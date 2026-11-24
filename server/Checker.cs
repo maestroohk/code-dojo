@@ -95,9 +95,43 @@ public sealed class Checker(CSharpRunner runner)
         string.Join("\n", s.Replace("\r\n", "\n").Split('\n').Select(l => l.TrimEnd())).Trim('\n');
 
     /// <summary>So that `// use foreach` in a comment cannot satisfy a "must use foreach" rule.</summary>
-    static string StripCommentsAndStrings(string code) =>
-        // Interpolated strings are kept whole: the code inside their { } is real code.
-        Regex.Replace(code, """//[^\n]*|/\*.*?\*/|\$@?"(?:\\.|""|[^"\\\n])*"|@\$"(?:""|[^"])*"|@"(?:[^"]|"")*"|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])+'""",
-            m => m.Value[0] == '/' ? " " : m.Value.Contains('$') && m.Value.IndexOf('$') < m.Value.IndexOf('"') ? m.Value : "\"\"",
-            RegexOptions.Singleline);
+    /// Uses the real C# lexer, so nested quotes, raw strings and interpolation are handled correctly:
+    /// literal text is blanked, comments are dropped, and code inside the { } of an interpolated
+    /// string stays, because it is real code.
+    public static string StripCommentsAndStrings(string code)
+    {
+        var root = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(code).GetRoot();
+        var sb = new System.Text.StringBuilder(code.Length);
+
+        void Trivia(Microsoft.CodeAnalysis.SyntaxTriviaList list)
+        {
+            foreach (var t in list)
+            {
+                var kind = Microsoft.CodeAnalysis.CSharp.CSharpExtensions.Kind(t);
+                var isComment = kind is Microsoft.CodeAnalysis.CSharp.SyntaxKind.SingleLineCommentTrivia
+                    or Microsoft.CodeAnalysis.CSharp.SyntaxKind.MultiLineCommentTrivia
+                    or Microsoft.CodeAnalysis.CSharp.SyntaxKind.SingleLineDocumentationCommentTrivia
+                    or Microsoft.CodeAnalysis.CSharp.SyntaxKind.MultiLineDocumentationCommentTrivia;
+                sb.Append(isComment ? " " : t.ToFullString());
+            }
+        }
+
+        foreach (var token in root.DescendantTokens())
+        {
+            Trivia(token.LeadingTrivia);
+            var kind = Microsoft.CodeAnalysis.CSharp.CSharpExtensions.Kind(token);
+            sb.Append(kind switch
+            {
+                Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralToken
+                    or Microsoft.CodeAnalysis.CSharp.SyntaxKind.Utf8StringLiteralToken
+                    or Microsoft.CodeAnalysis.CSharp.SyntaxKind.SingleLineRawStringLiteralToken
+                    or Microsoft.CodeAnalysis.CSharp.SyntaxKind.MultiLineRawStringLiteralToken => "\"\"",
+                Microsoft.CodeAnalysis.CSharp.SyntaxKind.CharacterLiteralToken => "' '",
+                Microsoft.CodeAnalysis.CSharp.SyntaxKind.InterpolatedStringTextToken => "",
+                _ => token.Text,
+            });
+            Trivia(token.TrailingTrivia);
+        }
+        return sb.ToString();
+    }
 }
