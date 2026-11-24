@@ -279,7 +279,7 @@ public sealed class CSharpRunner
             if (at > 0) visible.Append(line[..at]).Append('\n');
             var parts = line[(at + 1)..].Split(MarkSep);
             if (parts.Length >= 3)
-                marks.Add(new Mark(parts[1], parts[0] == "PASS", parts.Length > 3 ? parts[3].Replace("\\n", "\n") : ""));
+                marks.Add(new Mark(parts[1], parts[0] == "PASS", parts.Length > 2 ? parts[2].Replace("\\n", "\n") : ""));
         }
         if (visible.Length > 0) visible.Length--;   // undo the newline added after the final segment
 
