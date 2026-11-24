@@ -11,7 +11,7 @@ const DEFAULTS = () => ({
   review: [],         // [{ key, idx, box, due }]  steps answered wrong, resurfaced in Practice
   drafts: {},         // "track/module/lesson#idx" -> code the learner left in the editor
   stats: { correct: 0, wrong: 0, codePassed: 0, perfect: 0, hints: 0, drags: 0, fixes: 0, bestCombo: 0, practice: 0, reviewed: 0, bosses: 0 },
-  settings: { freeRoam: false, dailyGoal: 60, sound: true },
+  settings: { freeRoam: false, dailyGoal: 60, sound: true, typing: false },
 });
 
 export let state = DEFAULTS();
@@ -149,6 +149,8 @@ export const ACHIEVEMENTS = [
   { id: 'code-100', icon: '🏗️', title: 'Engineer', text: 'Pass 100 coding exercises.', test: s => s.stats.codePassed >= 100 },
   { id: 'bug-squasher', icon: '🐞', title: 'Bug squasher', text: 'Repair 5 broken programs.', test: s => s.stats.fixes >= 5 },
   { id: 'drag-20', icon: '🧩', title: 'Puzzle solver', text: 'Solve 20 drag-and-drop puzzles.', test: s => s.stats.drags >= 20 },
+  { id: 'typed-10', icon: '🎹', title: 'Fingers know it', text: 'Type out 10 code samples or puzzle answers.', test: s => (s.stats.typed || 0) >= 10 },
+  { id: 'typed-100', icon: '⚡', title: 'Muscle memory', text: 'Type out 100 code samples or puzzle answers.', test: s => (s.stats.typed || 0) >= 100 },
   { id: 'combo-8', icon: '🔥', title: 'On fire', text: 'Get 8 answers right in a row, first try.', test: s => s.stats.bestCombo >= 8 },
   { id: 'streak-3', icon: '📆', title: 'Habit forming', text: 'Keep a 3-day streak.', test: () => streak() >= 3 },
   { id: 'streak-7', icon: '🗓️', title: 'Full week', text: 'Keep a 7-day streak.', test: () => streak() >= 7 },

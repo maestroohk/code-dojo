@@ -26,6 +26,28 @@ export function h(tag, ...rest) {
   return el;
 }
 
+/**
+ * An in-page yes/no dialog. Used instead of window.confirm, which embedded browsers
+ * may silently block (the answer then is always "no" and nothing can be left or reset).
+ */
+export function ask(message, { ok = 'Yes', cancel = 'Cancel', danger = false } = {}) {
+  return new Promise(resolve => {
+    const done = answer => { document.removeEventListener('keydown', onKey, true); overlay.remove(); resolve(answer); };
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); done(true); }
+    };
+    const okBtn = h(`button.btn.${danger ? 'danger' : 'primary'}`, { type: 'button', onclick: () => done(true) }, ok);
+    const overlay = h('div.modal-back', { onclick: e => { if (e.target === overlay) done(false); } },
+      h('div.modal', { role: 'dialog', 'aria-modal': 'true' },
+        h('p', message),
+        h('div.modal-actions', h('button.btn.ghost', { type: 'button', onclick: () => done(false) }, cancel), okBtn)));
+    document.body.append(overlay);
+    document.addEventListener('keydown', onKey, true);
+    okBtn.focus();
+  });
+}
+
 export const shuffle = arr => {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -93,7 +115,7 @@ export function inline(s) {
 
 export function codeBlock(code, lang = 'csharp') {
   const plain = lang === 'text' || lang === 'output' || lang === 'txt';
-  return `<pre class="code${plain ? ' plain' : ''}"><code>${plain ? esc(code) : highlight(code)}</code></pre>`;
+  return `<pre class="code${plain ? ' plain' : ''}"${plain ? '' : ` data-code="${esc(code)}"`}><code>${plain ? esc(code) : highlight(code)}</code></pre>`;
 }
 
 export function md(text) {

@@ -1,5 +1,5 @@
 // Views and the lesson player. Routes: #/  #/lesson/t/m/l  #/practice  #/playground  #/profile
-import { h, md, inline, api, shuffle } from './util.js';
+import { h, md, inline, api, shuffle, ask } from './util.js';
 import * as game from './game.js';
 import { renderStep, renderRunOutput, DRAG_TYPES, TYPE_LABEL } from './steps.js';
 import { createEditor } from './editor.js';
@@ -175,9 +175,12 @@ function play({ title, items, mode, meta, onFinish }) {
   document.addEventListener('keydown', onKey);
   leave = () => { document.removeEventListener('keydown', onKey); current?.view.destroy?.(); };
 
-  function quit() {
-    if (answered > 0 && pos < total && !confirm('Leave this session? XP you earned so far is kept, but the lesson will not count as finished.')) return;
-    location.hash = '#/';
+  async function quit() {
+    if (answered > 0 && pos < total &&
+        !(await ask('Leave this session? The XP you earned so far is kept, but it will not count as finished.', { ok: 'Leave', cancel: 'Keep going' }))) return;
+    // Practice lives at #/practice and lessons at #/lesson/..., so always go via the router.
+    const target = mode === 'practice' ? '#/practice' : '#/';
+    if (location.hash === target) route(); else location.hash = target;
   }
 
   function refresh() {
@@ -202,7 +205,7 @@ function play({ title, items, mode, meta, onFinish }) {
     feedback.hidden = true; feedback.className = 'feedback';
     hintBox.replaceChildren();
     const view = renderStep(item.step, {
-      onChange: refresh, submit,
+      onChange: refresh, submit, bonus,
       track: item.track, module: item.module, lesson: item.lesson, idx: item.idx,
       draftKey: `${item.lessonKey}#${item.idx}`,
     });
@@ -215,6 +218,20 @@ function play({ title, items, mode, meta, onFinish }) {
     refresh();
     window.scrollTo(0, 0);
     if (item.step.type !== 'code') view.focus?.();
+  }
+
+  /** Extra XP outside the answer flow, e.g. for typing out a code sample. */
+  function bonus(xp, kind) {
+    if (replay || mode === 'practice') xp = 1;
+    earned += xp;
+    if (kind === 'typed') game.state.stats.typed = (game.state.stats.typed || 0) + 1;
+    const { leveledUp, level } = game.addXp(xp);
+    if (leveledUp) { game.sound('level'); toast([h('span.toast-icon', '⬆️'), h('div', h('strong', `Level ${level.level}`), h('div', level.rank))], 'gold'); }
+    xpEl.textContent = `${earned} XP`;
+    xpEl.classList.remove('bump'); void xpEl.offsetWidth; xpEl.classList.add('bump');
+    game.save();
+    announce(game.checkAchievements(tracks));
+    return xp;
   }
 
   function showHint() {
@@ -242,6 +259,8 @@ function play({ title, items, mode, meta, onFinish }) {
       if (attempts === 1 && hints === 0) { combo++; firstTry++; } else combo = 0;
       bestCombo = Math.max(bestCombo, combo);
       xp = mode === 'practice' ? 6 : game.stepXp(step, { attempts, hints, revealed, combo, replay, boss });
+      // Typing an answer is harder than dragging it, so it pays a little more.
+      if (current.typed) { xp += replay || mode === 'practice' ? 1 : 4; game.state.stats.typed = (game.state.stats.typed || 0) + 1; }
       game.state.stats.correct++;
       if (step.type === 'code') { game.state.stats.codePassed++; if (step.mode === 'fix') game.state.stats.fixes++; }
       if (DRAG_TYPES.has(step.type)) game.state.stats.drags++;
@@ -275,6 +294,7 @@ function play({ title, items, mode, meta, onFinish }) {
     const result = await view.check();
     if (current.view !== view) return;                       // the learner left while checks were running
     if (!result.noPenalty) attempts++;
+    current.typed = !!result.typed;
 
     if (result.correct) {
       phase = 'done';
@@ -497,7 +517,7 @@ function playground() {
     h('div.playground',
       editor.el,
       h('div.code-tools', runBtn,
-        h('button.btn.ghost', { type: 'button', onclick: () => { if (confirm('Clear the playground?')) { editor.value = ''; delete game.state.drafts[KEY]; game.save(); } } }, 'Clear'),
+        h('button.btn.ghost', { type: 'button', onclick: async () => { if (await ask('Clear the playground?', { ok: 'Clear' })) { editor.value = ''; delete game.state.drafts[KEY]; game.save(); } } }, 'Clear'),
         status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to run')),
       h('details.stdin', h('summary', 'Program input'), stdin),
       panel));
@@ -552,11 +572,12 @@ function profile() {
         onchange: e => { s.settings.dailyGoal = Number(e.target.value); game.save(true); profile(); },
       }, [[30, 'Casual · 30 XP'], [60, 'Regular · 60 XP'], [120, 'Serious · 120 XP'], [200, 'Intense · 200 XP']]
         .map(([v, label]) => h('option', { value: v, selected: s.settings.dailyGoal === v }, label)))),
+      setting('Type instead of drag', 'Fill-the-gap and ordering puzzles open in typing mode: you write the code yourself for a little extra XP. You can still switch on each puzzle.', toggle('typing')),
       setting('Free roam', 'Unlock every lesson. By default the first lesson of each module is open and the rest unlock in order.', toggle('freeRoam')),
       setting('Sound effects', 'Short tones for right and wrong answers.', toggle('sound')),
       setting('Reset progress', 'Erase XP, stars, streak and drafts on this machine.', h('button.btn.danger', {
         type: 'button',
-        onclick: async () => { if (confirm('Erase all progress? This cannot be undone.')) { await game.reset(); profile(); } },
+        onclick: async () => { if (await ask('Erase all progress? This cannot be undone.', { ok: 'Erase everything', danger: true })) { await game.reset(); profile(); } },
       }, 'Reset'))));
 }
 

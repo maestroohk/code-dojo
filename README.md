@@ -17,6 +17,7 @@ It builds on first run, then opens `http://localhost:8378`. The server listens o
 ## What is in it
 
 - **Exercise types:** quiz, predict the output, drag lines into order, drag tokens into gaps, drag to match, drag into buckets, write code, fix the bug.
+- **Typing practice:** every code sample in a lesson has "Type it" (retype it, with a live check of where you went wrong) and "Try it" (edit and run it). Ordering and fill-the-gap puzzles can be answered by typing instead of dragging.
 - **Game layer:** XP and levels, a daily goal and streak, combo bonuses, up to three stars per lesson, achievements, and hints that cost a little XP.
 - **Practice:** questions you get wrong come back after 1, 3, 7 and 14 days.
 - **Playground:** a scratchpad that runs any C# you type.

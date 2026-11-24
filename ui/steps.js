@@ -1,6 +1,6 @@
 // One renderer per exercise type. Each returns:
 //   { el, ready(), check() -> Promise<{ correct, detail? }>, reveal(), lock(on), focus?() }
-import { h, md, inline, esc, shuffle, tidy, highlight, codeBlock, api } from './util.js';
+import { h, md, inline, esc, shuffle, tidy, highlight, codeBlock, api, ask } from './util.js';
 import { enableDrag, Board } from './dnd.js';
 import { createEditor } from './editor.js';
 import { state, save } from './game.js';
@@ -23,9 +23,106 @@ export function renderStep(step, ctx) {
 
 // ---------------------------------------------------------------- learn
 
-function learn(step) {
+/** Ignore layout and comments when comparing typed code to a target. */
+const squash = code => code.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, '');
+
+/** Is the typing preference on? Clicking a mode toggle anywhere remembers the choice. */
+const prefersTyping = () => !!state.settings.typing;
+const rememberTyping = on => { state.settings.typing = on; save(); };
+
+/** A two-way switch between dragging and typing. Returns the element, with lock(on). */
+function modeToggle(typing, onChange) {
+  const drag = h('button.mode', { type: 'button', onclick: () => set(false) }, '✋ Drag');
+  const type = h('button.mode', { type: 'button', onclick: () => set(true) }, '⌨ Type');
+  const el = h('div.mode-toggle', { role: 'group', 'aria-label': 'How to answer' }, drag, type);
+  const paint = on => { drag.classList.toggle('on', !on); type.classList.toggle('on', on); };
+  const set = on => { if (el.dataset.locked || on === typing) return; typing = on; paint(on); onChange(on); };
+  paint(typing);
+  el.lock = on => { on ? el.dataset.locked = '1' : delete el.dataset.locked; drag.disabled = type.disabled = on; };
+  return el;
+}
+
+/**
+ * A typing drill: retype a code sample. Layout and comments do not matter, every other
+ * character does. Shows how far the typed text matches and where it first goes wrong.
+ */
+function typeDrill(target, ctx, onClose) {
+  const goal = squash(target);
+  const meter = h('div.drill-meter', h('div.drill-fill'));
+  const note = h('div.drill-note.muted.small', 'Type the sample above. Spacing and comments do not matter.');
+  const out = h('div.output', { hidden: true });
+  let done = false;
+
+  const editor = createEditor({
+    minLines: Math.max(4, target.split('\n').length + 1),
+    onRun: () => run(),
+    onChange(value) {
+      const mine = squash(value);
+      let same = 0;
+      while (same < mine.length && same < goal.length && mine[same] === goal[same]) same++;
+      meter.firstChild.style.width = `${(same / goal.length) * 100}%`;
+      const wrong = same < mine.length;
+      meter.classList.toggle('off', wrong);
+      if (mine === goal) {
+        note.className = 'drill-note good';
+        if (!done) { done = true; const xp = ctx.bonus?.(3, 'typed') ?? 0; note.textContent = `Typed it from start to finish.${xp ? ` +${xp} XP` : ''}`; }
+        else note.textContent = 'Typed it from start to finish.';
+      } else if (wrong) {
+        note.className = 'drill-note bad small';
+        note.textContent = `Differs after “${goal.slice(Math.max(0, same - 14), same)}”: expected “${goal[same] ?? 'the end'}” but found “${mine[same]}”.`;
+      } else {
+        note.className = 'drill-note muted small';
+        note.textContent = `${Math.round((same / goal.length) * 100)}% typed. Keep going.`;
+      }
+    },
+  });
+  const run = async () => {
+    out.hidden = false;
+    out.replaceChildren(h('span.muted.small', 'Compiling and running…'));
+    try { const r = await api('run', { track: ctx.track, code: editor.value }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
+    catch { out.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
+  };
+  const el = h('div.drill', meter, editor.el,
+    h('div.code-tools', h('button.btn.ghost', { type: 'button', onclick: run }, '▶ Run'),
+      h('button.btn.ghost', { type: 'button', onclick: onClose }, 'Close'), note), out);
+  setTimeout(() => editor.focus());
+  return el;
+}
+
+/** An editor pre-filled with a sample, to change and run. */
+function tryIt(source, ctx, onClose) {
+  const out = h('div.output', { hidden: true });
+  const editor = createEditor({ value: source, minLines: Math.max(4, source.split('\n').length + 1), onRun: () => run() });
+  const run = async () => {
+    out.hidden = false;
+    out.replaceChildren(h('span.muted.small', 'Compiling and running…'));
+    try { const r = await api('run', { track: ctx.track, code: editor.value }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
+    catch { out.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
+  };
+  setTimeout(() => editor.focus());
+  return h('div.drill', editor.el,
+    h('div.code-tools', h('button.btn.ghost', { type: 'button', onclick: run }, '▶ Run'),
+      h('button.btn.ghost', { type: 'button', onclick: onClose }, 'Close'),
+      h('span.muted.small', 'Change anything and run it. Some samples are fragments and need the lines around them.')), out);
+}
+
+function learn(step, ctx) {
+  const prose = h('div.prose', { html: md(step.body) });
+  // Every code sample can be typed out or experimented with, right under the card.
+  for (const pre of prose.querySelectorAll('pre.code[data-code]')) {
+    const source = pre.dataset.code;
+    if (squash(source).length < 12) continue;
+    const slot = h('div.sample-slot');
+    let paid = false;       // a sample earns its typing XP once per visit to the card
+    const once = { ...ctx, bonus: (xp, kind) => (paid ? 0 : ((paid = true), ctx.bonus?.(xp, kind) ?? 0)) };
+    const open = make => { slot.replaceChildren(make(source, once, () => slot.replaceChildren())); };
+    const bar = h('div.sample-bar',
+      h('button.mini', { type: 'button', onclick: () => open(typeDrill), title: 'Retype this sample to build muscle memory' }, '⌨ Type it'),
+      h('button.mini', { type: 'button', onclick: () => open(tryIt), title: 'Edit and run this sample' }, '▶ Try it'));
+    pre.after(bar, slot);
+  }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), h('div.prose', { html: md(step.body) })),
+    el: h('div.learn', step.title && h('h2', step.title), prose),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }
@@ -152,10 +249,43 @@ function order(step, ctx) {
   });
 
   const current = () => [...list.children].map(li => li.dataset.text);
+
+  // Typing mode: the shuffled lines stay on screen as raw material, and you type the program.
+  const strip = s => s.replace(/\s+/g, '');
+  let typing = prefersTyping();
+  const editor = createEditor({ minLines: step.lines.length + 1, onChange: () => ctx.onChange(), onRun: () => ctx.submit() });
+  const typedBox = h('div.typed-box', h('p.muted', 'Type the lines above in the right order. Spacing does not matter.'), editor.el);
+  const dragHelp = h('p.muted', 'Drag the lines, or use the arrows.');
+  const apply = () => {
+    typedBox.hidden = !typing;
+    dragHelp.hidden = typing;
+    list.classList.toggle('reference', typing);
+    typing ? list.dataset.locked = '1' : delete list.dataset.locked;
+  };
+  const toggle = modeToggle(typing, on => { typing = on; rememberTyping(on); clear(); apply(); ctx.onChange(); if (on) editor.focus(); });
+  apply();
+
+  const typedCheck = () => {
+    const mine = editor.value.split('\n').map(strip).filter(Boolean);
+    const scored = valid.map(v => {
+      const want = v.map(strip);
+      let same = 0;
+      while (same < mine.length && same < want.length && mine[same] === want[same]) same++;
+      return { same, ok: same === want.length && mine.length === want.length };
+    });
+    // Also accept the right text with different line breaks.
+    const flat = strip(editor.value);
+    if (scored.some(s => s.ok) || valid.some(v => strip(v.join('')) === flat)) return { correct: true, typed: true };
+    const best = Math.max(...scored.map(s => s.same));
+    return { correct: false, detail: best === 0 ? 'The first line is not right yet.' : `The first ${best} line${best === 1 ? ' is' : 's are'} right. Check line ${best + 1}.` };
+  };
+
   return {
-    el: h('div.order', prompt(step), h('p.muted', 'Drag the lines, or use the arrows.'), list),
-    ready: () => true,
+    el: h('div.order', h('div.step-head', prompt(step), toggle), dragHelp, list, typedBox),
+    ready: () => !typing || editor.value.trim().length > 0,
+    focus() { if (typing) editor.focus(); },
     async check() {
+      if (typing) return typedCheck();
       const mine = current();
       const ok = valid.some(v => v.join('\n') === mine.join('\n'));
       // Show which rows already sit in the right place (against the closest valid order).
@@ -169,8 +299,9 @@ function order(step, ctx) {
       for (const text of step.lines) list.append(pool.splice(pool.findIndex(li => li.dataset.text === text), 1)[0]);
       clear();
       [...list.children].forEach(li => li.classList.add('right'));
+      if (typing) editor.value = step.lines.join('\n');
     },
-    lock(on) { on ? list.dataset.locked = '1' : delete list.dataset.locked; },
+    lock(on) { on || typing ? list.dataset.locked = '1' : delete list.dataset.locked; toggle.lock(on); },
     retry: clear,
   };
 }
@@ -218,17 +349,58 @@ function blanks(step, ctx) {
     return { id: 's' + s.dataset.n, el: s, capacity: 1 };
   });
   const bank = h('div.chip-bank');
-  const el = h('div.blanks', prompt(step), codeEl, bank);
+
+  // Typing mode: the gaps become text boxes and the chips are hidden, so you recall instead of recognise.
+  const typedHtml = highlight(step.code).replace(/__(\d+)__/g, (_, n) => `<input class="slot-input" data-n="${n}" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Gap ${n}">`);
+  const typedEl = h('pre.code.blanks-code', h('code', { html: typedHtml }));
+  const inputs = [...typedEl.querySelectorAll('input')].sort((a, b) => a.dataset.n - b.dataset.n);
+  const strip = s => s.replace(/\s+/g, '');
+  inputs.forEach((input, i) => {
+    input.style.width = `${Math.min(Math.max(...accept[i].map(a => a.length), 3), 24) + 3}ch`;
+    input.addEventListener('input', () => { input.classList.remove('right', 'wrong'); ctx.onChange(); });
+    input.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const next = inputs.find(x => !x.value.trim());
+      next ? next.focus() : ctx.submit();
+    });
+  });
+
+  let typing = prefersTyping();
+  const typedHelp = h('p.muted', 'Type what belongs in each gap. Enter moves to the next one.');
+  const apply = () => { codeEl.hidden = typing; bank.hidden = typing; typedEl.hidden = !typing; typedHelp.hidden = !typing; };
+  const toggle = modeToggle(typing, on => { typing = on; rememberTyping(on); apply(); ctx.onChange(); if (on) inputs[0]?.focus(); });
+
+  const el = h('div.blanks', h('div.step-head', prompt(step), toggle), typedHelp, codeEl, typedEl, bank);
   const board = new Board(el, { tokens, zones, bank, onChange: () => { board.clearMarks(); ctx.onChange(); } });
   const text = id => tokens.find(t => t.id === id).text;
+  apply();
+
+  const drag = boardStep(el, board, {
+    accepts: zoneId => accept[Number(zoneId.slice(1)) - 1],
+    labelOf: text,
+    readyWhen: () => board.slotsFilled,
+  });
 
   return {
-    ...boardStep(el, board, {
-      accepts: zoneId => accept[Number(zoneId.slice(1)) - 1],
-      labelOf: text,
-      readyWhen: () => board.slotsFilled,
-    }),
+    ...drag,
+    ready: () => (typing ? inputs.every(i => i.value.trim()) : drag.ready()),
+    focus() { if (typing) inputs[0]?.focus(); },
+    async check() {
+      if (!typing) return drag.check();
+      let right = 0;
+      inputs.forEach((input, i) => {
+        const ok = accept[i].some(a => strip(a) === strip(input.value));
+        if (ok) right++;
+        input.classList.remove('right', 'wrong');
+        input.classList.add(ok ? 'right' : 'wrong');
+      });
+      const ok = right === inputs.length;
+      return { correct: ok, typed: true, detail: ok ? '' : `${right} of ${inputs.length} are right. Capital letters matter.` };
+    },
+    lock(on) { drag.lock(on); inputs.forEach(i => { i.disabled = on; }); toggle.lock(on); },
     reveal() {
+      inputs.forEach((input, i) => { input.value = accept[i][0]; input.classList.remove('wrong'); input.classList.add('right'); });
       for (const t of tokens) board.place(t.id, null, true);
       accept.forEach((options, i) => {
         const free = tokens.find(t => options.includes(t.text) && board.where.get(t.id) === null);
@@ -359,7 +531,11 @@ function code(step, ctx) {
   const runBtn = h('button.btn.ghost', { type: 'button', onclick: run, title: 'Run without grading' }, '▶ Run');
   const resetBtn = h('button.btn.ghost', {
     type: 'button', title: 'Back to the starting code',
-    onclick: () => { if (editor.value === starter || confirm('Replace your code with the starting code?')) { editor.value = starter; if (draftKey) { delete state.drafts[draftKey]; save(); } } },
+    onclick: async () => {
+      if (editor.value !== starter && !(await ask('Replace your code with the starting code?', { ok: 'Reset' }))) return;
+      editor.value = starter;
+      if (draftKey) { delete state.drafts[draftKey]; save(); }
+    },
   }, '↺ Reset');
 
   const el = h('div.code-step',

@@ -11,13 +11,14 @@ using System.Text.Json.Nodes;
 using CodeDojo;
 using Microsoft.Extensions.FileProviders;
 
-const int Port = 8378;
+// DOJO_PORT and DOJO_STATE let a second copy run beside the real one (used for testing).
+var Port = int.TryParse(Environment.GetEnvironmentVariable("DOJO_PORT"), out var envPort) ? envPort : 8378;
 
 var root = FindRoot();
 var content = new Content(root);
 var runner = new CSharpRunner();
 var checker = new Checker(runner);
-var stateDir = Path.Combine(root, ".state");
+var stateDir = Environment.GetEnvironmentVariable("DOJO_STATE") is { Length: > 0 } envState ? envState : Path.Combine(root, ".state");
 var progressFile = Path.Combine(stateDir, "progress.json");
 var progressLock = new object();
 
