@@ -148,7 +148,8 @@ public static class Validator
         using (prog)
         {
             var run = await runner.Run(prog, stdin, timeoutMs: 3000);
-            return run.ExitCode == 0 ? Checker.Tidy(run.Stdout) : null;
+            // A snippet that prints nothing gives us nothing to compare arrangements by.
+            return run.ExitCode == 0 && Checker.Tidy(run.Stdout) is { Length: > 0 } text ? text : null;
         }
     }
 

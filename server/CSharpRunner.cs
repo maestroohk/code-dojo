@@ -133,11 +133,24 @@ public sealed class CSharpRunner
     public async Task<RunOutput> Run(Compiled program, string? stdin, int timeoutMs = 6000)
     {
         await Gate.WaitAsync();
-        try { return await RunCore(program, stdin, timeoutMs); }
+        try
+        {
+            var (result, cpu) = await RunCore(program, stdin, timeoutMs);
+            // A timeout with almost no CPU used means the process never really got going (a busy
+            // machine, a virus scanner holding the new DLL). Give it one more chance before
+            // telling a learner their correct program hangs. A real infinite loop burns CPU.
+            // Likewise a non-zero exit with no output at all: a C# exception always prints something,
+            // so silence means the runtime itself failed to start.
+            var neverStarted = result.ExitCode != 0 && !result.TimedOut && result.Stdout.Length == 0
+                               && result.Stderr.Length == 0 && result.Marks.Count == 0;
+            if ((result.TimedOut && cpu < TimeSpan.FromMilliseconds(400)) || neverStarted)
+                (result, _) = await RunCore(program, stdin, timeoutMs);
+            return result;
+        }
         finally { Gate.Release(); }
     }
 
-    async Task<RunOutput> RunCore(Compiled program, string? stdin, int timeoutMs)
+    async Task<(RunOutput Result, TimeSpan Cpu)> RunCore(Compiled program, string? stdin, int timeoutMs)
     {
         var psi = new ProcessStartInfo(_dotnet)
         {
@@ -187,8 +200,15 @@ public sealed class CSharpRunner
         catch (IOException) { /* program exited without reading its input */ }
 
         var timedOut = false;
+        var cpu = TimeSpan.Zero;
         try { await proc.WaitForExitAsync(cts.Token); }
-        catch (OperationCanceledException) { timedOut = true; Kill(); await proc.WaitForExitAsync(); }
+        catch (OperationCanceledException)
+        {
+            timedOut = true;
+            try { cpu = proc.TotalProcessorTime; } catch { cpu = TimeSpan.MaxValue; }
+            Kill();
+            await proc.WaitForExitAsync();
+        }
 
         var stdout = await outTask;
         var stderr = await errTask;
@@ -207,8 +227,8 @@ public sealed class CSharpRunner
         }
         if (visible.Length > 0) visible.Length--;   // undo the newline added after the final segment
 
-        return new RunOutput(visible.ToString(), CleanStderr(stderr), timedOut ? -1 : proc.ExitCode,
-            timedOut, truncated, sw.ElapsedMilliseconds, marks);
+        return (new RunOutput(visible.ToString(), CleanStderr(stderr), timedOut ? -1 : proc.ExitCode,
+            timedOut, truncated, sw.ElapsedMilliseconds, marks), cpu);
     }
 
     /// <summary>Trim runtime noise from a stack trace so the learner sees their own frames.</summary>

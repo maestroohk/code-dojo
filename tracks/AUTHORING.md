@@ -21,7 +21,15 @@ through the real grader:
 ```
 dojo validate                     everything
 dojo validate 03-methods          only keys containing this text
+dojo validate --puzzles           also hunt for unfair drag puzzles (slow)
 ```
+
+`--puzzles` takes each `order` and `blanks` step whose code runs as a program on its own, tries
+the arrangements the app would mark wrong, and warns about any that compile and print the same
+thing. Fix a warning by listing the arrangement in `also`, accepting the extra token, or changing
+the code so only one arrangement gives the stated output. Steps whose code is a fragment or prints
+nothing cannot be checked this way. Write the prompt in learner language: say "the tests", never
+"the harness".
 
 ## Lesson file
 
@@ -153,6 +161,8 @@ Harness helpers (class `Dojo`, always available):
 | `Dojo.Throws<TException>("name", () => ...)` | the action throws that exception type |
 | `Dojo.Capture(() => ...)` | returns the text the action printed (use inside `Eq`) |
 | `Dojo.Try("name", () => { ... })` | runs a block; an exception becomes one failed row instead of a crash |
+| `await Dojo.ThrowsAsync<TException>("name", async () => ...)` | awaiting the action throws that exception type |
+| `await Dojo.TryAsync("name", async () => { ... })` | async version of `Try` |
 
 Name each check as the learner would read it: `"Add(2, 3) returns 5"`, not `"test1"`.
 
