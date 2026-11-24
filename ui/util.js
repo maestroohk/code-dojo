@@ -1,0 +1,160 @@
+// Small shared helpers: DOM building, markdown, C# highlighting, API calls.
+
+export const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/** h('div.card', {onclick}, child, 'text', [more]) */
+export function h(tag, ...rest) {
+  const [name, ...classes] = tag.split('.');
+  const el = document.createElement(name || 'div');
+  if (classes.length) el.className = classes.join(' ');
+  for (const item of rest.flat(Infinity)) {
+    if (item == null || item === false) continue;
+    if (item instanceof Node) el.append(item);
+    else if (typeof item === 'object') {
+      for (const [k, v] of Object.entries(item)) {
+        if (v == null) continue;
+        if (v === false && !(k in el)) continue;
+        if (k === 'html') el.innerHTML = v;
+        else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+        else if (k === 'dataset') Object.assign(el.dataset, v);
+        else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+        else if (k in el && k !== 'list') el[k] = v;
+        else el.setAttribute(k, v);
+      }
+    } else el.append(String(item));
+  }
+  return el;
+}
+
+export const shuffle = arr => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
+/** Compare text the way a person would: ignore trailing spaces and blank lines at the end. */
+export const tidy = s => String(s ?? '').replace(/\r\n/g, '\n').split('\n').map(l => l.trimEnd()).join('\n').replace(/^\n+|\n+$/g, '');
+
+export async function api(path, body, method) {
+  const res = await fetch('/api/' + path, body === undefined ? {} : {
+    method: method || 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  return res.status === 204 ? null : res.json();
+}
+
+// ---------------------------------------------------------------- highlighting
+
+const KEYWORDS = new Set(('abstract as async await base bool break byte case catch char checked class const continue ' +
+  'decimal default delegate do double else enum event explicit extern false finally fixed float for foreach get global ' +
+  'goto if implicit in init int interface internal is lock long namespace new null object operator out override params ' +
+  'private protected public readonly record ref required return sbyte sealed set short sizeof stackalloc static string ' +
+  'struct switch this throw true try typeof uint ulong unchecked unsafe ushort using var virtual void volatile when where ' +
+  'while with yield nameof not and or dynamic nint').split(' '));
+
+const TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|([$@]{0,3}"(?:\\.|""|[^"\\\n])*"?|'(?:\\.|[^'\\\n])+')|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?[fFdDmMuUlL]*\b)|([A-Za-z_]\w*)|([\s\S])/g;
+
+export function highlight(code) {
+  let out = '';
+  TOKEN.lastIndex = 0;
+  let m;
+  while ((m = TOKEN.exec(code))) {
+    const [text, comment, string, number, ident] = m;
+    if (comment) out += `<span class="t-com">${esc(text)}</span>`;
+    else if (string) out += `<span class="t-str">${esc(text)}</span>`;
+    else if (number) out += `<span class="t-num">${text}</span>`;
+    else if (ident) {
+      if (KEYWORDS.has(text)) out += `<span class="t-kw">${text}</span>`;
+      else if (/^__\d+__$/.test(text)) out += text;                       // a blank slot, replaced later
+      else if (/^\s*\(/.test(code.slice(TOKEN.lastIndex, TOKEN.lastIndex + 8))) out += `<span class="t-fn">${text}</span>`;
+      else if (/^[A-Z]/.test(text)) out += `<span class="t-type">${text}</span>`;
+      else out += text;
+    } else out += esc(text);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- markdown
+
+export function inline(s) {
+  return String(s).split(/(`[^`\n]+`)/).map(part => {
+    if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) return `<code>${esc(part.slice(1, -1))}</code>`;
+    return esc(part)
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*\w])\*([^*\s](?:[^*]*[^*\s])?)\*(?!\w)/g, '$1<em>$2</em>')
+      .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  }).join('');
+}
+
+export function codeBlock(code, lang = 'csharp') {
+  const plain = lang === 'text' || lang === 'output' || lang === 'txt';
+  return `<pre class="code${plain ? ' plain' : ''}"><code>${plain ? esc(code) : highlight(code)}</code></pre>`;
+}
+
+export function md(text) {
+  const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let para = [];
+  const flush = () => { if (para.length) { out.push(`<p>${inline(para.join(' '))}</p>`); para = []; } };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = line.match(/^\s*```(\w*)\s*$/);
+    if (fence) {
+      flush();
+      const body = [];
+      while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i]);
+      out.push(codeBlock(body.join('\n'), fence[1] || 'csharp'));
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.*)$/);
+    if (heading) { flush(); out.push(`<h${heading[1].length + 1}>${inline(heading[2])}</h${heading[1].length + 1}>`); continue; }
+
+    if (/^>\s?/.test(line)) {
+      flush();
+      const body = [];
+      for (; i < lines.length && /^>\s?/.test(lines[i]); i++) body.push(lines[i].replace(/^>\s?/, ''));
+      i--;
+      const joined = body.join(' ');
+      const kind = /^\*\*(warning|careful|gotcha|pitfall)/i.test(joined) ? ' warn' : '';
+      out.push(`<div class="callout${kind}">${inline(joined)}</div>`);
+      continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(line) && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] || '')) {
+      flush();
+      const row = l => l.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => inline(c.trim().replace(/\\\|/g, '|')));
+      const head = row(line);
+      const rows = [];
+      for (i += 2; i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i]); i++) rows.push(row(lines[i]));
+      i--;
+      out.push(`<table><thead><tr>${head.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>${
+        rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+      continue;
+    }
+    const bullet = line.match(/^\s*(?:[-*]|(\d+)\.)\s+(.*)$/);
+    if (bullet) {
+      flush();
+      const ordered = bullet[1] !== undefined;
+      const items = [];
+      for (; i < lines.length; i++) {
+        const b = lines[i].match(/^\s*(?:[-*]|(\d+)\.)\s+(.*)$/);
+        if (b) items.push(b[2]);
+        else if (/^\s{2,}\S/.test(lines[i]) && items.length) items[items.length - 1] += ' ' + lines[i].trim();
+        else break;
+      }
+      i--;
+      out.push(`<${ordered ? 'ol' : 'ul'}>${items.map(t => `<li>${inline(t)}</li>`).join('')}</${ordered ? 'ol' : 'ul'}>`);
+      continue;
+    }
+    if (/^\s*(---+|\*\*\*+)\s*$/.test(line)) { flush(); out.push('<hr>'); continue; }
+    if (!line.trim()) { flush(); continue; }
+    para.push(line.trim());
+  }
+  flush();
+  return out.join('\n');
+}

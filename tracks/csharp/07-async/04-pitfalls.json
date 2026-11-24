@@ -1,0 +1,378 @@
+{
+  "title": "Async pitfalls",
+  "summary": "The mistakes everyone makes once: async void, forgotten awaits, blocking on tasks, and Task.Run in the wrong place.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "async void",
+      "body": [
+        "An async method can be declared to return `void`. It compiles. It is almost always a mistake.",
+        "",
+        "```csharp",
+        "static async void SaveAsync(Order order)    // bad",
+        "static async Task SaveAsync(Order order)    // good",
+        "```",
+        "",
+        "With `async void` the caller gets **no task back**. That means:",
+        "",
+        "- The caller **cannot await it**. It has no way to know when the save is finished.",
+        "- The caller **cannot catch its exceptions**. There is no task to carry them, so an exception inside an `async void` method typically crashes the whole process.",
+        "",
+        "The fix is always the same: return `Task` instead of `void`.",
+        "",
+        "`async void` exists for one case only: event handlers in UI frameworks, such as a button's click handler, whose signature must return `void`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is `static async void SendEmailAsync(string to)` a problem?",
+      "options": [
+        "The caller cannot await it or catch its exceptions",
+        "It runs more slowly than `async Task`",
+        "`await` is not allowed inside it",
+        "It blocks the calling thread until the email is sent"
+      ],
+      "answer": 0,
+      "explain": "It can use `await` and it does not block. The trouble is on the caller's side: with no `Task` returned, there is nothing to await and nowhere for an exception to go."
+    },
+    {
+      "type": "learn",
+      "title": "The forgotten await",
+      "body": [
+        "Calling an async method without `await` still **starts** it. You just do not wait for it.",
+        "",
+        "```csharp",
+        "static async Task CheckoutAsync(Order order)",
+        "{",
+        "    SaveAsync(order);                 // oops: no await",
+        "    Console.WriteLine(\"Saved!\");      // printed before the save has finished",
+        "}",
+        "```",
+        "",
+        "This is called **fire and forget**, and it is rarely what you want:",
+        "",
+        "- The code after it runs too early.",
+        "- If `SaveAsync` fails, nobody sees the exception. The order is silently not saved.",
+        "- The program can even exit while the save is still in progress.",
+        "",
+        "The compiler helps: inside an async method it gives warning **CS4014**, \"this call is not awaited\". Treat that warning as an error.",
+        "",
+        "If the method returns a value you usually notice at once, because a `Task<int>` will not fit in an `int`. The dangerous ones are the methods that return a plain `Task`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var log = new List<string>();",
+        "",
+        "async Task SaveAsync()",
+        "{",
+        "    await Task.Delay(30);",
+        "    log.Add(\"saved\");",
+        "}",
+        "",
+        "SaveAsync();",
+        "log.Add(\"done\");",
+        "",
+        "Console.WriteLine(string.Join(\",\", log));"
+      ],
+      "answer": "done",
+      "explain": "`SaveAsync()` starts and returns a task as soon as it reaches the delay. Nothing awaits that task, so the program carries straight on, prints, and ends 30 ms before `saved` would have been added."
+    },
+    {
+      "type": "learn",
+      "title": "Blocking on a task",
+      "body": [
+        "A task has members that force the answer out of it **without** `await`:",
+        "",
+        "```csharp",
+        "int stock = GetStockAsync(\"TEA\").Result;                 // blocks",
+        "SaveAsync(order).Wait();                                 // blocks",
+        "int stock2 = GetStockAsync(\"TEA\").GetAwaiter().GetResult();   // blocks",
+        "```",
+        "",
+        "They are tempting, because the calling method then does not need to be `async`. Do not use them. This is called **sync over async**:",
+        "",
+        "- The thread is **blocked** for the whole wait. That is exactly what async exists to avoid.",
+        "- In UI apps and some server frameworks it can **deadlock**: the blocked thread is the one the task needs in order to finish, so both wait for ever.",
+        "- `.Result` and `.Wait()` wrap failures in an `AggregateException`, so your `catch` for the real exception type no longer matches.",
+        "",
+        "The answer is the rule from the first lesson: **async all the way**. Make the caller `async` and `await`.",
+        "",
+        "(Reading `.Result` of a task you have *already awaited* is harmless: it is finished. But `await` works there too, so just use `await`.)"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Fine, or a pitfall?",
+      "buckets": ["Fine", "Pitfall"],
+      "items": [
+        ["`static async Task SaveAsync(Order o)`", 0],
+        ["`static async void SaveAsync(Order o)`", 1],
+        ["`int n = await CountAsync();`", 0],
+        ["`int n = CountAsync().Result;`", 1],
+        ["`AuditAsync(order);` as a statement, with no `await`", 1],
+        ["`await Task.WhenAll(a, b);`", 0],
+        ["`SaveAsync(order).Wait();`", 1]
+      ],
+      "explain": "The three pitfalls so far: `async void` (nothing to await), a missing `await` (work and errors are lost), and `.Result` / `.Wait()` (a blocked thread)."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Code review",
+      "prompt": [
+        "The harness provides `Prices.GetAsync(int id)`, which returns a `Task<int>`.",
+        "",
+        "`TotalAsync` adds up the prices of some products, writes a line such as `total 60` to the log, and returns the total. It was written in a hurry and has **three** async mistakes, one of each kind you have just seen.",
+        "",
+        "When `await TotalAsync(ids, log)` has finished, the log line must already be in `log`.",
+        "",
+        "Find and fix all three."
+      ],
+      "starter": [
+        "static async void LogAsync(List<string> log, string message)",
+        "{",
+        "    await Task.Delay(10);",
+        "    log.Add(message);",
+        "}",
+        "",
+        "static async Task<int> TotalAsync(List<int> ids, List<string> log)",
+        "{",
+        "    int total = 0;",
+        "    foreach (int id in ids)",
+        "    {",
+        "        total += Prices.GetAsync(id).Result;",
+        "    }",
+        "    LogAsync(log, $\"total {total}\");",
+        "    return total;",
+        "}"
+      ],
+      "solution": [
+        "static async Task LogAsync(List<string> log, string message)",
+        "{",
+        "    await Task.Delay(10);",
+        "    log.Add(message);",
+        "}",
+        "",
+        "static async Task<int> TotalAsync(List<int> ids, List<string> log)",
+        "{",
+        "    int total = 0;",
+        "    foreach (int id in ids)",
+        "    {",
+        "        total += await Prices.GetAsync(id);",
+        "    }",
+        "    await LogAsync(log, $\"total {total}\");",
+        "    return total;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var log = new List<string>();",
+        "int total = await TotalAsync(new List<int> { 1, 2, 3 }, log);",
+        "string logged = string.Join(\"|\", log);",
+        "Dojo.Eq(\"TotalAsync(1, 2, 3) is 60\", 60, total);",
+        "Dojo.Eq(\"the log line is written before TotalAsync finishes\", \"total 60\", logged);",
+        "var log2 = new List<string>();",
+        "Dojo.Eq(\"TotalAsync of no ids is 0\", 0, await TotalAsync(new List<int>(), log2));",
+        "Dojo.Eq(\"and it logs total 0\", \"total 0\", string.Join(\"|\", log2));",
+        "await Task.Delay(30);",
+        "static class Prices",
+        "{",
+        "    public static async Task<int> GetAsync(int id)",
+        "    {",
+        "        await Task.Delay(10);",
+        "        return id * 10;",
+        "    }",
+        "}"
+      ],
+      "forbid": [
+        { "pattern": "\\basync\\s+void\\b", "message": "No async void" },
+        { "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter", "message": "Does not block with .Result or .Wait()" }
+      ],
+      "hints": [
+        "Mistake 1 is in the first line: `LogAsync` returns `void`, so nobody can wait for it. Make it return `Task`.",
+        "Mistake 2: `.Result` blocks the thread. Replace it with `await` in front of the call: `total += await Prices.GetAsync(id);`",
+        "Mistake 3: `LogAsync(...)` is called but not awaited, so `TotalAsync` returns before the line is logged. Put `await` in front of it."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Task.Run is for CPU work",
+      "body": [
+        "There are two reasons code can take a long time, and they need different tools.",
+        "",
+        "**Waiting on I/O** (database, HTTP, files): nothing in your program is busy. Use the async method and `await` it. No extra thread is needed.",
+        "",
+        "```csharp",
+        "string json = await client.GetStringAsync(url);",
+        "```",
+        "",
+        "**CPU-bound work** (resizing images, crunching a big report, hashing): the processor really is busy, and there is no async version to call. `Task.Run` moves that work to a background thread and gives you a task to await:",
+        "",
+        "```csharp",
+        "int primes = await Task.Run(() => CountPrimes(5_000_000));",
+        "```",
+        "",
+        "That keeps a desktop app responsive while the calculation runs.",
+        "",
+        "The common mistake is to wrap I/O in `Task.Run`:",
+        "",
+        "```csharp",
+        "var json = await Task.Run(() => client.GetStringAsync(url));   // pointless",
+        "```",
+        "",
+        "That borrows a thread only to start something that needs no thread. And `Task.Run` around a *blocking* call, such as `Task.Run(() => File.ReadAllText(path))`, just moves the blocked thread somewhere else. Call the async version instead: `File.ReadAllTextAsync(path)`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which line is a good use of `Task.Run`?",
+      "options": [
+        "`var thumbnail = await Task.Run(() => ResizeImage(photo));` where `ResizeImage` is a slow, ordinary method",
+        "`var rows = await Task.Run(() => db.LoadRowsAsync());`",
+        "`await Task.Run(() => Task.Delay(1000));`",
+        "`var text = Task.Run(() => File.ReadAllTextAsync(path)).Result;`"
+      ],
+      "answer": 0,
+      "explain": "Resizing an image keeps the CPU busy and has no async version, so a background thread is the right tool. The others are already async I/O: await them directly. The last one also blocks with `.Result`."
+    },
+    {
+      "type": "learn",
+      "title": "Two more types you will meet",
+      "body": [
+        "**`ValueTask<T>`** is a lighter alternative to `Task<T>`. Libraries use it for methods that usually have the answer ready *without* waiting, such as a cache lookup, because it avoids creating a task object each time. You use it the same way: `await` it, once. For your own methods, `Task<T>` is the right default.",
+        "",
+        "**`IAsyncEnumerable<T>`** is the async version of `IEnumerable<T>`: a sequence whose items **arrive over time**, such as pages from an API or rows streaming from a database. You write one with `async` plus `yield return`, and you read one with **`await foreach`**:",
+        "",
+        "```csharp",
+        "static async IAsyncEnumerable<Order> ReadOrdersAsync()",
+        "{",
+        "    for (int page = 1; page <= 3; page++)",
+        "    {",
+        "        List<Order> orders = await LoadPageAsync(page);   // wait for a page",
+        "        foreach (Order order in orders)",
+        "            yield return order;                            // hand its items out",
+        "    }",
+        "}",
+        "",
+        "await foreach (Order order in ReadOrdersAsync())",
+        "{",
+        "    Console.WriteLine(order.Id);",
+        "}",
+        "```",
+        "",
+        "It is lazy, just like an iterator: page 2 is only loaded when the loop gets that far. If the loop stops early, the remaining pages are never requested."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each situation to the right tool.",
+      "pairs": [
+        ["Query a database", "`await` the async method directly"],
+        ["Compress a large file in memory", "`await Task.Run(() => ...)`"],
+        ["A click handler in a desktop app", "`async void` (the only place for it)"],
+        ["Read rows as they stream in from a server", "`await foreach` over an `IAsyncEnumerable<T>`"],
+        ["A library method that usually answers from a cache", "it may return `ValueTask<T>`"]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Streaming pages",
+      "prompt": [
+        "The harness provides `Api.GetPageSizeAsync(int page)`, which returns a `Task<int>`: how many records are on that page of a report.",
+        "",
+        "Write two methods:",
+        "",
+        "- `static async IAsyncEnumerable<int> ReadPageSizesAsync(int pageCount)`",
+        "  For pages `1` to `pageCount`, in order, awaits the size of the page and yields it. It must be lazy: a page is only requested when the reader asks for the next item.",
+        "- `static async Task<int> SumAsync(IAsyncEnumerable<int> numbers)`",
+        "  Adds up everything in an async sequence, using `await foreach`.",
+        "",
+        "```csharp",
+        "await SumAsync(ReadPageSizesAsync(3))   // 100 + 200 + 300 = 600",
+        "```"
+      ],
+      "starter": [
+        "static async IAsyncEnumerable<int> ReadPageSizesAsync(int pageCount)",
+        "{",
+        "    // loop over the pages: await the size, then yield return it",
+        "    yield break;",
+        "}",
+        "",
+        "static async Task<int> SumAsync(IAsyncEnumerable<int> numbers)",
+        "{",
+        "    int total = 0;",
+        "    // await foreach (...)",
+        "    return total;",
+        "}"
+      ],
+      "solution": [
+        "static async IAsyncEnumerable<int> ReadPageSizesAsync(int pageCount)",
+        "{",
+        "    for (int page = 1; page <= pageCount; page++)",
+        "    {",
+        "        int size = await Api.GetPageSizeAsync(page);",
+        "        yield return size;",
+        "    }",
+        "}",
+        "",
+        "static async Task<int> SumAsync(IAsyncEnumerable<int> numbers)",
+        "{",
+        "    int total = 0;",
+        "    await foreach (int n in numbers)",
+        "    {",
+        "        total += n;",
+        "    }",
+        "    return total;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var seen = new List<int>();",
+        "await foreach (int size in ReadPageSizesAsync(3)) seen.Add(size);",
+        "Dojo.Eq(\"ReadPageSizesAsync(3) yields 100, 200, 300\", new List<int> { 100, 200, 300 }, seen);",
+        "Dojo.Eq(\"SumAsync(ReadPageSizesAsync(3)) is 600\", 600, await SumAsync(ReadPageSizesAsync(3)));",
+        "Dojo.Eq(\"SumAsync(ReadPageSizesAsync(0)) is 0\", 0, await SumAsync(ReadPageSizesAsync(0)));",
+        "Dojo.Eq(\"SumAsync works on any async sequence\", 12, await SumAsync(Fixed()));",
+        "Api.Calls = 0;",
+        "await foreach (int size in ReadPageSizesAsync(5))",
+        "{",
+        "    if (size >= 200) break;",
+        "}",
+        "Dojo.Eq(\"stopping after page 2 means only 2 pages were requested\", 2, Api.Calls);",
+        "static async IAsyncEnumerable<int> Fixed()",
+        "{",
+        "    yield return 5;",
+        "    await Task.Delay(5);",
+        "    yield return 7;",
+        "}",
+        "static class Api",
+        "{",
+        "    public static int Calls;",
+        "    public static async Task<int> GetPageSizeAsync(int page)",
+        "    {",
+        "        Calls++;",
+        "        await Task.Delay(5);",
+        "        return page * 100;",
+        "    }",
+        "}"
+      ],
+      "require": [
+        { "pattern": "\\bawait\\s+foreach\\b", "message": "Uses await foreach" },
+        { "pattern": "\\byield\\s+return\\b", "message": "Uses yield return" }
+      ],
+      "forbid": [
+        { "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter", "message": "Does not block with .Result or .Wait()" },
+        { "pattern": "\\basync\\s+void\\b", "message": "No async void" }
+      ],
+      "hints": [
+        "`ReadPageSizesAsync`: a `for` loop from 1 to `pageCount`. Inside it, `await Api.GetPageSizeAsync(page)` and `yield return` the result. Do not start all the pages up front.",
+        "`SumAsync`: `await foreach (int n in numbers) { total += n; }`",
+        "An async iterator is an ordinary iterator that is also allowed to `await` between its `yield return` lines."
+      ]
+    }
+  ]
+}
