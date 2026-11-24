@@ -313,7 +313,7 @@ export function renderRunOutput(panel, r, { stdin } = {}) {
         h('span.test-mark', t.pass ? '✓' : '✗'),
         h('div', h('div.test-name', t.name), !t.pass && t.detail && h('pre.test-detail', t.detail))))));
   }
-  if (r.timedOut) panel.append(h('div.diag.error', 'Stopped after 6 seconds. Is there a loop that never ends?'));
+  if (r.timedOut) panel.append(h('div.diag.error', 'Stopped: it ran for too long. Is there a loop that never ends, or is it waiting for something that never happens?'));
   if (stdin) panel.append(h('div.out-section', h('div.out-title', 'Input given'), h('pre.out', stdin)));
   if (r.stdout || !r.tests?.length) {
     panel.append(h('div.out-section', h('div.out-title', 'Output'),

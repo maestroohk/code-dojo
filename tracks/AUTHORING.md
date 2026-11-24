@@ -189,7 +189,11 @@ Things that catch authors out:
   `System.Text`, `System.Threading`, `System.Threading.Tasks`.
 - Only the base class library is referenced. No NuGet packages.
 - Culture is fixed to `en-US`, so number and date formatting is predictable.
-- A run is killed after 6 seconds. Keep any `Task.Delay` in async lessons to 50 ms or less.
+- A run is stopped after 4 seconds of CPU time, or 15 seconds on the clock (the generous clock limit
+  is deliberate: security scanners sometimes pause a new program for several seconds). Keep delays
+  that actually elapse to 50 ms or less. When one side of a race is meant to lose and be abandoned
+  or cancelled, make it long (2 seconds or more): it costs no time, and a thin margin such as 5 ms
+  against 50 ms fails on a busy machine.
 - Output must be deterministic: no `DateTime.Now`, no unseeded `Random`, no thread-order-dependent printing.
 - Compiler errors report line numbers in the learner's own code, not the harness.
 

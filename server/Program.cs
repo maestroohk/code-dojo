@@ -25,6 +25,23 @@ if (args.Length > 0 && args[0] == "validate")
     return await Validator.Run(content, checker, runner,
         args.Skip(1).FirstOrDefault(a => !a.StartsWith("--")), args.Contains("--puzzles"));
 
+if (args.Length > 0 && args[0] == "stress")
+{
+    // Diagnostic: run one tiny program many times and report slow or hung runs.
+    var (p, _) = runner.Compile("var d = new Dictionary<string,int>{[\"a\"]=1}; Console.WriteLine(d[\"a\"]);");
+    var n = args.Length > 1 ? int.Parse(args[1]) : 200;
+    var times = new List<long>();
+    for (var i = 0; i < n; i++)
+    {
+        var r = await runner.RunDiagnostic(p!);
+        times.Add(r.Ms);
+        if (r.Ms > 1500) Console.WriteLine($"run {i}: {r.Ms} ms timedOut={r.TimedOut} cpu={r.Cpu.TotalMilliseconds:F0} ms exited={r.Exited} threads={r.Threads} out=[{r.Stdout.Trim()}]");
+    }
+    times.Sort();
+    Console.WriteLine($"{n} runs: median {times[n / 2]} ms, p95 {times[(int)(n * 0.95)]} ms, max {times[^1]} ms");
+    return 0;
+}
+
 var builder = WebApplication.CreateSlimBuilder();
 builder.WebHost.UseUrls($"http://127.0.0.1:{Port}");
 builder.Logging.SetMinimumLevel(LogLevel.Warning);

@@ -130,27 +130,36 @@ public sealed class CSharpRunner
             d.GetMessage(), span.StartLinePosition.Line + 1, span.StartLinePosition.Character + 1, file);
     }
 
-    public async Task<RunOutput> Run(Compiled program, string? stdin, int timeoutMs = 6000)
+    public const int CpuLimitMs = 4000;
+    public const int WallLimitMs = 15000;
+
+    public async Task<RunOutput> Run(Compiled program, string? stdin, int wallMs = WallLimitMs, int cpuMs = CpuLimitMs)
     {
         await Gate.WaitAsync();
         try
         {
-            var (result, cpu) = await RunCore(program, stdin, timeoutMs);
-            // A timeout with almost no CPU used means the process never really got going (a busy
-            // machine, a virus scanner holding the new DLL). Give it one more chance before
-            // telling a learner their correct program hangs. A real infinite loop burns CPU.
-            // Likewise a non-zero exit with no output at all: a C# exception always prints something,
-            // so silence means the runtime itself failed to start.
+            var (result, _) = await RunCore(program, stdin, wallMs, cpuMs);
+            // A non-zero exit with no output at all: a C# exception always prints something,
+            // so silence means the runtime itself failed to start. Try once more.
             var neverStarted = result.ExitCode != 0 && !result.TimedOut && result.Stdout.Length == 0
                                && result.Stderr.Length == 0 && result.Marks.Count == 0;
-            if ((result.TimedOut && cpu < TimeSpan.FromMilliseconds(400)) || neverStarted)
-                (result, _) = await RunCore(program, stdin, timeoutMs);
+            if (neverStarted) (result, _) = await RunCore(program, stdin, wallMs, cpuMs);
             return result;
         }
         finally { Gate.Release(); }
     }
 
-    async Task<(RunOutput Result, TimeSpan Cpu)> RunCore(Compiled program, string? stdin, int timeoutMs)
+    bool _lastExited;
+    int _lastThreads;
+
+    /// <summary>One raw run with no retry, plus what the process looked like if it timed out.</summary>
+    public async Task<(long Ms, bool TimedOut, TimeSpan Cpu, bool Exited, int Threads, string Stdout)> RunDiagnostic(Compiled program)
+    {
+        var (r, cpu) = await RunCore(program, null, WallLimitMs, CpuLimitMs);
+        return (r.Ms, r.TimedOut, cpu, _lastExited, _lastThreads, r.Stdout);
+    }
+
+    async Task<(RunOutput Result, TimeSpan Cpu)> RunCore(Compiled program, string? stdin, int wallMs, int cpuMs)
     {
         var psi = new ProcessStartInfo(_dotnet)
         {
@@ -174,7 +183,6 @@ public sealed class CSharpRunner
         try { proc.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
 
         var truncated = false;
-        using var cts = new CancellationTokenSource(timeoutMs);
         void Kill() { try { proc.Kill(entireProcessTree: true); } catch { } }
 
         async Task<string> Pump(StreamReader reader)
@@ -199,16 +207,22 @@ public sealed class CSharpRunner
         }
         catch (IOException) { /* program exited without reading its input */ }
 
+        // Two limits. CPU time catches a runaway loop quickly. Wall-clock time is generous, because
+        // on some machines a security scanner pauses a freshly compiled program for several seconds
+        // before it runs a single instruction, and that must not fail a correct answer.
         var timedOut = false;
         var cpu = TimeSpan.Zero;
-        try { await proc.WaitForExitAsync(cts.Token); }
-        catch (OperationCanceledException)
+        var exit = proc.WaitForExitAsync();
+        while (await Task.WhenAny(exit, Task.Delay(100)) != exit)
         {
+            try { cpu = proc.TotalProcessorTime; } catch { /* already gone */ }
+            if (cpu.TotalMilliseconds <= cpuMs && sw.ElapsedMilliseconds <= wallMs) continue;
             timedOut = true;
-            try { cpu = proc.TotalProcessorTime; } catch { cpu = TimeSpan.MaxValue; }
+            try { _lastExited = proc.HasExited; _lastThreads = _lastExited ? 0 : proc.Threads.Count; } catch { }
             Kill();
-            await proc.WaitForExitAsync();
+            break;
         }
+        await exit;
 
         var stdout = await outTask;
         var stderr = await errTask;

@@ -41,7 +41,7 @@ public sealed class Checker(CSharpRunner runner)
                 var run = await runner.Run(program, (string?)step["stdin"]);
                 (stdout, stderr, timedOut, ms) = (run.Stdout, run.Stderr, run.TimedOut, run.Ms);
                 results.AddRange(run.Marks.Select(m => new TestResult(m.Name, m.Pass, m.Detail)));
-                if (run.TimedOut) results.Add(new("Finishes in time", false, "Your program was still running after 6 seconds. Is there a loop that never ends?"));
+                if (run.TimedOut) results.Add(new("Finishes in time", false, "Your program ran for too long and was stopped. Is there a loop that never ends, or is it waiting for something that never happens?"));
                 else if (run.ExitCode != 0) results.Add(new("Runs without crashing", false, FirstLine(run.Stderr)));
                 else if (run.Marks.Count == 0) results.Add(new("Runs without crashing", true, ""));
             }
@@ -59,7 +59,7 @@ public sealed class Checker(CSharpRunner runner)
                         (stdout, stderr) = (run.Stdout, run.Stderr);
                         results.AddRange(run.Marks.Select(m => new TestResult(m.Name, m.Pass, m.Detail)));
                     }
-                    if (run.TimedOut) { timedOut = true; results.Add(new(name, false, "Still running after 6 seconds. Is there a loop that never ends?")); continue; }
+                    if (run.TimedOut) { timedOut = true; results.Add(new(name, false, "Ran for too long and was stopped. Is there a loop that never ends, or is it waiting for something that never happens?")); continue; }
                     if (run.ExitCode != 0) { results.Add(new(name, false, "Crashed: " + FirstLine(run.Stderr))); continue; }
 
                     var actual = Tidy(run.Stdout);
