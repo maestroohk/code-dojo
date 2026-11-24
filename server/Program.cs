@@ -109,7 +109,7 @@ app.MapPut("/api/progress", async (HttpRequest req) =>
 app.MapPost("/api/run", async (RunRequest req) =>
 {
     if (content.Language(req.Track ?? "csharp") != "csharp") return Results.BadRequest("unsupported language");
-    var (program, diags) = runner.Compile(req.Code ?? "", req.Template);
+    var (program, diags) = runner.Compile(req.Code ?? "", req.Template, req.Framework == "web");
     if (program is null) return Results.Json(new { compiled = false, diagnostics = diags }, json);
     using (program)
     {
@@ -153,5 +153,5 @@ static string FindRoot()
     throw new DirectoryNotFoundException("Cannot find the code-dojo folder (the one holding tracks/ and ui/).");
 }
 
-record RunRequest(string? Track, string? Code, string? Stdin, string? Template);
+record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework);
 record CheckRequest(string Track, string Module, string Lesson, int Step, string? Code);

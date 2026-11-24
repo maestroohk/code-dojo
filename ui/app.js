@@ -55,6 +55,7 @@ function header(active) {
     h('nav.nav',
       link('#/', 'Learn', 'home'),
       h(`a.nav-link${active === 'practice' ? '.active' : ''}`, { href: '#/practice' }, 'Practice', due > 0 && h('span.badge', due)),
+      link('#/projects', 'Projects', 'projects'),
       link('#/playground', 'Playground', 'playground'),
       link('#/profile', 'Profile', 'profile')),
     h('div.stats',
@@ -96,29 +97,8 @@ function home() {
     : h('section.hero', h('div', h('div.eyebrow', 'Track complete'), h('h1', `You finished ${track.title} 🏆`),
       h('p.muted', 'Replay lessons for three stars, or keep sharp in Practice.')), h('a.btn.primary.big', { href: '#/practice' }, 'Practice'));
 
-  const modules = track.modules.map((m, mi) => {
-    const done = m.lessons.filter(l => game.isDone(game.lessonKey(track, m, l))).length;
-    return h('section.module',
-      h('div.module-head',
-        h('div.module-num', String(mi + 1).padStart(2, '0')),
-        h('div.module-text', h('h2', m.title), h('p.muted', m.summary || '')),
-        h('div.module-prog', h('span', `${done} / ${m.lessons.length}`), h('div.bar', h('div.bar-fill', { style: { width: `${(done / Math.max(1, m.lessons.length)) * 100}%` } })))),
-      h('div.lessons', m.lessons.map((l, li) => {
-        const key = game.lessonKey(track, m, l);
-        const rec = game.state.lessons[key];
-        const open = game.isUnlocked(track, m, li);
-        const boss = l.kind === 'boss';
-        const cls = `${rec ? '.done' : ''}${open ? '' : '.locked'}${boss ? '.boss' : ''}${next?.key === key ? '.next' : ''}`;
-        const inner = [
-          h('div.lesson-node', rec ? '✓' : open ? (boss ? '👑' : li + 1) : '🔒'),
-          h('div.lesson-text', h('div.lesson-title', l.title), h('div.lesson-sub', boss ? 'Boss challenge' : `${l.exercises} exercises`)),
-          rec ? stars(rec.stars) : h('span.stars.ghost', '★★★'),
-        ];
-        return open
-          ? h(`a.lesson${cls}`, { href: `#/lesson/${key}`, title: l.summary || '' }, inner)
-          : h(`div.lesson${cls}`, { title: 'Finish the previous lesson to unlock this one' }, inner);
-      })));
-  });
+  const modules = game.lessonModules(track).map((m, mi) => moduleSection(track, m, String(mi + 1).padStart(2, '0'), next?.key));
+  const projects = game.projectModules(track);
 
   page('home',
     tracks.length > 1 && h('div.track-tabs', tracks.map(t => h(`button.tab${t.id === track.id ? '.active' : ''}`, {
@@ -131,7 +111,60 @@ function home() {
         h('div', h('b', `${prog.done}/${prog.total}`), h('span.muted', 'lessons')),
         h('div', h('b', `${prog.stars}/${prog.maxStars}`), h('span.muted', 'stars')),
         h('div', h('b', game.state.xp.toLocaleString()), h('span.muted', 'total XP')))),
-    modules);
+    modules,
+    projects.length > 0 && h('a.project-teaser', { href: '#/projects' },
+      h('div', h('div.eyebrow', 'Projects'), h('h2', 'Build something real'),
+        h('p.muted', `${projects.map(p => p.title).join(', ')}. Multi-stage builds where your code carries forward and is tested like production code.`)),
+      h('span.btn.ghost', 'Open projects')));
+}
+
+/** One module (or project) card with its lessons (or stages). */
+function moduleSection(track, m, label, nextKey) {
+  const project = game.isProject(m);
+  const done = m.lessons.filter(l => game.isDone(game.lessonKey(track, m, l))).length;
+  return h(`section.module${project ? '.project' : ''}`,
+    h('div.module-head',
+      h('div.module-num', label),
+      h('div.module-text', h('h2', m.title), h('p.muted', m.summary || ''),
+        project && h('div.project-meta',
+          m.level && h('span.muted.small', m.level),
+          h('div.skill-row', (m.skills || []).map(s => h('span.skill', s))))),
+      h('div.module-prog', h('span', `${done} / ${m.lessons.length}`), h('div.bar', h('div.bar-fill', { style: { width: `${(done / Math.max(1, m.lessons.length)) * 100}%` } })))),
+    h('div.lessons', m.lessons.map((l, li) => {
+      const key = game.lessonKey(track, m, l);
+      const rec = game.state.lessons[key];
+      const open = game.isUnlocked(track, m, li);
+      const boss = l.kind === 'boss';
+      const cls = `${rec ? '.done' : ''}${open ? '' : '.locked'}${boss ? '.boss' : ''}${nextKey === key ? '.next' : ''}`;
+      const inner = [
+        h('div.lesson-node', rec ? '✓' : open ? (boss ? '👑' : li + 1) : '🔒'),
+        h('div.lesson-text', h('div.lesson-title', l.title), h('div.lesson-sub', boss ? 'Boss challenge' : `${l.exercises} ${project ? 'steps' : 'exercises'}`)),
+        rec ? stars(rec.stars) : h('span.stars.ghost', '★★★'),
+      ];
+      return open
+        ? h(`a.lesson${cls}`, { href: `#/lesson/${key}`, title: l.summary || '' }, inner)
+        : h(`div.lesson${cls}`, { title: `Finish the previous ${project ? 'stage' : 'lesson'} to unlock this one` }, inner);
+    })));
+}
+
+// ---------------------------------------------------------------- projects
+
+function projectsView() {
+  const track = tracks.find(t => t.id === sessionStorage.getItem('track')) || tracks[0];
+  const projects = track ? game.projectModules(track) : [];
+  page('projects',
+    h('section.hero',
+      h('div',
+        h('div.eyebrow', 'Projects'),
+        h('h1', 'Build something real'),
+        h('p.muted', 'A project is one program you grow over several stages. Each stage teaches what it needs, then asks you to extend your own code from the stage before. Web projects run as a real server on this machine and are tested over real HTTP.'))),
+    projects.length
+      ? projects.map((m, i) => {
+        // Point at the first unfinished stage of each project.
+        const nextStage = m.lessons.find(l => !game.isDone(game.lessonKey(track, m, l)));
+        return moduleSection(track, m, `P${i + 1}`, nextStage && game.lessonKey(track, m, nextStage));
+      })
+      : h('div.empty', h('p.muted', 'No projects in this track yet.')));
 }
 
 // ---------------------------------------------------------------- lesson player
@@ -145,7 +178,8 @@ function play({ title, items, mode, meta, onFinish }) {
   let pos = 0, combo = 0, bestCombo = 0, earned = 0, mistakes = 0, firstTry = 0, answered = 0;
   let current = null, phase = 'answer', attempts = 0, hints = 0, revealed = false;
   const replay = mode === 'lesson' && game.isDone(meta.key);
-  const boss = meta?.lesson?.kind === 'boss';
+  const project = !!meta?.project;
+  const boss = meta?.lesson?.kind === 'boss' || project;   // project code pays like boss code
 
   const progress = h('div.play-bar', h('div.play-fill'));
   const comboEl = h('div.combo');
@@ -179,7 +213,7 @@ function play({ title, items, mode, meta, onFinish }) {
     if (answered > 0 && pos < total &&
         !(await ask('Leave this session? The XP you earned so far is kept, but it will not count as finished.', { ok: 'Leave', cancel: 'Keep going' }))) return;
     // Practice lives at #/practice and lessons at #/lesson/..., so always go via the router.
-    const target = mode === 'practice' ? '#/practice' : '#/';
+    const target = mode === 'practice' ? '#/practice' : project ? '#/projects' : '#/';
     if (location.hash === target) route(); else location.hash = target;
   }
 
@@ -208,6 +242,9 @@ function play({ title, items, mode, meta, onFinish }) {
       onChange: refresh, submit, bonus,
       track: item.track, module: item.module, lesson: item.lesson, idx: item.idx,
       draftKey: `${item.lessonKey}#${item.idx}`,
+      // Projects: open with the learner's latest passing program, and remember each new one.
+      carried: project ? game.state.projects[meta.moduleKey] : undefined,
+      onPassed: project ? codeNow => { game.state.projects[meta.moduleKey] = codeNow; game.save(); } : undefined,
     });
     current = { item, view };
     typeTag.textContent = TYPE_LABEL[item.step.type] || item.step.type;
@@ -362,7 +399,8 @@ async function lessonView(trackId, moduleId, lessonId) {
 
   const items = lesson.steps.map((step, idx) => ({ step, lessonKey: key, idx, track: trackId, module: moduleId, lesson: lessonId }));
   play({
-    title: `${module.title} · ${lesson.title}`, items, mode: 'lesson', meta: { key, lesson: meta },
+    title: `${module.title} · ${lesson.title}`, items, mode: 'lesson',
+    meta: { key, lesson: meta, project: game.isProject(module), moduleKey: `${trackId}/${moduleId}` },
     onFinish(r) {
       const starCount = game.starsFor(r.mistakes);
       const bonus = Math.round((r.boss ? 50 : 20) * (r.replay ? 0.3 : 1)) + (starCount === 3 && !r.replay ? 15 : 0);
@@ -379,16 +417,23 @@ async function lessonView(trackId, moduleId, lessonId) {
       game.save(true);
       const fresh = game.checkAchievements(tracks);
       game.save(true);
-      summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading: r.boss ? 'Boss defeated!' : 'Lesson complete!', lessonTitle: lesson.title });
+      const isProject = game.isProject(module);
+      const lastStage = isProject && index === module.lessons.length - 1;
+      summary({
+        r, starCount, bonus, fresh, leveledUp, level, track, key, lessonTitle: lesson.title,
+        heading: lastStage ? 'Project shipped!' : isProject ? 'Stage complete!' : meta.kind === 'boss' ? 'Boss defeated!' : 'Lesson complete!',
+        siblings: isProject ? module.lessons.map(l => ({ key: game.lessonKey(track, module, l), lesson: l })) : null,
+      });
     },
   });
 }
 
-function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice }) {
+function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice, siblings }) {
   leave?.(); leave = null;
   game.sound('done');
   confetti();
-  const all = track ? game.flatLessons(track) : [];
+  const all = siblings || (track ? game.flatLessons(track) : []);
+  const home = siblings ? '#/projects' : '#/';
   const at = all.findIndex(x => x.key === key);
   const next = at >= 0 ? all[at + 1] : null;
   const accuracy = r.exercises ? Math.round((r.firstTry / r.exercises) * 100) : 100;
@@ -407,10 +452,10 @@ function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, hea
       leveledUp && h('div.level-up', `⬆️ Level ${level.level}: ${level.rank}`),
       fresh.length > 0 && h('div.summary-badges', fresh.map(a => h('div.badge-row', h('span.badge-icon', a.icon), h('div', h('strong', a.title), h('div.muted.small', a.text))))),
       h('div.summary-actions',
-        h('a.btn.ghost', { href: '#/' }, 'Back to the map'),
+        h('a.btn.ghost', { href: home }, siblings ? 'Back to projects' : 'Back to the map'),
         practice ? h('a.btn.primary.big', { href: '#/practice', onclick: () => setTimeout(route) }, 'Practice again')
-          : next ? h('a.btn.primary.big', { href: `#/lesson/${next.key}` }, next.lesson.kind === 'boss' ? 'Face the boss' : 'Next lesson')
-            : h('a.btn.primary.big', { href: '#/' }, 'Done')))));
+          : next ? h('a.btn.primary.big', { href: `#/lesson/${next.key}` }, siblings ? 'Next stage' : next.lesson.kind === 'boss' ? 'Face the boss' : 'Next lesson')
+            : h('a.btn.primary.big', { href: home }, 'Done')))));
   window.scrollTo(0, 0);
 }
 
@@ -594,6 +639,7 @@ function route() {
     case undefined: return home();
     case 'lesson': return lessonView(parts[1], parts[2], parts[3]);
     case 'practice': return practiceView();
+    case 'projects': return projectsView();
     case 'playground': return playground();
     case 'profile': return profile();
     default: return notFound();

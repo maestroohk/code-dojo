@@ -25,7 +25,8 @@ public sealed class Checker(CSharpRunner runner)
         foreach (var rule in Rules(step, "forbid"))
             results.Add(new(rule.Message, !Regex.IsMatch(bare, rule.Pattern, RegexOptions.Singleline), "This exercise asks you to solve it another way."));
 
-        var (program, diags) = runner.Compile(code, (string?)step["template"]);
+        var web = (string?)step["framework"] == "web";
+        var (program, diags) = runner.Compile(code, (string?)step["template"], web);
         if (program is null)
             return new(false, false, diags, results, "", "", false, 0);
 
@@ -43,6 +44,7 @@ public sealed class Checker(CSharpRunner runner)
                 results.AddRange(run.Marks.Select(m => new TestResult(m.Name, m.Pass, m.Detail)));
                 if (run.TimedOut) results.Add(new("Finishes in time", false, "Your program ran for too long and was stopped. Is there a loop that never ends, or is it waiting for something that never happens?"));
                 else if (run.ExitCode != 0) results.Add(new("Runs without crashing", false, FirstLine(run.Stderr)));
+                else if (run.Marks.Count == 0 && web) results.Add(new("The server starts", false, "Your program ended before the tests could call it. Does it end with app.Run()?"));
                 else if (run.Marks.Count == 0) results.Add(new("Runs without crashing", true, ""));
             }
             else

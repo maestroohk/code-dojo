@@ -10,6 +10,7 @@ const DEFAULTS = () => ({
   achievements: {},   // id -> date earned
   review: [],         // [{ key, idx, box, due }]  steps answered wrong, resurfaced in Practice
   drafts: {},         // "track/module/lesson#idx" -> code the learner left in the editor
+  projects: {},       // "track/module" -> the learner's latest passing program in that project
   stats: { correct: 0, wrong: 0, codePassed: 0, perfect: 0, hints: 0, drags: 0, fixes: 0, bestCombo: 0, practice: 0, reviewed: 0, bosses: 0 },
   settings: { freeRoam: false, dailyGoal: 60, sound: true, typing: false },
 });
@@ -97,8 +98,13 @@ export function isUnlocked(track, module, index) {
   return isDone(lessonKey(track, module, module.lessons[index - 1]));
 }
 
+export const isProject = module => module.kind === 'project';
+export const lessonModules = track => track.modules.filter(m => !isProject(m));
+export const projectModules = track => track.modules.filter(isProject);
+
+/** Every lesson on the map, in order. Project stages are not part of the map. */
 export function flatLessons(track) {
-  return track.modules.flatMap(m => m.lessons.map((l, i) => ({ track, module: m, lesson: l, index: i, key: lessonKey(track, m, l) })));
+  return lessonModules(track).flatMap(m => m.lessons.map((l, i) => ({ track, module: m, lesson: l, index: i, key: lessonKey(track, m, l) })));
 }
 
 export function nextLesson(track) {
@@ -161,6 +167,8 @@ export const ACHIEVEMENTS = [
     const bosses = flatLessons(t).filter(x => x.lesson.kind === 'boss');
     return bosses.length > 0 && bosses.every(x => s.lessons[x.key]);
   }) },
+  { id: 'project', icon: '🚢', title: 'Shipped it', text: 'Finish every stage of a project.', test: (s, tracks) => tracks.some(t => projectModules(t).some(m =>
+    m.lessons.length > 0 && m.lessons.every(l => s.lessons[lessonKey(t, m, l)]))) },
   { id: 'reviewer', icon: '🔁', title: 'Second chances', text: 'Master 5 questions you first got wrong.', test: s => s.stats.reviewed >= 5 },
   { id: 'xp-1000', icon: '💎', title: 'Four digits', text: 'Earn 1,000 XP.', test: s => s.xp >= 1000 },
   { id: 'xp-5000', icon: '🚀', title: 'Liftoff', text: 'Earn 5,000 XP.', test: s => s.xp >= 5000 },

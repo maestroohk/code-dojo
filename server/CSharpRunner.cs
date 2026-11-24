@@ -11,10 +11,12 @@ public record Mark(string Name, bool Pass, string Detail);
 public record RunOutput(string Stdout, string Stderr, int ExitCode, bool TimedOut, bool Truncated, long Ms, List<Mark> Marks);
 
 /// <summary>A compiled learner program sitting in its own temp folder. Dispose deletes it.</summary>
-public sealed class Compiled(string dir, string dll) : IDisposable
+public sealed class Compiled(string dir, string dll, bool web = false) : IDisposable
 {
     public string Dir => dir;
     public string Dll => dll;
+    /// <summary>An ASP.NET Core program: runs with a private port and is tested over HTTP.</summary>
+    public bool Web => web;
     public void Dispose()
     {
         try { Directory.Delete(dir, true); } catch { /* a locked temp folder is not worth failing over */ }
@@ -41,6 +43,9 @@ public sealed class CSharpRunner
     readonly string _dotnet;
     readonly string _runtimeConfig;
     readonly SyntaxTree _support;
+    readonly List<MetadataReference> _webRefs;
+    readonly string _webRuntimeConfig;
+    readonly SyntaxTree _webSupport;
 
     public CSharpRunner()
     {
@@ -65,6 +70,24 @@ public sealed class CSharpRunner
             },
         });
         _support = CSharpSyntaxTree.ParseText(SupportSource, Parse, path: "Dojo.cs", encoding: Encoding.UTF8);
+
+        // Project steps marked "framework": "web" also get ASP.NET Core, the same one this server runs on.
+        var webDir = Path.GetDirectoryName(typeof(Microsoft.AspNetCore.Builder.WebApplication).Assembly.Location)!;
+        _webRefs = _refs.Concat(tpa.Where(p => string.Equals(Path.GetDirectoryName(p), webDir, StringComparison.OrdinalIgnoreCase))
+                                   .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))).ToList();
+        _webRuntimeConfig = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            runtimeOptions = new
+            {
+                tfm = $"net{Environment.Version.Major}.0",
+                frameworks = new[]
+                {
+                    new { name = "Microsoft.NETCore.App", version = Environment.Version.ToString() },
+                    new { name = "Microsoft.AspNetCore.App", version = Path.GetFileName(webDir) },
+                },
+            },
+        });
+        _webSupport = CSharpSyntaxTree.ParseText(WebSupportSource, Parse, path: "DojoWeb.cs", encoding: Encoding.UTF8);
     }
 
     /// <summary>Wrap learner code so compiler line numbers point at what they typed.</summary>
@@ -79,10 +102,11 @@ public sealed class CSharpRunner
         return $"#line 1 \"{TestFile}\"\n{before}\n#line 1 \"{UserFile}\"\n{code}\n#line 1 \"{TestFile}\"\n{after}\n";
     }
 
-    public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null)
+    public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false)
     {
         var tree = CSharpSyntaxTree.ParseText(BuildSource(code, template), Parse, path: "Source.cs", encoding: Encoding.UTF8);
-        var comp = CSharpCompilation.Create("Exercise", [tree, _support], _refs,
+        SyntaxTree[] trees = web ? [tree, _support, _webSupport] : [tree, _support];
+        var comp = CSharpCompilation.Create("Exercise", trees, web ? _webRefs : _refs,
             new CSharpCompilationOptions(OutputKind.ConsoleApplication,
                 nullableContextOptions: NullableContextOptions.Enable,
                 optimizationLevel: OptimizationLevel.Debug,
@@ -108,8 +132,8 @@ public sealed class CSharpRunner
             try { Directory.Delete(dir, true); } catch { }
             return (null, diags);
         }
-        File.WriteAllText(Path.Combine(dir, "Exercise.runtimeconfig.json"), _runtimeConfig);
-        return (new Compiled(dir, dll), diags);
+        File.WriteAllText(Path.Combine(dir, "Exercise.runtimeconfig.json"), web ? _webRuntimeConfig : _runtimeConfig);
+        return (new Compiled(dir, dll, web), diags);
     }
 
     /// <summary>Cheap check used by the puzzle validator: does this compile, without emitting anything?</summary>
@@ -177,6 +201,24 @@ public sealed class CSharpRunner
         psi.Environment["DOTNET_NOLOGO"] = "1";
         psi.Environment["DOTNET_gcServer"] = "0";
         psi.Environment["DOTNET_TieredPGO"] = "0";
+        if (program.Web)
+        {
+            // A free loopback port for this run only. The test thread compiled into the program
+            // (DojoWeb) waits for the server to listen there, calls it, reports, and exits.
+            int port;
+            using (var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0))
+            {
+                probe.Start();
+                port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+            }
+            var url = $"http://127.0.0.1:{port}";
+            psi.Environment["DOJO_WEB_URL"] = url;
+            psi.Environment["ASPNETCORE_URLS"] = url;
+            psi.Environment["ASPNETCORE_ENVIRONMENT"] = "Production";
+            psi.Environment["Logging__LogLevel__Default"] = "Warning";
+            psi.Environment["Logging__LogLevel__Microsoft.AspNetCore"] = "Error";
+            psi.Environment["DOTNET_hostBuilder__reloadConfigOnChange"] = "false";
+        }
 
         var sw = Stopwatch.StartNew();
         using var proc = Process.Start(psi)!;
@@ -249,10 +291,100 @@ public sealed class CSharpRunner
     static string CleanStderr(string stderr)
     {
         var lines = stderr.Replace("\r\n", "\n").Split('\n')
-            .Where(l => !l.Contains(" in Dojo.cs:") && !l.Contains("at Dojo."))
+            .Where(l => !l.Contains(" in Dojo.cs:") && !l.Contains(" in DojoWeb.cs:") && !l.Contains("at Dojo.") && !l.Contains("at DojoWeb."))
             .Select(l => l.Replace("Program.<<Main>$>g__", "").Replace("Program.<Main>$(String[] args)", "top-level code"));
         return string.Join("\n", lines).Trim();
     }
+
+    /// <summary>
+    /// Compiled into web projects. The learner writes a real Program.cs that ends in app.Run().
+    /// A background thread waits for Kestrel, then runs DojoTests.Run(HttpClient) from the hidden
+    /// template against the live server and ends the process.
+    /// </summary>
+    const string WebSupportSource = """
+        global using Microsoft.AspNetCore.Builder;
+        global using Microsoft.AspNetCore.Http;
+        global using Microsoft.AspNetCore.Mvc;
+        global using Microsoft.AspNetCore.Routing;
+        global using Microsoft.Extensions.DependencyInjection;
+        global using Microsoft.Extensions.Hosting;
+        global using Microsoft.Extensions.Logging;
+        global using System.Net;
+        global using System.Net.Http;
+        global using System.Net.Http.Json;
+        global using System.Text.Json;
+
+        #nullable enable
+        public static class DojoWeb
+        {
+            [System.Runtime.CompilerServices.ModuleInitializer]
+            internal static void Start()
+            {
+                var url = Environment.GetEnvironmentVariable("DOJO_WEB_URL");
+                if (string.IsNullOrEmpty(url)) return;
+                new Thread(() => RunTests(url).GetAwaiter().GetResult()) { IsBackground = true, Name = "dojo-tests" }.Start();
+            }
+
+            static async Task RunTests(string url)
+            {
+                var uri = new Uri(url);
+                var up = false;
+                for (var i = 0; i < 100 && !up; i++)
+                {
+                    try { using var probe = new System.Net.Sockets.TcpClient(); await probe.ConnectAsync(uri.Host, uri.Port); up = true; }
+                    catch { await Task.Delay(100); }
+                }
+                if (!up)
+                {
+                    Dojo.Report("The server starts", false, "Nothing was listening after 10 seconds. Does your program build the app and end with app.Run()?");
+                    Environment.Exit(0);
+                }
+
+                using var http = new HttpClient { BaseAddress = uri, Timeout = TimeSpan.FromSeconds(5) };
+                var tests = System.Reflection.Assembly.GetEntryAssembly()?.GetType("DojoTests")?.GetMethod("Run",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                try
+                {
+                    if (tests?.Invoke(null, new object[] { http }) is Task running) await running;
+                }
+                catch (Exception e)
+                {
+                    var real = e is System.Reflection.TargetInvocationException { InnerException: { } inner } ? inner : e;
+                    Dojo.Report("The tests could finish", false, real.GetType().Name + ": " + real.Message);
+                }
+                Console.Out.Flush();
+                Environment.Exit(0);
+            }
+
+            /// <summary>Read a response body as text (empty when there is none).</summary>
+            public static async Task<string> Text(HttpResponseMessage response) => await response.Content.ReadAsStringAsync();
+
+            /// <summary>Parse a response body as JSON. Returns a default element when the body is not JSON.</summary>
+            public static async Task<JsonElement> Json(HttpResponseMessage response)
+            {
+                var text = await response.Content.ReadAsStringAsync();
+                try { return JsonDocument.Parse(text).RootElement.Clone(); }
+                catch (JsonException) { return default; }
+            }
+
+            /// <summary>One row: did the response have this status code?</summary>
+            public static void Status(string name, int expected, HttpResponseMessage response)
+            {
+                var actual = (int)response.StatusCode;
+                Dojo.Check(name, actual == expected, "expected status " + expected + " but got " + actual + " " + response.StatusCode);
+            }
+
+            /// <summary>Read a property from a JSON object without throwing. Missing gives null.</summary>
+            public static string? Prop(JsonElement json, string name)
+            {
+                if (json.ValueKind != JsonValueKind.Object) return null;
+                foreach (var p in json.EnumerateObject())
+                    if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                        return p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : p.Value.GetRawText();
+                return null;
+            }
+        }
+        """;
 
     /// <summary>Compiled into every learner program: test helpers plus predictable console behaviour.</summary>
     const string SupportSource = """
@@ -280,7 +412,7 @@ public sealed class CSharpRunner
                 _real = System.Console.Out;
             }
 
-            static void Report(string name, bool ok, string detail)
+            internal static void Report(string name, bool ok, string detail)
             {
                 System.Console.Out.Flush();
                 _real.WriteLine("\u001e" + (ok ? "PASS" : "FAIL") + "\u001f" + name + "\u001f" +

@@ -182,6 +182,84 @@ Things that catch authors out:
   contents of ordinary strings or comments.
 - In a table cell, write a literal pipe as `\|`.
 
+## Projects
+
+A project is a module whose `module.json` has `"kind": "project"`. It appears under **Projects**
+instead of on the lesson map. Its lesson files are **stages** of one growing program.
+
+```json
+{ "kind": "project", "title": "Tasks API", "summary": "...",
+  "level": "After module 4.", "skills": ["Minimal APIs", "Validation"] }
+```
+
+Name the folder `pNN-name` (for example `p01-tasks-api`) and the stages `01-...json`, `02-...json`.
+`tracks/csharp/p01-tasks-api/01-hello-http.json` is the reference stage.
+
+A stage is an ordinary lesson: a briefing `learn` card, a few quick steps to teach what the stage
+needs, and one to three `code` steps that grow the program. Two extra fields on a `code` step:
+
+- `"carry": true` — the editor opens with the learner's own passing code from the previous code
+  step of the project, not with `starter`. Still give a `starter`: it must be exactly the previous
+  code step's `solution`, so the step is solvable on its own (and it is what a learner who jumps in
+  gets). Every `solution` is the whole program so far.
+- `"framework": "web"` — compile against ASP.NET Core and test over HTTP (below).
+
+Write each prompt as a small spec: the endpoints or behaviour to add, with example requests and
+responses. Say what must keep working. Later stages re-test earlier behaviour.
+
+### Web steps (`"framework": "web"`)
+
+The learner writes a real `Program.cs` with top-level statements that ends in `app.Run();`. The
+dojo starts it on a private loopback port, waits until it listens, and calls
+`DojoTests.Run(HttpClient http)` from your template against the live server:
+
+```json
+"template": [
+  "{{CODE}}",
+  "static class DojoTests",
+  "{",
+  "    public static async Task Run(HttpClient http)",
+  "    {",
+  "        var r = await http.GetAsync(\"/health\");",
+  "        DojoWeb.Status(\"GET /health responds 200 OK\", 200, r);",
+  "        Dojo.Eq(\"GET /health returns ok\", \"ok\", await DojoWeb.Text(r));",
+  "    }",
+  "}"
+]
+```
+
+`{{CODE}}` comes first and `DojoTests` after it. The learner's own types (records, classes,
+interfaces) go at the bottom of their code, after `app.Run();`, which is where C# requires them.
+
+Helpers for web tests, on top of the `Dojo` ones:
+
+| Call | Does |
+|---|---|
+| `DojoWeb.Status("name", 201, response)` | one row: the status code is 201 |
+| `await DojoWeb.Text(response)` | the body as text |
+| `await DojoWeb.Json(response)` | the body as a `JsonElement` (default if not JSON) |
+| `DojoWeb.Prop(json, "title")` | a property as a string, case-insensitive, `null` if missing; numbers and booleans come back as raw JSON text (`"1"`, `"true"`) |
+
+`http` has the base address set, so use relative URLs. Send JSON with
+`http.PostAsJsonAsync("/tasks", new { title = "x" })`, `PutAsJsonAsync`, `DeleteAsync`, or a
+`StringContent` when you need to send something malformed. Add headers per request with
+`new HttpRequestMessage(HttpMethod.Get, "/tasks") { Headers = { { "X-Api-Key", "secret" } } }`.
+
+Rules for web steps:
+
+- Implicit usings add `Microsoft.AspNetCore.Builder`, `.Http`, `.Mvc`, `.Routing`,
+  `Microsoft.Extensions.DependencyInjection`, `.Hosting`, `.Logging`, `System.Net`,
+  `System.Net.Http`, `System.Net.Http.Json` and `System.Text.Json`.
+- Only what ships in the ASP.NET Core shared framework is available: minimal APIs, DI, middleware,
+  configuration, logging, `System.Text.Json`. No NuGet: no EF Core, no Swagger. Store data in memory.
+- The server starts fresh for every check, so tests must create the data they rely on and must not
+  assume ids beyond what the stage's spec promises (for example "the first task created gets id 1").
+- One uncaught exception in `DojoTests.Run` ends the tests with a single failed row. Guard reads
+  that can fail (use `DojoWeb.Prop`, which never throws) and wrap groups in `await Dojo.TryAsync`.
+- Do not test timing. Do not rely on `DateTime.Now` values, only on their presence if needed.
+- The Run button is hidden on steps with a template, so the prompt should tell the learner that
+  **Run checks** starts the server and calls it.
+
 ## The runtime
 
 - Learner code is compiled as C# (latest) with nullable enabled, as a top-level-statements program.

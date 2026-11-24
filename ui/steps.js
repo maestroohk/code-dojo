@@ -499,7 +499,8 @@ export function renderRunOutput(panel, r, { stdin } = {}) {
 
 function code(step, ctx) {
   const draftKey = ctx.draftKey;
-  const starter = step.starter ?? '';
+  // In a project, a stage opens with the learner's own program from the stage before.
+  const starter = (step.carry && ctx.carried) || (step.starter ?? '');
   const panel = h('div.output', { hidden: true });
   const status = h('span.muted.small');
   let busy = false, passed = false;
@@ -518,7 +519,7 @@ function code(step, ctx) {
     if (busy) return;
     setBusy(true, 'Compiling and running…');
     try {
-      const r = await api('run', { track: ctx.track, code: editor.value, stdin: firstInput || step.stdin || '', template: step.template });
+      const r = await api('run', { track: ctx.track, code: editor.value, stdin: firstInput || step.stdin || '', template: step.template, framework: step.framework });
       editor.mark(r.diagnostics);
       renderRunOutput(panel, r, { stdin: firstInput });
     } catch (e) {
@@ -539,7 +540,9 @@ function code(step, ctx) {
   }, '↺ Reset');
 
   const el = h('div.code-step',
-    h('div.code-head', step.title && h('h2', step.title), step.mode === 'fix' && h('span.tag.fix', '🐞 Fix the bug')),
+    h('div.code-head', step.title && h('h2', step.title), step.mode === 'fix' && h('span.tag.fix', '🐞 Fix the bug'),
+      step.framework === 'web' && h('span.tag.web', '🌐 Live web server'),
+      step.carry && ctx.carried && h('span.tag', 'Your code so far')),
     prompt(step),
     editor.el,
     h('div.code-tools', !step.template && runBtn, resetBtn, status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to check')),
@@ -555,6 +558,7 @@ function code(step, ctx) {
         editor.mark(r.diagnostics);
         renderRunOutput(panel, r);
         passed = r.passed;
+        if (r.passed) ctx.onPassed?.(editor.value);
         const failed = r.tests.filter(t => !t.pass).length;
         return {
           correct: r.passed,
