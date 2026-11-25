@@ -24,13 +24,17 @@ public static partial class PolyChecker
 
     const string JsPrelude =
         "var Dojo = (() => { const rep = (n, ok, d) => process.stdout.write('\\x1e' + (ok ? 'PASS' : 'FAIL') + '\\x1f' + n + '\\x1f' + String(d).replace(/\\n/g, '\\\\n') + '\\n'); " +
-        "const show = v => { try { return v === undefined ? 'undefined' : JSON.stringify(v); } catch { return String(v); } }; " +
+        // Plain JSON would make every Map and Set look like {} and NaN like null, and would drop undefined.
+        "const tag = (k, v) => v instanceof Map ? { Map: [...v] } : v instanceof Set ? { Set: [...v] } : v === undefined ? 'undefined' : typeof v === 'number' && !Number.isFinite(v) ? String(v) : typeof v === 'bigint' ? v + 'n' : v; " +
+        "const show = v => { try { return v === undefined ? 'undefined' : JSON.stringify(v, tag); } catch { return String(v); } }; " +
         "const same = (a, b) => show(a) === show(b); " +
         "return { eq(n, e, a) { const ok = same(e, a); rep(n, ok, ok ? '' : 'expected ' + show(e) + ' but got ' + show(a)); }, " +
         "check(n, ok, d = '') { rep(n, !!ok, ok ? '' : d); }, " +
         "throws(n, fn) { try { fn(); rep(n, false, 'expected an error but nothing was thrown'); } catch (e) { rep(n, true, ''); } }, " +
         "async throwsAsync(n, fn) { try { await fn(); rep(n, false, 'expected an error but nothing was thrown'); } catch (e) { rep(n, true, ''); } }, " +
-        "capture(fn) { const w = process.stdout.write.bind(process.stdout); const lg = console.log; let s = ''; console.log = (...a) => { s += a.join(' ') + '\\n'; }; try { fn(); } finally { console.log = lg; } return s; } }; })();";
+        // capture() takes a plain function; captureAsync() awaits one, so output after an await is caught too.
+        "capture(fn) { const lg = console.log; let s = ''; console.log = (...a) => { s += a.join(' ') + '\\n'; }; try { fn(); } finally { console.log = lg; } return s; }, " +
+        "async captureAsync(fn) { const lg = console.log; let s = ''; console.log = (...a) => { s += a.join(' ') + '\\n'; }; try { await fn(); } finally { console.log = lg; } return s; } }; })();";
 
     public static bool Handles(string language) => language is "python" or "javascript" or "typescript";
 
@@ -122,9 +126,14 @@ public static partial class PolyChecker
 
     static string LastLine(string s) => s.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Length > 0) ?? "The program exited with an error.";
 
-    static string StripComments(string code, string language) => language == "python"
-        ? Regex.Replace(code, @"#[^\n]*", "")
-        : Regex.Replace(Regex.Replace(code, @"/\*.*?\*/", " ", RegexOptions.Singleline), @"//[^\n]*", "");
+    // Comments are removed but string literals are stepped over, so "https://x" or "# tag" inside a string survives.
+    [GeneratedRegex(@"(""""""[\s\S]*?""""""|'''[\s\S]*?'''|""(?:\\.|[^""\\\n])*""|'(?:\\.|[^'\\\n])*')|#[^\n]*")]
+    private static partial Regex PyComment();
+    [GeneratedRegex(@"(""(?:\\.|[^""\\\n])*""|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|/\*[\s\S]*?\*/|//[^\n]*")]
+    private static partial Regex JsComment();
+
+    static string StripComments(string code, string language) =>
+        (language == "python" ? PyComment() : JsComment()).Replace(code, m => m.Groups[1].Success ? m.Value : " ");
 
     static IEnumerable<(string Pattern, string Message)> Rules(JsonObject step, string key) =>
         (step[key] as JsonArray ?? []).OfType<JsonObject>().Select(r => ((string?)r["pattern"] ?? "", (string?)r["message"] ?? key));

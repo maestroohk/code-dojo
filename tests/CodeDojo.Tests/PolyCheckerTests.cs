@@ -60,6 +60,34 @@ public class PolyCheckerTests
     }
 
     [Fact]
+    public async Task Js_eq_tells_maps_sets_nan_and_undefined_apart()
+    {
+        if (Langs.Find("javascript") is null) return;
+        var step = Step("""
+            { "type": "code", "template": ["{{CODE}}",
+              "Dojo.eq('maps differ', new Map([['a', 1]]), new Map([['a', 2]]));",
+              "Dojo.eq('sets differ', new Set([1]), new Set([2]));",
+              "Dojo.eq('NaN is not null', null, NaN);",
+              "Dojo.eq('undefined is kept', { a: 1 }, { a: 1, b: undefined });",
+              "Dojo.eq('equal maps match', new Map([['a', 1]]), new Map([['a', 1]]));"] }
+            """);
+        var r = await PolyChecker.Check(Langs, step, "", "javascript");
+        Assert.Equal([false, false, false, false, true], r.Tests.Select(t => t.Pass));
+    }
+
+    [Fact]
+    public async Task Comment_stripping_keeps_string_contents()
+    {
+        if (Langs.Find("javascript") is null) return;
+        var step = Step("""
+            { "type": "code", "require": [ { "pattern": "fetch\\(", "message": "Calls fetch" } ] }
+            """);
+        // Everything after // inside the string used to be eaten, hiding the fetch( call on the same line.
+        var r = await PolyChecker.Check(Langs, step, "const u = 'https://x.example'; const f = typeof fetch; if (false) fetch(u);", "javascript");
+        Assert.True(r.Tests.Single(t => t.Name == "Calls fetch").Pass);
+    }
+
+    [Fact]
     public async Task Require_rules_ignore_comments()
     {
         if (Langs.Find("javascript") is null) return;
