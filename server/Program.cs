@@ -122,7 +122,7 @@ app.MapPost("/api/run", async (RunRequest req) =>
         var r = await langs.Run(lang, req.Code ?? "", req.Stdin);
         if (!r.Compiled)
             return Results.Json(new { compiled = false, diagnostics = new[] { new Diag("error", lang.Name, r.CompileOutput, 0, 0, "") } }, json);
-        return Results.Json(new { compiled = true, diagnostics = Array.Empty<Diag>(), r.Stdout, r.Stderr, r.ExitCode, r.TimedOut, r.Truncated, r.Ms }, json);
+        return Results.Json(new { compiled = true, diagnostics = Array.Empty<Diag>(), r.Stdout, r.Stderr, r.ExitCode, r.TimedOut, r.Truncated, r.Ms, r.Images }, json);
     }
     if (content.Language(req.Track ?? "csharp") != "csharp") return Results.BadRequest("unsupported language");
     var (program, diags) = runner.Compile(req.Code ?? "", req.Template, req.Framework == "web");

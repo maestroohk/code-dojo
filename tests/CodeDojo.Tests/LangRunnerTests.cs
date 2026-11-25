@@ -21,6 +21,25 @@ public class LangRunnerTests
     }
 
     [Fact]
+    public async Task Data_science_environment_runs_pandas_and_captures_charts()
+    {
+        if (LangRunner.PyEnvPython() is null || Langs.Find("python") is not { } py) return;   // needs the dojo's pyenv
+        var r = await Langs.Run(py, """
+            import pandas as pd
+            import matplotlib.pyplot as plt
+            df = pd.DataFrame({"city": ["A", "B", "A"], "sales": [3, 5, 4]})
+            totals = df.groupby("city")["sales"].sum()
+            print(totals.to_dict())
+            totals.plot(kind="bar", title="Sales")
+            plt.show()
+            """, null);
+        Assert.True(r.Compiled, r.Stderr);
+        Assert.Equal("{'A': 7, 'B': 5}", r.Stdout.Trim());
+        var chart = Assert.Single(r.Images);
+        Assert.StartsWith("data:image/png;base64,", chart);
+    }
+
+    [Fact]
     public async Task Stdin_reaches_the_program()
     {
         if (Langs.Find("python") is not { } py) return;

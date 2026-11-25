@@ -495,6 +495,7 @@ export function renderRunOutput(panel, r, { stdin } = {}) {
       h('pre.out', r.stdout || h('span.muted', '(your program printed nothing)'))));
   }
   if (r.truncated) panel.append(h('div.diag.warning', 'Output was cut off: your program printed too much.'));
+  if (r.images?.length) panel.append(h('div.out-section', h('div.out-title', r.images.length === 1 ? 'Chart' : 'Charts'), h('div.out-charts', r.images.map(src => h('img.out-chart', { src, alt: 'A chart your program drew' })))));
   if (r.stderr) panel.append(h('div.out-section', h('div.out-title.bad', 'Runtime error'), h('pre.out.err', r.stderr)));
   if (warnings.length) panel.append(h('div.out-section', h('div.out-title.warn', 'Compiler warnings'), warnings.slice(0, 6).map(diagRow)));
   if (r.ms != null) panel.append(h('div.muted.small.out-time', `${r.ms} ms`));

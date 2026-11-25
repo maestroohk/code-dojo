@@ -12,14 +12,77 @@ public sealed class LangRunner
 {
     public record Lang(string Id, string Name, string File, string[]? Compile, string[] Run, string Probe, string Sample);
 
-    public record Result(bool Compiled, string CompileOutput, string Stdout, string Stderr, int ExitCode, bool TimedOut, bool Truncated, long Ms);
+    public record Result(bool Compiled, string CompileOutput, string Stdout, string Stderr, int ExitCode, bool TimedOut, bool Truncated, long Ms)
+    {
+        /// <summary>Charts the program drew (matplotlib), as data: URLs, in drawing order.</summary>
+        public List<string> Images { get; init; } = [];
+    }
+
+    /// <summary>
+    /// The dojo's own Python environment (numpy, pandas, matplotlib), used for Python when it exists:
+    /// %USERPROFILE%\code-dojo\pyenv, or DOJO_PYENV. Kept apart from the system Python.
+    /// </summary>
+    public static string? PyEnvPython()
+    {
+        var dir = Environment.GetEnvironmentVariable("DOJO_PYENV") is { Length: > 0 } d ? d
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "code-dojo", "pyenv");
+        var exe = Path.Combine(dir, OperatingSystem.IsWindows() ? "Scripts" : "bin", OperatingSystem.IsWindows() ? "python.exe" : "python");
+        if (!File.Exists(exe)) return null;
+        EnsurePlotHook(dir);
+        return exe;
+    }
+
+    /// <summary>
+    /// A sitecustomize module in the environment: charts render off-screen, and every figure still
+    /// open when the program ends (or passed to plt.show()) is saved as dojo-plot-N.png next to it.
+    /// </summary>
+    static void EnsurePlotHook(string envDir)
+    {
+        var site = OperatingSystem.IsWindows() ? Path.Combine(envDir, "Lib", "site-packages")
+            : Directory.GetDirectories(Path.Combine(envDir, "lib")).Select(d => Path.Combine(d, "site-packages")).FirstOrDefault(Directory.Exists);
+        if (site is null || !Directory.Exists(site)) return;
+        var file = Path.Combine(site, "sitecustomize.py");
+        const string hook = """
+            # Written by code-dojo: render charts off-screen and save them so the dojo can show them.
+            import os, atexit
+            os.environ.setdefault("MPLBACKEND", "Agg")
+            _dojo_n = [0]
+            def _dojo_save_all():
+                import sys
+                plt = sys.modules.get("matplotlib.pyplot")
+                if plt is None:
+                    return
+                for num in plt.get_fignums():
+                    _dojo_n[0] += 1
+                    plt.figure(num).savefig(f"dojo-plot-{_dojo_n[0]}.png", dpi=110, bbox_inches="tight")
+                plt.close("all")
+            def _dojo_patch():
+                import sys
+                plt = sys.modules.get("matplotlib.pyplot")
+                # pyplot may still be loading (it defines its own show later), so check every time.
+                if plt is not None and hasattr(plt, "figure") and getattr(plt.show, "__name__", "") != "_dojo_show":
+                    def _dojo_show(*a, **k):
+                        _dojo_save_all()
+                    plt.show = _dojo_show
+            import builtins
+            _dojo_import = builtins.__import__
+            def _dojo_hooked(name, *a, **k):
+                m = _dojo_import(name, *a, **k)
+                if name.startswith("matplotlib"):
+                    _dojo_patch()
+                return m
+            builtins.__import__ = _dojo_hooked
+            atexit.register(_dojo_save_all)
+            """;
+        try { if (!File.Exists(file) || File.ReadAllText(file) != hook) File.WriteAllText(file, hook); } catch { }
+    }
 
     // Terminal colour codes some tools emit even when asked not to.
     static readonly System.Text.RegularExpressions.Regex Ansi = new(@"\x1B\[[0-9;]*[A-Za-z]");
 
     static readonly Lang[] All =
     [
-        new("python", "Python", "main.py", null, ["python", "-I", "-X", "utf8", "main.py"], "python --version",
+        new("python", "Python", "main.py", null, [PyEnvPython() ?? "python", "-I", "-X", "utf8", "main.py"], (PyEnvPython() ?? "python") + " --version",
             "# Python: indentation is the block structure.\nscores = {\"ann\": 91, \"bob\": 78, \"cy\": 85}\n\nfor name, score in sorted(scores.items(), key=lambda kv: -kv[1]):\n    print(f\"{name:<5}{score:>4}\")\n\nprint(\"average:\", sum(scores.values()) / len(scores))\n"),
         new("javascript", "JavaScript", "main.js", null, ["node", "main.js"], "node --version",
             "// JavaScript (Node.js)\nconst scores = { ann: 91, bob: 78, cy: 85 };\n\nObject.entries(scores)\n  .sort(([, a], [, b]) => b - a)\n  .forEach(([name, score]) => console.log(`${name.padEnd(5)}${String(score).padStart(4)}`));\n\nconst values = Object.values(scores);\nconsole.log('average:', values.reduce((a, b) => a + b) / values.length);\n"),
@@ -70,7 +133,11 @@ public sealed class LangRunner
                     return new(false, (c.Stdout + c.Stderr).Trim(), "", "", c.ExitCode, c.TimedOut, false, c.Ms);
             }
             var r = await Exec(dir, lang.Run, stdin, cpuMs: CSharpRunner.CpuLimitMs, wallMs: CSharpRunner.WallLimitMs);
-            return r with { Compiled = true };
+            // Charts the program saved (see EnsurePlotHook), in the order they were drawn.
+            var images = Directory.GetFiles(dir, "dojo-plot-*.png")
+                .OrderBy(f => int.TryParse(Path.GetFileNameWithoutExtension(f)[10..], out var n) ? n : 0)
+                .Take(8).Select(f => "data:image/png;base64," + Convert.ToBase64String(File.ReadAllBytes(f))).ToList();
+            return r with { Compiled = true, Images = images };
         }
         finally
         {
@@ -90,6 +157,7 @@ public sealed class LangRunner
         };
         foreach (var a in cmd.Skip(1)) psi.ArgumentList.Add(a);
         psi.Environment["PYTHONIOENCODING"] = "utf-8";
+        psi.Environment["MPLBACKEND"] = "Agg";
         psi.Environment["NODE_DISABLE_COLORS"] = "1";
         psi.Environment["NO_COLOR"] = "1";
         psi.Environment["FORCE_COLOR"] = "0";
