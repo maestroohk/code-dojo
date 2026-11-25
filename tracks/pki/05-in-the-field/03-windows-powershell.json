@@ -1,0 +1,354 @@
+{
+  "title": "Windows and PowerShell",
+  "summary": "New-SelfSignedCertificate, the Cert: drive, PFX export and import, certutil, certreq and dotnet dev-certs.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "New-SelfSignedCertificate, including a chain",
+      "body": [
+        "On Windows you rarely need openssl. PowerShell makes certificates straight into the certificate store:",
+        "",
+        "```powershell",
+        "# a dev root that may sign one level of certificates",
+        "$root = New-SelfSignedCertificate -Subject \"CN=Dojo Dev Root\" `",
+        "  -CertStoreLocation Cert:\\CurrentUser\\My -KeyAlgorithm ECDSA_nistP256 `",
+        "  -KeyUsage CertSign, CRLSign -NotAfter (Get-Date).AddYears(5) `",
+        "  -TextExtension @(\"2.5.29.19={critical}{text}ca=1&pathlength=0\")",
+        "",
+        "# a TLS leaf signed by that root",
+        "$leaf = New-SelfSignedCertificate -DnsName shop.example, www.shop.example `",
+        "  -Signer $root -CertStoreLocation Cert:\\CurrentUser\\My `",
+        "  -KeyAlgorithm ECDSA_nistP256 -NotAfter (Get-Date).AddYears(1) `",
+        "  -TextExtension @(\"2.5.29.37={text}1.3.6.1.5.5.7.3.1\")",
+        "```",
+        "",
+        "- `-DnsName`: every name goes in the SAN; the first also becomes the subject CN",
+        "- `-Signer`: sign with another certificate (which must have its private key) instead of self-signing",
+        "- `-TextExtension`: raw extensions by OID: `2.5.29.19` Basic Constraints, `2.5.29.37` EKU, `2.5.29.17` SAN",
+        "- `-KeyAlgorithm`: `RSA` (with `-KeyLength 3072`), `ECDSA_nistP256`, ...",
+        "- It always writes to a store (`My` = Personal). `-NotAfter` defaults to one year."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the command for a one-year `shop.example` certificate in your Personal store.",
+      "code": [
+        "New-SelfSignedCertificate __1__ shop.example __2__ Cert:\\CurrentUser\\My -KeyAlgorithm ECDSA_nistP256 __3__ (Get-Date).AddYears(1)"
+      ],
+      "blanks": [
+        "-DnsName",
+        "-CertStoreLocation",
+        "-NotAfter"
+      ],
+      "bank": [
+        "-HostName",
+        "-Store",
+        "-Expires",
+        "-ValidTo"
+      ],
+      "explain": "`-DnsName` (not `-Subject`) is what gives you a SAN. `-CertStoreLocation` is a `Cert:` drive path."
+    },
+    {
+      "type": "learn",
+      "title": "The Cert: drive, PFX and CER files",
+      "body": [
+        "```powershell",
+        "# browse and filter (Cert:\\CurrentUser\\Root = trusted roots, \\CA = intermediates)",
+        "Get-ChildItem Cert:\\CurrentUser\\My | Where-Object Subject -like \"*shop.example*\" |",
+        "  Format-List Subject, Issuer, NotAfter, Thumbprint, HasPrivateKey",
+        "Get-ChildItem Cert:\\CurrentUser\\My | Where-Object { $_.NotAfter -lt (Get-Date).AddDays(30) }",
+        "",
+        "# export: PFX = certificate + private key (password protected), CER = certificate only (DER)",
+        "$pw = Read-Host \"PFX password\" -AsSecureString",
+        "Export-PfxCertificate -Cert $leaf -FilePath .\\shop.pfx -Password $pw -ChainOption BuildChain",
+        "Export-Certificate    -Cert $root -FilePath .\\dojo-root.cer",
+        "",
+        "# import",
+        "Import-PfxCertificate -FilePath .\\shop.pfx -CertStoreLocation Cert:\\CurrentUser\\My -Password $pw",
+        "Import-Certificate    -FilePath .\\dojo-root.cer -CertStoreLocation Cert:\\CurrentUser\\Root",
+        "",
+        "Remove-Item Cert:\\CurrentUser\\My\\<thumbprint>    # delete",
+        "```",
+        "",
+        "| Task | PowerShell | openssl | .NET |",
+        "|---|---|---|---|",
+        "| Self-signed | `New-SelfSignedCertificate -DnsName` | `openssl req -x509 -new` | `req.CreateSelfSigned(...)` |",
+        "| Signed by CA | `New-SelfSignedCertificate -Signer $ca` | `openssl x509 -req -CA` | `req.Create(ca, ...)` |",
+        "| Export with key | `Export-PfxCertificate` | `openssl pkcs12 -export` | `cert.Export(X509ContentType.Pkcs12, pw)` |",
+        "| Export cert only | `Export-Certificate` (DER) | `openssl x509 -outform DER` | `cert.RawData` / `ExportCertificatePem()` |",
+        "| Load a PFX | `Import-PfxCertificate` | `openssl pkcs12 -in` | `X509CertificateLoader.LoadPkcs12(bytes, pw)` |",
+        "| Find expiring | `Where-Object { $_.NotAfter -lt ... }` | `openssl x509 -checkend 2592000` | LINQ over `NotAfter` |"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each cmdlet to what it does.",
+      "pairs": [
+        [
+          "`Export-PfxCertificate`",
+          "writes certificate **and private key** to a password-protected file"
+        ],
+        [
+          "`Export-Certificate`",
+          "writes the certificate only, DER-encoded"
+        ],
+        [
+          "`Import-PfxCertificate`",
+          "puts a PFX's certificate and key into a store"
+        ],
+        [
+          "`Import-Certificate ... Cert:\\CurrentUser\\Root`",
+          "makes the current user trust a root"
+        ],
+        [
+          "`Get-ChildItem Cert:\\CurrentUser\\My`",
+          "lists your personal certificates"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Your Personal store holds these three certificates. What does the command print? (One subject per line, in store order.)",
+      "code": [
+        "# Subject                NotAfter",
+        "# CN=shop.example        2030-06-20",
+        "# CN=Dojo Dev Root       2035-01-01",
+        "# CN=api.shop.example    2030-05-15",
+        "",
+        "Get-ChildItem Cert:\\CurrentUser\\My |",
+        "  Where-Object { $_.NotAfter -lt (Get-Date \"2030-06-01\").AddDays(30) } |",
+        "  Select-Object -ExpandProperty Subject"
+      ],
+      "answer": [
+        "CN=shop.example",
+        "CN=api.shop.example"
+      ],
+      "verify": false,
+      "explain": "The cutoff is 2030-07-01. Both leaves expire before it (one has, in fact, already expired: the filter catches those too); the root does not."
+    },
+    {
+      "type": "learn",
+      "title": "certutil, certreq and dotnet dev-certs",
+      "body": [
+        "`certutil` ships with every Windows and reads files without touching the store:",
+        "",
+        "```powershell",
+        "certutil -dump shop.cer                    # decode a certificate (like openssl x509 -text)",
+        "certutil -dump shop.pfx                    # inspect a PFX (asks for the password)",
+        "certutil -verify -urlfetch shop.cer        # build the chain, fetch AIA/CRL/OCSP, report errors",
+        "certutil -encode shop.cer shop.pem         # DER -> Base64 (PEM)",
+        "certutil -decode shop.pem shop.cer         # Base64 -> DER",
+        "certutil -hashfile shop.cer SHA256         # SHA-256 of the file (= fingerprint for a DER file)",
+        "certutil -addstore -f Root dojo-root.cer   # trust a root machine-wide (admin)",
+        "```",
+        "",
+        "`certreq` makes a CSR from an `.inf` file (`certreq -new request.inf shop.csr`) and submits it to an Active Directory CA (`certreq -submit`).",
+        "",
+        "ASP.NET Core's development certificate:",
+        "",
+        "```powershell",
+        "dotnet dev-certs https --check --trust     # is there one, and is it trusted?",
+        "dotnet dev-certs https --trust             # create it and trust it (CurrentUser\\Root)",
+        "dotnet dev-certs https --export-path .\\dev.pem --format Pem --no-password",
+        "dotnet dev-certs https --clean             # remove it",
+        "```"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Built into Windows, or an openssl/Linux command?",
+      "buckets": [
+        "Windows (PowerShell, certutil)",
+        "openssl / Linux"
+      ],
+      "items": [
+        [
+          "`certutil -dump shop.cer`",
+          0
+        ],
+        [
+          "`openssl x509 -in shop.pem -noout -text`",
+          1
+        ],
+        [
+          "`update-ca-certificates`",
+          1
+        ],
+        [
+          "`Import-PfxCertificate`",
+          0
+        ],
+        [
+          "`openssl pkcs12 -export`",
+          1
+        ],
+        [
+          "`New-SelfSignedCertificate`",
+          0
+        ],
+        [
+          "`certreq -new request.inf shop.csr`",
+          0
+        ],
+        [
+          "`update-ca-trust`",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`dotnet dev-certs https --trust` on Windows. What does it do?",
+      "options": [
+        "Creates the localhost development certificate if needed and adds it to the current user's Trusted Root store (after a confirmation prompt)",
+        "Downloads a certificate from Let's Encrypt",
+        "Disables certificate validation for `dotnet run`",
+        "Installs a machine-wide root for every user"
+      ],
+      "answer": 0,
+      "explain": "The dev cert is self-signed for `localhost`; trusting it means putting it in `Cert:\\CurrentUser\\Root`. Use `--export-path` to hand it to Docker or a Linux box."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Find certificates that expire soon",
+      "prompt": [
+        "Mirror this PowerShell one-liner:",
+        "",
+        "```powershell",
+        "Get-ChildItem Cert:\\CurrentUser\\My | Where-Object { $_.NotAfter -lt $now.AddDays($days) } |",
+        "  Sort-Object NotAfter | Select-Object -ExpandProperty Subject",
+        "```",
+        "",
+        "Write `List<string> ExpiringWithin(X509Certificate2Collection certs, DateTime nowUtc, int days)` returning the subjects of certificates whose `NotAfter` is before `nowUtc + days`, sorted by `NotAfter` (earliest first). Already-expired certificates count too.",
+        "",
+        "`NotAfter` is **local** time; `nowUtc` is UTC. Convert before comparing. (No store: you get a collection, so this runs anywhere.)"
+      ],
+      "starter": [
+        "List<string> ExpiringWithin(X509Certificate2Collection certs, DateTime nowUtc, int days)",
+        "{",
+        "    // filter, sort, select",
+        "}"
+      ],
+      "solution": [
+        "List<string> ExpiringWithin(X509Certificate2Collection certs, DateTime nowUtc, int days)",
+        "{",
+        "    DateTime cutoff = nowUtc.AddDays(days);",
+        "    return certs",
+        "        .Where(c => c.NotAfter.ToUniversalTime() < cutoff)",
+        "        .OrderBy(c => c.NotAfter)",
+        "        .Select(c => c.Subject)",
+        "        .ToList();",
+        "}"
+      ],
+      "hints": [
+        "`X509Certificate2Collection` works with LINQ: `certs.Where(...)`.",
+        "`c.NotAfter.ToUniversalTime() < nowUtc.AddDays(days)`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoCerts = new X509Certificate2Collection();",
+        "dojoCerts.Add(DojoCert(\"CN=later.example\", null, false, nbYear: 2030, naYear: 2036));",
+        "dojoCerts.Add(DojoCert(\"CN=soon.example\", null, false, nbYear: 2030, naYear: 2035));",
+        "dojoCerts.Add(DojoCert(\"CN=gone.example\", null, false, nbYear: 2030, naYear: 2033));",
+        "dojoCerts.Add(DojoCert(\"CN=Dojo Root\", null, true, nbYear: 2030, naYear: 2045));",
+        "var dojoNow = new DateTime(2034, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "Dojo.Eq(\"within 365 days of 2034-06-01\", new List<string> { \"CN=gone.example\", \"CN=soon.example\" }, ExpiringWithin(dojoCerts, dojoNow, 365));",
+        "Dojo.Eq(\"within 800 days\", new List<string> { \"CN=gone.example\", \"CN=soon.example\", \"CN=later.example\" }, ExpiringWithin(dojoCerts, dojoNow, 800));",
+        "Dojo.Eq(\"nothing within 0 days of 2030-06-01\", new List<string>(), ExpiringWithin(dojoCerts, new DateTime(2030, 6, 1, 0, 0, 0, DateTimeKind.Utc), 0));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Export-PfxCertificate and Import-PfxCertificate",
+      "prompt": [
+        "Write the two halves of a PFX round trip, without any certificate store:",
+        "",
+        "- `byte[] ExportPfx(X509Certificate2 cert, string password)`, like `Export-PfxCertificate`: the certificate **with its private key**, password protected",
+        "- `X509Certificate2 ImportPfx(byte[] pfx, string password)`, like `Import-PfxCertificate` but into memory: use `X509CertificateLoader.LoadPkcs12`",
+        "",
+        "A wrong password must throw (`LoadPkcs12` does that for you: let the `CryptographicException` escape). `ExportPfx` must refuse a certificate without a private key: throw `InvalidOperationException`, the error you would get from `Export-PfxCertificate` on a public-only certificate."
+      ],
+      "starter": [
+        "byte[] ExportPfx(X509Certificate2 cert, string password)",
+        "{",
+        "    // ...",
+        "}",
+        "",
+        "X509Certificate2 ImportPfx(byte[] pfx, string password)",
+        "{",
+        "    // ...",
+        "}"
+      ],
+      "solution": [
+        "byte[] ExportPfx(X509Certificate2 cert, string password)",
+        "{",
+        "    if (!cert.HasPrivateKey) throw new InvalidOperationException(\"the certificate has no private key\");",
+        "    return cert.Export(X509ContentType.Pkcs12, password);",
+        "}",
+        "",
+        "X509Certificate2 ImportPfx(byte[] pfx, string password)",
+        "{",
+        "    return X509CertificateLoader.LoadPkcs12(pfx, password);",
+        "}"
+      ],
+      "hints": [
+        "`cert.Export(X509ContentType.Pkcs12, password)`",
+        "`X509CertificateLoader.LoadPkcs12(pfx, password)`",
+        "Check `cert.HasPrivateKey` first."
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoCert = DojoCert(\"CN=shop.example\", DojoCert(\"CN=Dojo Root\", null, true), false, \"shop.example\");",
+        "byte[] dojoPfx = ExportPfx(dojoCert, \"s3cret!\");",
+        "var dojoBack = ImportPfx(dojoPfx, \"s3cret!\");",
+        "Dojo.Eq(\"round trip keeps the subject\", \"CN=shop.example\", dojoBack.Subject);",
+        "Dojo.Eq(\"round trip keeps the private key\", true, dojoBack.HasPrivateKey);",
+        "Dojo.Eq(\"same certificate\", dojoCert.Thumbprint, dojoBack.Thumbprint);",
+        "Dojo.Throws<CryptographicException>(\"wrong password throws\", () => ImportPfx(dojoPfx, \"guess\"));",
+        "using var dojoPublic = X509CertificateLoader.LoadCertificate(dojoCert.RawData);",
+        "Dojo.Throws<InvalidOperationException>(\"a public-only certificate cannot become a PFX\", () => ExportPfx(dojoPublic, \"pw\"));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    }
+  ]
+}

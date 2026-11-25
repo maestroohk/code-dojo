@@ -1,0 +1,311 @@
+{
+  "title": "Installing trust",
+  "summary": "Make Linux, Windows, Docker images and every runtime trust your private root, and know which store each one reads.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Linux: add a root to the system store",
+      "body": [
+        "**Debian, Ubuntu, Alpine** (package `ca-certificates`):",
+        "",
+        "```bash",
+        "sudo cp dojo-root.pem /usr/local/share/ca-certificates/dojo-root.crt   # PEM content, .crt name!",
+        "sudo update-ca-certificates            # \"1 added\" -> /etc/ssl/certs/ca-certificates.crt",
+        "# remove: delete the file, then",
+        "sudo update-ca-certificates --fresh",
+        "```",
+        "",
+        "**RHEL, Fedora, CentOS, Amazon Linux:**",
+        "",
+        "```bash",
+        "sudo cp dojo-root.pem /etc/pki/ca-trust/source/anchors/dojo-root.pem",
+        "sudo update-ca-trust                   # -> /etc/pki/tls/certs/ca-bundle.crt",
+        "trust list | grep -i dojo              # check it is there",
+        "```",
+        "",
+        "Install only **roots** (or your own issuing CA if that's the anchor you want), never leaf certificates. Check the file first: `openssl x509 -in dojo-root.pem -noout -subject -ext basicConstraints` should say `CA:TRUE`."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Make an Ubuntu server trust `corp-root.pem`.",
+      "lines": [
+        "`openssl x509 -in corp-root.pem -noout -subject -ext basicConstraints`",
+        "`sudo cp corp-root.pem /usr/local/share/ca-certificates/corp-root.crt`",
+        "`sudo update-ca-certificates`",
+        "`curl -vI https://intranet.corp.example`"
+      ],
+      "explain": "Check it is a CA, copy with a `.crt` name, rebuild the bundle, then prove it with a client that uses the system store."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Do the same on RHEL.",
+      "code": [
+        "sudo cp corp-root.pem __1__/corp-root.pem",
+        "sudo __2__"
+      ],
+      "blanks": [
+        "/etc/pki/ca-trust/source/anchors",
+        "update-ca-trust"
+      ],
+      "bank": [
+        "/usr/local/share/ca-certificates",
+        "update-ca-certificates",
+        "/etc/ssl/certs"
+      ],
+      "explain": "Debian-family and Red Hat-family use different folders and different commands. Mixing them up is the classic \"it said done but nothing changed\"."
+    },
+    {
+      "type": "learn",
+      "title": "Windows and Docker",
+      "body": [
+        "**Windows:**",
+        "",
+        "```powershell",
+        "# every user on the machine (run as administrator)",
+        "Import-Certificate -FilePath .\\corp-root.cer -CertStoreLocation Cert:\\LocalMachine\\Root",
+        "certutil -addstore -f Root corp-root.cer          # same thing, from cmd",
+        "# only you (Windows asks for confirmation)",
+        "Import-Certificate -FilePath .\\corp-root.cer -CertStoreLocation Cert:\\CurrentUser\\Root",
+        "```",
+        "",
+        "GUI: `certlm.msc` (machine) and `certmgr.msc` (user) â†’ Trusted Root Certification Authorities â†’ Certificates. Group Policy pushes roots to a whole domain.",
+        "",
+        "**Docker:** a container has its own filesystem, so the host's trust store does not apply. Bake the root into the image:",
+        "",
+        "```dockerfile",
+        "FROM mcr.microsoft.com/dotnet/aspnet:8.0",
+        "COPY corp-root.crt /usr/local/share/ca-certificates/corp-root.crt",
+        "RUN update-ca-certificates",
+        "```",
+        "",
+        "(Alpine images may need `RUN apk add --no-cache ca-certificates` first.)"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Linux, or Windows?",
+      "buckets": [
+        "Linux",
+        "Windows"
+      ],
+      "items": [
+        [
+          "`update-ca-certificates`",
+          0
+        ],
+        [
+          "`Import-Certificate -CertStoreLocation Cert:\\LocalMachine\\Root`",
+          1
+        ],
+        [
+          "`/etc/pki/ca-trust/source/anchors`",
+          0
+        ],
+        [
+          "`certlm.msc`",
+          1
+        ],
+        [
+          "`certutil -addstore -f Root`",
+          1
+        ],
+        [
+          "`/etc/ssl/certs/ca-certificates.crt`",
+          0
+        ],
+        [
+          "`trust list`",
+          0
+        ],
+        [
+          "`Cert:\\CurrentUser\\Root`",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Which store does each runtime read?",
+      "body": [
+        "Installing a root in the OS store fixes **some** programs. Others carry their own list:",
+        "",
+        "| Runtime | Trust store it uses | Add your root |",
+        "|---|---|---|",
+        "| .NET on Windows | Windows store | `Import-Certificate ... Root` |",
+        "| .NET on Linux | OpenSSL's system store (`/etc/ssl/certs`) | `update-ca-certificates`; or `SSL_CERT_FILE` / `SSL_CERT_DIR` |",
+        "| curl, wget, git | system bundle | system store; or `curl --cacert`, `CURL_CA_BUNDLE`, `git config http.sslCAInfo` |",
+        "| Node.js | its **own built-in** Mozilla list | `NODE_EXTRA_CA_CERTS=/path/corp-root.pem` (read at start-up) |",
+        "| Python `requests` | the `certifi` package's bundle | `REQUESTS_CA_BUNDLE=/path/bundle.pem` |",
+        "| Python `ssl` / `urllib` | OpenSSL's default paths | `SSL_CERT_FILE=/path/bundle.pem` |",
+        "| Java | `$JAVA_HOME/lib/security/cacerts` | `keytool -importcert -cacerts -alias corp -file corp-root.pem` |",
+        "| Go | system store | system store; or `SSL_CERT_FILE` |",
+        "",
+        "`REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` **replace** the default list, so point them at the full system bundle (which now includes your root), not at your root alone."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each runtime to how you add a private root for it.",
+      "pairs": [
+        [
+          "Node.js",
+          "`NODE_EXTRA_CA_CERTS`"
+        ],
+        [
+          "Python requests",
+          "`REQUESTS_CA_BUNDLE`"
+        ],
+        [
+          "Java",
+          "`keytool -importcert -cacerts`"
+        ],
+        [
+          ".NET on Linux",
+          "`update-ca-certificates` or `SSL_CERT_FILE`"
+        ],
+        [
+          "Git",
+          "`git config http.sslCAInfo`"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "After `update-ca-certificates`, `curl https://intranet.corp.example` works, but a Python script using `requests` still fails with `CERTIFICATE_VERIFY_FAILED`. Why?",
+      "options": [
+        "`requests` uses certifi's own bundle; set `REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt`",
+        "Python caches certificates for 24 hours",
+        "The root must be in DER format for Python",
+        "`requests` does not support private CAs"
+      ],
+      "answer": 0,
+      "explain": "Different runtime, different store. Pointing `REQUESTS_CA_BUNDLE` at the system bundle makes Python agree with curl."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You copied `corp-root.pem` to `/usr/local/share/ca-certificates/` and `update-ca-certificates` printed `0 added, 0 removed`. Why?",
+      "options": [
+        "The file must be named `*.crt`; rename it to `corp-root.crt`",
+        "The file must be DER",
+        "You need `update-ca-trust` on Ubuntu",
+        "The root has expired"
+      ],
+      "answer": 0,
+      "explain": "Debian's tool only picks up `.crt` files in that folder (PEM content, `.crt` name)."
+    },
+    {
+      "type": "predict",
+      "prompt": "A trust bundle is just PEM blocks one after another. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "var a = DojoCert(\"CN=Public Root A\", null, true);",
+        "var b = DojoCert(\"CN=Public Root B\", null, true);",
+        "var corp = DojoCert(\"CN=Corp Root CA\", null, true);",
+        "string bundle = \"# ca-certificates.crt\\n\" + a.ExportCertificatePem() + \"\\n\" + b.ExportCertificatePem() + \"\\n\" + corp.ExportCertificatePem() + \"\\n\";",
+        "var store = new X509Certificate2Collection();",
+        "store.ImportFromPem(bundle);",
+        "Console.WriteLine(store.Count);",
+        "Console.WriteLine(store.Cast<X509Certificate2>().Any(c => c.Subject == \"CN=Corp Root CA\"));",
+        "Console.WriteLine(bundle.Split('\\n').Count(l => l == \"-----BEGIN CERTIFICATE-----\"));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "answer": [
+        "3",
+        "True",
+        "3"
+      ],
+      "explain": "That is all `/etc/ssl/certs/ca-certificates.crt` is: `update-ca-certificates` concatenates every trusted root into one file."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Trust from a bundle, like SSL_CERT_FILE",
+      "prompt": [
+        "Write `bool TrustsWithBundle(string bundlePem, X509Certificate2 leaf, X509Certificate2Collection intermediates)`: does a client whose trust store is the PEM bundle `bundlePem` (what `SSL_CERT_FILE` points at) accept `leaf`?",
+        "",
+        "- load every certificate in the bundle as a trust anchor (`CustomRootTrust`)",
+        "- the server-sent intermediates go in `ExtraStore`",
+        "- validate for serverAuth, `RevocationMode.NoCheck`, `DisableCertificateDownloads = true`, `VerificationTime` **2030-06-01 00:00 UTC**"
+      ],
+      "starter": [
+        "bool TrustsWithBundle(string bundlePem, X509Certificate2 leaf, X509Certificate2Collection intermediates)",
+        "{",
+        "    // ...",
+        "}"
+      ],
+      "solution": [
+        "bool TrustsWithBundle(string bundlePem, X509Certificate2 leaf, X509Certificate2Collection intermediates)",
+        "{",
+        "    var anchors = new X509Certificate2Collection();",
+        "    anchors.ImportFromPem(bundlePem);",
+        "    using var chain = new X509Chain();",
+        "    chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    chain.ChainPolicy.CustomTrustStore.AddRange(anchors);",
+        "    chain.ChainPolicy.ExtraStore.AddRange(intermediates);",
+        "    chain.ChainPolicy.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"));",
+        "    chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    chain.ChainPolicy.DisableCertificateDownloads = true;",
+        "    chain.ChainPolicy.VerificationTime = new DateTime(2030, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    return chain.Build(leaf);",
+        "}"
+      ],
+      "hints": [
+        "`ImportFromPem` the bundle into a collection, then `CustomTrustStore.AddRange(...)`.",
+        "serverAuth: `ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"))`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoRoot = DojoCert(\"CN=Corp Root CA\", null, true, naYear: 2040);",
+        "var dojoInt = DojoCert(\"CN=Corp Issuing CA\", dojoRoot, true);",
+        "var dojoLeaf = DojoCert(\"CN=intranet.corp.example\", dojoInt, false, \"intranet.corp.example\", \"1.3.6.1.5.5.7.3.1\", 2030, 2031);",
+        "var dojoA = DojoCert(\"CN=Public Root A\", null, true);",
+        "var dojoInts = new X509Certificate2Collection { dojoInt };",
+        "string dojoPublicOnly = \"# bundle\\n\" + dojoA.ExportCertificatePem() + \"\\n\";",
+        "string dojoWithCorp = dojoPublicOnly + dojoRoot.ExportCertificatePem() + \"\\n\";",
+        "Dojo.Eq(\"public bundle only: not trusted\", false, TrustsWithBundle(dojoPublicOnly, dojoLeaf, dojoInts));",
+        "Dojo.Eq(\"bundle with the corp root: trusted\", true, TrustsWithBundle(dojoWithCorp, dojoLeaf, dojoInts));",
+        "Dojo.Eq(\"corp root but no intermediate: not trusted\", false, TrustsWithBundle(dojoWithCorp, dojoLeaf, new X509Certificate2Collection()));",
+        "var dojoClient = DojoCert(\"CN=laptop-42\", dojoInt, false, \"laptop-42\", \"1.3.6.1.5.5.7.3.2\", 2030, 2031);",
+        "Dojo.Eq(\"a clientAuth certificate is not accepted as a server\", false, TrustsWithBundle(dojoWithCorp, dojoClient, dojoInts));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    }
+  ]
+}

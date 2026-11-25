@@ -1,0 +1,298 @@
+{
+  "title": "Troubleshooting playbook",
+  "summary": "Map the real error messages from curl, browsers, .NET, Java and Go to a cause, a command that confirms it, and the fix.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The playbook",
+      "body": [
+        "| Error you see | Usual cause | Confirm with | Fix |",
+        "|---|---|---|---|",
+        "| `curl: (60) SSL certificate problem: unable to get local issuer certificate` | server doesn't send the intermediate, or private root not trusted | `openssl s_client -connect h:443 -servername h -showcerts` (count the certs) | serve `fullchain.pem`; or install the root |",
+        "| `curl: (60) ... self-signed certificate in certificate chain` | the root is not trusted by this client | same, look at the last `i:` | install the root / `--cacert` |",
+        "| `NET::ERR_CERT_COMMON_NAME_INVALID` | host not in the SAN | `openssl x509 -noout -ext subjectAltName` | reissue with the right SAN |",
+        "| `NET::ERR_CERT_DATE_INVALID`, `certificate has expired` | expired (or the client's clock is wrong) | `openssl x509 -noout -dates`; `date` | renew; fix the clock |",
+        "| `AuthenticationException: The remote certificate is invalid because of errors in the certificate chain: PartialChain` (.NET, `RemoteCertificateChainErrors`) | missing intermediate | `s_client -showcerts` | serve the full chain |",
+        "| ... `RemoteCertificateNameMismatch` | wrong host name | `-ext subjectAltName` | SAN |",
+        "| `PKIX path building failed: unable to find valid certification path to requested target` (Java) | root not in `cacerts`, or missing intermediate | `keytool -list -cacerts`; `s_client` | `keytool -importcert -cacerts`; full chain |",
+        "| `x509: certificate signed by unknown authority` (Go) | root not in the container's store | `ls /etc/ssl/certs` in the container | add `ca-certificates` + your root to the image |",
+        "",
+        "Two habits: **reproduce with the same client** (curl and Chrome disagree because Chrome fetches missing intermediates), and **always pass the real host name** (`-servername`), or you diagnose the default certificate."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each error to its most likely cause.",
+      "pairs": [
+        [
+          "`unable to get local issuer certificate`",
+          "the server sends only its leaf"
+        ],
+        [
+          "`NET::ERR_CERT_COMMON_NAME_INVALID`",
+          "the host is not in the SAN"
+        ],
+        [
+          "`PKIX path building failed`",
+          "Java's cacerts lacks the root"
+        ],
+        [
+          "`x509: certificate signed by unknown authority`",
+          "the Go program's store doesn't have the root"
+        ],
+        [
+          "`certificate has expired`",
+          "notAfter is in the past"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`curl https://api.shop.example` fails with `curl: (60) SSL certificate problem: unable to get local issuer certificate`. Chrome opens the site with a padlock. The site uses a well-known public CA. Most likely?",
+      "options": [
+        "The server sends only the leaf; Chrome fills the gap from its cache or AIA, curl does not",
+        "curl's CA bundle is out of date",
+        "Chrome ignores certificate errors",
+        "The certificate is expired"
+      ],
+      "answer": 0,
+      "explain": "A public root is in every store, so the gap is the intermediate. Confirm with `s_client -showcerts`: you will see only `0 s:`."
+    },
+    {
+      "type": "predict",
+      "prompt": "You run `openssl s_client -connect api.shop.example:443 -servername api.shop.example -showcerts </dev/null`. How many certificates did the server send? (Then you know what to fix.)",
+      "code": [
+        "depth=0 CN = api.shop.example",
+        "verify error:num=20:unable to get local issuer certificate",
+        "verify error:num=21:unable to verify the first certificate",
+        "---",
+        "Certificate chain",
+        " 0 s:CN = api.shop.example",
+        "   i:C = US, O = Example Trust, CN = Example TLS Issuing CA 2",
+        "-----BEGIN CERTIFICATE-----",
+        "MIIF...",
+        "-----END CERTIFICATE-----",
+        "---",
+        "Verify return code: 21 (unable to verify the first certificate)"
+      ],
+      "answer": "1",
+      "verify": false,
+      "explain": "Only depth 0: the leaf. Fix it on the server by serving `cat cert.pem intermediate.pem > fullchain.pem` (nginx `ssl_certificate fullchain.pem;`)."
+    },
+    {
+      "type": "order",
+      "prompt": "Work a `NET::ERR_CERT_COMMON_NAME_INVALID` ticket for `portal.shop.example` from report to fix.",
+      "lines": [
+        "`curl -vI https://portal.shop.example` (reproduce outside the browser)",
+        "`openssl s_client -connect portal.shop.example:443 -servername portal.shop.example </dev/null | openssl x509 -noout -ext subjectAltName`",
+        "Reissue the certificate with `-addext \"subjectAltName=DNS:portal.shop.example\"`",
+        "Deploy it and reload the web server",
+        "Run the curl command again and check `subject` and `SSL certificate verify ok`"
+      ],
+      "explain": "Reproduce, confirm the SAN, fix, deploy, re-test. Skipping the confirm step is how you reissue a certificate that was fine while the DNS pointed at the wrong server."
+    },
+    {
+      "type": "sort",
+      "prompt": "Where is the fix made?",
+      "buckets": [
+        "On the server",
+        "On the client"
+      ],
+      "items": [
+        [
+          "missing intermediate",
+          0
+        ],
+        [
+          "private root not installed",
+          1
+        ],
+        [
+          "expired certificate",
+          0
+        ],
+        [
+          "host missing from the SAN",
+          0
+        ],
+        [
+          "Java truststore lacks the corporate root",
+          1
+        ],
+        [
+          "wrong EKU (clientAuth on a web server)",
+          0
+        ],
+        [
+          "laptop clock set to 2019",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Chain status flags and openssl error numbers",
+      "body": [
+        ".NET reports chain problems as `X509ChainStatusFlags`; openssl as numbered errors. Same problems, different names:",
+        "",
+        "| `X509ChainStatusFlags` | openssl verify error | Meaning |",
+        "|---|---|---|",
+        "| `PartialChain` | 20 `unable to get local issuer certificate` | an issuer could not be found |",
+        "| `UntrustedRoot` | 19 `self-signed certificate in certificate chain` | the path ends at a root nobody trusts |",
+        "| `NotTimeValid` | 10 `certificate has expired` / 9 `not yet valid` | outside notBefore/notAfter |",
+        "| `NotValidForUsage` | 26 `unsupported certificate purpose` | EKU doesn't allow serverAuth |",
+        "| `Revoked` | 23 `certificate revoked` | on a CRL / OCSP says revoked |",
+        "",
+        "In your own .NET code, print them instead of guessing:",
+        "",
+        "```csharp",
+        "handler.ServerCertificateCustomValidationCallback = (msg, cert, chain, errors) =>",
+        "{",
+        "    if (errors != SslPolicyErrors.None)",
+        "        Console.Error.WriteLine($\"{errors}: {string.Join(\", \", chain!.ChainStatus.Select(s => s.Status))}\");",
+        "    return errors == SslPolicyErrors.None;     // log, but still refuse",
+        "};",
+        "```"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "var root = DojoCert(\"CN=Shop Root CA\", null, true, naYear: 2040);",
+        "var inter = DojoCert(\"CN=Shop Issuing CA\", root, true);",
+        "var leaf = DojoCert(\"CN=shop.example\", inter, false, \"shop.example\", \"1.3.6.1.5.5.7.3.2\", 2030, 2031);",
+        "using var chain = new X509Chain();",
+        "chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "chain.ChainPolicy.CustomTrustStore.Add(root);",
+        "chain.ChainPolicy.ExtraStore.Add(inter);",
+        "chain.ChainPolicy.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"));",
+        "chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "chain.ChainPolicy.VerificationTime = new DateTime(2030, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "Console.WriteLine(chain.Build(leaf));",
+        "Console.WriteLine(string.Join(\", \", chain.ChainStatus.Select(s => s.Status).Distinct()));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "answer": [
+        "False",
+        "NotValidForUsage"
+      ],
+      "explain": "The leaf's EKU is clientAuth (`...3.2`) but the chain is checked for serverAuth (`...3.1`): `NotValidForUsage`, openssl's \"unsupported certificate purpose\"."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Go service in an `alpine` container fails with `x509: certificate signed by unknown authority` calling `https://intranet.corp.example`. The same binary works on your laptop. Best fix?",
+      "options": [
+        "Add `ca-certificates` and the corporate root to the image and run `update-ca-certificates` in the Dockerfile",
+        "Set `InsecureSkipVerify: true`",
+        "Install the root on the Docker host",
+        "Rebuild the binary with a newer Go"
+      ],
+      "answer": 0,
+      "explain": "The container has its own filesystem and its own (here: missing) trust store. The host's store doesn't apply inside it."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Translate .NET chain errors to openssl",
+      "prompt": [
+        "Write `string OpensslError(X509ChainStatusFlags flag)` that returns the openssl verify message for a .NET chain status flag, so a log line from a .NET service can be searched next to openssl output:",
+        "",
+        "| Flag | Return |",
+        "|---|---|",
+        "| `PartialChain` | `20 unable to get local issuer certificate` |",
+        "| `UntrustedRoot` | `19 self-signed certificate in certificate chain` |",
+        "| `NotTimeValid` | `10 certificate has expired` |",
+        "| `NotValidForUsage` | `26 unsupported certificate purpose` |",
+        "| `Revoked` | `23 certificate revoked` |",
+        "| anything else | `? ` + the flag's name (for example `? NotSignatureValid`) |",
+        "",
+        "The tests also break real chains and feed your function the flags `X509Chain` reports."
+      ],
+      "starter": [
+        "string OpensslError(X509ChainStatusFlags flag)",
+        "{",
+        "    // ...",
+        "}"
+      ],
+      "solution": [
+        "string OpensslError(X509ChainStatusFlags flag) => flag switch",
+        "{",
+        "    X509ChainStatusFlags.PartialChain => \"20 unable to get local issuer certificate\",",
+        "    X509ChainStatusFlags.UntrustedRoot => \"19 self-signed certificate in certificate chain\",",
+        "    X509ChainStatusFlags.NotTimeValid => \"10 certificate has expired\",",
+        "    X509ChainStatusFlags.NotValidForUsage => \"26 unsupported certificate purpose\",",
+        "    X509ChainStatusFlags.Revoked => \"23 certificate revoked\",",
+        "    _ => \"? \" + flag",
+        "};"
+      ],
+      "hints": [
+        "A `switch` expression on `flag` is the neatest form.",
+        "`_ => \"? \" + flag` uses the enum's name."
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "Dojo.Eq(\"Revoked\", \"23 certificate revoked\", OpensslError(X509ChainStatusFlags.Revoked));",
+        "Dojo.Eq(\"unknown flag\", \"? NotSignatureValid\", OpensslError(X509ChainStatusFlags.NotSignatureValid));",
+        "var dojoRoot = DojoCert(\"CN=Shop Root CA\", null, true, naYear: 2040);",
+        "var dojoInt = DojoCert(\"CN=Shop Issuing CA\", dojoRoot, true);",
+        "string DojoRun(X509Certificate2 leaf, bool trust, bool sendInt, int year = 2030)",
+        "{",
+        "    using var chain = new X509Chain();",
+        "    chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    if (trust) chain.ChainPolicy.CustomTrustStore.Add(dojoRoot); else chain.ChainPolicy.ExtraStore.Add(dojoRoot);",
+        "    if (sendInt) chain.ChainPolicy.ExtraStore.Add(dojoInt);",
+        "    chain.ChainPolicy.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"));",
+        "    chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    chain.ChainPolicy.DisableCertificateDownloads = true;",
+        "    chain.ChainPolicy.VerificationTime = new DateTime(year, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    chain.Build(leaf);",
+        "    return string.Join(\" | \", chain.ChainStatus.Select(s => s.Status).Distinct().Select(OpensslError));",
+        "}",
+        "var dojoGood = DojoCert(\"CN=shop.example\", dojoInt, false, \"shop.example\", \"1.3.6.1.5.5.7.3.1\", 2030, 2031);",
+        "Dojo.Eq(\"missing intermediate\", \"20 unable to get local issuer certificate\", DojoRun(dojoGood, true, false));",
+        "Dojo.Eq(\"untrusted root\", \"19 self-signed certificate in certificate chain\", DojoRun(dojoGood, false, true));",
+        "Dojo.Eq(\"expired (checked in 2032)\", \"10 certificate has expired\", DojoRun(dojoGood, true, true, 2032));",
+        "Dojo.Eq(\"wrong EKU\", \"26 unsupported certificate purpose\", DojoRun(DojoCert(\"CN=c.example\", dojoInt, false, \"c.example\", \"1.3.6.1.5.5.7.3.2\", 2030, 2031), true, true));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    }
+  ]
+}

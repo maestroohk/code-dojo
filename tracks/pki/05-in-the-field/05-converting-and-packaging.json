@@ -1,0 +1,324 @@
+{
+  "title": "Converting and packaging",
+  "summary": "PEM, DER and PFX conversions with openssl and certutil, matching a key to a certificate, and Java keystores with keytool.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Conversions you will need",
+      "body": [
+        "| From → to | openssl | Windows |",
+        "|---|---|---|",
+        "| PEM → DER | `openssl x509 -in cert.pem -outform DER -out cert.der` | `certutil -decode cert.pem cert.der` |",
+        "| DER → PEM | `openssl x509 -inform DER -in cert.der -out cert.pem` | `certutil -encode cert.der cert.pem` |",
+        "| key + cert (+ chain) → PFX | `openssl pkcs12 -export -inkey key.pem -in cert.pem -certfile int.pem -out site.pfx` | `Export-PfxCertificate` |",
+        "| PFX → certificates | `openssl pkcs12 -in site.pfx -nokeys -out certs.pem` | `certutil -dump site.pfx` to look |",
+        "| PFX → private key | `openssl pkcs12 -in site.pfx -nocerts -noenc -out key.pem` | |",
+        "| .p7b → PEM | `openssl pkcs7 -in chain.p7b -print_certs -out chain.pem` | open it, export each |",
+        "",
+        "- `-noenc` (older: `-nodes`) writes the key **unencrypted**. Protect that file (`chmod 600`).",
+        "- **OpenSSL 3 and old PFX files:** PFX files from older Windows and Java use RC2/3DES. OpenSSL 3 refuses them (`error:0308010C:digital envelope routines::unsupported`) until you add **`-legacy`**. To *make* a PFX for an old system, add `-legacy` to `pkcs12 -export` as well.",
+        "- .NET equivalents: `cert.RawData` (DER), `cert.ExportCertificatePem()`, `cert.Export(X509ContentType.Pkcs12, pw)`, `X509CertificateLoader.LoadPkcs12(...)`, `X509Certificate2.CreateFromPem(certPem, keyPem)`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to what it produces.",
+      "pairs": [
+        [
+          "`openssl x509 -in c.pem -outform DER -out c.der`",
+          "a binary certificate"
+        ],
+        [
+          "`openssl pkcs12 -export -inkey k.pem -in c.pem -out s.pfx`",
+          "a password-protected bundle of key and certificate"
+        ],
+        [
+          "`openssl pkcs12 -in s.pfx -nokeys -out certs.pem`",
+          "the certificates from a PFX, as PEM"
+        ],
+        [
+          "`openssl pkcs12 -in s.pfx -nocerts -noenc -out k.pem`",
+          "the unencrypted private key from a PFX"
+        ],
+        [
+          "`certutil -encode c.der c.pem`",
+          "Base64 text with BEGIN/END lines"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Bundle a key, its certificate and the intermediate into a PFX, then pull only the certificates back out.",
+      "code": [
+        "openssl pkcs12 __1__ -inkey key.pem -in cert.pem __2__ int.pem -out site.pfx",
+        "openssl pkcs12 -in site.pfx __3__ -out certs.pem"
+      ],
+      "blanks": [
+        "-export",
+        "-certfile",
+        "-nokeys"
+      ],
+      "bank": [
+        "-nocerts",
+        "-import",
+        "-untrusted",
+        "-outform"
+      ],
+      "explain": "`-export` creates a PFX; without it `pkcs12` reads one. `-certfile` adds extra certificates (the chain). `-nokeys` leaves the key out."
+    },
+    {
+      "type": "predict",
+      "prompt": "OpenSSL 3 fails to open a PFX exported years ago from Windows Server 2012. Which flag do you add? Type just the flag.",
+      "code": [
+        "$ openssl pkcs12 -in old.pfx -nokeys -out certs.pem",
+        "Enter Import Password:",
+        "Error outputting keys and certificates",
+        "40F7A1D4:error:0308010C:digital envelope routines:inner_evp_generic_fetch:unsupported:crypto/evp/evp_fetch.c:349:Global default library context, Algorithm (RC2-40-CBC : 0)"
+      ],
+      "answer": "-legacy",
+      "verify": false,
+      "explain": "RC2-40 lives in OpenSSL 3's legacy provider. `-legacy` loads it. Better still, re-export the PFX with AES (`openssl pkcs12 -export` defaults to AES-256 in OpenSSL 3)."
+    },
+    {
+      "type": "learn",
+      "title": "Does this key belong to this certificate?",
+      "body": [
+        "nginx says `SSL_CTX_use_PrivateKey ... key values mismatch`; IIS imports a certificate with no key. Check by comparing the **public key** inside both files:",
+        "",
+        "```bash",
+        "# any key type (RSA, EC): hash the public key from each side",
+        "openssl x509 -in cert.pem -noout -pubkey | openssl sha256",
+        "openssl pkey -in key.pem -pubout          | openssl sha256",
+        "# RSA only, the classic way",
+        "openssl x509 -in cert.pem -noout -modulus | openssl sha256",
+        "openssl rsa  -in key.pem  -noout -modulus | openssl sha256",
+        "```",
+        "",
+        "Same hash: they belong together. In .NET, compare `cert.PublicKey.ExportSubjectPublicKeyInfo()` with `key.ExportSubjectPublicKeyInfo()`.",
+        "",
+        "**Java keystores** (`keytool` ships with the JDK):",
+        "",
+        "```bash",
+        "keytool -importcert -alias dojo-root -file root.pem -keystore truststore.p12 -storepass changeit -noprompt",
+        "keytool -list -v -keystore truststore.p12 -storepass changeit",
+        "keytool -importkeystore -srckeystore site.pfx -srcstoretype PKCS12 -destkeystore site.jks",
+        "keytool -importcert -cacerts -alias dojo-root -file root.pem      # the JDK's own cacerts (password changeit)",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You run both public-key hashes and get two **different** values. What does it mean?",
+      "options": [
+        "The key does not belong to the certificate: find the right key, or issue a new certificate for this key",
+        "The certificate is expired",
+        "One file is DER and the other PEM",
+        "The key is encrypted"
+      ],
+      "answer": 0,
+      "explain": "The certificate binds exactly one public key. A different hash means a different key pair, whatever the file names say."
+    },
+    {
+      "type": "sort",
+      "prompt": "Can the file contain a private key?",
+      "buckets": [
+        "Can hold a private key",
+        "Certificates only"
+      ],
+      "items": [
+        [
+          "`site.pfx` / `site.p12`",
+          0
+        ],
+        [
+          "`key.pem`",
+          0
+        ],
+        [
+          "a `.jks` keystore",
+          0
+        ],
+        [
+          "`root.cer` from `Export-Certificate`",
+          1
+        ],
+        [
+          "`fullchain.pem`",
+          1
+        ],
+        [
+          "`chain.p7b`",
+          1
+        ]
+      ],
+      "explain": "PKCS#12 and Java keystores can hold keys; .cer, .der, .p7b and a fullchain never do. A `.pem` can hold anything: look for `BEGIN PRIVATE KEY`."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "var cert = DojoCert(\"CN=convert.example\", null, false, \"convert.example\");",
+        "byte[] der = cert.RawData;",
+        "string pem = cert.ExportCertificatePem();",
+        "Console.WriteLine(der[0].ToString(\"X2\"));",
+        "Console.WriteLine(pem.Split('\\n')[0]);",
+        "using var back = X509Certificate2.CreateFromPem(pem);",
+        "Console.WriteLine(back.RawData.SequenceEqual(der));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "answer": [
+        "30",
+        "-----BEGIN CERTIFICATE-----",
+        "True"
+      ],
+      "explain": "DER certificates start with `0x30` (an ASN.1 SEQUENCE). PEM is the same bytes in Base64 between BEGIN/END lines, so converting back gives identical bytes."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "PEM to DER by hand",
+      "prompt": [
+        "Write `byte[] PemToDer(string pem)`: what `openssl x509 -outform DER` and `certutil -decode` do.",
+        "",
+        "Take the text between `-----BEGIN CERTIFICATE-----` and `-----END CERTIFICATE-----`, remove the line breaks (the input may use `\\n` or `\\r\\n`), and Base64-decode it. If there are several certificates, return only the first. Text before the BEGIN line (like `subject=...` from openssl) must be ignored.",
+        "",
+        "Do it by hand: no `PemEncoding`, `ImportFromPem` or `CreateFromPem`."
+      ],
+      "starter": [
+        "byte[] PemToDer(string pem)",
+        "{",
+        "    const string begin = \"-----BEGIN CERTIFICATE-----\";",
+        "    const string end = \"-----END CERTIFICATE-----\";",
+        "    // ...",
+        "}"
+      ],
+      "solution": [
+        "byte[] PemToDer(string pem)",
+        "{",
+        "    const string begin = \"-----BEGIN CERTIFICATE-----\";",
+        "    const string end = \"-----END CERTIFICATE-----\";",
+        "    int start = pem.IndexOf(begin) + begin.Length;",
+        "    int stop = pem.IndexOf(end, start);",
+        "    string b64 = pem[start..stop].Replace(\"\\r\", \"\").Replace(\"\\n\", \"\").Trim();",
+        "    return Convert.FromBase64String(b64);",
+        "}"
+      ],
+      "hints": [
+        "`pem.IndexOf(end, start)` finds the END after the first BEGIN.",
+        "Remove `\\r` and `\\n` before `Convert.FromBase64String`."
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoA = DojoCert(\"CN=a.example\", null, false, \"a.example\");",
+        "var dojoB = DojoCert(\"CN=b.example\", null, false, \"b.example\");",
+        "Dojo.Eq(\"one certificate\", dojoA.RawData, PemToDer(dojoA.ExportCertificatePem()));",
+        "Dojo.Eq(\"Windows line endings\", dojoA.RawData, PemToDer(dojoA.ExportCertificatePem().Replace(\"\\n\", \"\\r\\n\")));",
+        "Dojo.Eq(\"text before the PEM is ignored, first of two wins\", dojoA.RawData, PemToDer(\"subject=CN = a.example\\nissuer=CN = a.example\\n\" + dojoA.ExportCertificatePem() + \"\\n\" + dojoB.ExportCertificatePem()));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "forbid": [
+        {
+          "pattern": "PemEncoding|ImportFromPem|CreateFromPem",
+          "message": "Parses the PEM by hand"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Does the key match the certificate?",
+      "prompt": [
+        "Write `bool KeyMatches(X509Certificate2 cert, ECDsa key)`, the .NET version of comparing `openssl x509 -pubkey` with `openssl pkey -pubout`: compare the certificate's SubjectPublicKeyInfo bytes with the key's.",
+        "",
+        "Return `false` (don't throw) when the certificate's key is not an ECDSA key at all."
+      ],
+      "starter": [
+        "bool KeyMatches(X509Certificate2 cert, ECDsa key)",
+        "{",
+        "    // ...",
+        "}"
+      ],
+      "solution": [
+        "bool KeyMatches(X509Certificate2 cert, ECDsa key)",
+        "{",
+        "    using var certKey = cert.GetECDsaPublicKey();",
+        "    if (certKey == null) return false;",
+        "    return certKey.ExportSubjectPublicKeyInfo().SequenceEqual(key.ExportSubjectPublicKeyInfo());",
+        "}"
+      ],
+      "hints": [
+        "`cert.GetECDsaPublicKey()` returns null for non-EC certificates.",
+        "`a.ExportSubjectPublicKeyInfo().SequenceEqual(b.ExportSubjectPublicKeyInfo())`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "var dojoOtherKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "var dojoReq = new CertificateRequest(\"CN=match.example\", dojoKey, HashAlgorithmName.SHA256);",
+        "using var dojoCert = dojoReq.CreateSelfSigned(DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddYears(1));",
+        "using var dojoPublic = X509CertificateLoader.LoadCertificate(dojoCert.RawData);",
+        "Dojo.Eq(\"the right key matches\", true, KeyMatches(dojoPublic, dojoKey));",
+        "Dojo.Eq(\"another key does not\", false, KeyMatches(dojoPublic, dojoOtherKey));",
+        "using var dojoRsa = RSA.Create(2048);",
+        "using var dojoRsaCert = new CertificateRequest(\"CN=rsa.example\", dojoRsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1).CreateSelfSigned(DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddYears(1));",
+        "Dojo.Eq(\"an RSA certificate never matches an EC key\", false, KeyMatches(dojoRsaCert, dojoKey));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    }
+  ]
+}
