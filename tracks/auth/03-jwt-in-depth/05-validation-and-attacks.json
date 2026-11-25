@@ -1,0 +1,427 @@
+{
+  "title": "Validation and the classic attacks",
+  "summary": "The full validation checklist, and the real attacks it stops: alg=none, algorithm confusion, weak secrets, missing exp and aud checks, and token theft.",
+  "minutes": 20,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The validation checklist",
+      "body": [
+        "A signature check alone is not validation. Before trusting any claim in a JWT, an API must check **all** of these:",
+        "",
+        "1. **Shape**: three base64url parts that decode to JSON.",
+        "2. **Algorithm**: the header's `alg` is on *your* allow-list for this key. The server decides the algorithm; the token only gets to agree.",
+        "3. **Signature**: verified with the key you trust for that issuer.",
+        "4. **`exp`**: present, and `now < exp + skew`.",
+        "5. **`nbf`**: if present, `now >= nbf - skew`.",
+        "6. **`iss`**: exactly the issuer you trust.",
+        "7. **`aud`**: contains *your* API's identifier.",
+        "8. Only then: read `sub`, roles and scopes and make authorization decisions.",
+        "",
+        "Every item exists because real systems skipped it and were broken. The next cards are the hall of shame."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the validation steps in a safe order.",
+      "lines": [
+        "split into three parts and decode the header",
+        "reject any alg that is not on the allow-list",
+        "verify the signature",
+        "check exp and nbf with skew",
+        "check iss and aud",
+        "use the claims for authorization"
+      ],
+      "also": [
+        [
+          "split into three parts and decode the header",
+          "reject any alg that is not on the allow-list",
+          "verify the signature",
+          "check iss and aud",
+          "check exp and nbf with skew",
+          "use the claims for authorization"
+        ]
+      ],
+      "explain": "Algorithm before signature, signature before you believe anything in the payload, and the claims last. The time and iss/aud checks can come in either order."
+    },
+    {
+      "type": "learn",
+      "title": "Attacks on the algorithm",
+      "body": [
+        "**`alg: none`.** The JWT spec defines an \"unsecured\" token with `\"alg\":\"none\"` and an empty signature. Early libraries honoured it: an attacker removed the signature, set `alg` to `none`, wrote any claims they liked, and was let in.",
+        "",
+        "```text",
+        "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.",
+        "{\"alg\":\"none\"}      {\"sub\":\"admin\"}       (no signature)",
+        "```",
+        "",
+        "**Algorithm confusion (RS256 → HS256).** A server expects RS256 and has the issuer's *public* key. Its library picks the algorithm from the header. The attacker sends `\"alg\":\"HS256\"` and an HMAC computed using **the public key as the HMAC secret**. The public key is public, so anyone can compute that. A naive verifier calls `HMAC(publicKeyBytes, input)`, gets a match, and accepts.",
+        "",
+        "The fix for both is the same: **never let the token choose the algorithm.** Configure each key with the one algorithm it is for, and reject everything else.",
+        "",
+        "**Weak HMAC secrets.** Any single HS256 token is an offline oracle: tools like `hashcat` try billions of candidate secrets per second against it. `\"secret\"`, `\"changeme\"` and the company name fall in seconds. Use 32+ random bytes."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "This validator lets the header pick the algorithm. What does it print for an attacker's token?",
+      "code": [
+        "using System.Text;",
+        "using System.Text.Json;",
+        "",
+        "string Naive(string token)",
+        "{",
+        "    var parts = token.Split('.');",
+        "    var json = Encoding.UTF8.GetString(Convert.FromBase64String(parts[0].PadRight((parts[0].Length + 3) / 4 * 4, '=')));",
+        "    string alg = JsonDocument.Parse(json).RootElement.GetProperty(\"alg\").GetString()!;",
+        "    if (alg == \"none\") return \"accepted without a signature\";",
+        "    return \"signature checked\";",
+        "}",
+        "",
+        "Console.WriteLine(Naive(\"eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.\"));"
+      ],
+      "answer": "accepted without a signature",
+      "explain": "The attacker controls the header. A validator that reads `alg` from it and obeys has handed the attacker the decision."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each attack to the check that stops it.",
+      "pairs": [
+        [
+          "`alg: none` token",
+          "algorithm allow-list"
+        ],
+        [
+          "HS256 signed with the RSA public key",
+          "binding each key to one algorithm"
+        ],
+        [
+          "Cracking the HMAC secret offline",
+          "a random secret of 32+ bytes"
+        ],
+        [
+          "Token issued for the billing API sent to the orders API",
+          "`aud` check"
+        ],
+        [
+          "A token stolen last year",
+          "`exp` check"
+        ],
+        [
+          "Token from a test identity server accepted in production",
+          "`iss` check"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Skipped claim checks, and where tokens live",
+      "body": [
+        "**Not checking `exp`**: a token leaked in a log or a screenshot works forever.",
+        "",
+        "**Not checking `aud`**: your company's identity server issues tokens for many APIs. A token meant for the low-risk *newsletter* API is accepted by the *payments* API, because the signature is valid. `aud` is what says \"this token is for me\".",
+        "",
+        "**Not checking `iss`**: a token from a different tenant, or the staging identity server, is accepted.",
+        "",
+        "**Where should a browser app keep its token?**",
+        "",
+        "| Storage | XSS can steal it? | CSRF risk? |",
+        "|---|---|---|",
+        "| `localStorage` / `sessionStorage` | **Yes**: any script on the page can read it and send it anywhere | No |",
+        "| JavaScript memory only | Harder (lost on refresh), still usable by injected script while the page runs | No |",
+        "| `HttpOnly; Secure; SameSite` cookie | Can't be *read*; injected script can still make requests while the page is open | Yes, so add CSRF defences |",
+        "",
+        "For browser apps the current best practice is the **Backend-for-Frontend (BFF)** pattern: the browser holds only an `HttpOnly` session cookie for its own backend, and that backend keeps the access and refresh tokens server-side and attaches them to API calls. Tokens never reach JavaScript."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A single-page app stores its access token in `localStorage`. An attacker finds an XSS bug in a comment field. What is the worst consequence?",
+      "options": [
+        "Script in the comment reads the token and sends it to the attacker, who uses it from their own machine until it expires",
+        "Nothing, because the token is signed",
+        "The attacker learns the signing key",
+        "Only the attacker's own account is affected"
+      ],
+      "answer": 0,
+      "explain": "A signed token is a bearer credential: whoever holds it is the user. `localStorage` is readable by every script on the origin, so XSS turns into token theft. Short lifetimes and the BFF pattern limit the damage."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the vulnerable validator",
+      "prompt": [
+        "This validator went to production. It has **four** security bugs:",
+        "",
+        "1. It accepts `alg: none`.",
+        "2. It would accept any algorithm other than `none` too, as long as an HMAC matches. Allow only `HS256` (return `\"bad_alg\"` for anything else).",
+        "3. It compares signatures with `!=`, which is not constant-time. Use `CryptographicOperations.FixedTimeEquals` on the decoded bytes.",
+        "4. It never checks `exp`. Return `\"expired\"` when `exp` is missing or `now >= exp` (no skew in this exercise).",
+        "",
+        "Also return `\"malformed\"` when the token doesn't have three parts. Keep the other return values (`\"ok\"`, `\"bad_signature\"`)."
+      ],
+      "starter": [
+        "string B64Url(byte[] data) =>",
+        "    Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "byte[] FromB64Url(string text)",
+        "{",
+        "    var s = text.Replace('-', '+').Replace('_', '/');",
+        "    switch (s.Length % 4)",
+        "    {",
+        "        case 2: s += \"==\"; break;",
+        "        case 3: s += \"=\"; break;",
+        "        case 1: throw new FormatException(\"Not valid base64url.\");",
+        "    }",
+        "    return Convert.FromBase64String(s);",
+        "}",
+        "",
+        "",
+        "string Validate(string token, byte[] secret, long now)",
+        "{",
+        "    var parts = token.Split('.');",
+        "    using var header = JsonDocument.Parse(FromB64Url(parts[0]));",
+        "    string alg = header.RootElement.GetProperty(\"alg\").GetString()!;",
+        "",
+        "    if (alg == \"none\") return \"ok\";   // \"for local testing\"",
+        "",
+        "    string expected = B64Url(HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1])));",
+        "    if (expected != parts[2]) return \"bad_signature\";",
+        "",
+        "    return \"ok\";",
+        "}"
+      ],
+      "solution": [
+        "string B64Url(byte[] data) =>",
+        "    Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "byte[] FromB64Url(string text)",
+        "{",
+        "    var s = text.Replace('-', '+').Replace('_', '/');",
+        "    switch (s.Length % 4)",
+        "    {",
+        "        case 2: s += \"==\"; break;",
+        "        case 3: s += \"=\"; break;",
+        "        case 1: throw new FormatException(\"Not valid base64url.\");",
+        "    }",
+        "    return Convert.FromBase64String(s);",
+        "}",
+        "",
+        "",
+        "string Validate(string token, byte[] secret, long now)",
+        "{",
+        "    var parts = token.Split('.');",
+        "    if (parts.Length != 3) return \"malformed\";",
+        "    using var header = JsonDocument.Parse(FromB64Url(parts[0]));",
+        "    string? alg = header.RootElement.GetProperty(\"alg\").GetString();",
+        "",
+        "    if (alg != \"HS256\") return \"bad_alg\";",
+        "",
+        "    byte[] expected = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1]));",
+        "    if (!CryptographicOperations.FixedTimeEquals(expected, FromB64Url(parts[2]))) return \"bad_signature\";",
+        "",
+        "    using var payload = JsonDocument.Parse(FromB64Url(parts[1]));",
+        "    if (!payload.RootElement.TryGetProperty(\"exp\", out var exp) || now >= exp.GetInt64()) return \"expired\";",
+        "",
+        "    return \"ok\";",
+        "}"
+      ],
+      "hints": [
+        "Replace `if (alg == \"none\") return \"ok\";` with `if (alg != \"HS256\") return \"bad_alg\";`.",
+        "Keep `expected` as bytes and compare with `CryptographicOperations.FixedTimeEquals(expected, FromB64Url(parts[2]))`.",
+        "After the signature: parse the payload, `TryGetProperty(\"exp\", ...)`, and compare with `now`."
+      ],
+      "template": [
+        "        using System.Security.Cryptography;",
+        "        using System.Text.Json;",
+        "        {{CODE}}",
+        "        var dojoSecret = RandomNumberGenerator.GetBytes(32);",
+        "        Dojo.Eq(\"a good token\", \"ok\", Validate(DojoJwt.Hs(\"{\\\"sub\\\":\\\"ada\\\",\\\"exp\\\":2000}\", dojoSecret), dojoSecret, 1000));",
+        "        Dojo.Eq(\"alg none -> bad_alg\", \"bad_alg\", Validate(DojoJwt.B64(\"{\\\"alg\\\":\\\"none\\\"}\") + \".\" + DojoJwt.B64(\"{\\\"sub\\\":\\\"admin\\\",\\\"exp\\\":2000}\") + \".\", dojoSecret, 1000));",
+        "        Dojo.Eq(\"alg HS384 -> bad_alg\", \"bad_alg\", Validate(DojoJwt.Hs(\"{\\\"alg\\\":\\\"HS384\\\"}\", \"{\\\"exp\\\":2000}\", dojoSecret), dojoSecret, 1000));",
+        "        Dojo.Eq(\"tampered -> bad_signature\", \"bad_signature\", Validate(DojoJwt.Tamper(DojoJwt.Hs(\"{\\\"exp\\\":2000}\", dojoSecret)), dojoSecret, 1000));",
+        "        Dojo.Eq(\"expired -> expired\", \"expired\", Validate(DojoJwt.Hs(\"{\\\"sub\\\":\\\"ada\\\",\\\"exp\\\":2000}\", dojoSecret), dojoSecret, 2000));",
+        "        Dojo.Eq(\"no exp -> expired\", \"expired\", Validate(DojoJwt.Hs(\"{\\\"sub\\\":\\\"ada\\\"}\", dojoSecret), dojoSecret, 1000));",
+        "        Dojo.Eq(\"two parts -> malformed\", \"malformed\", Validate(\"abc.def\", dojoSecret, 1000));",
+        "",
+        "static class DojoJwt",
+        "{",
+        "    public static string B64(byte[] d) => Convert.ToBase64String(d).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "    public static string B64(string s) => B64(System.Text.Encoding.UTF8.GetBytes(s));",
+        "    public const string Hs256Header = \"{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}\";",
+        "    public static string Hs(string header, string payload, byte[] secret)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(System.Security.Cryptography.HMACSHA256.HashData(secret, System.Text.Encoding.ASCII.GetBytes(input)));",
+        "    }",
+        "    public static string Hs(string payload, byte[] secret) => Hs(Hs256Header, payload, secret);",
+        "    public static string Es(string header, string payload, System.Security.Cryptography.ECDsa key)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(key.SignData(System.Text.Encoding.ASCII.GetBytes(input), System.Security.Cryptography.HashAlgorithmName.SHA256));",
+        "    }",
+        "    public static string Tamper(string token)",
+        "    {",
+        "        var p = token.Split('.');",
+        "        return p[0] + \".\" + B64(\"{\\\"sub\\\":\\\"admin\\\"}\") + \".\" + p[2];",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares signatures in constant time"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "expected\\s*!=\\s*parts",
+          "message": "No longer compares with !="
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A complete validator",
+      "prompt": [
+        "Write `string Validate(string token, byte[] secret, string issuer, string audience, long now)` that runs the whole checklist with a fixed **60-second skew** and returns the **first** problem it finds:",
+        "",
+        "| Return | When |",
+        "|---|---|",
+        "| `\"malformed\"` | not three parts, undecodable, not JSON, or no numeric `exp` |",
+        "| `\"bad_alg\"` | header `alg` is not exactly `\"HS256\"` |",
+        "| `\"bad_signature\"` | the HMAC doesn't match (constant-time) |",
+        "| `\"expired\"` | `now >= exp + 60` |",
+        "| `\"not_yet_valid\"` | `nbf` present and `now < nbf - 60` |",
+        "| `\"bad_issuer\"` | `iss` missing or not equal to `issuer` |",
+        "| `\"bad_audience\"` | `aud` (string or array) doesn't contain `audience` |",
+        "| `\"ok\"` | all checks pass |",
+        "",
+        "Check in the order of the table. Never throw. The tests import `System.Security.Cryptography` and `System.Text.Json`."
+      ],
+      "starter": [
+        "string Validate(string token, byte[] secret, string issuer, string audience, long now)",
+        "{",
+        "    return \"malformed\";",
+        "}"
+      ],
+      "solution": [
+        "string B64Url(byte[] data) =>",
+        "    Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "byte[] FromB64Url(string text)",
+        "{",
+        "    var s = text.Replace('-', '+').Replace('_', '/');",
+        "    switch (s.Length % 4)",
+        "    {",
+        "        case 2: s += \"==\"; break;",
+        "        case 3: s += \"=\"; break;",
+        "        case 1: throw new FormatException(\"Not valid base64url.\");",
+        "    }",
+        "    return Convert.FromBase64String(s);",
+        "}",
+        "",
+        "",
+        "string Validate(string token, byte[] secret, string issuer, string audience, long now)",
+        "{",
+        "    const long Skew = 60;",
+        "    var parts = token.Split('.');",
+        "    if (parts.Length != 3) return \"malformed\";",
+        "    try",
+        "    {",
+        "        using var header = JsonDocument.Parse(FromB64Url(parts[0]));",
+        "        if (!header.RootElement.TryGetProperty(\"alg\", out var alg) || alg.ValueKind != JsonValueKind.String || alg.GetString() != \"HS256\")",
+        "            return \"bad_alg\";",
+        "",
+        "        byte[] expected = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1]));",
+        "        if (!CryptographicOperations.FixedTimeEquals(expected, FromB64Url(parts[2]))) return \"bad_signature\";",
+        "",
+        "        using var payload = JsonDocument.Parse(FromB64Url(parts[1]));",
+        "        var root = payload.RootElement;",
+        "        if (!root.TryGetProperty(\"exp\", out var exp) || exp.ValueKind != JsonValueKind.Number) return \"malformed\";",
+        "        if (now >= exp.GetInt64() + Skew) return \"expired\";",
+        "        if (root.TryGetProperty(\"nbf\", out var nbf) && now < nbf.GetInt64() - Skew) return \"not_yet_valid\";",
+        "        if (!root.TryGetProperty(\"iss\", out var iss) || iss.GetString() != issuer) return \"bad_issuer\";",
+        "        if (!root.TryGetProperty(\"aud\", out var aud)) return \"bad_audience\";",
+        "        bool audOk = aud.ValueKind switch",
+        "        {",
+        "            JsonValueKind.String => aud.GetString() == audience,",
+        "            JsonValueKind.Array => aud.EnumerateArray().Any(a => a.ValueKind == JsonValueKind.String && a.GetString() == audience),",
+        "            _ => false,",
+        "        };",
+        "        return audOk ? \"ok\" : \"bad_audience\";",
+        "    }",
+        "    catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException)",
+        "    {",
+        "        return \"malformed\";",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Structure it as a series of early returns inside one `try`, with `catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException) { return \"malformed\"; }`.",
+        "`exp.ValueKind != JsonValueKind.Number` covers a string `exp`.",
+        "Reuse your `HasAudience` logic for the array case."
+      ],
+      "template": [
+        "        using System.Security.Cryptography;",
+        "        using System.Text.Json;",
+        "        {{CODE}}",
+        "        var S = System.Text.Encoding.UTF8.GetBytes(\"k8Jq2vN0pX7rT4wZ1yB6cE9fH3mL5sD8\");",
+        "        const string Iss = \"https://auth.dojo\";",
+        "        const string Aud = \"tasks-api\";",
+        "        string Tok(string payload) => DojoJwt.Hs(payload, S);",
+        "        string Good(string extra = \"\") => Tok(\"{\\\"iss\\\":\\\"https://auth.dojo\\\",\\\"aud\\\":\\\"tasks-api\\\",\\\"sub\\\":\\\"ada\\\",\\\"iat\\\":1700000000,\\\"nbf\\\":1700000000,\\\"exp\\\":1700000900\" + extra + \"}\");",
+        "        const long Now = 1700000100;",
+        "",
+        "        Dojo.Eq(\"a good token -> ok\", \"ok\", Validate(Good(), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"not a JWT -> malformed\", \"malformed\", Validate(\"hello\", S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"undecodable parts -> malformed\", \"malformed\", Validate(\"@@@.@@@.@@@\", S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"alg none -> bad_alg\", \"bad_alg\", Validate(\"eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.\", S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"alg RS256 -> bad_alg\", \"bad_alg\", Validate(DojoJwt.Hs(\"{\\\"alg\\\":\\\"RS256\\\"}\", \"{\\\"exp\\\":1700000900}\", S), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"wrong secret -> bad_signature\", \"bad_signature\", Validate(DojoJwt.Hs(\"{\\\"exp\\\":1700000900}\", new byte[32]), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"tampered payload -> bad_signature\", \"bad_signature\", Validate(DojoJwt.Tamper(Good()), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"no exp -> malformed\", \"malformed\", Validate(Tok(\"{\\\"iss\\\":\\\"https://auth.dojo\\\",\\\"aud\\\":\\\"tasks-api\\\"}\"), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"exp as a string -> malformed\", \"malformed\", Validate(Tok(\"{\\\"exp\\\":\\\"tomorrow\\\"}\"), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"30s after exp (inside skew) -> ok\", \"ok\", Validate(Good(), S, Iss, Aud, 1700000930));",
+        "        Dojo.Eq(\"60s after exp -> expired\", \"expired\", Validate(Good(), S, Iss, Aud, 1700000960));",
+        "        Dojo.Eq(\"nbf in the future -> not_yet_valid\", \"not_yet_valid\", Validate(Good(), S, Iss, Aud, 1699999900));",
+        "        Dojo.Eq(\"nbf just inside skew -> ok\", \"ok\", Validate(Good(), S, Iss, Aud, 1699999950));",
+        "        Dojo.Eq(\"wrong issuer -> bad_issuer\", \"bad_issuer\", Validate(Tok(\"{\\\"iss\\\":\\\"https://evil.dojo\\\",\\\"aud\\\":\\\"tasks-api\\\",\\\"exp\\\":1700000900}\"), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"no issuer -> bad_issuer\", \"bad_issuer\", Validate(Tok(\"{\\\"aud\\\":\\\"tasks-api\\\",\\\"exp\\\":1700000900}\"), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"wrong audience -> bad_audience\", \"bad_audience\", Validate(Tok(\"{\\\"iss\\\":\\\"https://auth.dojo\\\",\\\"aud\\\":\\\"billing-api\\\",\\\"exp\\\":1700000900}\"), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"audience array containing ours -> ok\", \"ok\", Validate(Tok(\"{\\\"iss\\\":\\\"https://auth.dojo\\\",\\\"aud\\\":[\\\"billing-api\\\",\\\"tasks-api\\\"],\\\"exp\\\":1700000900}\"), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"no audience -> bad_audience\", \"bad_audience\", Validate(Tok(\"{\\\"iss\\\":\\\"https://auth.dojo\\\",\\\"exp\\\":1700000900}\"), S, Iss, Aud, Now));",
+        "        Dojo.Eq(\"an expired token for another API reports expired first\", \"expired\", Validate(Tok(\"{\\\"iss\\\":\\\"x\\\",\\\"aud\\\":\\\"y\\\",\\\"exp\\\":1}\"), S, Iss, Aud, Now));",
+        "",
+        "static class DojoJwt",
+        "{",
+        "    public static string B64(byte[] d) => Convert.ToBase64String(d).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "    public static string B64(string s) => B64(System.Text.Encoding.UTF8.GetBytes(s));",
+        "    public const string Hs256Header = \"{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}\";",
+        "    public static string Hs(string header, string payload, byte[] secret)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(System.Security.Cryptography.HMACSHA256.HashData(secret, System.Text.Encoding.ASCII.GetBytes(input)));",
+        "    }",
+        "    public static string Hs(string payload, byte[] secret) => Hs(Hs256Header, payload, secret);",
+        "    public static string Es(string header, string payload, System.Security.Cryptography.ECDsa key)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(key.SignData(System.Text.Encoding.ASCII.GetBytes(input), System.Security.Cryptography.HashAlgorithmName.SHA256));",
+        "    }",
+        "    public static string Tamper(string token)",
+        "    {",
+        "        var p = token.Split('.');",
+        "        return p[0] + \".\" + B64(\"{\\\"sub\\\":\\\"admin\\\"}\") + \".\" + p[2];",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares in constant time"
+        }
+      ]
+    }
+  ]
+}

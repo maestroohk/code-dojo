@@ -1,0 +1,388 @@
+{
+  "title": "RS256 and ES256: asymmetric tokens",
+  "summary": "Sign with a private key, verify with the public key, and see why that matters once many services check tokens.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The trouble with a shared secret",
+      "body": [
+        "With HS256, the key that **verifies** a token can also **create** one. That's fine for one service. Now picture an identity server and twenty APIs:",
+        "",
+        "- All twenty APIs need the secret to verify tokens.",
+        "- So any of them, if compromised (or just careless with logs), can mint tokens for **any user, for every other API**.",
+        "- Rotating the secret means changing twenty deployments at once.",
+        "",
+        "**Asymmetric** signatures fix this. You met them in the certificates topic: a **private key** signs, the matching **public key** verifies, and the public key can't be used to sign.",
+        "",
+        "- Only the identity server holds the private key.",
+        "- Every API gets the public key, which isn't secret at all. Identity providers publish theirs at a URL (the JWKS, two lessons from now).",
+        "- A compromised API can verify tokens but can't forge them.",
+        "",
+        "This is why tokens from Entra ID, Auth0, Okta, Google and Keycloak are signed with **RS256** or **ES256**, not HS256."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An internal API that only *verifies* tokens is breached and its configuration leaks. With which algorithm can the attacker now mint valid tokens for other services?",
+      "options": [
+        "HS256, because the verification secret is also the signing secret",
+        "RS256, because the public key leaked",
+        "ES256, because elliptic curves are weaker",
+        "All of them equally"
+      ],
+      "answer": 0,
+      "explain": "With RS256 or ES256 the API only had the public key, which was never secret. The private key stayed on the identity server."
+    },
+    {
+      "type": "learn",
+      "title": "The algorithms",
+      "body": [
+        "| `alg` | Signature | Key | Signature size |",
+        "|---|---|---|---|",
+        "| `HS256` | HMAC-SHA256 | shared secret | 32 bytes |",
+        "| `RS256` | RSASSA-PKCS1-v1_5 with SHA-256 | RSA, 2048+ bits | 256 bytes for 2048-bit |",
+        "| `PS256` | RSASSA-PSS with SHA-256 | RSA | 256 bytes |",
+        "| `ES256` | ECDSA on P-256 with SHA-256 | EC P-256 | 64 bytes |",
+        "| `EdDSA` | Ed25519 | Ed25519 | 64 bytes |",
+        "",
+        "RS256 is the most widely supported. ES256 gives much smaller keys and signatures at the same security.",
+        "",
+        "In .NET both are in `System.Security.Cryptography`:",
+        "",
+        "```csharp",
+        "// RS256",
+        "using RSA rsa = RSA.Create(2048);",
+        "byte[] sig = rsa.SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);",
+        "bool ok = rsa.VerifyData(data, sig, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);",
+        "",
+        "// ES256",
+        "using ECDsa ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "byte[] sig2 = ec.SignData(data, HashAlgorithmName.SHA256);",
+        "bool ok2 = ec.VerifyData(data, sig2, HashAlgorithmName.SHA256);",
+        "```",
+        "",
+        "One trap: JWTs carry an ECDSA signature as the raw 64 bytes `r || s` (IEEE P1363), not the DER structure some libraries produce. .NET's `SignData` returns the raw format by default, which is exactly what JWS needs. Java and OpenSSL users often have to convert."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] data = \"header.payload\"u8.ToArray();",
+        "",
+        "using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "byte[] ecSig = ec.SignData(data, HashAlgorithmName.SHA256);",
+        "",
+        "using var rsa = RSA.Create(2048);",
+        "byte[] rsaSig = rsa.SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);",
+        "",
+        "Console.WriteLine(ecSig.Length);",
+        "Console.WriteLine(rsaSig.Length);",
+        "Console.WriteLine(ec.VerifyData(data, ecSig, HashAlgorithmName.SHA256));"
+      ],
+      "answer": [
+        "64",
+        "256",
+        "True"
+      ],
+      "explain": "ES256 signatures are 64 bytes (two 32-byte numbers). A 2048-bit RSA signature is 2048 / 8 = 256 bytes. ECDSA signatures also differ every time you sign, because each uses a fresh random number, yet all of them verify."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each `alg` value to its signature scheme.",
+      "pairs": [
+        [
+          "`HS256`",
+          "HMAC with SHA-256 and a shared secret"
+        ],
+        [
+          "`RS256`",
+          "RSA PKCS#1 v1.5 with SHA-256"
+        ],
+        [
+          "`PS256`",
+          "RSA-PSS with SHA-256"
+        ],
+        [
+          "`ES256`",
+          "ECDSA on curve P-256"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Who should hold each key in a system with one identity server and many APIs?",
+      "buckets": [
+        "Only the identity server",
+        "Every API (and anyone)"
+      ],
+      "items": [
+        [
+          "The RSA private key",
+          0
+        ],
+        [
+          "The EC P-256 private key",
+          0
+        ],
+        [
+          "The RSA public key",
+          1
+        ],
+        [
+          "The EC public key, published as a JWK",
+          1
+        ]
+      ],
+      "explain": "Public keys are meant to be shared. Only the signer ever needs the private key."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Verify an ES256 token's signature with the public key.",
+      "code": [
+        "byte[] input = Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1]);",
+        "byte[] signature = FromB64Url(parts[__1__]);",
+        "bool ok = publicKey.__2__(input, signature, HashAlgorithmName.__3__);"
+      ],
+      "blanks": [
+        "2",
+        "VerifyData",
+        "SHA256"
+      ],
+      "bank": [
+        "1",
+        "SignData",
+        "SHA1",
+        "VerifyHash"
+      ],
+      "explain": "`VerifyData` hashes the input with SHA-256 for you and checks the 64-byte signature."
+    },
+    {
+      "type": "code",
+      "title": "ES256 by hand",
+      "prompt": [
+        "Write:",
+        "",
+        "- `string SignEs256(string payloadJson, ECDsa privateKey)`: header exactly `{\"alg\":\"ES256\",\"typ\":\"JWT\"}`.",
+        "- `bool VerifyEs256(string token, ECDsa publicKey)`: three parts, header `alg` is `\"ES256\"`, and the signature verifies. `false` for anything else, never an exception.",
+        "",
+        "The tests create a P-256 key pair, give `SignEs256` the private key, and give `VerifyEs256` a **separate object holding only the public key**, the way a real API would. They import `System.Security.Cryptography` and `System.Text.Json`."
+      ],
+      "starter": [
+        "string SignEs256(string payloadJson, ECDsa privateKey)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "bool VerifyEs256(string token, ECDsa publicKey)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "string B64Url(byte[] data) =>",
+        "    Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "byte[] FromB64Url(string text)",
+        "{",
+        "    var s = text.Replace('-', '+').Replace('_', '/');",
+        "    switch (s.Length % 4)",
+        "    {",
+        "        case 2: s += \"==\"; break;",
+        "        case 3: s += \"=\"; break;",
+        "        case 1: throw new FormatException(\"Not valid base64url.\");",
+        "    }",
+        "    return Convert.FromBase64String(s);",
+        "}",
+        "",
+        "",
+        "string SignEs256(string payloadJson, ECDsa privateKey)",
+        "{",
+        "    string input = B64Url(Encoding.UTF8.GetBytes(\"{\\\"alg\\\":\\\"ES256\\\",\\\"typ\\\":\\\"JWT\\\"}\")) + \".\" + B64Url(Encoding.UTF8.GetBytes(payloadJson));",
+        "    byte[] sig = privateKey.SignData(Encoding.ASCII.GetBytes(input), HashAlgorithmName.SHA256);",
+        "    return input + \".\" + B64Url(sig);",
+        "}",
+        "",
+        "bool VerifyEs256(string token, ECDsa publicKey)",
+        "{",
+        "    var parts = token.Split('.');",
+        "    if (parts.Length != 3) return false;",
+        "    try",
+        "    {",
+        "        using var header = JsonDocument.Parse(FromB64Url(parts[0]));",
+        "        if (!header.RootElement.TryGetProperty(\"alg\", out var alg) || alg.GetString() != \"ES256\") return false;",
+        "        return publicKey.VerifyData(Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1]), FromB64Url(parts[2]), HashAlgorithmName.SHA256);",
+        "    }",
+        "    catch (Exception e) when (e is FormatException or JsonException)",
+        "    {",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Same shape as HS256: build the signing input, then `privateKey.SignData(Encoding.ASCII.GetBytes(input), HashAlgorithmName.SHA256)`.",
+        "Verify with `publicKey.VerifyData(input, FromB64Url(parts[2]), HashAlgorithmName.SHA256)` after checking the header's `alg`."
+      ],
+      "template": [
+        "        using System.Security.Cryptography;",
+        "        using System.Text.Json;",
+        "        {{CODE}}",
+        "        using var dojoPriv = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "        using var dojoPub = ECDsa.Create(dojoPriv.ExportParameters(false));",
+        "        using var dojoOther = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "        var dojoTok = SignEs256(\"{\\\"sub\\\":\\\"ada\\\",\\\"exp\\\":1700000900}\", dojoPriv);",
+        "        Dojo.Check(\"the token starts with the ES256 header\", dojoTok.StartsWith(\"eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.\"), dojoTok);",
+        "        Dojo.Eq(\"the signature part is 86 characters (64 bytes)\", 86, dojoTok.Split('.').Last().Length);",
+        "        Dojo.Eq(\"the public key verifies it\", true, VerifyEs256(dojoTok, dojoPub));",
+        "        Dojo.Eq(\"another key pair's public key rejects it\", false, VerifyEs256(dojoTok, dojoOther));",
+        "        Dojo.Eq(\"a tampered payload is rejected\", false, VerifyEs256(DojoJwt.Tamper(dojoTok), dojoPub));",
+        "        Dojo.Eq(\"a token signed by the tests verifies\", true, VerifyEs256(DojoJwt.Es(\"{\\\"alg\\\":\\\"ES256\\\"}\", \"{\\\"sub\\\":\\\"grace\\\"}\", dojoPriv), dojoPub));",
+        "        Dojo.Eq(\"an HS256 header is rejected\", false, VerifyEs256(DojoJwt.Hs(\"{\\\"sub\\\":\\\"ada\\\"}\", new byte[32]), dojoPub));",
+        "        Dojo.Eq(\"garbage is rejected without throwing\", false, VerifyEs256(\"%%%.%%%.%%%\", dojoPub));",
+        "",
+        "static class DojoJwt",
+        "{",
+        "    public static string B64(byte[] d) => Convert.ToBase64String(d).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "    public static string B64(string s) => B64(System.Text.Encoding.UTF8.GetBytes(s));",
+        "    public const string Hs256Header = \"{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}\";",
+        "    public static string Hs(string header, string payload, byte[] secret)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(System.Security.Cryptography.HMACSHA256.HashData(secret, System.Text.Encoding.ASCII.GetBytes(input)));",
+        "    }",
+        "    public static string Hs(string payload, byte[] secret) => Hs(Hs256Header, payload, secret);",
+        "    public static string Es(string header, string payload, System.Security.Cryptography.ECDsa key)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(key.SignData(System.Text.Encoding.ASCII.GetBytes(input), System.Security.Cryptography.HashAlgorithmName.SHA256));",
+        "    }",
+        "    public static string Tamper(string token)",
+        "    {",
+        "        var p = token.Split('.');",
+        "        return p[0] + \".\" + B64(\"{\\\"sub\\\":\\\"admin\\\"}\") + \".\" + p[2];",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "VerifyData",
+          "message": "Verifies with the public key"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "RS256 by hand",
+      "prompt": [
+        "Now the same for RSA, the most common algorithm in the wild:",
+        "",
+        "- `string SignRs256(string payloadJson, RSA privateKey)`: header exactly `{\"alg\":\"RS256\",\"typ\":\"JWT\"}`, PKCS#1 v1.5 padding, SHA-256.",
+        "- `bool VerifyRs256(string token, RSA publicKey)`: as before, with `alg` `\"RS256\"`.",
+        "",
+        "The tests generate a 2048-bit key and verify with a public-only copy."
+      ],
+      "starter": [
+        "string SignRs256(string payloadJson, RSA privateKey)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "bool VerifyRs256(string token, RSA publicKey)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "string B64Url(byte[] data) =>",
+        "    Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "byte[] FromB64Url(string text)",
+        "{",
+        "    var s = text.Replace('-', '+').Replace('_', '/');",
+        "    switch (s.Length % 4)",
+        "    {",
+        "        case 2: s += \"==\"; break;",
+        "        case 3: s += \"=\"; break;",
+        "        case 1: throw new FormatException(\"Not valid base64url.\");",
+        "    }",
+        "    return Convert.FromBase64String(s);",
+        "}",
+        "",
+        "",
+        "string SignRs256(string payloadJson, RSA privateKey)",
+        "{",
+        "    string input = B64Url(Encoding.UTF8.GetBytes(\"{\\\"alg\\\":\\\"RS256\\\",\\\"typ\\\":\\\"JWT\\\"}\")) + \".\" + B64Url(Encoding.UTF8.GetBytes(payloadJson));",
+        "    byte[] sig = privateKey.SignData(Encoding.ASCII.GetBytes(input), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);",
+        "    return input + \".\" + B64Url(sig);",
+        "}",
+        "",
+        "bool VerifyRs256(string token, RSA publicKey)",
+        "{",
+        "    var parts = token.Split('.');",
+        "    if (parts.Length != 3) return false;",
+        "    try",
+        "    {",
+        "        using var header = JsonDocument.Parse(FromB64Url(parts[0]));",
+        "        if (!header.RootElement.TryGetProperty(\"alg\", out var alg) || alg.GetString() != \"RS256\") return false;",
+        "        return publicKey.VerifyData(Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1]), FromB64Url(parts[2]), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);",
+        "    }",
+        "    catch (Exception e) when (e is FormatException or JsonException)",
+        "    {",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "`privateKey.SignData(bytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)`",
+        "`publicKey.VerifyData(input, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)`"
+      ],
+      "template": [
+        "        using System.Security.Cryptography;",
+        "        using System.Text.Json;",
+        "        {{CODE}}",
+        "        using var dojoPriv = RSA.Create(2048);",
+        "        using var dojoPub = RSA.Create(dojoPriv.ExportParameters(false));",
+        "        var dojoTok = SignRs256(\"{\\\"sub\\\":\\\"ada\\\"}\", dojoPriv);",
+        "        Dojo.Check(\"the token starts with the RS256 header\", dojoTok.StartsWith(\"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.\"), dojoTok);",
+        "        Dojo.Eq(\"the signature is 256 bytes (342 characters)\", 342, dojoTok.Split('.').Last().Length);",
+        "        Dojo.Eq(\"RS256 signatures are deterministic\", dojoTok, SignRs256(\"{\\\"sub\\\":\\\"ada\\\"}\", dojoPriv));",
+        "        Dojo.Eq(\"the public key verifies it\", true, VerifyRs256(dojoTok, dojoPub));",
+        "        Dojo.Eq(\"a tampered payload is rejected\", false, VerifyRs256(DojoJwt.Tamper(dojoTok), dojoPub));",
+        "        Dojo.Eq(\"an HS256 token is rejected\", false, VerifyRs256(DojoJwt.Hs(\"{\\\"sub\\\":\\\"ada\\\"}\", new byte[32]), dojoPub));",
+        "        Dojo.Eq(\"garbage is rejected without throwing\", false, VerifyRs256(\"a.b\", dojoPub));",
+        "",
+        "static class DojoJwt",
+        "{",
+        "    public static string B64(byte[] d) => Convert.ToBase64String(d).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "    public static string B64(string s) => B64(System.Text.Encoding.UTF8.GetBytes(s));",
+        "    public const string Hs256Header = \"{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}\";",
+        "    public static string Hs(string header, string payload, byte[] secret)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(System.Security.Cryptography.HMACSHA256.HashData(secret, System.Text.Encoding.ASCII.GetBytes(input)));",
+        "    }",
+        "    public static string Hs(string payload, byte[] secret) => Hs(Hs256Header, payload, secret);",
+        "    public static string Es(string header, string payload, System.Security.Cryptography.ECDsa key)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(key.SignData(System.Text.Encoding.ASCII.GetBytes(input), System.Security.Cryptography.HashAlgorithmName.SHA256));",
+        "    }",
+        "    public static string Tamper(string token)",
+        "    {",
+        "        var p = token.Split('.');",
+        "        return p[0] + \".\" + B64(\"{\\\"sub\\\":\\\"admin\\\"}\") + \".\" + p[2];",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "RSASignaturePadding\\.Pkcs1",
+          "message": "Uses PKCS#1 v1.5 padding"
+        }
+      ]
+    }
+  ]
+}

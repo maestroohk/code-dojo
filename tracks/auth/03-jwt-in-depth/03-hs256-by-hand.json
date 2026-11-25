@@ -1,0 +1,312 @@
+{
+  "title": "HS256 by hand",
+  "summary": "Sign and verify a JWT with HMAC-SHA256 using nothing but the base class library.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "HMAC: a hash with a key",
+      "body": [
+        "**HS256** means *HMAC with SHA-256*. HMAC (RFC 2104) mixes a secret key into a hash, so only someone who knows the key can produce the right output:",
+        "",
+        "```csharp",
+        "byte[] mac = HMACSHA256.HashData(key, message);   // 32 bytes",
+        "```",
+        "",
+        "A JWT's signature is the HMAC of the ASCII text `base64url(header) + \".\" + base64url(payload)`, called the **signing input**, then base64url-encoded:",
+        "",
+        "```text",
+        "signature = base64url( HMAC-SHA256( secret, \"eyJhbGci...J9.eyJzdWIi...fQ\" ) )",
+        "```",
+        "",
+        "The same secret signs and verifies, which makes HS256 **symmetric**. That is simple and fast, and fine when one service both issues and checks its own tokens. Its limits are the subject of the next lesson.",
+        "",
+        "The secret must be **random and at least 256 bits** (32 bytes), for example `RandomNumberGenerator.GetBytes(32)`. A word like `\"secret\"` can be guessed offline from any one token."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = new byte[32];",
+        "byte[] mac = HMACSHA256.HashData(key, Encoding.ASCII.GetBytes(\"header.payload\"));",
+        "string b64url = Convert.ToBase64String(mac).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "Console.WriteLine(mac.Length);",
+        "Console.WriteLine(b64url.Length);",
+        "byte[] other = new byte[32];",
+        "other[31] = 1;",
+        "Console.WriteLine(HMACSHA256.HashData(key, \"a\"u8).SequenceEqual(HMACSHA256.HashData(other, \"a\"u8)));"
+      ],
+      "answer": [
+        "32",
+        "43",
+        "False"
+      ],
+      "explain": "32 bytes encode to 43 base64url characters (44 with padding). Changing a single bit of the key gives a completely different MAC."
+    },
+    {
+      "type": "learn",
+      "title": "Signing, step by step",
+      "body": [
+        "Building a token is four lines. Step through it:",
+        "",
+        "The output is a perfectly ordinary HS256 JWT. Paste it into any JWT debugger with the key and it verifies."
+      ],
+      "trace": {
+        "code": [
+          "string B64Url(byte[] d) => Convert.ToBase64String(d).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+          "byte[] secret = System.Text.Encoding.UTF8.GetBytes(\"dojo-secret\");",
+          "string header = B64Url(System.Text.Encoding.UTF8.GetBytes(\"{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}\"));",
+          "string payload = B64Url(System.Text.Encoding.UTF8.GetBytes(\"{\\\"sub\\\":\\\"ada\\\",\\\"exp\\\":1700000900}\"));",
+          "string signingInput = header + \".\" + payload;",
+          "byte[] mac = System.Security.Cryptography.HMACSHA256.HashData(secret, System.Text.Encoding.ASCII.GetBytes(signingInput));",
+          "string token = signingInput + \".\" + B64Url(mac);",
+          "Console.WriteLine(token);"
+        ]
+      }
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the lines that create an HS256 token.",
+      "verify": false,
+      "lines": [
+        "string header = B64Url(Encoding.UTF8.GetBytes(headerJson));",
+        "string payload = B64Url(Encoding.UTF8.GetBytes(payloadJson));",
+        "string signingInput = header + \".\" + payload;",
+        "byte[] mac = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(signingInput));",
+        "return signingInput + \".\" + B64Url(mac);"
+      ],
+      "also": [
+        [
+          "string payload = B64Url(Encoding.UTF8.GetBytes(payloadJson));",
+          "string header = B64Url(Encoding.UTF8.GetBytes(headerJson));",
+          "string signingInput = header + \".\" + payload;",
+          "byte[] mac = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(signingInput));",
+          "return signingInput + \".\" + B64Url(mac);"
+        ]
+      ],
+      "explain": "Encode both JSON parts, join them with a dot, MAC the joined text, append the encoded MAC."
+    },
+    {
+      "type": "learn",
+      "title": "Verifying",
+      "body": [
+        "Verification recomputes the MAC and compares:",
+        "",
+        "```csharp",
+        "var parts = token.Split('.');",
+        "if (parts.Length != 3) return false;",
+        "",
+        "// 1. Which algorithm does the header claim? Only accept the one you expect.",
+        "using var header = JsonDocument.Parse(FromB64Url(parts[0]));",
+        "if (header.RootElement.GetProperty(\"alg\").GetString() != \"HS256\") return false;",
+        "",
+        "// 2. Recompute over the parts exactly as received, and compare in constant time.",
+        "byte[] expected = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1]));",
+        "return CryptographicOperations.FixedTimeEquals(expected, FromB64Url(parts[2]));",
+        "```",
+        "",
+        "Two details matter:",
+        "",
+        "- MAC the parts **as received**. Don't decode and re-encode the JSON first: a different spacing or key order changes the bytes.",
+        "- Compare with `FixedTimeEquals`. An early-exit comparison lets an attacker discover a valid signature byte by byte (the timing attack from the foundations module).",
+        "",
+        "A valid signature proves the token came from someone holding the secret and wasn't modified. It does **not** prove the token is still valid: `exp`, `iss` and `aud` are checked afterwards."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why must the signature be recomputed over the base64url parts exactly as they arrived?",
+      "options": [
+        "Re-encoding the decoded JSON can change the bytes (spacing, key order, escaping), so a genuine token would fail",
+        "Because base64url decoding is lossy",
+        "To make verification slower for attackers",
+        "It doesn't matter; any equivalent JSON gives the same signature"
+      ],
+      "answer": 0,
+      "explain": "The signature covers bytes, not meaning. `{\"a\":1}` and `{ \"a\": 1 }` are equal JSON with different signatures."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the verification.",
+      "code": [
+        "byte[] expected = HMACSHA256.HashData(secret,",
+        "    Encoding.ASCII.GetBytes(parts[__1__] + \".\" + parts[__2__]));",
+        "return CryptographicOperations.__3__(expected, __4__(parts[2]));"
+      ],
+      "blanks": [
+        "0",
+        "1",
+        "FixedTimeEquals",
+        "FromB64Url"
+      ],
+      "bank": [
+        "2",
+        "Equals",
+        "B64Url",
+        "SequenceEqual"
+      ],
+      "explain": "The MAC covers header and payload, and the received signature (part 2) is decoded before the constant-time compare."
+    },
+    {
+      "type": "predict",
+      "prompt": "Ada edits her token's payload to say `admin`, keeping the original signature. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "string B64(byte[] d) => Convert.ToBase64String(d).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "byte[] secret = Encoding.UTF8.GetBytes(\"a-long-random-secret-of-32-bytes!\");",
+        "",
+        "string Sign(string input) => B64(HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(input)));",
+        "",
+        "string h = B64(Encoding.UTF8.GetBytes(\"{\\\"alg\\\":\\\"HS256\\\"}\"));",
+        "string real = h + \".\" + B64(Encoding.UTF8.GetBytes(\"{\\\"sub\\\":\\\"ada\\\"}\"));",
+        "string fake = h + \".\" + B64(Encoding.UTF8.GetBytes(\"{\\\"sub\\\":\\\"admin\\\"}\"));",
+        "string sig = Sign(real);",
+        "",
+        "Console.WriteLine(Sign(real) == sig);",
+        "Console.WriteLine(Sign(fake) == sig);"
+      ],
+      "answer": [
+        "True",
+        "False"
+      ],
+      "explain": "Without the secret Ada can't compute the matching signature for her edited payload, so the server rejects it. (Real code compares with `FixedTimeEquals`; `==` keeps this example short.)"
+    },
+    {
+      "type": "code",
+      "title": "Sign and verify HS256",
+      "prompt": [
+        "Write two methods (bring your own `B64Url` / `FromB64Url`):",
+        "",
+        "- `string CreateHs256(string payloadJson, byte[] secret)`: the header is exactly `{\"alg\":\"HS256\",\"typ\":\"JWT\"}`.",
+        "- `bool VerifyHs256(string token, byte[] secret)`: `true` only when the token has three parts, its header's `alg` is `\"HS256\"`, and the signature matches (constant-time). Return `false`, never throw, for garbage input.",
+        "",
+        "The tests import `System.Security.Cryptography` and `System.Text.Json`. With the secret `dojo-secret` and the payload `{\"sub\":\"ada\",\"name\":\"Ada Lovelace\",\"iat\":1700000000}`, your token must be:",
+        "",
+        "```text",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJuYW1lIjoiQWRhIExvdmVsYWNlIiwiaWF0IjoxNzAwMDAwMDAwfQ.Cm2LgthmpjCZHddLllEQKSLKKh8papMu4017Z39uMwE",
+        "```"
+      ],
+      "starter": [
+        "string CreateHs256(string payloadJson, byte[] secret)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "bool VerifyHs256(string token, byte[] secret)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "string B64Url(byte[] data) =>",
+        "    Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "byte[] FromB64Url(string text)",
+        "{",
+        "    var s = text.Replace('-', '+').Replace('_', '/');",
+        "    switch (s.Length % 4)",
+        "    {",
+        "        case 2: s += \"==\"; break;",
+        "        case 3: s += \"=\"; break;",
+        "        case 1: throw new FormatException(\"Not valid base64url.\");",
+        "    }",
+        "    return Convert.FromBase64String(s);",
+        "}",
+        "",
+        "",
+        "string CreateHs256(string payloadJson, byte[] secret)",
+        "{",
+        "    string header = B64Url(Encoding.UTF8.GetBytes(\"{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}\"));",
+        "    string payload = B64Url(Encoding.UTF8.GetBytes(payloadJson));",
+        "    string signingInput = header + \".\" + payload;",
+        "    byte[] signature = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(signingInput));",
+        "    return signingInput + \".\" + B64Url(signature);",
+        "}",
+        "",
+        "bool VerifyHs256(string token, byte[] secret)",
+        "{",
+        "    var parts = token.Split('.');",
+        "    if (parts.Length != 3) return false;",
+        "    try",
+        "    {",
+        "        using var header = JsonDocument.Parse(FromB64Url(parts[0]));",
+        "        if (!header.RootElement.TryGetProperty(\"alg\", out var alg) || alg.GetString() != \"HS256\") return false;",
+        "        byte[] expected = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1]));",
+        "        return CryptographicOperations.FixedTimeEquals(expected, FromB64Url(parts[2]));",
+        "    }",
+        "    catch (Exception e) when (e is FormatException or JsonException)",
+        "    {",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Sign: encode header and payload, join with `.`, `HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(input))`, append.",
+        "Verify: split, check `alg` in the decoded header, recompute, `CryptographicOperations.FixedTimeEquals`.",
+        "Wrap the decoding in `try { ... } catch (Exception e) when (e is FormatException or JsonException) { return false; }`."
+      ],
+      "template": [
+        "        using System.Security.Cryptography;",
+        "        using System.Text.Json;",
+        "        {{CODE}}",
+        "        var dojoSecret = System.Text.Encoding.UTF8.GetBytes(\"dojo-secret\");",
+        "        var dojoTok = CreateHs256(\"{\\\"sub\\\":\\\"ada\\\",\\\"name\\\":\\\"Ada Lovelace\\\",\\\"iat\\\":1700000000}\", dojoSecret);",
+        "        Dojo.Eq(\"CreateHs256 makes the exact sample token\", \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJuYW1lIjoiQWRhIExvdmVsYWNlIiwiaWF0IjoxNzAwMDAwMDAwfQ.Cm2LgthmpjCZHddLllEQKSLKKh8papMu4017Z39uMwE\", dojoTok);",
+        "        Dojo.Eq(\"VerifyHs256 accepts it\", true, VerifyHs256(dojoTok, dojoSecret));",
+        "        Dojo.Eq(\"a different secret is rejected\", false, VerifyHs256(dojoTok, System.Text.Encoding.UTF8.GetBytes(\"dojo-secreT\")));",
+        "        Dojo.Eq(\"a tampered payload is rejected\", false, VerifyHs256(DojoJwt.Tamper(dojoTok), dojoSecret));",
+        "        Dojo.Eq(\"a token from the tests' own signer is accepted\", true, VerifyHs256(DojoJwt.Hs(\"{\\\"sub\\\":\\\"grace\\\"}\", dojoSecret), dojoSecret));",
+        "        Dojo.Eq(\"alg HS512 in the header is rejected\", false, VerifyHs256(DojoJwt.Hs(\"{\\\"alg\\\":\\\"HS512\\\"}\", \"{\\\"sub\\\":\\\"ada\\\"}\", dojoSecret), dojoSecret));",
+        "        Dojo.Eq(\"alg none with an empty signature is rejected\", false, VerifyHs256(\"eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.\", dojoSecret));",
+        "        Dojo.Eq(\"garbage is rejected without throwing\", false, VerifyHs256(\"not.a.jwt!\", dojoSecret));",
+        "        Dojo.Eq(\"two parts are rejected\", false, VerifyHs256(\"abc.def\", dojoSecret));",
+        "",
+        "static class DojoJwt",
+        "{",
+        "    public static string B64(byte[] d) => Convert.ToBase64String(d).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "    public static string B64(string s) => B64(System.Text.Encoding.UTF8.GetBytes(s));",
+        "    public const string Hs256Header = \"{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}\";",
+        "    public static string Hs(string header, string payload, byte[] secret)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(System.Security.Cryptography.HMACSHA256.HashData(secret, System.Text.Encoding.ASCII.GetBytes(input)));",
+        "    }",
+        "    public static string Hs(string payload, byte[] secret) => Hs(Hs256Header, payload, secret);",
+        "    public static string Es(string header, string payload, System.Security.Cryptography.ECDsa key)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(key.SignData(System.Text.Encoding.ASCII.GetBytes(input), System.Security.Cryptography.HashAlgorithmName.SHA256));",
+        "    }",
+        "    public static string Tamper(string token)",
+        "    {",
+        "        var p = token.Split('.');",
+        "        return p[0] + \".\" + B64(\"{\\\"sub\\\":\\\"admin\\\"}\") + \".\" + p[2];",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "HMACSHA256",
+          "message": "Uses HMACSHA256"
+        },
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares in constant time"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "System\\.IdentityModel|JwtSecurityToken",
+          "message": "Builds the token by hand, no JWT library"
+        }
+      ]
+    }
+  ]
+}

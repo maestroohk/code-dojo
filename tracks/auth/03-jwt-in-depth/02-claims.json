@@ -1,0 +1,248 @@
+{
+  "title": "Claims",
+  "summary": "The registered claims (iss, sub, aud, exp, nbf, iat, jti), custom claims, and checking times with clock skew.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Registered claims",
+      "body": [
+        "The payload is a JSON object of **claims**. RFC 7519 reserves short names for the common ones:",
+        "",
+        "| Claim | Name | Meaning |",
+        "|---|---|---|",
+        "| `iss` | issuer | who made the token: `https://login.example.com` |",
+        "| `sub` | subject | who it is about, a stable id: `\"user-8812\"` (not an email that may change) |",
+        "| `aud` | audience | who it is **for**: `\"orders-api\"`, or an array of them |",
+        "| `exp` | expiration time | not valid at or after this moment |",
+        "| `nbf` | not before | not valid before this moment |",
+        "| `iat` | issued at | when it was made |",
+        "| `jti` | JWT id | a unique id for this token, used to detect replays or revoke it |",
+        "",
+        "Times are **NumericDate**: whole seconds since 1970-01-01 UTC (Unix time). In .NET: `DateTimeOffset.FromUnixTimeSeconds(1700000000)` and `now.ToUnixTimeSeconds()`.",
+        "",
+        "Every claim is optional by the spec, but a sane API **requires** `exp`, `iss` and `aud`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each claim to the question it answers.",
+      "pairs": [
+        [
+          "`iss`",
+          "Who issued this token?"
+        ],
+        [
+          "`aud`",
+          "Which service is it meant for?"
+        ],
+        [
+          "`sub`",
+          "Which user or client is it about?"
+        ],
+        [
+          "`exp`",
+          "When does it stop being valid?"
+        ],
+        [
+          "`jti`",
+          "Which exact token is this?"
+        ],
+        [
+          "`nbf`",
+          "When does it start being valid?"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var t = DateTimeOffset.FromUnixTimeSeconds(1700000000);",
+        "Console.WriteLine(t.ToString(\"u\"));",
+        "Console.WriteLine(t.AddMinutes(15).ToUnixTimeSeconds());",
+        "Console.WriteLine(1700000900 - 1700000000);"
+      ],
+      "answer": [
+        "2023-11-14 22:13:20Z",
+        "1700000900",
+        "900"
+      ],
+      "explain": "NumericDates are plain seconds, so a 15-minute token has `exp - iat == 900`."
+    },
+    {
+      "type": "learn",
+      "title": "Custom claims, and reading claims in C#",
+      "body": [
+        "Add your own claims next to the registered ones: `\"role\": \"admin\"`, `\"scope\": \"orders:read orders:write\"`, `\"tenant\": \"acme\"`. To avoid clashing with names others define, public claim names are registered with IANA or made collision-proof with a URL: `\"https://example.com/claims/plan\": \"pro\"`. Keep payloads small (they travel on every request) and never put secrets in them.",
+        "",
+        "`System.Text.Json` reads a payload without any classes:",
+        "",
+        "```csharp",
+        "using System.Text.Json;",
+        "",
+        "using var doc = JsonDocument.Parse(payloadJson);",
+        "JsonElement root = doc.RootElement;",
+        "",
+        "string? sub = root.GetProperty(\"sub\").GetString();",
+        "long exp = root.GetProperty(\"exp\").GetInt64();",
+        "bool hasNbf = root.TryGetProperty(\"nbf\", out JsonElement nbf);",
+        "```",
+        "",
+        "Watch out for `aud`: it may be a **string** or an **array** of strings. Check `ValueKind`:",
+        "",
+        "```csharp",
+        "var aud = root.GetProperty(\"aud\");",
+        "bool ok = aud.ValueKind == JsonValueKind.String",
+        "    ? aud.GetString() == \"orders-api\"",
+        "    : aud.EnumerateArray().Any(a => a.GetString() == \"orders-api\");",
+        "```"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Read the claims you need from the payload.",
+      "code": [
+        "using var doc = JsonDocument.__1__(payloadJson);",
+        "var root = doc.__2__;",
+        "long exp = root.GetProperty(\"exp\").__3__();",
+        "bool hasNbf = root.__4__(\"nbf\", out var nbf);"
+      ],
+      "blanks": [
+        "Parse",
+        "RootElement",
+        "GetInt64",
+        "TryGetProperty"
+      ],
+      "bank": [
+        "Deserialize",
+        "Root",
+        "GetString",
+        "GetProperty"
+      ],
+      "explain": "`TryGetProperty` is the safe way to read a claim that may be missing; `GetProperty` throws `KeyNotFoundException` if it is absent."
+    },
+    {
+      "type": "learn",
+      "title": "Clocks disagree: skew",
+      "body": [
+        "The server that issued a token and the one checking it have slightly different clocks. Allow a small **clock skew** (also called leeway), typically 30 seconds to 5 minutes:",
+        "",
+        "```text",
+        "expired       if  now >= exp + skew",
+        "not yet valid if  now <  nbf - skew",
+        "```",
+        "",
+        "Without skew, a token issued \"now\" by a server whose clock runs 2 seconds fast is rejected as not yet valid. With a huge skew, an expired token keeps working long after it should. Microsoft's JWT handler defaults to **5 minutes**; many teams lower it.",
+        "",
+        "Always pass `now` into your validation code rather than reading the clock inside it. That way tests can check the exact boundaries."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A token has `exp = 1000`. The validator allows 60 seconds of skew. Which `now` values are accepted?",
+      "options": [
+        "Any `now` below 1060",
+        "Any `now` below 1000",
+        "Any `now` below 940",
+        "Any `now` at all, since skew disables the check"
+      ],
+      "answer": 0,
+      "explain": "Skew extends the deadline: `now >= exp + skew` means expired, so up to 1059 is accepted."
+    },
+    {
+      "type": "code",
+      "title": "Check the times",
+      "prompt": [
+        "Write `string CheckTimes(string payloadJson, long now, long skew)` that returns:",
+        "",
+        "- `\"missing_exp\"` when there is no `exp` claim,",
+        "- `\"expired\"` when `now >= exp + skew`,",
+        "- `\"not_yet_valid\"` when there is an `nbf` and `now < nbf - skew`,",
+        "- `\"ok\"` otherwise.",
+        "",
+        "Check in that order. The tests already import `System.Text.Json`."
+      ],
+      "starter": [
+        "string CheckTimes(string payloadJson, long now, long skew)",
+        "{",
+        "    return \"ok\";",
+        "}"
+      ],
+      "solution": [
+        "string CheckTimes(string payloadJson, long now, long skew)",
+        "{",
+        "    using var doc = JsonDocument.Parse(payloadJson);",
+        "    var root = doc.RootElement;",
+        "    if (!root.TryGetProperty(\"exp\", out var exp)) return \"missing_exp\";",
+        "    if (now >= exp.GetInt64() + skew) return \"expired\";",
+        "    if (root.TryGetProperty(\"nbf\", out var nbf) && now < nbf.GetInt64() - skew) return \"not_yet_valid\";",
+        "    return \"ok\";",
+        "}"
+      ],
+      "hints": [
+        "`JsonDocument.Parse`, then `TryGetProperty(\"exp\", out var exp)`.",
+        "Compare with `exp.GetInt64() + skew` and `nbf.GetInt64() - skew`."
+      ],
+      "template": [
+        "using System.Text.Json;",
+        "{{CODE}}",
+        "const string P = \"{\\\"sub\\\":\\\"ada\\\",\\\"nbf\\\":1000,\\\"exp\\\":2000}\";",
+        "Dojo.Eq(\"inside the window\", \"ok\", CheckTimes(P, 1500, 0));",
+        "Dojo.Eq(\"at exp with no skew -> expired\", \"expired\", CheckTimes(P, 2000, 0));",
+        "Dojo.Eq(\"just after exp but inside 60s skew\", \"ok\", CheckTimes(P, 2059, 60));",
+        "Dojo.Eq(\"at exp + skew -> expired\", \"expired\", CheckTimes(P, 2060, 60));",
+        "Dojo.Eq(\"before nbf -> not_yet_valid\", \"not_yet_valid\", CheckTimes(P, 999, 0));",
+        "Dojo.Eq(\"at nbf -> ok\", \"ok\", CheckTimes(P, 1000, 0));",
+        "Dojo.Eq(\"before nbf but inside skew\", \"ok\", CheckTimes(P, 950, 60));",
+        "Dojo.Eq(\"no exp -> missing_exp\", \"missing_exp\", CheckTimes(\"{\\\"sub\\\":\\\"ada\\\"}\", 1, 0));",
+        "Dojo.Eq(\"no nbf is fine\", \"ok\", CheckTimes(\"{\\\"exp\\\":2000}\", 1, 0));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Check the audience",
+      "prompt": [
+        "Write `bool HasAudience(string payloadJson, string expected)` (`System.Text.Json` is imported by the tests):",
+        "",
+        "- `aud` as a string: `true` when it equals `expected` exactly.",
+        "- `aud` as an array: `true` when any element equals `expected`.",
+        "- missing `aud`, or any other JSON type: `false`."
+      ],
+      "starter": [
+        "bool HasAudience(string payloadJson, string expected)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool HasAudience(string payloadJson, string expected)",
+        "{",
+        "    using var doc = JsonDocument.Parse(payloadJson);",
+        "    if (!doc.RootElement.TryGetProperty(\"aud\", out var aud)) return false;",
+        "    return aud.ValueKind switch",
+        "    {",
+        "        JsonValueKind.String => aud.GetString() == expected,",
+        "        JsonValueKind.Array => aud.EnumerateArray().Any(a => a.ValueKind == JsonValueKind.String && a.GetString() == expected),",
+        "        _ => false,",
+        "    };",
+        "}"
+      ],
+      "hints": [
+        "Use `TryGetProperty(\"aud\", out var aud)` and switch on `aud.ValueKind`.",
+        "For arrays: `aud.EnumerateArray().Any(a => a.GetString() == expected)`."
+      ],
+      "template": [
+        "using System.Text.Json;",
+        "{{CODE}}",
+        "Dojo.Eq(\"string aud that matches\", true, HasAudience(\"{\\\"aud\\\":\\\"orders-api\\\"}\", \"orders-api\"));",
+        "Dojo.Eq(\"string aud that doesn't\", false, HasAudience(\"{\\\"aud\\\":\\\"billing-api\\\"}\", \"orders-api\"));",
+        "Dojo.Eq(\"array aud containing it\", true, HasAudience(\"{\\\"aud\\\":[\\\"billing-api\\\",\\\"orders-api\\\"]}\", \"orders-api\"));",
+        "Dojo.Eq(\"array aud without it\", false, HasAudience(\"{\\\"aud\\\":[\\\"billing-api\\\"]}\", \"orders-api\"));",
+        "Dojo.Eq(\"comparison is exact\", false, HasAudience(\"{\\\"aud\\\":\\\"Orders-API\\\"}\", \"orders-api\"));",
+        "Dojo.Eq(\"missing aud\", false, HasAudience(\"{\\\"sub\\\":\\\"ada\\\"}\", \"orders-api\"));",
+        "Dojo.Eq(\"aud of the wrong type\", false, HasAudience(\"{\\\"aud\\\":42}\", \"orders-api\"));"
+      ]
+    }
+  ]
+}

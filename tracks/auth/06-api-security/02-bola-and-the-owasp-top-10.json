@@ -1,0 +1,295 @@
+{
+  "title": "Broken object-level authorization and the OWASP API Top 10",
+  "summary": "The most common API vulnerability is checking who the caller is but not whether this object is theirs. Meet it and its relatives.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The OWASP API Security Top 10",
+      "body": [
+        "OWASP publishes the most common API weaknesses (2023 edition):",
+        "",
+        "1. **Broken Object Level Authorization (BOLA)**: `GET /invoices/2` returns *someone else's* invoice.",
+        "2. **Broken Authentication**: weak login, no rate limiting, unvalidated tokens.",
+        "3. **Broken Object Property Level Authorization**: reading or writing *fields* you shouldn't (mass assignment, over-exposed data).",
+        "4. **Unrestricted Resource Consumption**: no limits on size, rate, cost.",
+        "5. **Broken Function Level Authorization (BFLA)**: a normal user can call `DELETE /admin/users/7`.",
+        "6. **Unrestricted Access to Sensitive Business Flows**: bots buying every concert ticket.",
+        "7. **Server-Side Request Forgery (SSRF)**: your API fetches a URL an attacker chose, such as cloud metadata.",
+        "8. **Security Misconfiguration**: verbose errors, open CORS, default credentials.",
+        "9. **Improper Inventory Management**: a forgotten `v1` endpoint without the fixes.",
+        "10. **Unsafe Consumption of APIs**: trusting what third-party APIs return.",
+        "",
+        "Authentication (who) appears once. **Authorization** (what, and *which object*) appears three times, and BOLA has topped the list since the first edition."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each finding to its OWASP API category.",
+      "pairs": [
+        [
+          "`GET /orders/1002` returns another customer's order",
+          "Broken Object Level Authorization"
+        ],
+        [
+          "A normal user can call `POST /admin/refunds`",
+          "Broken Function Level Authorization"
+        ],
+        [
+          "`PATCH /me {\"role\":\"admin\"}` makes you an admin",
+          "Broken Object Property Level Authorization"
+        ],
+        [
+          "`POST /preview?url=http://169.254.169.254/` returns cloud credentials",
+          "Server-Side Request Forgery"
+        ],
+        [
+          "`GET /search?pageSize=10000000` takes the database down",
+          "Unrestricted Resource Consumption"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "BOLA in one line",
+      "body": [
+        "Here is the bug that tops the list:",
+        "",
+        "```csharp",
+        "app.MapGet(\"/invoices/{id}\", (int id, ClaimsPrincipal user) =>",
+        "    db.Invoices.Find(id));        // authenticated... but whose invoice?",
+        "```",
+        "",
+        "The endpoint checks that *someone* is logged in, then hands over any invoice whose id they type. Ids are often sequential, so an attacker just counts.",
+        "",
+        "The fix is to make ownership part of the lookup:",
+        "",
+        "```csharp",
+        "var invoice = db.Invoices.FirstOrDefault(i => i.Id == id && i.OwnerId == user.FindFirst(\"sub\")!.Value);",
+        "return invoice is null ? Results.NotFound() : Results.Ok(invoice);",
+        "```",
+        "",
+        "Answer **`404`** rather than `403` for objects that belong to others: `403` would confirm that invoice 2 exists. Random ids (GUIDs) make guessing harder, but they are **not** authorization: ids leak in URLs, logs and shared links."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An endpoint checks `[Authorize]` and then returns `db.Documents.Find(id)`. A penetration tester logged in as user A fetches document ids that belong to user B. What fixes it properly?",
+      "options": [
+        "Filter the query by the caller's id, and return 404 when it doesn't match",
+        "Switch to GUID ids so they can't be guessed",
+        "Add `[Authorize(Roles = \"user\")]`",
+        "Rate limit the endpoint"
+      ],
+      "answer": 0,
+      "explain": "GUIDs and rate limits slow the attack down; only an ownership check stops it."
+    },
+    {
+      "type": "learn",
+      "title": "Object properties: over-exposure and mass assignment",
+      "body": [
+        "**Over-exposure**: returning the whole entity (`passwordHash`, `isAdmin`, internal notes) and trusting the front-end to hide fields. Return a response DTO with only what this caller may see.",
+        "",
+        "**Mass assignment**: binding the request body straight onto the entity.",
+        "",
+        "```csharp",
+        "app.MapPut(\"/invoices/{id}\", (int id, Invoice update) => ... invoices[i] = update);",
+        "// client sends {\"amount\": 1, \"paid\": true, \"owner\": \"mallory\"}",
+        "```",
+        "",
+        "Every property the client sends gets written, including ones it must never control. The fix is an **input DTO** listing only the fields a caller may change, and copying those onto the stored entity:",
+        "",
+        "```csharp",
+        "record InvoiceUpdate(decimal Amount);",
+        "invoices[i] = invoices[i] with { Amount = update.Amount };",
+        "```",
+        "",
+        "**Function-level** checks (BFLA) are the role checks from the previous module: put admin operations behind a policy, and deny by default."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which OWASP category does each fix address?",
+      "buckets": [
+        "Object level (BOLA)",
+        "Property level",
+        "Function level (BFLA)"
+      ],
+      "items": [
+        [
+          "Filtering queries by the caller's id",
+          0
+        ],
+        [
+          "Returning 404 for other people's objects",
+          0
+        ],
+        [
+          "An input DTO with only editable fields",
+          1
+        ],
+        [
+          "A response DTO without `passwordHash`",
+          1
+        ],
+        [
+          "`RequireAuthorization(\"Admin\")` on `/admin/*`",
+          2
+        ],
+        [
+          "A deny-by-default fallback policy",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A mass-assignment bug, simulated. What does this print?",
+      "code": [
+        "var stored = new Invoice(1, \"ada\", 120m, false);",
+        "var fromClient = new Invoice(0, \"mallory\", 1m, true);",
+        "",
+        "var buggy = fromClient with { Id = stored.Id };",
+        "var safe = stored with { Amount = fromClient.Amount };",
+        "",
+        "Console.WriteLine($\"{buggy.Owner} {buggy.Paid}\");",
+        "Console.WriteLine($\"{safe.Owner} {safe.Paid} {safe.Amount}\");",
+        "",
+        "record Invoice(int Id, string Owner, decimal Amount, bool Paid);"
+      ],
+      "answer": [
+        "mallory True",
+        "ada False 1"
+      ],
+      "explain": "Copying the client's object keeps every field they sent. Copying only `Amount` onto the stored record keeps ownership and payment status under the server's control."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "web",
+      "title": "Fix BOLA and mass assignment",
+      "prompt": [
+        "This invoices API checks that a user is present (`X-User` stands in for a validated token) but has two classic bugs. **Run checks** starts the server and calls it.",
+        "",
+        "1. **BOLA**: `GET` and `PUT /invoices/{id}` work on anyone's invoice. Only the owner may see or change one; anyone else gets `404`.",
+        "2. **Mass assignment**: `PUT` binds the whole `Invoice`, so a client can change `Owner` and `Paid`. Accept an `InvoiceUpdate(decimal Amount)` instead and change only the amount.",
+        "3. Also: a paid invoice can't be changed: `409 Conflict`."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "var invoices = new List<Invoice>",
+        "{",
+        "    new(1, \"ada\", 120m, false),",
+        "    new(2, \"bob\", 75m, false),",
+        "    new(3, \"ada\", 30m, true),",
+        "};",
+        "",
+        "// For this exercise the caller's name arrives in X-User (pretend a token was already validated).",
+        "string? Caller(HttpContext ctx) => ctx.Request.Headers[\"X-User\"].FirstOrDefault();",
+        "",
+        "app.MapGet(\"/invoices/{id:int}\", (int id, HttpContext ctx) =>",
+        "{",
+        "    if (Caller(ctx) is null) return Results.Unauthorized();",
+        "    var invoice = invoices.FirstOrDefault(i => i.Id == id);",
+        "    return invoice is null ? Results.NotFound() : Results.Ok(invoice);",
+        "});",
+        "",
+        "app.MapPut(\"/invoices/{id:int}\", (int id, Invoice update, HttpContext ctx) =>",
+        "{",
+        "    if (Caller(ctx) is null) return Results.Unauthorized();",
+        "    var index = invoices.FindIndex(i => i.Id == id);",
+        "    if (index < 0) return Results.NotFound();",
+        "    invoices[index] = update with { Id = id };",
+        "    return Results.Ok(invoices[index]);",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "record Invoice(int Id, string Owner, decimal Amount, bool Paid);"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "var invoices = new List<Invoice>",
+        "{",
+        "    new(1, \"ada\", 120m, false),",
+        "    new(2, \"bob\", 75m, false),",
+        "    new(3, \"ada\", 30m, true),",
+        "};",
+        "",
+        "// For this exercise the caller's name arrives in X-User (pretend a token was already validated).",
+        "string? Caller(HttpContext ctx) => ctx.Request.Headers[\"X-User\"].FirstOrDefault();",
+        "",
+        "app.MapGet(\"/invoices/{id:int}\", (int id, HttpContext ctx) =>",
+        "{",
+        "    var user = Caller(ctx);",
+        "    if (user is null) return Results.Unauthorized();",
+        "    var invoice = invoices.FirstOrDefault(i => i.Id == id && i.Owner == user);",
+        "    return invoice is null ? Results.NotFound() : Results.Ok(invoice);",
+        "});",
+        "",
+        "app.MapPut(\"/invoices/{id:int}\", (int id, InvoiceUpdate update, HttpContext ctx) =>",
+        "{",
+        "    var user = Caller(ctx);",
+        "    if (user is null) return Results.Unauthorized();",
+        "    var index = invoices.FindIndex(i => i.Id == id && i.Owner == user);",
+        "    if (index < 0) return Results.NotFound();",
+        "    if (invoices[index].Paid) return Results.Conflict(new { error = \"Paid invoices can't be changed.\" });",
+        "    invoices[index] = invoices[index] with { Amount = update.Amount };",
+        "    return Results.Ok(invoices[index]);",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "record Invoice(int Id, string Owner, decimal Amount, bool Paid);",
+        "record InvoiceUpdate(decimal Amount);"
+      ],
+      "hints": [
+        "Add `&& i.Owner == user` to both lookups.",
+        "Add `record InvoiceUpdate(decimal Amount);` and bind that in `MapPut`.",
+        "`invoices[index] = invoices[index] with { Amount = update.Amount };`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"Reading invoices could be checked\", async () =>",
+        "        {",
+        "            DojoWeb.Status(\"no user gets 401\", 401, await Send(http, HttpMethod.Get, \"/invoices/1\", null));",
+        "            DojoWeb.Status(\"ada reads her invoice 1\", 200, await Send(http, HttpMethod.Get, \"/invoices/1\", \"ada\"));",
+        "            DojoWeb.Status(\"ada can't read bob's invoice 2 (404, as if it didn't exist)\", 404, await Send(http, HttpMethod.Get, \"/invoices/2\", \"ada\"));",
+        "            DojoWeb.Status(\"bob reads invoice 2\", 200, await Send(http, HttpMethod.Get, \"/invoices/2\", \"bob\"));",
+        "            DojoWeb.Status(\"a missing invoice gets 404\", 404, await Send(http, HttpMethod.Get, \"/invoices/99\", \"ada\"));",
+        "        });",
+        "        await Dojo.TryAsync(\"Updating invoices could be checked\", async () =>",
+        "        {",
+        "            DojoWeb.Status(\"ada can't update bob's invoice\", 404, await Send(http, HttpMethod.Put, \"/invoices/2\", \"ada\", new { amount = 1, owner = \"ada\", paid = true }));",
+        "            Dojo.Eq(\"bob's invoice is unchanged\", \"75\", DojoWeb.Prop(await DojoWeb.Json(await Send(http, HttpMethod.Get, \"/invoices/2\", \"bob\")), \"amount\"));",
+        "            var r = await Send(http, HttpMethod.Put, \"/invoices/1\", \"ada\", new { amount = 99.5, owner = \"bob\", paid = true });",
+        "            DojoWeb.Status(\"ada updates her own invoice\", 200, r);",
+        "            var json = await DojoWeb.Json(r);",
+        "            Dojo.Eq(\"the amount changes\", \"99.5\", DojoWeb.Prop(json, \"amount\"));",
+        "            Dojo.Eq(\"but she can't mark it paid (mass assignment)\", \"false\", DojoWeb.Prop(json, \"paid\"));",
+        "            Dojo.Eq(\"or give it to someone else\", \"ada\", DojoWeb.Prop(json, \"owner\"));",
+        "            DojoWeb.Status(\"a paid invoice can't be changed (409)\", 409, await Send(http, HttpMethod.Put, \"/invoices/3\", \"ada\", new { amount = 0 }));",
+        "        });",
+        "    }",
+        "",
+        "    static Task<HttpResponseMessage> Send(HttpClient http, HttpMethod m, string url, string? user, object? body = null)",
+        "    {",
+        "        var msg = new HttpRequestMessage(m, url);",
+        "        if (user is not null) msg.Headers.Add(\"X-User\", user);",
+        "        if (body is not null) msg.Content = JsonContent.Create(body);",
+        "        return http.SendAsync(msg);",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,311 @@
+{
+  "title": "MFA and stopping guessers",
+  "summary": "Second factors, how authenticator-app codes (TOTP) work, and throttling attackers who guess passwords online.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Multi-factor authentication",
+      "body": [
+        "Passwords get phished, reused and guessed. A second factor means a stolen password alone is not enough.",
+        "",
+        "Common second factors, weakest first:",
+        "",
+        "- **SMS codes**: better than nothing, but SIM-swap attacks and interception make them weak.",
+        "- **TOTP codes** from an authenticator app: a 6-digit code that changes every 30 seconds, computed on the phone from a shared secret.",
+        "- **Push approval**: \"Is this you signing in?\" on a phone. Attackers spam requests until a tired user taps yes (**MFA fatigue**), so good apps make you type a number shown on screen.",
+        "- **Passkeys / FIDO2 security keys** (WebAuthn): the device signs a challenge with a private key that never leaves it, and the signature is bound to the website's real domain. A fake site gets nothing useful. This is **phishing-resistant**.",
+        "",
+        "A code you can *type* can also be typed into a convincing fake site, which forwards it to the real one within its 30 seconds. Passkeys can't be relayed that way."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Can each one be captured by a fake login page and replayed to the real site?",
+      "buckets": [
+        "Can be phished",
+        "Phishing-resistant"
+      ],
+      "items": [
+        [
+          "Password",
+          0
+        ],
+        [
+          "SMS code",
+          0
+        ],
+        [
+          "TOTP code from an app",
+          0
+        ],
+        [
+          "Push approval without number matching",
+          0
+        ],
+        [
+          "Passkey",
+          1
+        ],
+        [
+          "FIDO2 hardware key",
+          1
+        ]
+      ],
+      "explain": "Passkeys and FIDO2 keys sign a challenge that includes the site's origin. A phishing domain gets a signature that is worthless on the real domain."
+    },
+    {
+      "type": "learn",
+      "title": "How a TOTP code is made",
+      "body": [
+        "TOTP (Time-based One-Time Password, RFC 6238) is short enough to write yourself. The server and the phone share a random secret (that is what the QR code contains). Both compute:",
+        "",
+        "```csharp",
+        "long counter = unixSeconds / 30;                 // which 30-second window",
+        "byte[] msg = BitConverter.GetBytes(counter);     // 8 bytes",
+        "if (BitConverter.IsLittleEndian) Array.Reverse(msg);  // big-endian, as the RFC says",
+        "byte[] h = HMACSHA1.HashData(secret, msg);       // 20 bytes",
+        "",
+        "int offset = h[^1] & 0x0F;                       // \"dynamic truncation\"",
+        "int binary = (h[offset] & 0x7F) << 24 | h[offset + 1] << 16",
+        "           | h[offset + 2] << 8 | h[offset + 3];",
+        "int code = binary % 1_000_000;                   // 6 digits",
+        "```",
+        "",
+        "Then format with leading zeros: `code.ToString(\"D6\")`. Because the code depends only on the secret and the clock, phone and server agree without talking. (HMAC is a keyed hash; the JWT module uses it again.)",
+        "",
+        "Servers usually accept the previous and next window too, to allow for clock drift, and remember the last counter used so a code can't be replayed."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Which 30-second window is each moment in? What does this print?",
+      "code": [
+        "long[] times = [0, 29, 30, 59, 1111111109];",
+        "foreach (var t in times)",
+        "    Console.WriteLine(t / 30);"
+      ],
+      "answer": [
+        "0",
+        "0",
+        "1",
+        "1",
+        "37037036"
+      ],
+      "explain": "Integer division groups the seconds into windows of 30. Everyone whose clock reads within the same window computes the same code."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the dynamic truncation step.",
+      "code": [
+        "int offset = h[^1] __1__ 0x0F;",
+        "int binary = (h[offset] & __2__) << 24 | h[offset + 1] << 16",
+        "           | h[offset + 2] << __3__ | h[offset + 3];",
+        "string code = (binary % 1_000_000).ToString(__4__);"
+      ],
+      "blanks": [
+        "&",
+        "0x7F",
+        "8",
+        "\"D6\""
+      ],
+      "bank": [
+        "|",
+        "0xFF",
+        "16",
+        "\"N6\""
+      ],
+      "explain": "The low 4 bits of the last byte choose where to read; the top bit is masked off so the number is positive; the four bytes are combined big-endian; `D6` keeps leading zeros."
+    },
+    {
+      "type": "code",
+      "title": "Compute a TOTP code",
+      "prompt": [
+        "Write `string Totp(byte[] secret, long unixSeconds, int digits)` following RFC 6238 with HMAC-SHA1 and a 30-second step.",
+        "",
+        "The RFC's own test vectors (secret is the ASCII text `12345678901234567890`, 8 digits):",
+        "",
+        "| unixSeconds | code |",
+        "|---|---|",
+        "| 59 | `94287082` |",
+        "| 1111111109 | `07081804` |",
+        "| 1234567890 | `89005924` |",
+        "",
+        "With `digits = 6`, time 59 gives `287082`. Note the leading zero in `07081804`."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "string Totp(byte[] secret, long unixSeconds, int digits)",
+        "{",
+        "    // your code here",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "string Totp(byte[] secret, long unixSeconds, int digits)",
+        "{",
+        "    long counter = unixSeconds / 30;",
+        "    byte[] msg = BitConverter.GetBytes(counter);",
+        "    if (BitConverter.IsLittleEndian) Array.Reverse(msg);",
+        "    byte[] h = HMACSHA1.HashData(secret, msg);",
+        "",
+        "    int offset = h[^1] & 0x0F;",
+        "    int binary = (h[offset] & 0x7F) << 24 | h[offset + 1] << 16 | h[offset + 2] << 8 | h[offset + 3];",
+        "    int code = binary % (int)Math.Pow(10, digits);",
+        "    return code.ToString(\"D\" + digits);",
+        "}"
+      ],
+      "hints": [
+        "Build the 8-byte big-endian counter, then `HMACSHA1.HashData(secret, msg)`.",
+        "Truncate as on the card, then `% (int)Math.Pow(10, digits)`.",
+        "Format with `ToString(\"D\" + digits)` so leading zeros stay."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKey = System.Text.Encoding.ASCII.GetBytes(\"12345678901234567890\");",
+        "Dojo.Eq(\"Totp(key, 59, 8)\", \"94287082\", Totp(dojoKey, 59, 8));",
+        "Dojo.Eq(\"Totp(key, 1111111109, 8) keeps its leading zero\", \"07081804\", Totp(dojoKey, 1111111109, 8));",
+        "Dojo.Eq(\"Totp(key, 1234567890, 8)\", \"89005924\", Totp(dojoKey, 1234567890, 8));",
+        "Dojo.Eq(\"Totp(key, 2000000000, 8)\", \"69279037\", Totp(dojoKey, 2000000000, 8));",
+        "Dojo.Eq(\"Totp(key, 59, 6)\", \"287082\", Totp(dojoKey, 59, 6));",
+        "Dojo.Eq(\"Totp(key, 30, 6) is in the same window as 59\", Totp(dojoKey, 59, 6), Totp(dojoKey, 30, 6));"
+      ],
+      "require": [
+        {
+          "pattern": "HMACSHA1",
+          "message": "Uses HMAC-SHA1"
+        }
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Brute force and how to slow it",
+      "body": [
+        "Slow hashing protects a *stolen* database. Attackers who guess against your **live login endpoint** need different defences.",
+        "",
+        "- **Brute force**: many passwords against one account.",
+        "- **Password spraying**: one common password (`Summer2026!`) against many accounts, staying under per-account limits.",
+        "- **Credential stuffing**: username/password pairs leaked from *other* sites, replayed against yours. Very effective, because people reuse passwords.",
+        "",
+        "Defences, used together:",
+        "",
+        "- **Throttle per account and per IP**: after N failures in a window, refuse or delay further attempts. `429 Too Many Requests` with a `Retry-After` header is the HTTP way to say so.",
+        "- **Prefer temporary lockouts and growing delays** to permanent lockout. A permanent lock lets anyone lock your users out on purpose (a denial of service).",
+        "- **Reject known-breached passwords** at registration (services like Have I Been Pwned offer this).",
+        "- **MFA**, which makes a correct password insufficient.",
+        "- **Monitor**: many failures across many accounts from a few IPs is spraying or stuffing.",
+        "",
+        "ASP.NET Core ships a rate limiter (`builder.Services.AddRateLimiter`, with fixed window, sliding window and token bucket policies) for per-endpoint limits."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An attacker tries the password `Winter2026!` once against each of 50,000 accounts. Which defence helps **least**?",
+      "options": [
+        "Locking an account after 5 failed attempts on that account",
+        "Rate limiting failed logins per source IP",
+        "Rejecting common and breached passwords at sign-up",
+        "Requiring MFA"
+      ],
+      "answer": 0,
+      "explain": "That is password spraying: each account sees only one failure, so a per-account limit never triggers. Limits across accounts (per IP, global anomaly detection), banning common passwords and MFA all help."
+    },
+    {
+      "type": "code",
+      "title": "A login throttle",
+      "prompt": [
+        "Write a class `LoginThrottle` that tracks failed logins per username and locks an account for a while after too many.",
+        "",
+        "- Constructor: `LoginThrottle(int maxFailures, TimeSpan window)`.",
+        "- `void RecordFailure(string user, DateTimeOffset now)`",
+        "- `void RecordSuccess(string user)`: clears that user's failures.",
+        "- `bool IsLocked(string user, DateTimeOffset now)`: `true` when the user has at least `maxFailures` failures whose time is within `window` before `now` (a failure at time `t` counts while `now - t < window`).",
+        "",
+        "The time is passed in, never read from the clock, so the class is easy to test and behaves the same every run.",
+        "",
+        "```csharp",
+        "var t = new LoginThrottle(3, TimeSpan.FromMinutes(15));",
+        "t.RecordFailure(\"ada\", start);                   // 1",
+        "t.RecordFailure(\"ada\", start.AddMinutes(1));     // 2",
+        "t.RecordFailure(\"ada\", start.AddMinutes(2));     // 3",
+        "t.IsLocked(\"ada\", start.AddMinutes(3))           // true",
+        "t.IsLocked(\"ada\", start.AddMinutes(16))          // false: the first failure has aged out",
+        "```"
+      ],
+      "starter": [
+        "class LoginThrottle",
+        "{",
+        "    public LoginThrottle(int maxFailures, TimeSpan window)",
+        "    {",
+        "    }",
+        "",
+        "    public void RecordFailure(string user, DateTimeOffset now) { }",
+        "",
+        "    public void RecordSuccess(string user) { }",
+        "",
+        "    public bool IsLocked(string user, DateTimeOffset now) => false;",
+        "}"
+      ],
+      "solution": [
+        "class LoginThrottle",
+        "{",
+        "    private readonly int _max;",
+        "    private readonly TimeSpan _window;",
+        "    private readonly Dictionary<string, List<DateTimeOffset>> _failures = new();",
+        "",
+        "    public LoginThrottle(int maxFailures, TimeSpan window)",
+        "    {",
+        "        _max = maxFailures;",
+        "        _window = window;",
+        "    }",
+        "",
+        "    public void RecordFailure(string user, DateTimeOffset now)",
+        "    {",
+        "        if (!_failures.TryGetValue(user, out var list))",
+        "            _failures[user] = list = new List<DateTimeOffset>();",
+        "        list.Add(now);",
+        "    }",
+        "",
+        "    public void RecordSuccess(string user) => _failures.Remove(user);",
+        "",
+        "    public bool IsLocked(string user, DateTimeOffset now) =>",
+        "        _failures.TryGetValue(user, out var list) && list.Count(t => now - t < _window) >= _max;",
+        "}"
+      ],
+      "hints": [
+        "Keep a `Dictionary<string, List<DateTimeOffset>>` of failure times.",
+        "`IsLocked` counts the failures with `now - t < window`.",
+        "`RecordSuccess` removes the user's entry."
+      ],
+      "template": [
+        "var dojoStart = new DateTimeOffset(2026, 1, 1, 9, 0, 0, TimeSpan.Zero);",
+        "var dojoT = new LoginThrottle(3, TimeSpan.FromMinutes(15));",
+        "Dojo.Eq(\"a new user is not locked\", false, dojoT.IsLocked(\"ada\", dojoStart));",
+        "dojoT.RecordFailure(\"ada\", dojoStart);",
+        "dojoT.RecordFailure(\"ada\", dojoStart.AddMinutes(1));",
+        "Dojo.Eq(\"2 failures of 3 allowed: not locked\", false, dojoT.IsLocked(\"ada\", dojoStart.AddMinutes(2)));",
+        "dojoT.RecordFailure(\"ada\", dojoStart.AddMinutes(2));",
+        "Dojo.Eq(\"3 failures within 15 minutes: locked\", true, dojoT.IsLocked(\"ada\", dojoStart.AddMinutes(3)));",
+        "Dojo.Eq(\"another user is not affected\", false, dojoT.IsLocked(\"grace\", dojoStart.AddMinutes(3)));",
+        "Dojo.Eq(\"at exactly 15 minutes the first failure no longer counts\", false, dojoT.IsLocked(\"ada\", dojoStart.AddMinutes(15)));",
+        "Dojo.Eq(\"after 16 minutes: unlocked\", false, dojoT.IsLocked(\"ada\", dojoStart.AddMinutes(16)));",
+        "dojoT.RecordFailure(\"ada\", dojoStart.AddMinutes(16));",
+        "dojoT.RecordFailure(\"ada\", dojoStart.AddMinutes(16));",
+        "dojoT.RecordFailure(\"ada\", dojoStart.AddMinutes(16));",
+        "Dojo.Eq(\"three new failures inside the window lock it again\", true, dojoT.IsLocked(\"ada\", dojoStart.AddMinutes(16)));",
+        "dojoT.RecordSuccess(\"ada\");",
+        "Dojo.Eq(\"a success clears the failures\", false, dojoT.IsLocked(\"ada\", dojoStart.AddMinutes(16)));",
+        "{{CODE}}"
+      ],
+      "forbid": [
+        {
+          "pattern": "DateTime(Offset)?\\.(Now|UtcNow)",
+          "message": "Does not read the clock; uses the time passed in"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,274 @@
+{
+  "title": "Server-side sessions",
+  "summary": "HTTP forgets you after every request. A session id remembers you, if it is random enough and expires properly.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "HTTP forgets",
+      "body": [
+        "HTTP is **stateless**: every request stands alone. After `POST /login` succeeds, the next request, `GET /account`, arrives with no memory of it. The server needs a way to recognise the same user again without asking for the password every time.",
+        "",
+        "The classic answer is a **server-side session**:",
+        "",
+        "```text",
+        "POST /login  (username + password)",
+        "  server: password ok -> make a random id \"9f2c...\", store  9f2c... -> { user: \"ada\", created, lastSeen }",
+        "  response: Set-Cookie: sid=9f2c...",
+        "",
+        "GET /account",
+        "  Cookie: sid=9f2c...",
+        "  server: look up 9f2c... -> ada",
+        "```",
+        "",
+        "The browser holds only a meaningless random **session id**. Everything that matters (who the user is, when they logged in) stays on the server. That has a big advantage you will appreciate in the JWT module: to log someone out, you delete one row."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "In a server-side session design, what does the cookie contain?",
+      "options": [
+        "Only an unguessable random id that points at the server's session record",
+        "The username and a flag saying the user is logged in",
+        "The password hash, so the server can re-check it on every request",
+        "The user's roles, so the server doesn't need to look them up"
+      ],
+      "answer": 0,
+      "explain": "Anything in a cookie can be read and edited by the user. Put `user=ada; admin=true` in a cookie and someone will change it to `user=root`. A random id is useless to change: the attacker would have to guess another live id."
+    },
+    {
+      "type": "learn",
+      "title": "Making a session id",
+      "body": [
+        "A session id is a password that the server hands out. Whoever presents it *is* that user, so it must be impossible to guess:",
+        "",
+        "- Take it from a **cryptographically secure** random source: `RandomNumberGenerator`.",
+        "- Make it long: at least **128 bits**. 256 bits is common and costs nothing.",
+        "- It must carry **no meaning**: no username, no timestamp, no counter.",
+        "",
+        "```csharp",
+        "using System.Security.Cryptography;",
+        "",
+        "string id = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));  // 256 bits, 64 hex characters",
+        "// or: RandomNumberGenerator.GetHexString(64)",
+        "```",
+        "",
+        "`System.Random` is **not** acceptable: it is a fast predictable generator for games and simulations, and its future output can be worked out from a few samples."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print? (The random bytes differ every run; the lengths do not.)",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "Console.WriteLine(Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).Length);",
+        "Console.WriteLine(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).Length);",
+        "Console.WriteLine(RandomNumberGenerator.GetBytes(16).Length * 8);"
+      ],
+      "answer": [
+        "64",
+        "44",
+        "128"
+      ],
+      "explain": "Hex uses 2 characters per byte. Base64 uses 4 characters for every 3 bytes, rounded up with padding: 32 bytes need 44 characters. 16 bytes are 128 bits."
+    },
+    {
+      "type": "sort",
+      "prompt": "Would each one make an acceptable session id?",
+      "buckets": [
+        "Acceptable",
+        "Not acceptable"
+      ],
+      "items": [
+        [
+          "`Convert.ToHexString(RandomNumberGenerator.GetBytes(32))`",
+          0
+        ],
+        [
+          "`RandomNumberGenerator.GetHexString(64)`",
+          0
+        ],
+        [
+          "The next number from a database sequence",
+          1
+        ],
+        [
+          "`new Random().Next().ToString()`",
+          1
+        ],
+        [
+          "SHA-256 of the username and login time",
+          1
+        ],
+        [
+          "The user's email address, base64-encoded",
+          1
+        ]
+      ],
+      "explain": "Sequences and timestamps are guessable, `Random` is predictable, and a hash of guessable inputs is still guessable: an attacker hashes the same inputs."
+    },
+    {
+      "type": "learn",
+      "title": "Sessions must end",
+      "body": [
+        "A session that lives forever is a stolen session that works forever. Use two timeouts together:",
+        "",
+        "- **Idle timeout**: end the session after, say, 20 minutes without a request. Each request moves `lastSeen` forward (a *sliding* expiry).",
+        "- **Absolute timeout**: end it after, say, 8 hours since login **no matter what**. Otherwise a session kept busy by an attacker (or by a script) slides forever.",
+        "",
+        "```csharp",
+        "bool Expired(Session s, DateTimeOffset now) =>",
+        "    now - s.LastSeen >= IdleTimeout || now - s.Created >= AbsoluteTimeout;",
+        "```",
+        "",
+        "When a session has expired, delete it and treat the request as unauthenticated (`401`). Banks use short timeouts; a chat app may use long ones. The point is that both exist."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the check: idle for 20 minutes, or 8 hours since login.",
+      "code": [
+        "bool Expired(DateTimeOffset created, DateTimeOffset lastSeen, DateTimeOffset now) =>",
+        "    now - __1__ >= TimeSpan.FromMinutes(20) __2__ now - __3__ >= TimeSpan.__4__(8);"
+      ],
+      "blanks": [
+        "lastSeen",
+        "||",
+        "created",
+        "FromHours"
+      ],
+      "bank": [
+        "created",
+        "&&",
+        "lastSeen",
+        "FromMinutes"
+      ],
+      "explain": "Either limit ends the session, so the two conditions are joined with `||`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why keep an absolute timeout when you already have an idle timeout?",
+      "options": [
+        "A session in constant use would otherwise never expire, so a stolen one could be kept alive indefinitely",
+        "Idle timeouts don't work with cookies",
+        "Absolute timeouts make sessions faster to look up",
+        "They are the same thing with different names"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "code",
+      "title": "A session store",
+      "prompt": [
+        "Write a class `SessionStore` that keeps sessions in memory.",
+        "",
+        "- Constructor: `SessionStore(TimeSpan idle, TimeSpan absolute)`.",
+        "- `string Create(string user, DateTimeOffset now)`: makes a new 256-bit random id (as 64 hex characters), stores the session, returns the id.",
+        "- `string? GetUser(string id, DateTimeOffset now)`: returns the user, or `null` when the id is unknown or the session has expired (idle **or** absolute, using `>=`). An expired session is removed. A successful lookup moves the idle clock forward to `now`.",
+        "- `void Remove(string id)`.",
+        "",
+        "The tests already import `System.Security.Cryptography`; don't add `using` lines."
+      ],
+      "starter": [
+        "class SessionStore",
+        "{",
+        "    public SessionStore(TimeSpan idle, TimeSpan absolute) { }",
+        "",
+        "    public string Create(string user, DateTimeOffset now) => \"\";",
+        "",
+        "    public string? GetUser(string id, DateTimeOffset now) => null;",
+        "",
+        "    public void Remove(string id) { }",
+        "}"
+      ],
+      "solution": [
+        "class SessionStore",
+        "{",
+        "    private class Session",
+        "    {",
+        "        public required string User;",
+        "        public DateTimeOffset Created;",
+        "        public DateTimeOffset LastSeen;",
+        "    }",
+        "",
+        "    private readonly Dictionary<string, Session> _sessions = new();",
+        "    private readonly TimeSpan _idle, _absolute;",
+        "",
+        "    public SessionStore(TimeSpan idle, TimeSpan absolute)",
+        "    {",
+        "        _idle = idle;",
+        "        _absolute = absolute;",
+        "    }",
+        "",
+        "    public string Create(string user, DateTimeOffset now)",
+        "    {",
+        "        var id = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));",
+        "        _sessions[id] = new Session { User = user, Created = now, LastSeen = now };",
+        "        return id;",
+        "    }",
+        "",
+        "    public string? GetUser(string id, DateTimeOffset now)",
+        "    {",
+        "        if (!_sessions.TryGetValue(id, out var s)) return null;",
+        "        if (now - s.LastSeen >= _idle || now - s.Created >= _absolute)",
+        "        {",
+        "            _sessions.Remove(id);",
+        "            return null;",
+        "        }",
+        "        s.LastSeen = now;",
+        "        return s.User;",
+        "    }",
+        "",
+        "    public void Remove(string id) => _sessions.Remove(id);",
+        "}"
+      ],
+      "hints": [
+        "Store a small class with `User`, `Created` and `LastSeen` in a `Dictionary<string, ...>`.",
+        "In `GetUser`, check both timeouts, remove on expiry, otherwise set `LastSeen = now`."
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "var dojoT0 = new DateTimeOffset(2026, 5, 1, 9, 0, 0, TimeSpan.Zero);",
+        "var dojoS = new SessionStore(TimeSpan.FromMinutes(20), TimeSpan.FromHours(8));",
+        "var dojoId = dojoS.Create(\"ada\", dojoT0);",
+        "Dojo.Eq(\"the id is 64 characters\", 64, dojoId.Length);",
+        "Dojo.Check(\"the id is hex\", dojoId.All(Uri.IsHexDigit), dojoId);",
+        "Dojo.Check(\"two ids differ\", dojoS.Create(\"ada\", dojoT0) != dojoId, \"the same id came back twice\");",
+        "Dojo.Eq(\"lookup right away\", \"ada\", dojoS.GetUser(dojoId, dojoT0));",
+        "Dojo.Eq(\"unknown id -> null\", null, dojoS.GetUser(\"not-an-id\", dojoT0));",
+        "Dojo.Eq(\"after 19 minutes idle: still valid\", \"ada\", dojoS.GetUser(dojoId, dojoT0.AddMinutes(19)));",
+        "Dojo.Eq(\"19 minutes after that request: still valid (sliding)\", \"ada\", dojoS.GetUser(dojoId, dojoT0.AddMinutes(38)));",
+        "Dojo.Eq(\"20 minutes idle: expired\", null, dojoS.GetUser(dojoId, dojoT0.AddMinutes(58)));",
+        "Dojo.Eq(\"expired sessions stay gone\", null, dojoS.GetUser(dojoId, dojoT0.AddMinutes(59)));",
+        "",
+        "var dojoBusy = dojoS.Create(\"grace\", dojoT0);",
+        "string? dojoLast = null;",
+        "for (int m = 10; m < 8 * 60; m += 10) dojoLast = dojoS.GetUser(dojoBusy, dojoT0.AddMinutes(m));",
+        "Dojo.Eq(\"a busy session is valid at 7h50m\", \"grace\", dojoLast);",
+        "Dojo.Eq(\"but ends at 8 hours (absolute)\", null, dojoS.GetUser(dojoBusy, dojoT0.AddHours(8)));",
+        "",
+        "var dojoGone = dojoS.Create(\"bob\", dojoT0);",
+        "dojoS.Remove(dojoGone);",
+        "Dojo.Eq(\"a removed session is gone\", null, dojoS.GetUser(dojoGone, dojoT0));",
+        "{{CODE}}"
+      ],
+      "require": [
+        {
+          "pattern": "RandomNumberGenerator",
+          "message": "Makes ids with RandomNumberGenerator"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "new\\s+Random\\s*\\(",
+          "message": "Does not use System.Random"
+        },
+        {
+          "pattern": "DateTime(Offset)?\\.(Now|UtcNow)",
+          "message": "Does not read the clock"
+        }
+      ]
+    }
+  ]
+}

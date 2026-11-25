@@ -1,0 +1,240 @@
+{
+  "title": "The pieces: schemes, principals and policies",
+  "summary": "What AddAuthentication, AddJwtBearer and TokenValidationParameters do, and the ClaimsPrincipal that comes out of them.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "How a real app wires it up",
+      "body": [
+        "In production you don't hand-write token validation. With the `Microsoft.AspNetCore.Authentication.JwtBearer` package an API looks like this:",
+        "",
+        "```csharp",
+        "builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)",
+        "    .AddJwtBearer(options =>",
+        "    {",
+        "        options.Authority = \"https://login.microsoftonline.com/{tenant}/v2.0\"; // fetches discovery + JWKS",
+        "        options.Audience = \"api://orders-api\";",
+        "        options.TokenValidationParameters = new TokenValidationParameters",
+        "        {",
+        "            ValidateIssuer = true,",
+        "            ValidateAudience = true,",
+        "            ValidateLifetime = true,",
+        "            ValidateIssuerSigningKey = true,",
+        "            ClockSkew = TimeSpan.FromSeconds(30),        // default is 5 minutes",
+        "            ValidAlgorithms = [\"RS256\"],",
+        "        };",
+        "        options.MapInboundClaims = false;  // keep \"sub\", \"role\" as-is",
+        "    });",
+        "builder.Services.AddAuthorization();",
+        "",
+        "var app = builder.Build();",
+        "app.UseAuthentication();   // reads the token, sets HttpContext.User",
+        "app.UseAuthorization();    // enforces [Authorize] / RequireAuthorization",
+        "",
+        "app.MapGet(\"/orders\", () => ...).RequireAuthorization();",
+        "```",
+        "",
+        "- An **authentication scheme** is a named handler that turns a request into an identity (\"Bearer\", \"Cookies\").",
+        "- **`UseAuthentication`** runs the default scheme on every request and puts the result in `HttpContext.User`. A missing token is not an error; the user is just anonymous.",
+        "- **`UseAuthorization`** looks at the endpoint's requirements and either lets it run, **challenges** (`401`, not authenticated) or **forbids** (`403`, authenticated but not allowed).",
+        "",
+        "Everything in the JWT module maps onto these options. The sandbox has no NuGet, so in this module you build the same pieces from the framework's own building blocks."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each `TokenValidationParameters` setting to the check it controls.",
+      "pairs": [
+        [
+          "`ValidateIssuer` / `ValidIssuer`",
+          "`iss` is the trusted issuer"
+        ],
+        [
+          "`ValidateAudience` / `ValidAudience`",
+          "`aud` contains this API"
+        ],
+        [
+          "`ValidateLifetime` + `ClockSkew`",
+          "`exp` and `nbf`, with leeway"
+        ],
+        [
+          "`ValidateIssuerSigningKey` / `IssuerSigningKeys`",
+          "the signature, with keys from the JWKS"
+        ],
+        [
+          "`ValidAlgorithms`",
+          "the `alg` allow-list"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "ClaimsPrincipal",
+      "body": [
+        "Whatever the scheme, the result is a `System.Security.Claims.ClaimsPrincipal`:",
+        "",
+        "```csharp",
+        "using System.Security.Claims;",
+        "",
+        "var identity = new ClaimsIdentity(",
+        "    [new Claim(\"sub\", \"ada\"), new Claim(\"role\", \"admin\"), new Claim(\"role\", \"user\")],",
+        "    authenticationType: \"Bearer\",   // non-null => IsAuthenticated is true",
+        "    nameType: \"sub\",                // what Identity.Name reads",
+        "    roleType: \"role\");              // what IsInRole checks",
+        "var user = new ClaimsPrincipal(identity);",
+        "",
+        "user.Identity!.IsAuthenticated   // true",
+        "user.Identity.Name               // \"ada\"",
+        "user.IsInRole(\"admin\")           // true",
+        "user.FindFirst(\"sub\")?.Value     // \"ada\"",
+        "user.FindAll(\"role\")             // both role claims",
+        "```",
+        "",
+        "Two traps:",
+        "",
+        "- An identity created **without** an `authenticationType` has `IsAuthenticated == false`, even with claims. That's the anonymous user ASP.NET gives you by default.",
+        "- `IsInRole` checks claims of the identity's `roleType`. By default that's the long `ClaimTypes.Role` URI, not `\"role\"`, which is why JWT apps either pass `roleType: \"role\"` or turn off claim mapping."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Claims;",
+        "",
+        "var claims = new[] { new Claim(\"sub\", \"ada\"), new Claim(\"role\", \"editor\") };",
+        "",
+        "var anonymous = new ClaimsPrincipal(new ClaimsIdentity(claims));",
+        "var signedIn = new ClaimsPrincipal(new ClaimsIdentity(claims, \"Bearer\", \"sub\", \"role\"));",
+        "",
+        "Console.WriteLine(anonymous.Identity!.IsAuthenticated);",
+        "Console.WriteLine(signedIn.Identity!.IsAuthenticated);",
+        "Console.WriteLine(signedIn.Identity.Name);",
+        "Console.WriteLine(signedIn.IsInRole(\"editor\"));",
+        "Console.WriteLine(anonymous.IsInRole(\"editor\"));"
+      ],
+      "answer": [
+        "False",
+        "True",
+        "ada",
+        "True",
+        "False"
+      ],
+      "explain": "No authentication type means not authenticated. And the first identity uses the default role claim type, so a claim literally named `role` doesn't count as a role there."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the startup code of an API that uses authorization.",
+      "verify": false,
+      "lines": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddAuthentication(\"Bearer\");",
+        "builder.Services.AddAuthorization();",
+        "var app = builder.Build();",
+        "app.UseAuthentication();",
+        "app.UseAuthorization();",
+        "app.MapGet(\"/orders\", () => \"ok\").RequireAuthorization();",
+        "app.Run();"
+      ],
+      "also": [
+        [
+          "var builder = WebApplication.CreateBuilder(args);",
+          "builder.Services.AddAuthorization();",
+          "builder.Services.AddAuthentication(\"Bearer\");",
+          "var app = builder.Build();",
+          "app.UseAuthentication();",
+          "app.UseAuthorization();",
+          "app.MapGet(\"/orders\", () => \"ok\").RequireAuthorization();",
+          "app.Run();"
+        ]
+      ],
+      "explain": "Services before `Build()`. Authentication must run before authorization, because authorization needs to know who the user is."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An API calls `user.IsInRole(\"admin\")` and it is always `false`, although the token clearly has `\"role\": \"admin\"`. The most likely cause?",
+      "options": [
+        "The identity's role claim type is the default `ClaimTypes.Role` URI, not `\"role\"`",
+        "Roles only work with cookies",
+        "`IsInRole` is case-insensitive and found two roles",
+        "The token is expired"
+      ],
+      "answer": 0,
+      "explain": "Pass `roleType: \"role\"` when building the identity (or set `RoleClaimType` in `TokenValidationParameters`, or disable inbound claim mapping)."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Build an authenticated identity whose name and roles come from JWT claims.",
+      "code": [
+        "var identity = new ClaimsIdentity(claims, __1__, __2__, __3__);",
+        "var user = new __4__(identity);"
+      ],
+      "blanks": [
+        "\"Bearer\"",
+        "\"sub\"",
+        "\"role\"",
+        "ClaimsPrincipal"
+      ],
+      "bank": [
+        "null",
+        "\"name\"",
+        "ClaimTypes.Role",
+        "ClaimsIdentity"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "From payload to principal",
+      "prompt": [
+        "Write `ClaimsPrincipal ToPrincipal(string payloadJson)` that turns a (validated) JWT payload into a principal:",
+        "",
+        "- one `Claim` per property, with the property name as type and the value's `ToString()` as value (`\"exp\": 2000` becomes `\"2000\"`),",
+        "- an array becomes **one claim per element** (`\"role\": [\"admin\", \"user\"]` gives two `role` claims),",
+        "- the identity has authentication type `\"Bearer\"`, name type `\"sub\"`, role type `\"role\"`.",
+        "",
+        "The tests import `System.Security.Claims` and `System.Text.Json`."
+      ],
+      "starter": [
+        "ClaimsPrincipal ToPrincipal(string payloadJson)",
+        "{",
+        "    return new ClaimsPrincipal();",
+        "}"
+      ],
+      "solution": [
+        "ClaimsPrincipal ToPrincipal(string payloadJson)",
+        "{",
+        "    using var doc = JsonDocument.Parse(payloadJson);",
+        "    var claims = new List<Claim>();",
+        "    foreach (var prop in doc.RootElement.EnumerateObject())",
+        "    {",
+        "        if (prop.Value.ValueKind == JsonValueKind.Array)",
+        "            foreach (var item in prop.Value.EnumerateArray()) claims.Add(new Claim(prop.Name, item.ToString()));",
+        "        else",
+        "            claims.Add(new Claim(prop.Name, prop.Value.ToString()));",
+        "    }",
+        "    return new ClaimsPrincipal(new ClaimsIdentity(claims, \"Bearer\", \"sub\", \"role\"));",
+        "}"
+      ],
+      "hints": [
+        "`foreach (var prop in doc.RootElement.EnumerateObject())`",
+        "Check `prop.Value.ValueKind == JsonValueKind.Array` and loop with `EnumerateArray()`."
+      ],
+      "template": [
+        "using System.Security.Claims;",
+        "using System.Text.Json;",
+        "{{CODE}}",
+        "var dojoU = ToPrincipal(\"{\\\"sub\\\":\\\"ada\\\",\\\"role\\\":[\\\"admin\\\",\\\"user\\\"],\\\"scope\\\":\\\"tasks:read tasks:write\\\",\\\"exp\\\":2000}\");",
+        "Dojo.Eq(\"authenticated\", true, dojoU.Identity?.IsAuthenticated);",
+        "Dojo.Eq(\"Identity.Name is sub\", \"ada\", dojoU.Identity?.Name);",
+        "Dojo.Eq(\"IsInRole(admin)\", true, dojoU.IsInRole(\"admin\"));",
+        "Dojo.Eq(\"IsInRole(user)\", true, dojoU.IsInRole(\"user\"));",
+        "Dojo.Eq(\"IsInRole(root)\", false, dojoU.IsInRole(\"root\"));",
+        "Dojo.Eq(\"two role claims\", 2, dojoU.FindAll(\"role\").Count());",
+        "Dojo.Eq(\"scope is one claim\", \"tasks:read tasks:write\", dojoU.FindFirst(\"scope\")?.Value);",
+        "Dojo.Eq(\"numbers become text\", \"2000\", dojoU.FindFirst(\"exp\")?.Value);",
+        "Dojo.Eq(\"a single string role works too\", true, ToPrincipal(\"{\\\"sub\\\":\\\"bob\\\",\\\"role\\\":\\\"editor\\\"}\").IsInRole(\"editor\"));"
+      ]
+    }
+  ]
+}

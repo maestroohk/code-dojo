@@ -1,0 +1,245 @@
+{
+  "title": "API keys versus tokens",
+  "summary": "When a long-lived API key is fine, when you need tokens, and how to issue, store and check keys properly.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two kinds of credential",
+      "body": [
+        "**API keys** are long random strings given to a *client application*, sent on every request (`X-Api-Key: dk_live_...` or `Authorization: ApiKey ...`).",
+        "",
+        "**Access tokens** (usually JWTs from OAuth) are short-lived, issued by an authorization server, and can represent a **user** and a **delegated scope**.",
+        "",
+        "| | API key | OAuth access token |",
+        "|---|---|---|",
+        "| Identifies | an application / account | a user *and* an app, or a service |",
+        "| Lifetime | months, until rotated | minutes |",
+        "| If leaked | works until someone notices and revokes it | works until `exp` |",
+        "| Revocation | delete the key (one lookup per request) | wait for `exp`, or extra machinery |",
+        "| Good for | server-to-server integrations, developer APIs (Stripe, SendGrid), metering | anything acting for a user; zero-trust service meshes |",
+        "",
+        "An API key **must never be embedded in a browser or mobile app**: anything shipped to a device is public. A key in front-end code identifies a *project* at best (as with map tile APIs), never authenticates anyone."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "API key or user access token?",
+      "buckets": [
+        "API key is fine",
+        "Use a user access token"
+      ],
+      "items": [
+        [
+          "A partner's nightly server job pushing orders",
+          0
+        ],
+        [
+          "Metering a paying developer's usage of your SMS API",
+          0
+        ],
+        [
+          "A mobile app reading the signed-in user's messages",
+          1
+        ],
+        [
+          "A single-page app updating the user's profile",
+          1
+        ],
+        [
+          "A third-party app acting for one of your users",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Issuing and checking keys properly",
+      "body": [
+        "- **Generate** 32 random bytes and add a readable **prefix**: `dk_live_` + 43 base64url characters. The prefix tells you (and secret scanners on GitHub) what the string is, and a `test` vs `live` prefix stops test keys hitting production.",
+        "- **Show it once.** Store only a **hash**. Like refresh tokens, keys are long random values, so SHA-256 is enough; a slow password hash would make every request slow.",
+        "- **Look up by hash.** Hash the incoming key and look up the hash. A dictionary lookup on a hash doesn't leak the secret through timing, because an attacker can't steer the hash byte by byte.",
+        "- **Scope** every key (`reports:read`), give it an owner and an expiry, and make rotation easy: allow two active keys per client so they can swap without downtime.",
+        "- **Rate-limit** per key, and log the key's *id* or prefix, never the key."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "string Hash(string key) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)));",
+        "",
+        "var stored = new Dictionary<string, string> { [Hash(\"dk_live_abc123\")] = \"acme-corp\" };",
+        "",
+        "Console.WriteLine(stored.TryGetValue(Hash(\"dk_live_abc123\"), out var owner) ? owner : \"unknown\");",
+        "Console.WriteLine(stored.TryGetValue(Hash(\"dk_live_abc124\"), out _) ? \"found\" : \"unknown\");",
+        "Console.WriteLine(stored.ContainsKey(\"dk_live_abc123\"));"
+      ],
+      "answer": [
+        "acme-corp",
+        "unknown",
+        "False"
+      ],
+      "explain": "The database never holds the key itself, so a leaked table of hashes doesn't hand out working keys."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Generate a prefixed API key and the value to store.",
+      "code": [
+        "string key = \"dk_live_\" + Convert.ToBase64String(__1__.GetBytes(32))",
+        "    .TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "string toStore = Convert.ToHexString(__2__.HashData(Encoding.UTF8.GetBytes(__3__)));"
+      ],
+      "blanks": [
+        "RandomNumberGenerator",
+        "SHA256",
+        "key"
+      ],
+      "bank": [
+        "Random",
+        "MD5",
+        "toStore"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A developer pastes a live API key into a public GitHub repository. Which design choice limits the damage most?",
+      "options": [
+        "A recognisable prefix, so GitHub's secret scanning flags it and you can revoke it within minutes",
+        "Base64-encoding the key",
+        "Making the key 16 characters instead of 64",
+        "Storing the key in plain text so support staff can read it back"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is SHA-256 acceptable for storing API keys when it is far too fast for passwords?",
+      "options": [
+        "API keys are 256 random bits, so there is no dictionary to guess from; passwords are human-chosen and guessable",
+        "SHA-256 is slower than PBKDF2",
+        "API keys are never leaked",
+        "It isn't acceptable; API keys need Argon2"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "code",
+      "framework": "web",
+      "title": "API key middleware with scopes",
+      "prompt": [
+        "The starter stores two keys **as SHA-256 hashes** with their scopes. **Run checks** starts the server and calls it.",
+        "",
+        "- Middleware: every path except `/health` needs an `X-Api-Key` header whose SHA-256 hex is in `apiKeys`; otherwise `401 {\"error\": ...}`. Put the `ApiClient` in `ctx.Items[\"client\"]`.",
+        "- `GET /reports` needs scope `reports:read`, `POST /reports` needs `reports:write`; a known key without the scope gets `403`."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "string Sha256Hex(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));",
+        "",
+        "// Only hashes are stored. The keys themselves were shown to their owners once, at creation.",
+        "var apiKeys = new Dictionary<string, ApiClient>",
+        "{",
+        "    [Sha256Hex(\"dk_reports_8f3b2c1d9e7a6f5b4c3d2e1f0a9b8c7d\")] = new(\"reporting-dashboard\", [\"reports:read\"]),",
+        "    [Sha256Hex(\"dk_ingest_1a2b3c4d5e6f708192a3b4c5d6e7f8091\")] = new(\"ingest-job\", [\"reports:read\", \"reports:write\"]),",
+        "};",
+        "",
+        "// TODO: middleware that authenticates X-Api-Key",
+        "",
+        "app.MapGet(\"/health\", () => \"ok\");",
+        "app.MapGet(\"/reports\", () => new[] { \"q1\", \"q2\" });",
+        "app.MapPost(\"/reports\", () => Results.Created(\"/reports/q3\", new { id = \"q3\" }));",
+        "",
+        "app.Run();",
+        "",
+        "record ApiClient(string Name, string[] Scopes);"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "string Sha256Hex(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));",
+        "",
+        "// Only hashes are stored. The keys themselves were shown to their owners once, at creation.",
+        "var apiKeys = new Dictionary<string, ApiClient>",
+        "{",
+        "    [Sha256Hex(\"dk_reports_8f3b2c1d9e7a6f5b4c3d2e1f0a9b8c7d\")] = new(\"reporting-dashboard\", [\"reports:read\"]),",
+        "    [Sha256Hex(\"dk_ingest_1a2b3c4d5e6f708192a3b4c5d6e7f8091\")] = new(\"ingest-job\", [\"reports:read\", \"reports:write\"]),",
+        "};",
+        "",
+        "app.Use(async (ctx, next) =>",
+        "{",
+        "    if (ctx.Request.Path == \"/health\") { await next(ctx); return; }",
+        "",
+        "    var key = ctx.Request.Headers[\"X-Api-Key\"].ToString();",
+        "    if (key.Length == 0 || !apiKeys.TryGetValue(Sha256Hex(key), out var client))",
+        "    {",
+        "        ctx.Response.StatusCode = 401;",
+        "        await ctx.Response.WriteAsJsonAsync(new { error = \"A valid X-Api-Key header is required.\" });",
+        "        return;",
+        "    }",
+        "    ctx.Items[\"client\"] = client;",
+        "    await next(ctx);",
+        "});",
+        "",
+        "IResult? Need(HttpContext ctx, string scope) =>",
+        "    ctx.Items[\"client\"] is ApiClient c && c.Scopes.Contains(scope)",
+        "        ? null",
+        "        : Results.Json(new { error = \"Missing scope \" + scope }, statusCode: 403);",
+        "",
+        "app.MapGet(\"/health\", () => \"ok\");",
+        "app.MapGet(\"/reports\", (HttpContext ctx) => Need(ctx, \"reports:read\") ?? Results.Ok(new[] { \"q1\", \"q2\" }));",
+        "app.MapPost(\"/reports\", (HttpContext ctx) => Need(ctx, \"reports:write\") ?? Results.Created(\"/reports/q3\", new { id = \"q3\" }));",
+        "",
+        "app.Run();",
+        "",
+        "record ApiClient(string Name, string[] Scopes);"
+      ],
+      "hints": [
+        "`ctx.Request.Headers[\"X-Api-Key\"].ToString()` then `apiKeys.TryGetValue(Sha256Hex(key), out var client)`.",
+        "A helper `IResult? Need(HttpContext ctx, string scope)` returning `null` when allowed lets you write `Need(ctx, \"reports:read\") ?? Results.Ok(...)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "static class DojoTests",
+        "{",
+        "    const string Reader = \"dk_reports_8f3b2c1d9e7a6f5b4c3d2e1f0a9b8c7d\";",
+        "    const string Writer = \"dk_ingest_1a2b3c4d5e6f708192a3b4c5d6e7f8091\";",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"API keys could be checked\", async () =>",
+        "        {",
+        "            Dojo.Eq(\"GET /health needs no key\", \"ok\", await DojoWeb.Text(await Send(http, HttpMethod.Get, \"/health\", null)));",
+        "            DojoWeb.Status(\"GET /reports without a key gets 401\", 401, await Send(http, HttpMethod.Get, \"/reports\", null));",
+        "            DojoWeb.Status(\"a wrong key gets 401\", 401, await Send(http, HttpMethod.Get, \"/reports\", \"dk_reports_0000\"));",
+        "            DojoWeb.Status(\"the stored hash itself is not a key\", 401, await Send(http, HttpMethod.Get, \"/reports\", Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Reader)))));",
+        "            DojoWeb.Status(\"the reader key can GET /reports\", 200, await Send(http, HttpMethod.Get, \"/reports\", Reader));",
+        "            DojoWeb.Status(\"the reader key can't POST /reports (403)\", 403, await Send(http, HttpMethod.Post, \"/reports\", Reader));",
+        "            DojoWeb.Status(\"the ingest key can POST /reports\", 201, await Send(http, HttpMethod.Post, \"/reports\", Writer));",
+        "            DojoWeb.Status(\"a key for /health doesn't hurt\", 200, await Send(http, HttpMethod.Get, \"/health\", \"garbage\"));",
+        "        });",
+        "    }",
+        "",
+        "    static Task<HttpResponseMessage> Send(HttpClient http, HttpMethod m, string url, string? key)",
+        "    {",
+        "        var msg = new HttpRequestMessage(m, url);",
+        "        if (key is not null) msg.Headers.Add(\"X-Api-Key\", key);",
+        "        return http.SendAsync(msg);",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}

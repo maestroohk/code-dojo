@@ -1,0 +1,349 @@
+{
+  "title": "Keys, refresh tokens and revocation",
+  "summary": "Publish and rotate keys with JWKS and kid, pair short access tokens with refresh tokens, revoke what you must, and meet JWE.",
+  "minutes": 20,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "JWKS and kid",
+      "body": [
+        "An identity provider publishes its **public** keys as a **JSON Web Key Set** (JWKS, RFC 7517) at a well-known URL, for example `https://login.example.com/.well-known/jwks.json`:",
+        "",
+        "```json",
+        "{",
+        "  \"keys\": [",
+        "    { \"kty\": \"EC\", \"crv\": \"P-256\", \"kid\": \"2026-06\", \"use\": \"sig\", \"alg\": \"ES256\",",
+        "      \"x\": \"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",",
+        "      \"y\": \"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\" },",
+        "    { \"kty\": \"RSA\", \"kid\": \"2025-12\", \"use\": \"sig\", \"alg\": \"RS256\",",
+        "      \"n\": \"0vx7agoebGcQSuu...\", \"e\": \"AQAB\" }",
+        "  ]",
+        "}",
+        "```",
+        "",
+        "Each token's header names the key that signed it with **`kid`** (key id): `{\"alg\":\"ES256\",\"kid\":\"2026-06\"}`. The API fetches the JWKS (and caches it), finds the key with that `kid`, and verifies. An EC key is its curve plus the point's `x` and `y` coordinates, base64url-encoded; an RSA key is its modulus `n` and exponent `e`.",
+        "",
+        "> **Tip:** Treat `kid` as a *lookup key into your trusted set*, nothing more. Never use it as a file path or a URL to fetch a key from; both have been exploited."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange a zero-downtime key rotation.",
+      "lines": [
+        "generate the new key pair",
+        "publish the new public key in the JWKS next to the old one",
+        "wait until APIs have refreshed their cached JWKS",
+        "start signing new tokens with the new key",
+        "wait until every token signed with the old key has expired",
+        "remove the old public key from the JWKS"
+      ],
+      "explain": "Publish before you sign, retire only after the last old token is dead. During the overlap both keys verify, chosen by `kid`."
+    },
+    {
+      "type": "predict",
+      "prompt": "An API picks the key by `kid`. What does this print?",
+      "code": [
+        "var keys = new Dictionary<string, string>",
+        "{",
+        "    [\"2025-12\"] = \"old public key\",",
+        "    [\"2026-06\"] = \"new public key\",",
+        "};",
+        "",
+        "string Pick(string kid) => keys.TryGetValue(kid, out var k) ? k : \"reject: unknown kid\";",
+        "",
+        "Console.WriteLine(Pick(\"2026-06\"));",
+        "Console.WriteLine(Pick(\"2025-12\"));",
+        "Console.WriteLine(Pick(\"../../etc/passwd\"));"
+      ],
+      "answer": [
+        "new public key",
+        "old public key",
+        "reject: unknown kid"
+      ],
+      "explain": "Both keys verify during the rotation window. Anything not in the trusted set is rejected outright."
+    },
+    {
+      "type": "learn",
+      "title": "Access tokens and refresh tokens",
+      "body": [
+        "A JWT access token can't easily be taken back, so make it **short-lived**: 5 to 15 minutes. To avoid making the user log in every 15 minutes, the login also returns a **refresh token**:",
+        "",
+        "| | Access token | Refresh token |",
+        "|---|---|---|",
+        "| Lifetime | minutes | days to weeks |",
+        "| Sent to | every API call | **only** the token endpoint |",
+        "| Format | usually a JWT, checked without a lookup | usually an **opaque random string**, looked up in a database |",
+        "| Revocable | hard (wait for `exp`) | easy (delete the row) |",
+        "",
+        "When the access token expires, the client posts the refresh token to the token endpoint and gets a new pair. **Refresh token rotation**: every refresh returns a *new* refresh token and invalidates the old one. If an old one is ever presented again, someone has a stolen copy, so the server **revokes the whole family** (every token descended from that login), logging both the attacker and the user out. This is **reuse detection**, required by current OAuth guidance for browser apps.",
+        "",
+        "Store refresh tokens **hashed** (SHA-256 is fine here, since they are long random values, not human passwords), so a database leak doesn't hand out live tokens."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A refresh token that was already used once (and rotated) is presented again. What should the server do?",
+      "options": [
+        "Reject it and revoke every refresh token in that family, because a copy has been stolen",
+        "Accept it once more, in case the client retried after a network error",
+        "Reject it but leave the newer tokens valid",
+        "Issue a new access token but not a new refresh token"
+      ],
+      "answer": 0,
+      "explain": "The server can't tell whether the attacker or the user is presenting the old token, so it kills the whole family. The legitimate user logs in again; the attacker is out."
+    },
+    {
+      "type": "learn",
+      "title": "Revocation strategies",
+      "body": [
+        "Sometimes an access token must die before its `exp`: the user logs out, is fired, or a token leaks. Options, from cheapest to strongest:",
+        "",
+        "- **Short lifetimes**: the default defence. A 10-minute token limits any leak to 10 minutes.",
+        "- **Denylist by `jti`**: store revoked token ids until their `exp`, and check each token against it. Needs a fast shared store (Redis), but only holds revoked tokens, and entries can be dropped once the token would have expired anyway.",
+        "- **Token version / \"valid after\"**: keep a per-user counter or timestamp; tokens carry it as a claim, and tokens with an older value are rejected. One write revokes all of a user's tokens.",
+        "- **Introspection** (RFC 7662): the API asks the authorization server \"is this token active?\" on each request, or uses opaque **reference tokens** that only the server can resolve. Revocation is instant; you pay a network call.",
+        "",
+        "Each lookup gives up some of the \"no database\" benefit of JWTs. That's the trade-off, and it's why many teams use short-lived JWTs plus revocable refresh tokens.",
+        "",
+        "**JWE in one paragraph.** A JWS (what you have built) is signed and readable. A **JWE** (RFC 7516) is *encrypted*: five base64url parts (header, encrypted key, IV, ciphertext, tag), unreadable without the key. Use it when the token passes through parties who must not read its claims. Most APIs don't need it; just keep sensitive data out of tokens."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Does the API need to look something up on each request?",
+      "buckets": [
+        "No lookup",
+        "Lookup needed"
+      ],
+      "items": [
+        [
+          "Short-lived access tokens, validated by signature",
+          0
+        ],
+        [
+          "Rejecting tokens by `exp` alone",
+          0
+        ],
+        [
+          "A `jti` denylist",
+          1
+        ],
+        [
+          "Introspection at the authorization server",
+          1
+        ],
+        [
+          "A per-user token version compared with a claim",
+          1
+        ]
+      ],
+      "explain": "Only signature-and-claims validation is fully stateless. Every form of early revocation consults some state."
+    },
+    {
+      "type": "mcq",
+      "prompt": "How many dot-separated parts does a JWE (encrypted token) have?",
+      "options": [
+        "5",
+        "3",
+        "2",
+        "4"
+      ],
+      "answer": 0,
+      "explain": "Header, encrypted content-encryption key, initialization vector, ciphertext and authentication tag. A three-part token is a JWS."
+    },
+    {
+      "type": "code",
+      "title": "Verify with a JWKS",
+      "prompt": [
+        "Write `bool VerifyWithJwks(string token, string jwksJson)`:",
+        "",
+        "1. The header must have `alg` = `\"ES256\"` and a string `kid`.",
+        "2. Find the key in `jwksJson`'s `keys` array with that `kid`. None -> `false`. It must have `kty` `\"EC\"` and `crv` `\"P-256\"`.",
+        "3. Build the public key from `x` and `y`:",
+        "   ```csharp",
+        "   using var ec = ECDsa.Create(new ECParameters",
+        "   {",
+        "       Curve = ECCurve.NamedCurves.nistP256,",
+        "       Q = new ECPoint { X = FromB64Url(x), Y = FromB64Url(y) },",
+        "   });",
+        "   ```",
+        "4. Verify the signature. Never throw: return `false` for anything malformed.",
+        "",
+        "The tests build a JWKS with two keys and sign tokens with each. They import `System.Security.Cryptography` and `System.Text.Json`."
+      ],
+      "starter": [
+        "bool VerifyWithJwks(string token, string jwksJson)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "string B64Url(byte[] data) =>",
+        "    Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "byte[] FromB64Url(string text)",
+        "{",
+        "    var s = text.Replace('-', '+').Replace('_', '/');",
+        "    switch (s.Length % 4)",
+        "    {",
+        "        case 2: s += \"==\"; break;",
+        "        case 3: s += \"=\"; break;",
+        "        case 1: throw new FormatException(\"Not valid base64url.\");",
+        "    }",
+        "    return Convert.FromBase64String(s);",
+        "}",
+        "",
+        "",
+        "bool VerifyWithJwks(string token, string jwksJson)",
+        "{",
+        "    var parts = token.Split('.');",
+        "    if (parts.Length != 3) return false;",
+        "    try",
+        "    {",
+        "        using var header = JsonDocument.Parse(FromB64Url(parts[0]));",
+        "        var h = header.RootElement;",
+        "        if (!h.TryGetProperty(\"alg\", out var alg) || alg.GetString() != \"ES256\") return false;",
+        "        if (!h.TryGetProperty(\"kid\", out var kidEl) || kidEl.GetString() is not string kid) return false;",
+        "",
+        "        using var jwks = JsonDocument.Parse(jwksJson);",
+        "        foreach (var key in jwks.RootElement.GetProperty(\"keys\").EnumerateArray())",
+        "        {",
+        "            if (key.GetProperty(\"kid\").GetString() != kid) continue;",
+        "            if (key.GetProperty(\"kty\").GetString() != \"EC\" || key.GetProperty(\"crv\").GetString() != \"P-256\") return false;",
+        "",
+        "            using var ec = ECDsa.Create(new ECParameters",
+        "            {",
+        "                Curve = ECCurve.NamedCurves.nistP256,",
+        "                Q = new ECPoint",
+        "                {",
+        "                    X = FromB64Url(key.GetProperty(\"x\").GetString()!),",
+        "                    Y = FromB64Url(key.GetProperty(\"y\").GetString()!),",
+        "                },",
+        "            });",
+        "            return ec.VerifyData(Encoding.ASCII.GetBytes(parts[0] + \".\" + parts[1]), FromB64Url(parts[2]), HashAlgorithmName.SHA256);",
+        "        }",
+        "        return false;",
+        "    }",
+        "    catch (Exception e) when (e is FormatException or JsonException or KeyNotFoundException or InvalidOperationException or CryptographicException)",
+        "    {",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Read `kid` from the header, then loop over `doc.RootElement.GetProperty(\"keys\").EnumerateArray()`.",
+        "Build the `ECDsa` as on the card, then `ec.VerifyData(input, FromB64Url(parts[2]), HashAlgorithmName.SHA256)`.",
+        "Catch `FormatException`, `JsonException`, `KeyNotFoundException`, `InvalidOperationException` and `CryptographicException`."
+      ],
+      "template": [
+        "        using System.Security.Cryptography;",
+        "        using System.Text.Json;",
+        "        {{CODE}}",
+        "        using var dojoK1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "        using var dojoK2 = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "        using var dojoRogue = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "        string Jwk(string kid, ECDsa k)",
+        "        {",
+        "            var p = k.ExportParameters(false);",
+        "            return $\"{{\\\"kty\\\":\\\"EC\\\",\\\"crv\\\":\\\"P-256\\\",\\\"kid\\\":\\\"{kid}\\\",\\\"use\\\":\\\"sig\\\",\\\"x\\\":\\\"{DojoJwt.B64(p.Q.X!)}\\\",\\\"y\\\":\\\"{DojoJwt.B64(p.Q.Y!)}\\\"}}\";",
+        "        }",
+        "        var dojoJwks = \"{\\\"keys\\\":[\" + Jwk(\"2025-12\", dojoK1) + \",\" + Jwk(\"2026-06\", dojoK2) + \"]}\";",
+        "        const string P = \"{\\\"sub\\\":\\\"ada\\\"}\";",
+        "        Dojo.Eq(\"a token signed with key 2026-06\", true, VerifyWithJwks(DojoJwt.Es(\"{\\\"alg\\\":\\\"ES256\\\",\\\"kid\\\":\\\"2026-06\\\"}\", P, dojoK2), dojoJwks));",
+        "        Dojo.Eq(\"a token signed with the older key 2025-12\", true, VerifyWithJwks(DojoJwt.Es(\"{\\\"alg\\\":\\\"ES256\\\",\\\"kid\\\":\\\"2025-12\\\"}\", P, dojoK1), dojoJwks));",
+        "        Dojo.Eq(\"kid says 2026-06 but key 2025-12 signed it\", false, VerifyWithJwks(DojoJwt.Es(\"{\\\"alg\\\":\\\"ES256\\\",\\\"kid\\\":\\\"2026-06\\\"}\", P, dojoK1), dojoJwks));",
+        "        Dojo.Eq(\"a key that isn't in the JWKS\", false, VerifyWithJwks(DojoJwt.Es(\"{\\\"alg\\\":\\\"ES256\\\",\\\"kid\\\":\\\"rogue\\\"}\", P, dojoRogue), dojoJwks));",
+        "        Dojo.Eq(\"no kid\", false, VerifyWithJwks(DojoJwt.Es(\"{\\\"alg\\\":\\\"ES256\\\"}\", P, dojoK2), dojoJwks));",
+        "        Dojo.Eq(\"alg HS256 with a kid\", false, VerifyWithJwks(DojoJwt.Hs(\"{\\\"alg\\\":\\\"HS256\\\",\\\"kid\\\":\\\"2026-06\\\"}\", P, new byte[32]), dojoJwks));",
+        "        Dojo.Eq(\"a tampered payload\", false, VerifyWithJwks(DojoJwt.Tamper(DojoJwt.Es(\"{\\\"alg\\\":\\\"ES256\\\",\\\"kid\\\":\\\"2026-06\\\"}\", P, dojoK2)), dojoJwks));",
+        "        Dojo.Eq(\"a JWKS that isn't JSON\", false, VerifyWithJwks(DojoJwt.Es(\"{\\\"alg\\\":\\\"ES256\\\",\\\"kid\\\":\\\"2026-06\\\"}\", P, dojoK2), \"nope\"));",
+        "",
+        "static class DojoJwt",
+        "{",
+        "    public static string B64(byte[] d) => Convert.ToBase64String(d).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "    public static string B64(string s) => B64(System.Text.Encoding.UTF8.GetBytes(s));",
+        "    public const string Hs256Header = \"{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}\";",
+        "    public static string Hs(string header, string payload, byte[] secret)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(System.Security.Cryptography.HMACSHA256.HashData(secret, System.Text.Encoding.ASCII.GetBytes(input)));",
+        "    }",
+        "    public static string Hs(string payload, byte[] secret) => Hs(Hs256Header, payload, secret);",
+        "    public static string Es(string header, string payload, System.Security.Cryptography.ECDsa key)",
+        "    {",
+        "        var input = B64(header) + \".\" + B64(payload);",
+        "        return input + \".\" + B64(key.SignData(System.Text.Encoding.ASCII.GetBytes(input), System.Security.Cryptography.HashAlgorithmName.SHA256));",
+        "    }",
+        "    public static string Tamper(string token)",
+        "    {",
+        "        var p = token.Split('.');",
+        "        return p[0] + \".\" + B64(\"{\\\"sub\\\":\\\"admin\\\"}\") + \".\" + p[2];",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "ECParameters",
+          "message": "Builds the key from the JWK's x and y"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A jti denylist",
+      "prompt": [
+        "Write a class `Denylist` for revoked access tokens:",
+        "",
+        "- `void Revoke(string jti, long exp)`: remember the token id until its expiry.",
+        "- `bool IsRevoked(string jti)`",
+        "- `int Purge(long now)`: forget entries whose `exp <= now` (those tokens fail the `exp` check anyway) and return how many were removed.",
+        "",
+        "That keeps the list as small as the number of revoked tokens that are still alive."
+      ],
+      "starter": [
+        "class Denylist",
+        "{",
+        "    public void Revoke(string jti, long exp) { }",
+        "    public bool IsRevoked(string jti) => false;",
+        "    public int Purge(long now) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class Denylist",
+        "{",
+        "    private readonly Dictionary<string, long> _revoked = new();",
+        "",
+        "    public void Revoke(string jti, long exp) => _revoked[jti] = exp;",
+        "",
+        "    public bool IsRevoked(string jti) => _revoked.ContainsKey(jti);",
+        "",
+        "    public int Purge(long now)",
+        "    {",
+        "        var dead = _revoked.Where(p => p.Value <= now).Select(p => p.Key).ToList();",
+        "        foreach (var jti in dead) _revoked.Remove(jti);",
+        "        return dead.Count;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `Dictionary<string, long>` from jti to exp is all you need.",
+        "Collect the expired keys into a list before removing them."
+      ],
+      "template": [
+        "var dojoD = new Denylist();",
+        "dojoD.Revoke(\"t1\", 1000);",
+        "dojoD.Revoke(\"t2\", 2000);",
+        "dojoD.Revoke(\"t3\", 3000);",
+        "Dojo.Eq(\"t2 is revoked\", true, dojoD.IsRevoked(\"t2\"));",
+        "Dojo.Eq(\"t9 is not\", false, dojoD.IsRevoked(\"t9\"));",
+        "Dojo.Eq(\"Purge(1999) removes 1\", 1, dojoD.Purge(1999));",
+        "Dojo.Eq(\"t1 is forgotten\", false, dojoD.IsRevoked(\"t1\"));",
+        "Dojo.Eq(\"t2 is still revoked\", true, dojoD.IsRevoked(\"t2\"));",
+        "Dojo.Eq(\"Purge(2000) removes t2 (exp <= now)\", 1, dojoD.Purge(2000));",
+        "Dojo.Eq(\"Purge(2000) again removes nothing\", 0, dojoD.Purge(2000));",
+        "Dojo.Eq(\"t3 is still revoked\", true, dojoD.IsRevoked(\"t3\"));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}
