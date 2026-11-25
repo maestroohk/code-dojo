@@ -9,6 +9,7 @@ import { pkiLab } from './lab-pki.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
 import { subnetTrainer } from './lab-subnet.js';
+import { vimLab } from './lab-vim.js';
 import { workbench } from './workbench.js';
 import { netLabs } from './netlabs.js';
 
@@ -93,6 +94,8 @@ const LABS = [
     text: 'Build roots, intermediates and server certificates like blocks, wire up who signs whom, and watch real chain validation succeed or fail. Eight fix-it challenges.' },
   { id: 'subnet', icon: '⧖', title: 'Subnetting trainer', category: 'Networking',
     text: 'Endless subnetting questions (network, broadcast, host ranges, masks, splitting blocks) with a bit-by-bit breakdown after every answer, until it is automatic.' },
+  { id: 'vim', icon: '⌨', title: 'Vim & nano trainer', category: 'Linux',
+    text: 'A real Vim emulator with 36 keystroke-golf challenges, from "how do I quit?" to text objects, dot-repeat and :%s. Plus nano basics, a cheat sheet and free practice.' },
   { id: 'code', icon: '▶', title: 'Code in motion', category: 'Foundations',
     text: 'Step through any program line by line, forwards and backwards: watch loops count, variables change, arrays get sorted and recursive calls stack up.' },
   { id: 'linq', icon: '⇶', title: 'LINQ in motion', category: 'C#',
@@ -283,6 +286,14 @@ function labsView(id) {
   if (!lab) return notFound();
   if (id === 'linq') return linqLab(lab);
   if (id === 'code') return codeLab(lab);
+  if (id === 'vim') {
+    const host = h('div');
+    page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'),
+      h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`),
+        h('p.muted', 'Click the editor and type real Vim keys. Every challenge has a par: match the goal in as few keystrokes as you can.'))),
+      host);
+    return vimLab(host, (xp, title) => toast(h('div', h('b', `+${xp} XP`), ` · solved "${title}"`), 'gold'));
+  }
   if (id === 'subnet') {
     const host = h('div');
     page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'),
