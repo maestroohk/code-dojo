@@ -1,0 +1,178 @@
+{
+  "title": "Boss: log analytics",
+  "summary": "Idiomatic, efficient data wrangling.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Module boss",
+      "body": "Three functions over web-server log lines like `2024-05-01T10:00:03 GET /home 200 35ms`. Aim for code a Python reviewer would approve: comprehensions, built-ins, the right containers, no index loops."
+    },
+    {
+      "type": "code",
+      "title": "Parse",
+      "prompt": "Write `parse(lines)`, a **generator** that yields a dict per valid line: `{\"time\": str, \"method\": str, \"path\": str, \"status\": int, \"ms\": int}`. Skip blank lines and lines that do not have exactly 5 fields or whose status/ms are not numbers (ms ends in `ms`).",
+      "starter": "def parse(lines):\n    ...\n",
+      "solution": [
+        "def parse(lines):",
+        "    for line in lines:",
+        "        parts = line.split()",
+        "        if len(parts) != 5 or not parts[4].endswith(\"ms\"):",
+        "            continue",
+        "        time, method, path, status, ms = parts",
+        "        try:",
+        "            yield {\"time\": time, \"method\": method, \"path\": path, \"status\": int(status), \"ms\": int(ms[:-2])}",
+        "        except ValueError:",
+        "            continue"
+      ],
+      "template": [
+        "{{CODE}}",
+        "LOG = [\"2024-05-01T10:00:03 GET /home 200 35ms\", \"\", \"garbage\", \"2024-05-01T10:00:04 POST /login 401 12ms\", \"t GET /x abc 1ms\", \"t GET /y 200 fast\"]",
+        "rows = list(parse(LOG))",
+        "Dojo.eq(\"two valid rows\", 2, len(rows))",
+        "Dojo.eq(\"first row\", {\"time\": \"2024-05-01T10:00:03\", \"method\": \"GET\", \"path\": \"/home\", \"status\": 200, \"ms\": 35}, rows[0])",
+        "Dojo.eq(\"status is an int\", 401, rows[1][\"status\"])",
+        "import types",
+        "Dojo.check(\"parse is a generator\", isinstance(parse([]), types.GeneratorType), \"use yield\")"
+      ],
+      "hints": [
+        "Unpack the five fields after checking the count.",
+        "`int(ms[:-2])` drops the `ms`; wrap conversions in `try`/`except ValueError`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Stats",
+      "prompt": [
+        "Keep `parse`. Write `stats(rows)` returning a dict:",
+        "",
+        "- `\"requests\"`: number of rows",
+        "- `\"errors\"`: rows with status `>= 400`",
+        "- `\"slowest\"`: path of the slowest request (first one on ties), or `None`",
+        "- `\"by_status\"`: dict status to count, **sorted by status**",
+        "- `\"avg_ms\"`: average ms rounded to 1 place, or `0.0` when empty",
+        "- `\"top_paths\"`: the 2 most requested paths as a list (ties: first seen first)",
+        "",
+        "`rows` may be any iterable (even the generator), so make one list first."
+      ],
+      "starter": "# parse from the previous step, then stats\n",
+      "solution": [
+        "from collections import Counter",
+        "",
+        "def parse(lines):",
+        "    for line in lines:",
+        "        parts = line.split()",
+        "        if len(parts) != 5 or not parts[4].endswith(\"ms\"):",
+        "            continue",
+        "        time, method, path, status, ms = parts",
+        "        try:",
+        "            yield {\"time\": time, \"method\": method, \"path\": path, \"status\": int(status), \"ms\": int(ms[:-2])}",
+        "        except ValueError:",
+        "            continue",
+        "",
+        "def stats(rows):",
+        "    rows = list(rows)",
+        "    statuses = Counter(r[\"status\"] for r in rows)",
+        "    return {",
+        "        \"requests\": len(rows),",
+        "        \"errors\": sum(1 for r in rows if r[\"status\"] >= 400),",
+        "        \"slowest\": max(rows, key=lambda r: r[\"ms\"])[\"path\"] if rows else None,",
+        "        \"by_status\": dict(sorted(statuses.items())),",
+        "        \"avg_ms\": round(sum(r[\"ms\"] for r in rows) / len(rows), 1) if rows else 0.0,",
+        "        \"top_paths\": [p for p, _ in Counter(r[\"path\"] for r in rows).most_common(2)],",
+        "    }"
+      ],
+      "template": [
+        "{{CODE}}",
+        "LOG = \"\"\"t1 GET /home 200 30ms",
+        "t2 GET /about 200 50ms",
+        "t3 POST /login 401 10ms",
+        "t4 GET /home 500 90ms",
+        "t5 GET /about 200 20ms",
+        "t6 GET /home 200 40ms\"\"\".splitlines()",
+        "s = stats(parse(LOG))",
+        "Dojo.eq(\"requests\", 6, s[\"requests\"])",
+        "Dojo.eq(\"errors\", 2, s[\"errors\"])",
+        "Dojo.eq(\"slowest\", \"/home\", s[\"slowest\"])",
+        "Dojo.eq(\"by_status sorted\", [(200, 4), (401, 1), (500, 1)], list(s[\"by_status\"].items()))",
+        "Dojo.eq(\"avg_ms\", 40.0, s[\"avg_ms\"])",
+        "Dojo.eq(\"top_paths\", [\"/home\", \"/about\"], s[\"top_paths\"])",
+        "e = stats([])",
+        "Dojo.eq(\"empty input\", (0, 0, None, {}, 0.0, []), (e[\"requests\"], e[\"errors\"], e[\"slowest\"], e[\"by_status\"], e[\"avg_ms\"], e[\"top_paths\"]))"
+      ],
+      "hints": [
+        "`Counter(...).most_common(2)` keeps first-seen order on ties.",
+        "`dict(sorted(counter.items()))` gives a dict in status order.",
+        "Guard `max` and the average with `if rows else ...`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Bursts",
+      "prompt": "Keep `parse` and `stats`. Write `error_bursts(rows, size)` returning a list of `(start_time, end_time)` for every run of **at least `size` consecutive** error rows (status `>= 400`), in order. Use `itertools.groupby` on \"is this an error?\".",
+      "starter": "# parse and stats from the previous step, then error_bursts\n",
+      "solution": [
+        "from collections import Counter",
+        "from itertools import groupby",
+        "",
+        "def parse(lines):",
+        "    for line in lines:",
+        "        parts = line.split()",
+        "        if len(parts) != 5 or not parts[4].endswith(\"ms\"):",
+        "            continue",
+        "        time, method, path, status, ms = parts",
+        "        try:",
+        "            yield {\"time\": time, \"method\": method, \"path\": path, \"status\": int(status), \"ms\": int(ms[:-2])}",
+        "        except ValueError:",
+        "            continue",
+        "",
+        "def stats(rows):",
+        "    rows = list(rows)",
+        "    statuses = Counter(r[\"status\"] for r in rows)",
+        "    return {",
+        "        \"requests\": len(rows),",
+        "        \"errors\": sum(1 for r in rows if r[\"status\"] >= 400),",
+        "        \"slowest\": max(rows, key=lambda r: r[\"ms\"])[\"path\"] if rows else None,",
+        "        \"by_status\": dict(sorted(statuses.items())),",
+        "        \"avg_ms\": round(sum(r[\"ms\"] for r in rows) / len(rows), 1) if rows else 0.0,",
+        "        \"top_paths\": [p for p, _ in Counter(r[\"path\"] for r in rows).most_common(2)],",
+        "    }",
+        "",
+        "def error_bursts(rows, size):",
+        "    bursts = []",
+        "    for is_error, run in groupby(rows, key=lambda r: r[\"status\"] >= 400):",
+        "        run = list(run)",
+        "        if is_error and len(run) >= size:",
+        "            bursts.append((run[0][\"time\"], run[-1][\"time\"]))",
+        "    return bursts"
+      ],
+      "template": [
+        "{{CODE}}",
+        "LOG = \"\"\"t1 GET / 500 1ms",
+        "t2 GET / 503 1ms",
+        "t3 GET / 200 1ms",
+        "t4 GET / 404 1ms",
+        "t5 GET / 200 1ms",
+        "t6 GET / 500 1ms",
+        "t7 GET / 500 1ms",
+        "t8 GET / 500 1ms\"\"\".splitlines()",
+        "Dojo.eq(\"bursts of 2 or more\", [(\"t1\", \"t2\"), (\"t6\", \"t8\")], error_bursts(parse(LOG), 2))",
+        "Dojo.eq(\"bursts of 3 or more\", [(\"t6\", \"t8\")], error_bursts(parse(LOG), 3))",
+        "Dojo.eq(\"single errors count with size 1\", 3, len(error_bursts(parse(LOG), 1)))",
+        "Dojo.eq(\"no rows\", [], error_bursts([], 1))",
+        "Dojo.eq(\"stats still works\", 6, stats(parse(LOG))[\"errors\"])"
+      ],
+      "require": [
+        {
+          "pattern": "\\bgroupby\\(",
+          "message": "Uses groupby"
+        }
+      ],
+      "hints": [
+        "`groupby(rows, key=lambda r: r[\"status\"] >= 400)` yields (True/False, run).",
+        "Turn each run into a list to get its length and its first and last times."
+      ]
+    }
+  ]
+}
