@@ -1,0 +1,173 @@
+{
+  "title": "Packages and services",
+  "module": "Linux missions · 3 · Boss",
+  "minutes": 35,
+  "summary": "No internet, two .deb files and a dependency puzzle. Query packages with dpkg, install offline, configure a service, start it, check it listens with ss, and make it start at boot.",
+  "nodes": {
+    "jaffa": "a new server with no internet access; packages wait in /root/packages"
+  },
+  "default_node": "jaffa",
+  "ready": [
+    {
+      "node": "jaffa",
+      "cmd": "test -s /root/packages/sprinkles-cli_0.9.1_all.deb"
+    }
+  ],
+  "vars": {
+    "PORT": {
+      "type": "int",
+      "min": 7100,
+      "max": 7999
+    }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Whose file is this?",
+      "text": "Every file the system installed belongs to a package. Which package installed `/usr/bin/ssh-keygen`?",
+      "answer": "openssh-client",
+      "hints": [
+        "`dpkg -S <path>` searches the installed packages' file lists. (On Red Hat family systems it is `rpm -qf <path>`.)",
+        "`dpkg -S /usr/bin/ssh-keygen` prints `package: path`."
+      ],
+      "solution": {
+        "answer_cmd": {
+          "node": "jaffa",
+          "cmd": "dpkg -S /usr/bin/ssh-keygen | cut -d: -f1"
+        }
+      }
+    },
+    {
+      "id": "t2",
+      "type": "answer",
+      "title": "Read the label first",
+      "text": "Ops dropped two packages in `/root/packages`. Before installing anything, read its label: `sprinkles-cli` **depends** on `netcat-openbsd` and on one other package. Which one?",
+      "answer": "crumbd",
+      "hints": [
+        "A `.deb` file carries its metadata (name, version, dependencies). `dpkg-deb --info file.deb` (or `-I`) shows it without installing.",
+        "Look at the `Depends:` line of `dpkg-deb -I /root/packages/sprinkles-cli_0.9.1_all.deb`. `dpkg-deb -c` lists the files inside."
+      ],
+      "solution": {
+        "answer_cmd": {
+          "node": "jaffa",
+          "cmd": "dpkg-deb -f /root/packages/sprinkles-cli_0.9.1_all.deb Depends | tr ',' '\\n' | grep -v netcat | awk '{print $1}'"
+        }
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Install, offline",
+      "text": "Install `sprinkles-cli` from `/root/packages`. This server has **no internet**, so apt can't download anything. Try installing it on its own first and read the error: it is a useful one. Then get it done.",
+      "checks": [
+        {
+          "node": "jaffa",
+          "cmd": "[ \"$(dpkg-query -W -f='${Status}' crumbd 2>/dev/null)\" = 'install ok installed' ]",
+          "fail_msg": "crumbd is not (fully) installed yet. Check: dpkg -l crumbd"
+        },
+        {
+          "node": "jaffa",
+          "cmd": "[ \"$(dpkg-query -W -f='${Status}' sprinkles-cli 2>/dev/null)\" = 'install ok installed' ]",
+          "fail_msg": "sprinkles-cli is not (fully) installed yet. Check: dpkg -l sprinkles-cli (iU means unpacked but not configured)."
+        }
+      ],
+      "hints": [
+        "`dpkg -i /root/packages/sprinkles-cli_0.9.1_all.deb` complains that it depends on crumbd, which isn't installed. dpkg installs files, but never fetches dependencies.",
+        "Install both in one go: `dpkg -i /root/packages/*.deb`. Or let apt sort out the order from local files: `apt install /root/packages/*.deb` (the paths must start with `/` or `./`, so apt knows they are files).",
+        "Already ran the first command? Install crumbd, then `dpkg --configure -a` finishes the half-installed sprinkles-cli."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "jaffa",
+            "cmd": "dpkg -i /root/packages/crumbd_1.4.2_all.deb /root/packages/sprinkles-cli_0.9.1_all.deb"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "answer",
+      "title": "Where's the config?",
+      "text": "What is the full path of the **configuration file** that the `crumbd` package installed?",
+      "answer": "/etc/crumbd/crumbd.conf",
+      "hints": [
+        "`dpkg -L crumbd` lists every file a package installed.",
+        "Configuration lives under `/etc` (and packages mark such files as *conffiles*, so upgrades don't overwrite your edits)."
+      ],
+      "solution": {
+        "answer_cmd": {
+          "node": "jaffa",
+          "cmd": "dpkg -L crumbd | grep '^/etc/.*\\.conf$'"
+        }
+      }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "Configure and start",
+      "text": "The company port plan says crumbd lives on **port {{PORT}}**. Configure it, then **start** the service and check that it is listening. `sprinkles` should then print a crumb of wisdom.",
+      "checks": [
+        {
+          "node": "jaffa",
+          "cmd": "grep -Eq '^[[:space:]]*port[[:space:]]*=[[:space:]]*{{PORT}}[[:space:]]*$' /etc/crumbd/crumbd.conf",
+          "fail_msg": "The config file doesn't say port = {{PORT}} yet."
+        },
+        {
+          "node": "jaffa",
+          "cmd": "ss -ltnH 'sport = :{{PORT}}' | grep -q LISTEN",
+          "fail_msg": "Nothing is listening on TCP port {{PORT}}. Is the service started (and restarted after the config change)?"
+        },
+        {
+          "node": "jaffa",
+          "cmd": "sprinkles | grep -q 'crumbd'",
+          "fail_msg": "sprinkles doesn't get an answer from crumbd."
+        }
+      ],
+      "hints": [
+        "Edit the file with `nano /etc/crumbd/crumbd.conf` (or `sed -i 's/^port = .*/port = {{PORT}}/' /etc/crumbd/crumbd.conf`).",
+        "The package installed a service script in `/etc/init.d/crumbd`. `service crumbd start` runs it (`status`, `stop` and `restart` work too). On a systemd machine you'd use `systemctl start crumbd`.",
+        "Is it listening? `ss -ltn` lists listening TCP sockets (`-l` listening, `-t` TCP, `-n` numbers, add `-p` for the process). If it didn't start, read `/var/log/crumbd.log`."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "jaffa",
+            "cmd": "sed -i 's/^port = .*/port = {{PORT}}/' /etc/crumbd/crumbd.conf && service crumbd restart && ss -ltn && sprinkles"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "Open for business, every boot",
+      "text": "Two last things. crumbd only listens on `127.0.0.1`, so other machines can't reach it: make it listen on **all interfaces** (and restart it). And make sure it **starts at boot**: enable the service for the normal runlevels.",
+      "checks": [
+        {
+          "node": "jaffa",
+          "cmd": "ss -ltnH 'sport = :{{PORT}}' | grep -Eq '(0\\.0\\.0\\.0|\\*):{{PORT}}'",
+          "fail_msg": "crumbd isn't listening on all interfaces (0.0.0.0:{{PORT}}) yet. Check with: ss -ltn"
+        },
+        {
+          "node": "jaffa",
+          "cmd": "ls /etc/rc2.d/ 2>/dev/null | grep -q '^S[0-9]*crumbd$'",
+          "fail_msg": "crumbd is not enabled at boot (no S..crumbd link in /etc/rc2.d)."
+        }
+      ],
+      "hints": [
+        "`127.0.0.1` means \"this machine only\"; `0.0.0.0` means \"every address this machine has\". Change `listen` in the config, then `service crumbd restart`.",
+        "With SysV init scripts, \"enabled\" means a start link in `/etc/rc2.d` and friends. `update-rc.d crumbd defaults` creates them from the script's header. (systemd: `systemctl enable crumbd`.)"
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "jaffa",
+            "cmd": "sed -i 's/^listen = .*/listen = 0.0.0.0/' /etc/crumbd/crumbd.conf && service crumbd restart && update-rc.d crumbd defaults && ss -ltn"
+          }
+        ]
+      }
+    }
+  ]
+}

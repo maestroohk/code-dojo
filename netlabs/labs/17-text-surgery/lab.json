@@ -1,0 +1,210 @@
+{
+  "title": "Text surgery",
+  "module": "Linux missions · 2 · Operator",
+  "minutes": 40,
+  "summary": "Marketing's customer export is a crime scene: semicolons, stray spaces, SHOUTING emails, Windows line endings and duplicates. Operate with tr, sed, cut, sort, uniq and awk.",
+  "nodes": {
+    "garibaldi": "the reporting server; the export is /srv/export/customers.csv"
+  },
+  "default_node": "garibaldi",
+  "ready": [
+    {
+      "node": "garibaldi",
+      "cmd": "test -s /srv/export/customers.csv"
+    }
+  ],
+  "vars": {
+    "SEED": {
+      "type": "int",
+      "min": 1,
+      "max": 1000000
+    },
+    "CITY": {
+      "type": "choice",
+      "options": [
+        "leeds",
+        "york",
+        "bristol",
+        "derby",
+        "bath",
+        "hull"
+      ]
+    }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "state",
+      "title": "Invisible carriage returns",
+      "text": "Look at the patient: `head -5 /srv/export/customers.csv`, then `head -3 /srv/export/customers.csv | cat -A` (`-A` makes invisible characters visible). Every line ends in `^M$`: Windows line endings (`\\r\\n`), which confuse Linux tools. Write a copy without them to `/root/step1.csv`.",
+      "checks": [
+        {
+          "node": "garibaldi",
+          "cmd": "test -s /root/step1.csv",
+          "fail_msg": "/root/step1.csv does not exist yet (or is empty)."
+        },
+        {
+          "node": "garibaldi",
+          "cmd": "! grep -q $'\\r' /root/step1.csv",
+          "fail_msg": "step1.csv still contains carriage returns (\\r)."
+        },
+        {
+          "node": "garibaldi",
+          "cmd": "[ $(wc -l < /root/step1.csv) -eq $(wc -l < /srv/export/customers.csv) ]",
+          "fail_msg": "step1.csv should have the same number of lines as the original."
+        }
+      ],
+      "hints": [
+        "`tr` translates or deletes characters. `tr -d 'x'` deletes every x. It reads stdin only, so feed it with `<`.",
+        "`tr -d '\\r' < /srv/export/customers.csv > /root/step1.csv`. (`sed 's/\\r$//'` works too, and so does `dos2unix` where it is installed.)"
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "garibaldi",
+            "cmd": "tr -d '\\r' < /srv/export/customers.csv > /root/step1.csv"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t2",
+      "type": "answer",
+      "title": "Head count",
+      "text": "How many customer **rows** say they live in **{{CITY}}**? City names are messy (`YORK`, ` York `, `york`), so count them all. Count rows as they are, duplicates included, and don't count the header.",
+      "answer_cmd": {
+        "node": "garibaldi",
+        "cmd": "tr -d '\\r' < /srv/export/customers.csv | tail -n +2 | awk -F';' '{c = $4; gsub(/ /, \"\", c); if (tolower(c) == \"{{CITY}}\") n++} END {print n + 0}'"
+      },
+      "hints": [
+        "Fields are separated by `;`. `cut -d';' -f4 /root/step1.csv` prints the city column.",
+        "Make the column uniform before counting: `tr -d ' '` removes spaces and `tr 'A-Z' 'a-z'` lowercases.",
+        "`tail -n +2 /root/step1.csv | cut -d';' -f4 | tr -d ' ' | tr 'A-Z' 'a-z' | sort | uniq -c` counts every city at once."
+      ],
+      "solution": {
+        "answer_cmd": {
+          "node": "garibaldi",
+          "cmd": "tr -d '\\r' < /srv/export/customers.csv | tail -n +2 | cut -d';' -f4 | tr -d ' ' | tr 'A-Z' 'a-z' | grep -cx '{{CITY}}'"
+        }
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Stitch it into a clean CSV",
+      "text": "Make `/root/clean.csv`: the same rows **without the header**, fields separated by **commas**, spaces at the start and end of every field removed (keep the space inside a name like `Ada Lovelace`), and the **email** and **city** in lowercase. A row should look like `317,Ada Lovelace,ada.lovelace@example.com,leeds,12`.",
+      "checks": [
+        {
+          "node": "garibaldi",
+          "cmd": "test -s /root/clean.csv",
+          "fail_msg": "/root/clean.csv does not exist yet (or is empty)."
+        },
+        {
+          "node": "garibaldi",
+          "cmd": "! head -1 /root/clean.csv | grep -qi email",
+          "fail_msg": "The header line is still there."
+        },
+        {
+          "node": "garibaldi",
+          "cmd": "diff <(tr -d '\\r' < /srv/export/customers.csv | tail -n +2 | awk -F';' -v OFS=, '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, \"\", $i); $3 = tolower($3); $4 = tolower($4); print}') /root/clean.csv > /dev/null",
+          "fail_msg": "Not quite the expected rows yet. Compare a few lines of your file with the example: commas, no stray spaces, lowercase email and city, same row order as the original."
+        }
+      ],
+      "hints": [
+        "Build it one stage at a time: `tail -n +2` drops the header, then trim, then lowercase, then swap `;` for `,`.",
+        "`sed 's/ *; */,/g'` turns `;` plus any spaces around it into a single comma; `sed 's/^ *//; s/ *$//'` trims the ends of the line.",
+        "Lowercasing only two columns is a job for awk: `awk -F, -v OFS=, '{ $3 = tolower($3); $4 = tolower($4); print }'`. (`-F` is the input separator, `OFS` the output one.)",
+        "All together: `tail -n +2 /root/step1.csv | sed 's/ *; */,/g; s/^ *//; s/ *$//' | awk -F, -v OFS=, '{ $3 = tolower($3); $4 = tolower($4); print }' > /root/clean.csv`"
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "garibaldi",
+            "cmd": "tail -n +2 /root/step1.csv | sed 's/ *; */,/g; s/^ *//; s/ *$//' | awk -F, -v OFS=, '{ $3 = tolower($3); $4 = tolower($4); print }' > /root/clean.csv"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "state",
+      "title": "Seeing double",
+      "text": "Some customers were exported twice. Make `/root/unique.csv`: `clean.csv` with every row appearing **once**, sorted by **ID** numerically (smallest first).",
+      "checks": [
+        {
+          "node": "garibaldi",
+          "cmd": "test -s /root/unique.csv",
+          "fail_msg": "/root/unique.csv does not exist yet (or is empty)."
+        },
+        {
+          "node": "garibaldi",
+          "cmd": "diff <(tr -d '\\r' < /srv/export/customers.csv | tail -n +2 | awk -F';' -v OFS=, '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, \"\", $i); $3 = tolower($3); $4 = tolower($4); print}' | sort -t, -k1,1n | uniq) /root/unique.csv > /dev/null",
+          "fail_msg": "unique.csv should be clean.csv's rows, each once, sorted numerically by the first column."
+        }
+      ],
+      "hints": [
+        "`sort` puts identical lines next to each other; `uniq` then drops the repeats. `sort -u` does both.",
+        "Numeric sort on the first comma-separated field: `sort -t, -k1,1n` (`-t,` separator, `-k1,1` field 1 only, `n` numeric). So: `sort -t, -k1,1n /root/clean.csv | uniq > /root/unique.csv`."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "garibaldi",
+            "cmd": "sort -t, -k1,1n /root/clean.csv | uniq > /root/unique.csv"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t5",
+      "type": "answer",
+      "title": "Customer of the year",
+      "text": "Marketing wants to send a giant golden biscuit to the customer with the **most orders** (last column). What is their email address?",
+      "answer_cmd": {
+        "node": "garibaldi",
+        "cmd": "tr -d '\\r' < /srv/export/customers.csv | tail -n +2 | awk -F';' -v OFS=, '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, \"\", $i); $3 = tolower($3); $4 = tolower($4); print}' | sort -t, -k1,1n | uniq | sort -t, -k5,5nr | head -1 | cut -d, -f3"
+      },
+      "hints": [
+        "Sort `unique.csv` on field 5, numerically, biggest first: `sort -t, -k5,5nr /root/unique.csv | head -3`.",
+        "Then `cut -d, -f3` keeps only the email. Or in awk: `awk -F, '$5 > max { max = $5; who = $3 } END { print who }' /root/unique.csv`."
+      ],
+      "solution": {
+        "answer_cmd": {
+          "node": "garibaldi",
+          "cmd": "awk -F, '$5 > max { max = $5; who = $3 } END { print who }' /root/unique.csv"
+        }
+      }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "The report Brenda actually wants",
+      "text": "From `unique.csv`, write `/root/report.txt` with **one line per city**: the city and its **total orders** (sum of the last column), separated by a space, biggest total first. For example `leeds 214`.",
+      "checks": [
+        {
+          "node": "garibaldi",
+          "cmd": "test -s /root/report.txt",
+          "fail_msg": "/root/report.txt does not exist yet (or is empty)."
+        },
+        {
+          "node": "garibaldi",
+          "cmd": "[ \"$(tr -d '\\r' < /srv/export/customers.csv | tail -n +2 | awk -F';' -v OFS=, '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, \"\", $i); $3 = tolower($3); $4 = tolower($4); print}' | sort -t, -k1,1n | uniq | awk -F, '{t[$4] += $5} END {for (c in t) print c, t[c]}' | sort -k2,2nr)\" = \"$(awk '{print $1, $2}' /root/report.txt)\" ]",
+          "fail_msg": "Not the expected report: one line per city as `city total`, totals from unique.csv (no duplicates), biggest first."
+        }
+      ],
+      "hints": [
+        "Summing per group is awk's party trick: an **associative array** keyed by city. `t[$4] += $5` adds each row's orders to its city's total.",
+        "Print the totals at the END: `awk -F, '{ t[$4] += $5 } END { for (c in t) print c, t[c] }' /root/unique.csv`. The order is random...",
+        "...so sort it on the second field, numerically, reversed: `... | sort -k2,2nr > /root/report.txt`."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "garibaldi",
+            "cmd": "awk -F, '{ t[$4] += $5 } END { for (c in t) print c, t[c] }' /root/unique.csv | sort -k2,2nr > /root/report.txt"
+          }
+        ]
+      }
+    }
+  ]
+}

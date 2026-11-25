@@ -1,0 +1,100 @@
+{
+  "title": "Disk full!",
+  "module": "Linux missions · 2 · Operator",
+  "minutes": 30,
+  "summary": "3 a.m., \"No space left on device\". Measure with df and du, find the monster file, compress and truncate logs safely, and catch the space thief that df sees but ls can't.",
+  "nodes": { "bourbon": "the order server; its data disk is /srv/data (64 MB)" },
+  "default_node": "bourbon",
+  "ready": [ { "node": "bourbon", "cmd": "pgrep -f '[l]og-hoarder' && pgrep -f '[b]iscuit-api' && test -s /srv/data/logs/app.log.3" } ],
+  "vars": {
+    "TOP": { "type": "choice", "options": ["tmp", "media", "old"] }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "How bad is it?",
+      "text": "How full is the filesystem mounted at `/srv/data`? Submit the **Use%** number that `df` reports (just the number, without `%`).",
+      "answer_cmd": { "node": "bourbon", "cmd": "df --output=pcent /srv/data | tail -1 | tr -dc 0-9" },
+      "hints": [
+        "`df -h` lists every mounted filesystem with its size, used, available and Use%. `-h` means human units (M, G).",
+        "`df -h /srv/data` shows just the one you care about."
+      ],
+      "solution": { "answer_cmd": { "node": "bourbon", "cmd": "df /srv/data | awk 'NR==2 {print $5}' | tr -d %" } }
+    },
+    {
+      "id": "t2",
+      "type": "answer",
+      "title": "Where did it all go?",
+      "text": "`df` says *how full*, `du` says *what is using it*. Which folder directly inside `/srv/data` takes up the most space? Submit its name.",
+      "answer": ["{{TOP}}", "/srv/data/{{TOP}}", "/srv/data/{{TOP}}/"],
+      "hints": [
+        "`du -sh /srv/data/*` prints a total for each item in `/srv/data` (`-s` summary, `-h` human units).",
+        "Sort it, biggest last: `du -sh /srv/data/* | sort -h`. Hidden folders are included in each folder's total."
+      ],
+      "solution": { "answer_cmd": { "node": "bourbon", "cmd": "du -s /srv/data/* | sort -n | tail -1 | awk '{print $2}' | xargs basename" } }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Evict the monster",
+      "text": "Somewhere in that folder is a single file of almost 30 MB that has no business on an order server. Find it and delete it.",
+      "checks": [
+        { "node": "bourbon", "cmd": "[ -z \"$(find /srv/data -type f -size +20M)\" ]", "fail_msg": "There is still a file over 20 MB under /srv/data." },
+        { "node": "bourbon", "cmd": "test -s /srv/data/orders/today.txt && test -e /srv/data/logs/app.log", "fail_msg": "Today's orders or the live log went missing. Restart the lab: only the monster had to go." }
+      ],
+      "hints": [
+        "Keep drilling down with `du -sh <folder>/*`, or ask `find` straight away: `find /srv/data -type f -size +20M`.",
+        "Plain `ls` hides folders whose names start with a dot; `ls -la` shows them. Found it? `rm <path>`."
+      ],
+      "solution": { "steps": [ { "node": "bourbon", "cmd": "find /srv/data -type f -size +20M -delete" } ] }
+    },
+    {
+      "id": "t4",
+      "type": "state",
+      "title": "Squash the old logs",
+      "text": "`/srv/data/logs` holds yesterday's rotated logs `app.log.1`, `app.log.2` and `app.log.3`. We must keep them, but they don't need to be readable at full size. **Compress** each with gzip, so they become `app.log.1.gz` and so on.",
+      "checks": [
+        { "node": "bourbon", "cmd": "test -s /srv/data/logs/app.log.1.gz && test -s /srv/data/logs/app.log.2.gz && test -s /srv/data/logs/app.log.3.gz", "fail_msg": "app.log.1.gz, app.log.2.gz and app.log.3.gz don't all exist yet." },
+        { "node": "bourbon", "cmd": "! test -e /srv/data/logs/app.log.1 && ! test -e /srv/data/logs/app.log.2 && ! test -e /srv/data/logs/app.log.3", "fail_msg": "The uncompressed copies are still there (gzip replaces the file unless you ask it to keep it)." }
+      ],
+      "hints": [
+        "`gzip file` replaces `file` with a much smaller `file.gz`. Log text squashes well, often to a tenth.",
+        "One command for all three: `gzip /srv/data/logs/app.log.[1-3]`. Read them later with `zcat` or `zless`, no need to unpack."
+      ],
+      "solution": { "steps": [ { "node": "bourbon", "cmd": "gzip /srv/data/logs/app.log.[1-3]" } ] }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "Shrink the live log (carefully)",
+      "text": "`app.log` is 14 MB and `biscuit-api` is **still writing to it**. Empty it so it starts again from zero, while keeping `biscuit-api` running and still logging into `/srv/data/logs/app.log`.",
+      "checks": [
+        { "node": "bourbon", "cmd": "pgrep -f '[b]iscuit-api' >/dev/null", "fail_msg": "biscuit-api is not running any more! Restart the lab and try again without stopping it." },
+        { "node": "bourbon", "cmd": "[ $(stat -c %s /srv/data/logs/app.log 2>/dev/null || echo 99999999) -lt 1048576 ]", "fail_msg": "/srv/data/logs/app.log is missing or still bigger than 1 MB." },
+        { "node": "bourbon", "cmd": "ls -l /proc/$(pgrep -f '[b]iscuit-api' | head -1)/fd | grep -q '/srv/data/logs/app.log$'", "fail_msg": "biscuit-api is writing into a deleted file, not into /srv/data/logs/app.log (did the file get removed and recreated?)." }
+      ],
+      "hints": [
+        "Deleting a file that a program has open does **not** free the space: the program keeps writing into the now-invisible file, and the new `app.log` you create stays empty.",
+        "Empty it in place instead: `truncate -s 0 /srv/data/logs/app.log`, or the classic `: > /srv/data/logs/app.log`. Same file, now zero bytes."
+      ],
+      "solution": { "steps": [ { "node": "bourbon", "cmd": "truncate -s 0 /srv/data/logs/app.log" } ] }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "The invisible space thief",
+      "text": "Check `df -h /srv/data` again. Add up what `du -sh /srv/data` sees: about 10 MB are missing! Gary deleted a 10 MB debug log, but some process is still holding it open. Find the process and free that space.",
+      "checks": [
+        { "node": "bourbon", "cmd": "! find /proc/[0-9]*/fd -lname '/srv/data/*(deleted)' 2>/dev/null | grep -q .", "fail_msg": "A process still holds a deleted file under /srv/data open." },
+        { "node": "bourbon", "cmd": "[ $(df --output=pcent /srv/data | tail -1 | tr -dc 0-9) -lt 25 ]", "fail_msg": "/srv/data is still over 25% full." }
+      ],
+      "hints": [
+        "Every open file of every process is listed in `/proc/<PID>/fd/` as a link. A deleted one ends in `(deleted)`. Usually you'd use `lsof +L1`, but this server doesn't have lsof.",
+        "`ls -l /proc/[0-9]*/fd 2>/dev/null | grep deleted` shows the link. To see **which** process: `find /proc/[0-9]*/fd -lname '*(deleted)' 2>/dev/null` (the number after /proc/ is the PID).",
+        "Restart or kill that process (`ps -p <PID> -o args` tells you who it is), or, if it must stay up, truncate the file through its fd: `: > /proc/<PID>/fd/<N>`."
+      ],
+      "solution": { "steps": [ { "node": "bourbon", "cmd": "pkill -f '[l]og-hoarder'; sleep 1; df -h /srv/data" } ] }
+    }
+  ]
+}

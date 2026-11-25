@@ -1,0 +1,171 @@
+{
+  "title": "Cron and automation",
+  "module": "Linux missions · 3 · Boss",
+  "minutes": 35,
+  "summary": "Robots should do the boring jobs at 3 a.m. Read and write crontabs, learn why a script that works by hand fails under cron, dodge the % trap, and retire Gary's most dangerous job.",
+  "nodes": {
+    "oreo": "the automation server, running a cron daemon"
+  },
+  "default_node": "oreo",
+  "ready": [
+    {
+      "node": "oreo",
+      "cmd": "pgrep -f '[m]inicron' && crontab -l | grep -q cleanup-crumbs"
+    }
+  ],
+  "vars": {
+    "HOUR": {
+      "type": "int",
+      "min": 1,
+      "max": 5
+    }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Read Gary's crontab",
+      "text": "Gary left a job in root's crontab. Have a look (`crontab -l`). At what **hour** of the day does `cleanup-crumbs` run? (24-hour clock, just the hour.)",
+      "answer": [
+        "{{HOUR}}",
+        "0{{HOUR}}",
+        "{{HOUR}}:30",
+        "0{{HOUR}}:30"
+      ],
+      "hints": [
+        "A crontab line is five time fields and then the command: `minute hour day-of-month month day-of-week command`.",
+        "`30 4 * * 1-5` means minute 30 of hour 4 (04:30), any day of the month, any month, Monday to Friday."
+      ],
+      "solution": {
+        "answer_cmd": {
+          "node": "oreo",
+          "cmd": "crontab -l | grep cleanup-crumbs | awk '{print $2}'"
+        }
+      }
+    },
+    {
+      "id": "t2",
+      "type": "state",
+      "title": "Every five minutes",
+      "text": "Brenda wants the oven report written all day long. Add a job to root's crontab that runs `/usr/local/bin/bake-report` **every 5 minutes**. Keep Gary's job for now.",
+      "checks": [
+        {
+          "node": "oreo",
+          "cmd": "crontab -l | grep -Eq '^[[:space:]]*(\\*/5|0,5,10,15,20,25,30,35,40,45,50,55)[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+.*bake-report'",
+          "fail_msg": "No crontab line runs bake-report every 5 minutes yet (crontab -l to check)."
+        },
+        {
+          "node": "oreo",
+          "cmd": "crontab -l | grep -q cleanup-crumbs",
+          "fail_msg": "Gary's cleanup-crumbs line disappeared. Keep it for now (task 5 deals with it)."
+        }
+      ],
+      "hints": [
+        "`crontab -e` opens root's crontab in nano. Add a line, save (Ctrl+O, Enter) and exit (Ctrl+X): crontab checks the syntax and installs it.",
+        "`*/5` in the minute field means \"every 5th minute\". So: `*/5 * * * * /usr/local/bin/bake-report`.",
+        "Without an editor: `(crontab -l; echo '*/5 * * * * /usr/local/bin/bake-report') | crontab -` (list the old jobs, add one, install the lot)."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "oreo",
+            "cmd": "(crontab -l; echo '*/5 * * * * /usr/local/bin/bake-report') | crontab -"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "It works on my machine",
+      "text": "Run `sync-sprinkles` in your terminal: it works. Now schedule it to run **every minute** from root's crontab... and wait a minute. Then read cron's mail to root: `cat /var/mail/root`. Fix things so that the job really **succeeds under cron**. (`minicron --run-now sync-sprinkles` runs your job right away, exactly the way cron would.)",
+      "checks": [
+        {
+          "node": "oreo",
+          "cmd": "crontab -l | grep -Eq '^[[:space:]]*\\*[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+.*sync-sprinkles'",
+          "fail_msg": "No crontab line runs sync-sprinkles every minute (* * * * *) yet."
+        },
+        {
+          "node": "oreo",
+          "cmd": "minicron --run-now sync-sprinkles >/dev/null 2>&1",
+          "fail_msg": "The job fails when cron runs it. Run: minicron --run-now sync-sprinkles, and look at the error."
+        }
+      ],
+      "hints": [
+        "The mail says `sprinkle-tool: not found`. But it runs fine by hand! What is different? Compare `echo $PATH` in your shell with the PATH cron uses (see the lesson).",
+        "Find where the tool really lives: `type sprinkle-tool`. Your interactive shell found it because `~/.bashrc` adds `/opt/sprinkles/bin` to PATH. Cron doesn't read `.bashrc`.",
+        "Two good fixes: put `PATH=/usr/local/bin:/usr/bin:/bin:/opt/sprinkles/bin` on a line **above** the job in the crontab, or make the script call `/opt/sprinkles/bin/sprinkle-tool` by its full path."
+      ],
+      "solution": {
+        "note": "This is the number one cron surprise. Cron starts jobs with a tiny environment (PATH=/usr/bin:/bin, no .bashrc, no aliases, sh instead of bash). Use full paths or set PATH at the top of the crontab.",
+        "steps": [
+          {
+            "node": "oreo",
+            "cmd": "(crontab -l; echo 'PATH=/usr/local/bin:/usr/bin:/bin:/opt/sprinkles/bin'; echo '* * * * * /usr/local/bin/sync-sprinkles') | crontab - && minicron --run-now sync-sprinkles"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "state",
+      "title": "The percent trap",
+      "text": "Add a job that runs every night at **02:00** and makes a dated backup of the crumbs folder, with exactly this command:\n\n```\ntar -czf /root/backups/crumbs-$(date +%F).tgz -C /srv crumbs\n```\n\nIt works perfectly when you type it in the shell. In a crontab, it does not, unless you know cron's little secret about one of those characters. Make it work (test with `minicron --run-now /root/backups`).",
+      "checks": [
+        {
+          "node": "oreo",
+          "cmd": "crontab -l | grep -Eq '^[[:space:]]*0[[:space:]]+0?2[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+.*/root/backups'",
+          "fail_msg": "No crontab line runs the backup at 02:00 (0 2 * * *) yet."
+        },
+        {
+          "node": "oreo",
+          "cmd": "rm -f /root/backups/crumbs-$(date +%F).tgz; minicron --run-now /root/backups >/dev/null 2>&1 && test -s /root/backups/crumbs-$(date +%F).tgz",
+          "fail_msg": "When cron runs the job, no /root/backups/crumbs-<today>.tgz appears. Try: minicron --run-now /root/backups"
+        }
+      ],
+      "hints": [
+        "Run it the cron way and read the error: `minicron --run-now /root/backups`. The command looks cut short...",
+        "In a crontab, `%` is special: cron turns the first `%` into the end of the command (the rest becomes the job's input). `man 5 crontab` on a real system says so in one easily missed sentence.",
+        "Escape it as `\\%`: `0 2 * * * tar -czf /root/backups/crumbs-$(date +\\%F).tgz -C /srv crumbs`. (Or put the command in a script and schedule the script.)"
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "oreo",
+            "cmd": "(crontab -l; echo '0 2 * * * tar -czf /root/backups/crumbs-$(date +\\%F).tgz -C /srv crumbs') | crontab - && minicron --run-now /root/backups"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "Retire Gary's job",
+      "text": "Read `/usr/local/bin/cleanup-crumbs`. Every weekday night it deletes the whole crumbs folder, including the files your new backup job is about to save. Remove that job from the crontab, and **only** that job.",
+      "checks": [
+        {
+          "node": "oreo",
+          "cmd": "! crontab -l 2>/dev/null | grep -q cleanup-crumbs",
+          "fail_msg": "cleanup-crumbs is still in root's crontab."
+        },
+        {
+          "node": "oreo",
+          "cmd": "crontab -l | grep -q bake-report && crontab -l | grep -q sync-sprinkles && crontab -l | grep -q /root/backups",
+          "fail_msg": "Your own jobs (bake-report, sync-sprinkles, the backup) should still be there."
+        }
+      ],
+      "hints": [
+        "`crontab -e`, delete the line, save. Or put a `#` in front of it to keep it as a comment.",
+        "In one line: `crontab -l | grep -v cleanup-crumbs | crontab -` (`grep -v` keeps every line that does **not** match). Careful: `crontab -r` would remove **all** jobs."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "oreo",
+            "cmd": "crontab -l | grep -v cleanup-crumbs | crontab - && crontab -l"
+          }
+        ]
+      }
+    }
+  ]
+}

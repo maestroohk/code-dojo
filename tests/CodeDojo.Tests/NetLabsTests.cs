@@ -22,10 +22,12 @@ public class NetLabsTests
     static JsonObject Task(string json) => JsonNode.Parse(json)!.AsObject();
 
     [Fact]
-    public void Loads_all_ten_labs_with_valid_definitions()
+    public void Loads_every_lab_folder_with_a_valid_definition()
     {
         var labs = Engine(out _).LoadLabs();
-        Assert.Equal(10, labs.Count);
+        var folders = Directory.GetDirectories(Path.Combine(Root(), "netlabs", "labs")).Count(d => File.Exists(Path.Combine(d, "lab.json")));
+        Assert.Equal(folders, labs.Count);
+        Assert.True(labs.Count >= 10);
         Assert.Equal("01-ip-addressing", labs[0].Id);
         Assert.Equal("cdnet-01", labs[0].Project);
         Assert.Equal("cdnet-01-pc2-1", labs[0].Container("pc2"));

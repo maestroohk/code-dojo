@@ -22,10 +22,10 @@ const shellMd = text => {
 };
 
 /** Entry point from the router. Returns a cleanup function. */
-export function netLabs(page, id) {
+export function netLabs(page, id, kind = 'net') {
   const cleanups = [];
   const leave = () => cleanups.splice(0).forEach(f => { try { f(); } catch { } });
-  if (id) labPage(page, id, cleanups); else listPage(page, cleanups);
+  if (id) labPage(page, id, cleanups, kind); else listPage(page, cleanups, kind);
   return leave;
 }
 
@@ -56,12 +56,20 @@ function dockerBanner(info, refresh) {
 
 // ---------------------------------------------------------------- list
 
-function listPage(page, cleanups) {
+// Linux missions share the engine with the network labs; the list pages show one family each.
+const LINUX = 'Linux missions';
+const isLinux = l => (l.module || '').startsWith(LINUX);
+
+function listPage(page, cleanups, kind) {
+  const linux = kind === 'linux';
   const body = h('div', h('p.muted', 'Asking Docker...'));
   page('labs',
     h('a.back-link', { href: '#/labs' }, '← All labs'),
-    h('section.hero', h('div', h('div.eyebrow', 'Lab · Networking & security'), h('h1', 'Live network labs'),
-      h('p.muted', 'Real networks of Linux hosts on your machine. Open a terminal on any host, break things, fix them, and let the lab check your work.'))),
+    linux
+      ? h('section.hero', h('div', h('div.eyebrow', 'Lab · Linux'), h('h1', 'Linux missions'),
+        h('p.muted', 'Short, story-driven missions on a real Linux server. You are the new sysadmin at Byte & Biscuit: find things, fix things, and work your way from Survival to Boss.')))
+      : h('section.hero', h('div', h('div.eyebrow', 'Lab · Networking & security'), h('h1', 'Live network labs'),
+        h('p.muted', 'Real networks of Linux hosts on your machine. Open a terminal on any host, break things, fix them, and let the lab check your work.'))),
     body);
   let timer = null;
   cleanups.push(() => clearTimeout(timer));
@@ -71,11 +79,12 @@ function listPage(page, cleanups) {
     try { info = await api('netlabs' + (fresh ? '?fresh=true' : '')); }
     catch (e) { body.replaceChildren(h('p.bad', String(e.message))); return; }
     const running = info.labs.filter(l => l.running);
+    const labs = info.labs.filter(l => isLinux(l) === linux);
     let module = null;
     const cards = [];
-    for (const l of info.labs) {
-      if (l.module !== module) { module = l.module; cards.push(h('h2.section-title', module)); }
-      cards.push(h('a.nl-card', { href: `#/labs/net/${l.id}` },
+    for (const l of labs) {
+      if (l.module !== module) { module = l.module; cards.push(h('h2.section-title', linux ? module.replace(`${LINUX} · `, '') : module)); }
+      cards.push(h('a.nl-card', { href: `#/labs/${kind}/${l.id}` },
         h('div.nl-num', l.num),
         h('div.nl-card-body',
           h('h3', l.title, l.running && h('span.nl-pill.on', 'running')),
@@ -83,10 +92,10 @@ function listPage(page, cleanups) {
           h('div.topic-meta', l.minutes && h('span', `about ${l.minutes} min`), h('span', `${l.done}/${l.total} tasks`)),
           h('div.bar', h('div.bar-fill', { style: { width: `${(l.done / Math.max(1, l.total)) * 100}%` } })))));
     }
-    const total = info.labs.reduce((a, l) => a + l.total, 0), done = info.labs.reduce((a, l) => a + l.done, 0);
+    const total = labs.reduce((a, l) => a + l.total, 0), done = labs.reduce((a, l) => a + l.done, 0);
     body.replaceChildren(
       dockerBanner(info, refresh) || '',
-      h('div.nl-summary', h('span', `${done}/${total} tasks done across ${info.labs.length} labs`),
+      h('div.nl-summary', h('span', `${done}/${total} tasks done across ${labs.length} ${linux ? 'missions' : 'labs'}`),
         running.length > 0 && h('button.btn.ghost', { type: 'button', onclick: async e => {
           e.currentTarget.disabled = true; e.currentTarget.textContent = 'Stopping...';
           await api('netlabs/stop-all', {}); refresh();
@@ -291,9 +300,10 @@ function terminal(labId, node, { onStatus } = {}) {
 
 // ---------------------------------------------------------------- one lab
 
-function labPage(page, id, cleanups) {
+function labPage(page, id, cleanups, kind) {
   const root = h('div.nl-lab', loader('the lab'));
-  page('labs', h('a.back-link', { href: '#/labs/net' }, '← All network labs'), root);
+  const back = kind === 'linux' ? ['#/labs/linux', 'All Linux missions'] : ['#/labs/net', 'All network labs'];
+  page('labs', h('a.back-link', { href: back[0] }, '← ' + back[1]), root);
   const terms = new Map();   // node -> terminal
   let active = null, lab = null, busy = false;
   cleanups.push(() => terms.forEach(t => t.close()));
@@ -409,7 +419,7 @@ function labPage(page, id, cleanups) {
   async function load() {
     let info, overview;
     try { [info, overview] = await Promise.all([api(`netlabs/${id}`), api('netlabs')]); }
-    catch (e) { root.replaceChildren(h('div.empty', h('h2', 'No such lab'), h('a.btn.primary', { href: '#/labs/net' }, 'All network labs'))); return; }
+    catch (e) { root.replaceChildren(h('div.empty', h('h2', 'No such lab'), h('a.btn.primary', { href: back[0] }, back[1]))); return; }
     lab = info;
     renderControls();
     topoHost.replaceChildren(topology(lab.topology, lab.running, openTerm));
@@ -431,7 +441,7 @@ function labPage(page, id, cleanups) {
             h('div.nl-sticky',
               h('div.nl-row', controls),
               status,
-              h('div.nl-card-box', h('div.eyebrow', 'Network'), topoHost),
+              h('div.nl-card-box', h('div.eyebrow', kind === 'linux' ? 'Machines' : 'Network'), topoHost),
               h('div.nl-card-box', h('div.eyebrow', 'Terminals'), termTabs, termHost)))));
     }
     root.querySelector('.nl-bannerslot')?.replaceChildren(banner || '');

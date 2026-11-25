@@ -1,0 +1,97 @@
+{
+  "title": "The process hunt",
+  "module": "Linux missions · 2 · Operator",
+  "minutes": 30,
+  "summary": "The server's fans sound like a jet engine. Track down a CPU hog that keeps coming back, a backup that ignores you, a zombie and a process that needs to learn some manners.",
+  "nodes": { "digestive": "the build server, mysteriously busy" },
+  "default_node": "digestive",
+  "ready": [ { "node": "digestive", "cmd": "pgrep -f '[c]ookie-miner' && pgrep -f '[g]ary-backup' && pgrep -f '[o]ven-sim' && ps -eo stat= | grep -q '^Z'" } ],
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Who is eating the CPU?",
+      "text": "Something is burning CPU on `digestive`. Find the process using the most CPU and submit its **PID** (process ID number).",
+      "answer_cmd": { "node": "digestive", "cmd": "pgrep -f '[c]ookie-miner'" },
+      "hints": [
+        "`top` shows a live list sorted by CPU (press `q` to quit). For a one-shot snapshot: `top -b -n 1 | head -15`.",
+        "Or with `ps`: `ps aux --sort=-%cpu | head -5`. The PID is the second column of `ps aux`, the first column of `top`."
+      ],
+      "solution": { "answer_cmd": { "node": "digestive", "cmd": "ps -eo pid=,args= --sort=-%cpu | grep '[c]ookie-miner' | awk '{print $1}' | head -1" } }
+    },
+    {
+      "id": "t2",
+      "type": "state",
+      "title": "Kill it... for good",
+      "text": "Stop `cookie-miner`. Then wait a few seconds and look again. Make sure it **stays** dead.",
+      "checks": [
+        { "node": "digestive", "cmd": "sleep 2; ! pgrep -f '[c]ookie-miner' >/dev/null", "fail_msg": "cookie-miner is running (again?). Something keeps restarting it: who is its parent?" }
+      ],
+      "hints": [
+        "`kill <PID>` asks a process to stop (signal TERM). `pkill -f cookie-miner` does it by name.",
+        "It comes back with a new PID? Then something restarts it. Every process has a parent: `ps -o pid,ppid,args -p <PID>` shows the **PPID**, then look up that parent with `ps -p <PPID> -o args`.",
+        "Kill the parent (`oven-watchdog`) first, then the miner: `pkill -f oven-watchdog; pkill -f cookie-miner`."
+      ],
+      "solution": {
+        "note": "On a real server the watchdog would be a systemd service (`Restart=always`) or a cron job, and the fix is to stop and disable that service. Killing the child alone is a game of whack-a-mole.",
+        "steps": [ { "node": "digestive", "cmd": "pkill -f '[o]ven-watchdog'; pkill -f '[c]ookie-miner'; sleep 1" } ]
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "The backup that won't listen",
+      "text": "`gary-backup` has been \"backing up\" for 412 days and has never written a byte. Stop it. (It is not going to go quietly.)",
+      "checks": [
+        { "node": "digestive", "cmd": "! pgrep -f '[g]ary-backup' >/dev/null", "fail_msg": "gary-backup is still running." }
+      ],
+      "hints": [
+        "Try the polite way first: `pkill -f gary-backup`. Still there? Look inside the script: `cat /usr/local/bin/gary-backup`.",
+        "`trap '' TERM` means \"ignore the TERM signal\". A program can ignore TERM, INT and HUP, but **not** KILL (signal 9).",
+        "`pkill -KILL -f gary-backup` (or `kill -9 <PID>`). KILL gives the program no chance to clean up, so it is the last resort, not the first."
+      ],
+      "solution": { "steps": [ { "node": "digestive", "cmd": "pkill -KILL -f '[g]ary-backup'; sleep 1" } ] }
+    },
+    {
+      "id": "t4",
+      "type": "answer",
+      "title": "There's a zombie in here",
+      "text": "`ps` shows a process in state **Z**: a *zombie*. It has finished, but its parent never collected its exit status. Which process is the zombie's **parent**? Submit the parent's PID.",
+      "answer_cmd": { "node": "digestive", "cmd": "ps -eo ppid=,stat= | awk '$2 ~ /^Z/ {print $1; exit}'" },
+      "hints": [
+        "`ps aux | grep defunct` or `ps -eo pid,ppid,stat,args` and look for `Z` in the STAT column.",
+        "The PPID column of the zombie's line is the answer."
+      ],
+      "solution": { "answer_cmd": { "node": "digestive", "cmd": "ps -eo pid=,ppid=,stat= | awk '$3 ~ /^Z/ {print $2; exit}'" } }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "Lay it to rest",
+      "text": "You can't kill a zombie: it is already dead. Get rid of it anyway.",
+      "checks": [
+        { "node": "digestive", "cmd": "sleep 1; ! ps -eo stat= | grep -q '^Z'", "fail_msg": "There is still a zombie process (state Z)." }
+      ],
+      "hints": [
+        "`kill -9` on the zombie's own PID does nothing. The problem is the parent that never calls wait().",
+        "Kill the **parent** (`crumb-collector`). The zombie is then adopted by PID 1 (the container's init), which collects it at once."
+      ],
+      "solution": { "steps": [ { "node": "digestive", "cmd": "pkill -f '[c]rumb-collector'; sleep 1" } ] }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "Manners for the oven",
+      "text": "`oven-sim` must keep running, but it should give way to everything else. Give the running process a **nice value of 15** (without restarting it).",
+      "checks": [
+        { "node": "digestive", "cmd": "pgrep -f '[o]ven-sim' >/dev/null", "fail_msg": "oven-sim is not running any more! Restart the lab, or start it again: nohup nice -n 15 oven-sim &" },
+        { "node": "digestive", "cmd": "[ \"$(ps -o ni= -p $(pgrep -f '[o]ven-sim' | head -1) | tr -d ' ')\" = 15 ]", "fail_msg": "oven-sim's nice value is not 15 yet (see the NI column of: ps -o pid,ni,args -p <PID>)." }
+      ],
+      "hints": [
+        "Niceness goes from -20 (greedy) to 19 (very polite). `nice -n 15 cmd` *starts* a command with that value; `renice` changes a running one.",
+        "`renice -n 15 -p $(pgrep -f oven-sim)`. Check with `ps -o pid,ni,args -p <PID>`."
+      ],
+      "solution": { "steps": [ { "node": "digestive", "cmd": "renice -n 15 -p $(pgrep -f '[o]ven-sim')" } ] }
+    }
+  ]
+}

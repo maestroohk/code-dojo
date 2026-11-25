@@ -1,0 +1,107 @@
+{
+  "title": "The permission heist",
+  "module": "Linux missions · 2 · Operator",
+  "minutes": 35,
+  "summary": "Friday's deploy died with \"Permission denied\" and Gary's answer was chmod 777. Do it properly: read rwx, lock down a secret, fix owners and groups, and write a tight sudo rule.",
+  "nodes": { "jammie": "the app server; user deploy runs the deploys" },
+  "default_node": "jammie",
+  "ready": [ { "node": "jammie", "cmd": "test -x /usr/local/bin/restart-oven" } ],
+  "vars": {
+    "MODE": { "type": "choice", "options": ["644", "666", "604", "664"] },
+    "OWNER": { "type": "choice", "options": ["gary", "intern", "nobody"] }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Case the joint",
+      "text": "Read the crime scene first: `cat /srv/app/deploy.log`. Then look at the secret file `/etc/app/secret.conf`. What are its permissions right now, as a **3-digit octal number** (like `750`)?",
+      "answer": ["{{MODE}}", "0{{MODE}}"],
+      "hints": [
+        "`ls -l /etc/app/secret.conf` shows something like `-rw-r--r--`. Skip the first character (the file type), then read three groups of three: **owner**, **group**, **others**.",
+        "Score each group: r = 4, w = 2, x = 1, and add up. `rw-` = 6, `r--` = 4, `---` = 0. So `-rw-r--r--` is 644.",
+        "Or let Linux do the maths: `stat -c %a /etc/app/secret.conf`."
+      ],
+      "solution": { "answer_cmd": { "node": "jammie", "cmd": "stat -c %a /etc/app/secret.conf" } }
+    },
+    {
+      "id": "t2",
+      "type": "state",
+      "title": "Lock up the secret",
+      "text": "A database password that **everyone** on the server can read is a heist waiting to happen. Make `/etc/app/secret.conf` owned by user `root` and group `deployers`, readable by its group, and not accessible at all to others. Only root may change it.",
+      "checks": [
+        { "node": "jammie", "cmd": "[ \"$(stat -c '%U:%G' /etc/app/secret.conf)\" = root:deployers ]", "fail_msg": "The owner should be root and the group deployers." },
+        { "node": "jammie", "cmd": "[ \"$(stat -c %a /etc/app/secret.conf)\" = 640 ] || [ \"$(stat -c %a /etc/app/secret.conf)\" = 440 ]", "fail_msg": "The permissions should be 640: owner read+write, group read, others nothing." }
+      ],
+      "hints": [
+        "`chown user:group file` changes both owner and group (`chgrp group file` changes only the group).",
+        "`chmod 640 file`: 6 (rw-) for the owner, 4 (r--) for the group, 0 (---) for everyone else. In letters: `chmod u=rw,g=r,o= file`."
+      ],
+      "solution": { "steps": [ { "node": "jammie", "cmd": "chown root:deployers /etc/app/secret.conf && chmod 640 /etc/app/secret.conf" } ] }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Join the crew",
+      "text": "The secret is now readable by group `deployers`, but user `deploy` isn't in that group. Add them, **without** removing them from any other group.",
+      "checks": [
+        { "node": "jammie", "cmd": "id -nG deploy | grep -qw deployers", "fail_msg": "deploy is not in the deployers group yet (check with: id deploy)." },
+        { "node": "jammie", "cmd": "id -nG deploy | grep -qw deploy", "fail_msg": "deploy lost its own group: use usermod -aG (the a means append)." }
+      ],
+      "hints": [
+        "`id deploy` shows a user's groups.",
+        "`usermod -aG deployers deploy`. The **a** (append) matters: `-G` alone replaces all of the user's extra groups. (`gpasswd -a deploy deployers` does the same.)",
+        "Group changes apply to **new** logins. A shell that was already open as deploy keeps its old groups."
+      ],
+      "solution": { "steps": [ { "node": "jammie", "cmd": "usermod -aG deployers deploy" } ] }
+    },
+    {
+      "id": "t4",
+      "type": "state",
+      "title": "Make the script runnable",
+      "text": "`/srv/app/deploy.sh` can't be run at all: nobody has the **x** (execute) permission. Fix it so that `deploy` can **run** it but not **change** it, and users outside the deployers group can't read or run it. (Hint: Gary's `chmod 777` fails two of those three rules.)",
+      "checks": [
+        { "node": "jammie", "cmd": "su -s /bin/bash deploy -c 'test -x /srv/app/deploy.sh'", "fail_msg": "deploy still cannot execute deploy.sh." },
+        { "node": "jammie", "cmd": "su -s /bin/bash deploy -c 'test ! -w /srv/app/deploy.sh'", "fail_msg": "deploy can modify deploy.sh. Only root should be able to change it." },
+        { "node": "jammie", "cmd": "m=$(stat -c %a /srv/app/deploy.sh); [ \"${m: -1}\" = 0 ]", "fail_msg": "Others (users outside the file's group) can still read or run deploy.sh." }
+      ],
+      "hints": [
+        "Same idea as the secret: give the file to group `deployers`, and give that group read + execute.",
+        "`chgrp deployers /srv/app/deploy.sh && chmod 750 /srv/app/deploy.sh`: owner (root) rwx, group r-x, others nothing. A script needs **r** as well as **x**, because the shell has to read it to run it."
+      ],
+      "solution": { "steps": [ { "node": "jammie", "cmd": "chgrp deployers /srv/app/deploy.sh && chmod 750 /srv/app/deploy.sh" } ] }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "The deploy goes through",
+      "text": "Try it as the deploy user: `su - deploy -c /srv/app/deploy.sh`. One more \"Permission denied\" stands in the way. Fix it (properly!) so the deploy succeeds.",
+      "checks": [
+        { "node": "jammie", "cmd": "su - deploy -c /srv/app/deploy.sh", "fail_msg": "Running /srv/app/deploy.sh as deploy still fails. Run it yourself to see the error." },
+        { "node": "jammie", "cmd": "m=$(stat -c %a /srv/app/releases); [ \"${m: -1}\" != 7 ] && [ \"${m: -1}\" != 6 ] && [ \"${m: -1}\" != 3 ] && [ \"${m: -1}\" != 2 ]", "fail_msg": "Works, but now everybody can write to /srv/app/releases. Give write access to deploy (or its group) only." }
+      ],
+      "hints": [
+        "The script writes into `/srv/app/releases`. `ls -ld /srv/app/releases` (the `-d` shows the folder itself, not its contents): who owns it?",
+        "Writing a **new file** in a folder needs **w** on the folder. Either give the folder to deploy (`chown deploy:deployers /srv/app/releases`) or to the group with group write (`chgrp deployers ... && chmod 775 ...`)."
+      ],
+      "solution": { "steps": [ { "node": "jammie", "cmd": "chown deploy:deployers /srv/app/releases && chmod 775 /srv/app/releases && su - deploy -c /srv/app/deploy.sh" } ] }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "One key, one door",
+      "text": "After a deploy, `deploy` must restart the oven with `sudo /usr/local/bin/restart-oven`, **without** a password prompt (it runs unattended). It must **not** be able to run anything else as root. Write that sudo rule.",
+      "checks": [
+        { "node": "jammie", "cmd": "visudo -c >/dev/null", "fail_msg": "The sudo configuration has a syntax error. Run visudo -c to see it." },
+        { "node": "jammie", "cmd": "su - deploy -c 'sudo -n /usr/local/bin/restart-oven'", "fail_msg": "deploy cannot run sudo /usr/local/bin/restart-oven without a password yet." },
+        { "node": "jammie", "cmd": "su - deploy -c 'sudo -n /usr/bin/id'", "expect": "fail", "fail_msg": "deploy can run other commands as root too. Allow only restart-oven." }
+      ],
+      "hints": [
+        "Rules go in a file under `/etc/sudoers.d/`. A rule reads: **who** `host=(as whom)` **options: command**.",
+        "`deploy ALL=(root) NOPASSWD: /usr/local/bin/restart-oven`. Give the full path to the command: a bare name could match anything.",
+        "Write it with `visudo -f /etc/sudoers.d/deploy`, or with echo, then `chmod 440` the file and check it with `visudo -c`. A broken sudoers file can lock everyone out of sudo."
+      ],
+      "solution": { "steps": [ { "node": "jammie", "cmd": "echo 'deploy ALL=(root) NOPASSWD: /usr/local/bin/restart-oven' > /etc/sudoers.d/deploy && chmod 440 /etc/sudoers.d/deploy && visudo -c" } ] }
+    }
+  ]
+}

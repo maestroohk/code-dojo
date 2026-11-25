@@ -1,0 +1,201 @@
+{
+  "title": "Boss fight: incident night",
+  "module": "Linux missions · 3 · Boss",
+  "minutes": 45,
+  "summary": "02:47, the pager goes off: the web shop is down. A full disk, a config nobody can read, a typo, a CPU hog and a supervisor that gave up. Everything you learned, against the clock (not really, take your time).",
+  "nodes": {
+    "biscotti": "the web shop server; read /root/PAGER.txt first"
+  },
+  "default_node": "biscotti",
+  "ready": [
+    {
+      "node": "biscotti",
+      "cmd": "grep -q 'giving up' /var/log/shop/supervisor.log && pgrep -f '[t]humbnailer'"
+    }
+  ],
+  "vars": {
+    "PORT": {
+      "type": "int",
+      "min": 8100,
+      "max": 8999
+    },
+    "COREPID": {
+      "type": "int",
+      "min": 10000,
+      "max": 39999
+    }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Triage: what filled the disk?",
+      "text": "Read the page: `cat /root/PAGER.txt`. Then start where the alarm is loudest. `/srv/shop/data` is 100% full. What is the **name** of the file that filled it?",
+      "answer": [
+        "core.{{COREPID}}",
+        "/srv/shop/data/core.{{COREPID}}"
+      ],
+      "hints": [
+        "Mission 16 all over again: `df -h /srv/shop/data`, then `du -sh /srv/shop/data/*` or `ls -lhS /srv/shop/data` (`-S` sorts by size).",
+        "A file called `core.<number>` is a **core dump**: a crashed program's memory, written out for debugging. Useful once, enormous always."
+      ],
+      "solution": {
+        "answer_cmd": {
+          "node": "biscotti",
+          "cmd": "ls -S /srv/shop/data | head -1"
+        }
+      }
+    },
+    {
+      "id": "t2",
+      "type": "state",
+      "title": "Make room",
+      "text": "Free space on `/srv/shop/data`: bring it **below 50%**. The order log `orders.log` is the company's income: it stays.",
+      "checks": [
+        {
+          "node": "biscotti",
+          "cmd": "test -s /srv/shop/data/orders.log",
+          "fail_msg": "orders.log is gone or empty! Those were real orders. Restart the lab and try again."
+        },
+        {
+          "node": "biscotti",
+          "cmd": "[ $(df --output=pcent /srv/shop/data | tail -1 | tr -dc 0-9) -lt 50 ]",
+          "fail_msg": "/srv/shop/data is still 50% full or more."
+        }
+      ],
+      "hints": [
+        "Nobody is going to debug that core dump at 3 a.m. (and if they were, you'd move it to a bigger disk, not keep it here).",
+        "`rm /srv/shop/data/core.*`. Check with `df -h /srv/shop/data`. If space doesn't come back, remember mission 16: is anything holding it open?"
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "biscotti",
+            "cmd": "rm -f /srv/shop/data/core.* && df -h /srv/shop/data"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Read the logs, find the next fault",
+      "text": "Disk fixed, but the shop is still down. Look at `shopctl status` and the logs in `/var/log/shop/` (`tail` is your friend). The app runs as user **shop** and dies reading its config. Fix the config file's permissions: `shop` must be able to **read** it, nobody else (except root) may read it, and `shop` must not be able to change it.",
+      "checks": [
+        {
+          "node": "biscotti",
+          "cmd": "su -s /bin/sh shop -c 'cat /etc/shop/shop.conf' >/dev/null 2>&1",
+          "fail_msg": "User shop still can't read /etc/shop/shop.conf."
+        },
+        {
+          "node": "biscotti",
+          "cmd": "su -s /bin/sh shop -c 'test ! -w /etc/shop/shop.conf'",
+          "fail_msg": "User shop can modify its own config. Read-only is enough."
+        },
+        {
+          "node": "biscotti",
+          "cmd": "m=$(stat -c %a /etc/shop/shop.conf); [ \"${m: -1}\" = 0 ]",
+          "fail_msg": "Other users can read the config. Give access to shop only."
+        }
+      ],
+      "hints": [
+        "`tail -n 20 /var/log/shop/shop-api.log`: a Python traceback ends with the actual error, `PermissionError: ... '/etc/shop/shop.conf'`. `ls -l /etc/shop/shop.conf` shows why.",
+        "Mission 14's recipe: give the file to the group of the user who needs it, with group read only. `chgrp shop /etc/shop/shop.conf && chmod 640 /etc/shop/shop.conf`."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "biscotti",
+            "cmd": "chgrp shop /etc/shop/shop.conf && chmod 640 /etc/shop/shop.conf && ls -l /etc/shop/shop.conf"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "state",
+      "title": "Spot the typo",
+      "text": "There's something wrong **inside** that config file too, and the runbook says what it should be. Fix it. (Running the app by hand shows the error at once: `runuser -u shop -- /srv/shop/bin/shop-api`, then Ctrl+C if it starts.)",
+      "checks": [
+        {
+          "node": "biscotti",
+          "cmd": "grep -Eq '^[[:space:]]*port[[:space:]]*=[[:space:]]*{{PORT}}[[:space:]]*$' /etc/shop/shop.conf",
+          "fail_msg": "The config doesn't say port = {{PORT}} yet."
+        },
+        {
+          "node": "biscotti",
+          "cmd": "[ \"$(stat -c '%G %a' /etc/shop/shop.conf)\" = 'shop 640' ] || su -s /bin/sh shop -c 'cat /etc/shop/shop.conf' >/dev/null 2>&1",
+          "fail_msg": "The edit broke the permissions again (some editors replace the file). shop must be able to read it."
+        }
+      ],
+      "hints": [
+        "`cat /etc/shop/shop.conf`, and compare it with the port in `/root/PAGER.txt`. Count the zeros.",
+        "`nano /etc/shop/shop.conf` or `sed -i 's/^port = .*/port = {{PORT}}/' /etc/shop/shop.conf`. Then `ls -l` again: the permissions should survive an in-place edit."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "biscotti",
+            "cmd": "sed -i 's/^port = .*/port = {{PORT}}/' /etc/shop/shop.conf && cat /etc/shop/shop.conf"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "Who's eating the CPU?",
+      "text": "The pager also said **load average high**. Find what is burning CPU and stop it. (It's not the shop. The shop isn't even running.)",
+      "checks": [
+        {
+          "node": "biscotti",
+          "cmd": "sleep 1; ! pgrep -f '[t]humbnailer' >/dev/null",
+          "fail_msg": "The CPU hog is still running."
+        }
+      ],
+      "hints": [
+        "`top` (P sorts by CPU, q quits), or `ps aux --sort=-%cpu | head -5`.",
+        "`pkill -f thumbnailer`. Polite TERM is enough this time."
+      ],
+      "solution": {
+        "steps": [
+          {
+            "node": "biscotti",
+            "cmd": "pkill -f '[t]humbnailer'; sleep 1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "Bring the shop back",
+      "text": "Everything is fixed... but the shop still isn't up. Find out why, get it running, and prove it: `curl http://127.0.0.1:{{PORT}}/health` must answer `OK`.",
+      "checks": [
+        {
+          "node": "biscotti",
+          "cmd": "curl -fsS -m 3 http://127.0.0.1:{{PORT}}/health | grep -q OK",
+          "fail_msg": "http://127.0.0.1:{{PORT}}/health doesn't answer OK yet. What does shopctl status say?"
+        },
+        {
+          "node": "biscotti",
+          "cmd": "pgrep -f '[s]hop-supervisor' >/dev/null",
+          "fail_msg": "The shop answers, but not under its supervisor (start it with shopctl, so it gets restarted if it crashes)."
+        }
+      ],
+      "hints": [
+        "`tail /var/log/shop/supervisor.log`: after 5 crashes in a row the supervisor gave up, on purpose, so a broken app doesn't restart forever.",
+        "`shopctl restart`, then `shopctl status`, `ss -ltn` and the curl. If it crashes again, the newest lines of `/var/log/shop/shop-api.log` say why."
+      ],
+      "solution": {
+        "note": "Incident over. Now the part that makes you a boss: write it up. What broke (disk full from a core dump, a config the app couldn't read, a port typo, a runaway job), how you found it, how you fixed it, and what stops it next time: monitoring disk usage before it hits 100%, limiting core dumps (`ulimit -c`), testing config changes, alerting when the supervisor gives up.",
+        "steps": [
+          {
+            "node": "biscotti",
+            "cmd": "shopctl restart && sleep 3 && shopctl status && curl -s http://127.0.0.1:{{PORT}}/health"
+          }
+        ]
+      }
+    }
+  ]
+}
