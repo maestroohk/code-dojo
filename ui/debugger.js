@@ -85,7 +85,11 @@ export function createDebugger({ show, breakpoints, onRestart, onStop, watchKey 
   const saveWatches = () => { try { localStorage.setItem(watchKey, JSON.stringify(watches)); } catch { } };
 
   // ---------------------------------------------------------------- loading
-  function load(d) {
+  /**
+   * @param d     a recording (server/CodeSpaces.Debug.cs Shape); d.live is a live session's state
+   * @param from  the recording continues an earlier one (interactive input): move on from this step instead of the start
+   */
+  function load(d, { from = -1 } = {}) {
     data = d;
     const ev = data.events || [];
     depth = ev.map(e => (e.s >= 0 && data.stacks[e.s] ? data.stacks[e.s].length : 0));
@@ -95,10 +99,16 @@ export function createDebugger({ show, breakpoints, onRestart, onStop, watchKey 
     paintTicks();
     put(notes, (data.notes || []).map(t => h('div', t)), data.truncated && h('div', `The recording stopped after ${(data.maxEvents || ev.length).toLocaleString()} steps (is a loop endless?). Everything up to there is here.`));
     notes.hidden = !notes.childNodes.length;
-    // Start where a live debugger would stop first: a breakpoint, else a crash, else the first step.
-    const first = next(-1, 1, i => isHit(i) || isCrash(i));
+    // Start where a live debugger would stop first: a breakpoint, else a crash, else where the program waits
+    // for input, else the first step (or, continuing after input, the step after it).
+    from = Math.min(from, ev.length - 1);
+    let first = next(from, 1, i => isHit(i) || isCrash(i));
+    if (first < 0 && isWaiting(last())) first = last();
+    if (first < 0 && from >= 0) first = Math.min(from + 1, last());
     go(first >= 0 ? first : 0);
   }
+  /** The program is blocked in Console.ReadLine at this (last) step of a live session. */
+  const isWaiting = i => ev(i)?.k === 'input' && i === last() && !!data?.live?.waiting;
   const ev = i => data?.events?.[i];
   const isStep = i => { const e = ev(i); return !!e && !e.k; };
   const isCrash = i => ev(i)?.k === 'crash';
@@ -164,7 +174,11 @@ export function createDebugger({ show, breakpoints, onRestart, onStop, watchKey 
     if (!e) { put(status, h('span.muted', data?.error || 'Nothing was recorded.')); return; }
     const top = data.stacks[e.s]?.at(-1);
     put(status,
-      e.k === 'end' ? h('span', h('b', 'The program finished.'), h('span.muted', ` Step back (${K.back}) or drag the timeline to look at any moment of the run.`))
+      e.k === 'end' && e.req ? h('span', h('b', 'The request finished: '), e.req, h('span.muted', ` Step back (${K.back}) or drag the timeline to look at any moment of it.`))
+      : e.k === 'end' ? h('span', h('b', 'The program finished.'), h('span.muted', ` Step back (${K.back}) or drag the timeline to look at any moment of the run.`))
+      : e.k === 'input' ? (isWaiting(at)
+        ? h('span.warn', h('b', 'Waiting for input '), `at ${where(e.f, e.l)}: type a line in the Debug output panel and press Enter.`)
+        : h('span', h('b', 'Console.ReadLine '), h('span.muted', `at ${where(e.f, e.l)}: the program read a line of input here.`)))
         : e.k === 'crash' ? h('span.bad', h('b', 'Stopped on an unhandled exception '), `at ${where(e.f, e.l)}`)
           : e.k === 'throw' ? h('span.warn', h('b', `${short(e.ty)} thrown `), `at ${where(e.f, e.l)} (the program may still catch it)`)
             : h('span', isHit(at) && h('span.dbg-bp-dot', { title: 'Breakpoint' }), h('b', top?.m || 'top level'), h('span.muted', ` · ${where(e.f, e.l)}`)));

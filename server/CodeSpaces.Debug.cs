@@ -4,13 +4,36 @@ using System.Xml.Linq;
 
 namespace CodeDojo;
 
-/// <summary>Debugging a code space's console project with the time-travel debugger (CodeDebugger.cs).</summary>
+/// <summary>
+/// Debugging a code space's console or web project with the time-travel debugger (CodeDebugger.cs). Console
+/// programs are recorded whole, or live with interactive input; web apps run live and are recorded per request
+/// (CodeDebugger.Live.cs). One live session per space.
+/// </summary>
 public sealed partial class CodeSpaces
 {
-    public record DebugRequest(string? Project, string? Stdin, List<CodeDebugger.Breakpoint>? Breakpoints, int? MaxEvents);
+    /// <param name="Interactive">Console: keep the program running and ask for input when it reads a line.</param>
+    public record DebugRequest(string? Project, string? Stdin, List<CodeDebugger.Breakpoint>? Breakpoints, int? MaxEvents, bool? Interactive = null);
     public record PlainDebugRequest(string? Code, string? Stdin, List<CodeDebugger.Breakpoint>? Breakpoints, int? MaxEvents);
+    /// <summary>For a live session: a request to load (Id), a line of input (Text), the breakpoints to mark hits with.</summary>
+    public record DebugSessionRequest(int? Id, string? Text, List<CodeDebugger.Breakpoint>? Breakpoints);
 
-    /// <summary>The project to debug: the one asked for if it is a console app, else the space's console app.</summary>
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, LiveDebug> _debugSessions = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The usings an SDK web project gets from ImplicitUsings.</summary>
+    const string WebImplicitUsings = CodeDebugger.DefaultImplicitUsings + """
+
+        global using global::System.Net.Http.Json;
+        global using global::Microsoft.AspNetCore.Builder;
+        global using global::Microsoft.AspNetCore.Hosting;
+        global using global::Microsoft.AspNetCore.Http;
+        global using global::Microsoft.AspNetCore.Routing;
+        global using global::Microsoft.Extensions.Configuration;
+        global using global::Microsoft.Extensions.DependencyInjection;
+        global using global::Microsoft.Extensions.Hosting;
+        global using global::Microsoft.Extensions.Logging;
+        """;
+
+    /// <summary>The project to debug: the one asked for if it is a console or web app, else the space's first console app, else its web app.</summary>
     string? DebugTarget(string dir, string? project, out string error)
     {
         error = "";
@@ -21,14 +44,25 @@ public sealed partial class CodeSpaces
             if (!File.Exists(full)) { error = "That is not a project in this space."; return null; }
             chosen = full;
         }
-        if (chosen is not null && KindOf(chosen) == "console") return chosen;
-        if (chosen is not null && KindOf(chosen) == "web") { error = "The debugger records console programs; web apps are not supported yet. Use Run for this one."; return null; }
-        var consoles = ProjectFiles(dir).Where(p => KindOf(p) == "console").ToList();
-        if (consoles.Count > 0) return consoles[0];
-        error = ProjectFiles(dir).Any(p => KindOf(p) == "web")
-            ? "The debugger records console programs; web apps are not supported yet. Use Run instead."
-            : "There is no console app to debug here. Add a console project (OutputType Exe).";
+        if (chosen is not null && KindOf(chosen) is "console" or "web") return chosen;
+        var projects = ProjectFiles(dir);
+        if ((projects.FirstOrDefault(p => KindOf(p) == "console") ?? projects.FirstOrDefault(p => KindOf(p) == "web")) is { } found) return found;
+        error = "There is nothing to debug here. Add a console project (OutputType Exe) or a web project.";
         return null;
+    }
+
+    /// <summary>The port of the web app being debugged in this space, if one is running.</summary>
+    int? DebugPort(string name) =>
+        _debugSessions.TryGetValue(name, out var d) && d.Web && !d.Exited && d.Port > 0 ? d.Port : null;
+
+    void StopDebugSession(string name)
+    {
+        if (_debugSessions.TryRemove(name, out var d)) d.Dispose();
+    }
+
+    void StopDebugSessions()
+    {
+        foreach (var name in _debugSessions.Keys.ToList()) StopDebugSession(name);
     }
 
     /// <summary>Everything CodeDebugger needs for a console project and the projects it references.</summary>
@@ -112,7 +146,9 @@ public sealed partial class CodeSpaces
 
             var gu = GlobalUsings(projDir, doc);
             var implicitOn = Prop(doc, "ImplicitUsings") is "enable" or "true";
-            if (implicitOn && !gu.Contains("global using global::System;")) gu = CodeDebugger.DefaultImplicitUsings + "\n" + gu;
+            var webProject = KindOf(csproj) == "web";
+            if (webProject) aspNet = true;
+            if (implicitOn && !gu.Contains("global using global::System;")) gu = (webProject ? WebImplicitUsings : CodeDebugger.DefaultImplicitUsings) + "\n" + gu;
             usings.AddRange(gu.Replace("\r\n", "\n").Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("global using ")));
         }
 
@@ -136,21 +172,66 @@ public sealed partial class CodeSpaces
             MaxEvents = req.MaxEvents ?? CodeDebugger.DefaultMaxEvents,
             Breakpoints = req.Breakpoints,
             Notes = notes,
+            Web = KindOf(main) == "web",
         };
     }
 
+    /// <summary>
+    /// Record a console program (whole, or live when Interactive), or start a web app live. Live answers carry
+    /// "live": the session's state (requests, log, waiting for input).
+    /// </summary>
     public async Task<object> Debug(string name, DebugRequest req, string dotnet)
     {
         if (DebugInput(name, req, out var error) is not { } input) return new { error };
-        var r = await CodeDebugger.Run(dotnet, input);
-        return Shape(r, Rel(Path.Combine(Root, name), input.WorkingDir!) is var p && p == "." ? "" : p);
+        var project = Rel(Path.Combine(Root, name), input.WorkingDir!) is var p && p == "." ? "" : p;
+        if (!input.Web && req.Interactive != true)
+        {
+            StopDebugSession(name);
+            return Shape(await CodeDebugger.Run(dotnet, input), project);
+        }
+        StopDebugSession(name);
+        var (session, first) = await Task.Run(() => LiveDebug.Start(dotnet, input));
+        if (session is null) return Shape(first, project);
+        _debugSessions[name] = session;
+        if (input.Web)
+        {
+            await session.WaitListening(30_000);
+            return Shape(session.RequestResult(0, req.Breakpoints), project, session.Summary(req.Breakpoints));
+        }
+        var snap = await session.Snapshot(req.Breakpoints);
+        return Shape(snap, project, session.Summary(req.Breakpoints));
     }
 
-    static object Shape(CodeDebugger.Result r, string? project) => new
+    LiveDebug? Session(string name) => _debugSessions.TryGetValue(name, out var d) ? d : null;
+    static readonly object NoSession = new { error = "The debug session has ended. Start debugging again." };
+
+    /// <summary>The live session's state: the request list (with breakpoint hits), the app's output, input wanted.</summary>
+    public object DebugSession(string name, DebugSessionRequest req) => Session(name) is { } d ? d.Summary(req.Breakpoints) : NoSession;
+
+    /// <summary>One request's recording (Id 0: the app's startup).</summary>
+    public object DebugRequestRecording(string name, DebugSessionRequest req) =>
+        Session(name) is { Web: true } d ? Shape(d.RequestResult(req.Id ?? 0, req.Breakpoints), null, d.Summary(req.Breakpoints)) : NoSession;
+
+    /// <summary>A line for the program waiting in Console.ReadLine; answers with the recording up to the next read (or the end).</summary>
+    public async Task<object> DebugInputLine(string name, DebugSessionRequest req)
+    {
+        if (Session(name) is not { Web: false } d) return NoSession;
+        var r = await d.Input(req.Text, req.Breakpoints);
+        return Shape(r, null, d.Summary(req.Breakpoints));
+    }
+
+    public object DebugStop(string name)
+    {
+        var had = _debugSessions.ContainsKey(name);
+        StopDebugSession(name);
+        return new { stopped = had };
+    }
+
+    static object Shape(CodeDebugger.Result r, string? project, object? live = null) => new
     {
         error = r.Error, diagnostics = r.Diagnostics, files = r.Files, values = r.Values, stacks = r.Stacks, events = r.Events,
         truncated = r.Truncated, timedOut = r.TimedOut, exception = r.Exception, output = r.Output, stderr = r.Stderr,
-        exitCode = r.ExitCode, ms = r.Ms, hits = r.Hits, notes = r.Notes, maxEvents = r.MaxEvents, project,
+        exitCode = r.ExitCode, ms = r.Ms, hits = r.Hits, notes = r.Notes, maxEvents = r.MaxEvents, project, live,
     };
 
     /// <summary>The Playground's single file, with the usings learner code gets everywhere else in the dojo.</summary>
@@ -202,6 +283,10 @@ public sealed partial class CodeSpaces
     static void MapDebug(WebApplication app, CodeSpaces spaces, CSharpRunner runner, JsonSerializerOptions json)
     {
         app.MapPost("/api/spaces/{name}/debug", async (string name, DebugRequest req) => Results.Json(await spaces.Debug(name, req, runner.DotnetPath), json));
+        app.MapPost("/api/spaces/{name}/debug/session", (string name, DebugSessionRequest req) => Results.Json(spaces.DebugSession(name, req), json));
+        app.MapPost("/api/spaces/{name}/debug/request", (string name, DebugSessionRequest req) => Results.Json(spaces.DebugRequestRecording(name, req), json));
+        app.MapPost("/api/spaces/{name}/debug/input", async (string name, DebugSessionRequest req) => Results.Json(await spaces.DebugInputLine(name, req), json));
+        app.MapPost("/api/spaces/{name}/debug/stop", (string name) => Results.Json(spaces.DebugStop(name), json));
         app.MapPost("/api/debug", async (PlainDebugRequest req) => Results.Json(await DebugPlain(runner.DotnetPath, req), json));
     }
 }

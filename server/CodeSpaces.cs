@@ -982,12 +982,16 @@ public sealed partial class CodeSpaces : IDisposable
     /// <summary>Send one HTTP request to the web app running in this space (and nowhere else).</summary>
     public async Task<object> Send(string name, SendRequest req)
     {
-        if (!_states.TryGetValue(name, out var s) || s.Job is not { Running: true, Kind: "run", Port: > 0 } j) return new { error = "The app is not running." };
+        // While a web app is being debugged, requests go to it (CodeSpaces.Debug.cs); otherwise to the one Run started.
+        int port;
+        if (DebugPort(name) is { } dp) port = dp;
+        else if (_states.TryGetValue(name, out var s) && s.Job is { Running: true, Kind: "run", Port: > 0 } j) port = j.Port;
+        else return new { error = "The app is not running." };
         var method = (req.Method ?? "GET").Trim().ToUpperInvariant();
         if (!Methods.Contains(method)) return new { error = "Unsupported method." };
         var path = (req.Path ?? "/").Trim();
         if (!path.StartsWith('/') || path.StartsWith("//")) path = "/" + path.TrimStart('/');
-        if (!Uri.TryCreate($"http://127.0.0.1:{j.Port}{path}", UriKind.Absolute, out var uri) || uri.Host != "127.0.0.1" || uri.Port != j.Port)
+        if (!Uri.TryCreate($"http://127.0.0.1:{port}{path}", UriKind.Absolute, out var uri) || uri.Host != "127.0.0.1" || uri.Port != port)
             return new { error = "Bad path." };
         using var msg = new HttpRequestMessage(new HttpMethod(method), uri);
         if (req.Body is { Length: > 0 } body)
@@ -1082,6 +1086,7 @@ public sealed partial class CodeSpaces : IDisposable
         _reaper.Dispose();
         foreach (var s in _states.Values)
             lock (s.Gate) if (s.Job is { Running: true } j) Kill(s, j);
+        StopDebugSessions();
         _http.Dispose();
         _nuget.Dispose();
     }

@@ -30,7 +30,7 @@ public static class CodeDebugger
     public const int DefaultMaxEvents = 20_000, MaxEventsCap = 100_000;
     public const int WallLimitMs = 60_000, CpuLimitMs = 30_000;
     const int StderrCap = 20_000, StdoutCap = 200_000;
-    const long SinkCap = 200_000_000;
+    internal const long SinkCap = 200_000_000;
 
     public record SourceFile(string Path, string Code);
     public record Breakpoint(string? File, int Line);
@@ -52,6 +52,8 @@ public static class CodeDebugger
         public int MaxEvents { get; init; } = DefaultMaxEvents;
         public List<Breakpoint>? Breakpoints { get; init; }
         public List<string> Notes { get; init; } = [];
+        /// <summary>An ASP.NET Core app: requests are tagged so steps group per request (CodeDebugger.Live.cs).</summary>
+        public bool Web { get; init; }
     }
 
     public sealed class Result
@@ -98,10 +100,49 @@ public static class CodeDebugger
 
     public static async Task<Result> Run(string dotnet, Input input)
     {
-        var result = new Result { Files = input.Files.Select(f => f.Path).ToList(), Notes = [.. input.Notes] };
-        var max = Math.Clamp(input.MaxEvents <= 0 ? DefaultMaxEvents : input.MaxEvents, 100, MaxEventsCap);
-        result.MaxEvents = max;
-        if (input.Files.Count == 0) { result.Error = "There are no C# files to debug."; return result; }
+        var result = NewResult(input);
+        if (Build(input, result) is not { } built) return result;
+        try
+        {
+            await Gate.WaitAsync();
+            try { await Execute(dotnet, built.Dll, built.Dir, built.Sink, result.MaxEvents, input, result); }
+            finally { Gate.Release(); }
+            Read(built.Sink, result);
+        }
+        finally
+        {
+            try { Directory.Delete(built.Dir, true); } catch { }
+        }
+        AddHits(result, input.Breakpoints);
+        if (result.TimedOut) result.Notes.Add("It ran longer than the debugger allows and was stopped; the steps up to then are here.");
+        return result;
+    }
+
+    internal static Result NewResult(Input input) => new()
+    {
+        Files = input.Files.Select(f => f.Path).ToList(), Notes = [.. input.Notes],
+        MaxEvents = Math.Clamp(input.MaxEvents <= 0 ? DefaultMaxEvents : input.MaxEvents, 100, MaxEventsCap),
+    };
+
+    /// <summary>The step indexes that sit on a breakpoint.</summary>
+    internal static void AddHits(Result result, List<Breakpoint>? bps)
+    {
+        result.Hits.Clear();
+        if (bps is not { Count: > 0 } || result.Files.Count == 0) return;
+        var set = bps.Select(b => (File: b.File ?? result.Files[0], b.Line)).ToHashSet();
+        for (var i = 0; i < result.Events.Count; i++)
+            if (result.Events[i] is JsonObject e && (string?)e["k"] is null && e["f"] is { } f && (int)f >= 0 && (int)f < result.Files.Count
+                && set.Contains((result.Files[(int)f], (int)e["l"]!)))
+                result.Hits.Add(i);
+    }
+
+    /// <summary>A compiled, rewritten program in its own temp folder, ready to start.</summary>
+    internal sealed record Built(string Dir, string Dll, string Sink);
+
+    /// <summary>Compiles the program twice (as written, then rewritten with stops) and emits it. Null with result.Error on failure.</summary>
+    internal static Built? Build(Input input, Result result)
+    {
+        if (input.Files.Count == 0) { result.Error = "There are no C# files to debug."; return null; }
 
         var parse = CSharpRunner.ParseOptions.WithPreprocessorSymbols("DEBUG", "TRACE", "NET", "NETCOREAPP");
         var originals = input.Files.Select(f => CSharpSyntaxTree.ParseText(f.Code.Replace("\r\n", "\n"), parse, path: f.Path, encoding: Encoding.UTF8)).ToList();
@@ -121,7 +162,7 @@ public static class CodeDebugger
         {
             result.Diagnostics = errors.Take(50).Select(ToDiag).ToList();
             result.Error = "The program does not compile, so it cannot be debugged yet. Fix the errors (Build shows them all) and try again.";
-            return result;
+            return null;
         }
 
         // 2. Every file rewritten with trace calls. A file the rewriter cannot handle runs untraced.
@@ -140,11 +181,12 @@ public static class CodeDebugger
                 result.Notes.Add($"{originals[i].FilePath} could not be prepared for stepping ({e.Message}); it runs without stops.");
             }
         }
-        var support = CSharpSyntaxTree.ParseText(Support, parse, path: "__DojoDbg.cs", encoding: Encoding.UTF8);
+        var support = new List<SyntaxTree> { CSharpSyntaxTree.ParseText(Support, parse, path: "__DojoDbg.cs", encoding: Encoding.UTF8) };
+        if (input.Web) support.Add(CSharpSyntaxTree.ParseText(WebSupport, parse, path: "__DojoWeb.cs", encoding: Encoding.UTF8));
         CSharpCompilation comp = null!;
         for (var attempt = 0; attempt < 4; attempt++)
         {
-            comp = CSharpCompilation.Create(input.AssemblyName, [.. traced, usings, support], refs, options);
+            comp = CSharpCompilation.Create(input.AssemblyName, [.. traced, usings, .. support], refs, options);
             var bad = comp.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
             if (bad.Count == 0) break;
             var files = bad.Select(d => d.Location.SourceTree?.FilePath).OfType<string>().ToHashSet();
@@ -159,46 +201,24 @@ public static class CodeDebugger
             if (!replaced || attempt == 3)
             {
                 result.Error = "This program cannot be recorded for debugging (" + bad[0].GetMessage() + "). Use Run instead.";
-                return result;
+                return null;
             }
         }
 
         var dir = Path.Combine(Path.GetTempPath(), "code-dojo", "debug-" + Guid.NewGuid().ToString("N")[..12]);
         Directory.CreateDirectory(dir);
-        try
+        var dll = Path.Combine(dir, input.AssemblyName + ".dll");
+        EmitResult emit;
+        using (var pe = File.Create(dll)) emit = comp.Emit(pe);
+        if (!emit.Success)
         {
-            var dll = Path.Combine(dir, input.AssemblyName + ".dll");
-            EmitResult emit;
-            using (var pe = File.Create(dll)) emit = comp.Emit(pe);
-            if (!emit.Success)
-            {
-                result.Error = "The recorder could not build this program: " + emit.Diagnostics.FirstOrDefault(d => d.Severity == DiagnosticSeverity.Error)?.GetMessage();
-                return result;
-            }
-            File.WriteAllText(Path.Combine(dir, input.AssemblyName + ".runtimeconfig.json"), RuntimeConfig(input.AspNetFramework, fw.WebDir));
-            File.WriteAllLines(Path.Combine(dir, "dojo-libs.txt"), input.RuntimeLibs.Where(File.Exists));
-            var sink = Path.Combine(dir, "steps.txt");
-
-            await Gate.WaitAsync();
-            try { await Execute(dotnet, dll, dir, sink, max, input, result); }
-            finally { Gate.Release(); }
-            Read(sink, result);
-        }
-        finally
-        {
+            result.Error = "The recorder could not build this program: " + emit.Diagnostics.FirstOrDefault(d => d.Severity == DiagnosticSeverity.Error)?.GetMessage();
             try { Directory.Delete(dir, true); } catch { }
+            return null;
         }
-
-        if (input.Breakpoints is { Count: > 0 } bps)
-        {
-            var set = bps.Select(b => (File: b.File ?? result.Files[0], b.Line)).ToHashSet();
-            for (var i = 0; i < result.Events.Count; i++)
-                if (result.Events[i] is JsonObject e && (string?)e["k"] is null && e["f"] is { } f && (int)f >= 0 && (int)f < result.Files.Count
-                    && set.Contains((result.Files[(int)f], (int)e["l"]!)))
-                    result.Hits.Add(i);
-        }
-        if (result.TimedOut) result.Notes.Add("It ran longer than the debugger allows and was stopped; the steps up to then are here.");
-        return result;
+        File.WriteAllText(Path.Combine(dir, input.AssemblyName + ".runtimeconfig.json"), RuntimeConfig(input.AspNetFramework, fw.WebDir));
+        File.WriteAllLines(Path.Combine(dir, "dojo-libs.txt"), input.RuntimeLibs.Where(File.Exists));
+        return new Built(dir, dll, Path.Combine(dir, "steps.txt"));
     }
 
     static string RuntimeConfig(bool web, string webDir) => System.Text.Json.JsonSerializer.Serialize(new
@@ -221,37 +241,11 @@ public static class CodeDebugger
 
     static async Task Execute(string dotnet, string dll, string dir, string sink, int max, Input input, Result result)
     {
-        var psi = new ProcessStartInfo(dotnet)
-        {
-            WorkingDirectory = input.WorkingDir is { } wd && Directory.Exists(wd) ? wd : dir,
-            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
-            UseShellExecute = false, CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8, StandardInputEncoding = new UTF8Encoding(false),
-        };
-        psi.ArgumentList.Add(dll);
-        foreach (var key in psi.Environment.Keys.ToList())
-            if (key.StartsWith("MSBuild", StringComparison.OrdinalIgnoreCase) || key.StartsWith("ASPNETCORE_", StringComparison.OrdinalIgnoreCase)
-                || key.StartsWith("DOJO_", StringComparison.OrdinalIgnoreCase) || key is "DOTNET_STARTUP_HOOKS")
-                psi.Environment.Remove(key);
-        psi.Environment["DOTNET_NOLOGO"] = "1";
-        psi.Environment["DOTNET_TieredPGO"] = "0";
-        psi.Environment["DOTNET_ENVIRONMENT"] = "Development";
-        psi.Environment["DOJO_DEBUG_OUT"] = sink;
-        psi.Environment["DOJO_DEBUG_MAX"] = max.ToString();
-
+        var psi = StartInfo(dotnet, dll, dir, sink, max, input);
         var sw = Stopwatch.StartNew();
         using var proc = Process.Start(psi)!;
         try { proc.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
         void Kill() { try { proc.Kill(entireProcessTree: true); } catch { } }
-        static async Task<string> Pump(StreamReader reader, int cap)
-        {
-            var sb = new StringBuilder();
-            var buf = new char[4096];
-            int n;
-            while ((n = await reader.ReadAsync(buf)) > 0)
-                if (sb.Length < cap) sb.Append(buf, 0, Math.Min(n, cap - sb.Length));
-            return sb.ToString();
-        }
         var outTask = Pump(proc.StandardOutput, StdoutCap);
         var errTask = Pump(proc.StandardError, StderrCap);
         try
@@ -281,10 +275,44 @@ public static class CodeDebugger
         if (stdout.Length > 0) result.Notes.Add("Some output bypassed Console.Out and is not attached to steps: " + Clip(stdout.Trim(), 400));
     }
 
+    internal static async Task<string> Pump(StreamReader reader, int cap)
+    {
+        var sb = new StringBuilder();
+        var buf = new char[4096];
+        int n;
+        while ((n = await reader.ReadAsync(buf)) > 0)
+            if (sb.Length < cap) sb.Append(buf, 0, Math.Min(n, cap - sb.Length));
+        return sb.ToString();
+    }
+
+    /// <summary>dotnet {dll} with a clean environment and the recorder's settings.</summary>
+    internal static ProcessStartInfo StartInfo(string dotnet, string dll, string dir, string sink, int max, Input input)
+    {
+        var psi = new ProcessStartInfo(dotnet)
+        {
+            WorkingDirectory = input.WorkingDir is { } wd && Directory.Exists(wd) ? wd : dir,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            UseShellExecute = false, CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8, StandardInputEncoding = new UTF8Encoding(false),
+        };
+        psi.ArgumentList.Add(dll);
+        foreach (var key in psi.Environment.Keys.ToList())
+            if (key.StartsWith("MSBuild", StringComparison.OrdinalIgnoreCase) || key.StartsWith("ASPNETCORE_", StringComparison.OrdinalIgnoreCase)
+                || key.StartsWith("DOJO_", StringComparison.OrdinalIgnoreCase) || key is "DOTNET_STARTUP_HOOKS")
+                psi.Environment.Remove(key);
+        psi.Environment["DOTNET_NOLOGO"] = "1";
+        psi.Environment["DOTNET_TieredPGO"] = "0";
+        psi.Environment["DOTNET_ENVIRONMENT"] = "Development";
+        psi.Environment["DOJO_DEBUG_OUT"] = sink;
+        psi.Environment["DOJO_DEBUG_MAX"] = max.ToString();
+
+        return psi;
+    }
+
     static string Clip(string s, int n) => s.Length > n ? s[..n] + "…" : s;
 
     /// <summary>Turns the recording into tables the UI can index: values[id], stacks[id], events[i].</summary>
-    static void Read(string sink, Result result)
+    internal static void Read(string sink, Result result)
     {
         if (!File.Exists(sink)) { result.Error ??= result.TimedOut ? "It ran too long before reaching any code." : "The program did not start (" + Clip(result.Stderr, 400) + ")"; return; }
         var values = new Dictionary<int, JsonNode?>();
@@ -304,7 +332,7 @@ public static class CodeDebugger
                         var id = int.Parse(line.AsSpan(2, tab - 2));
                         (line[0] == 'V' ? values : stacks)[id] = JsonNode.Parse(line[(tab + 1)..]);
                     }
-                    else if (line.StartsWith("E\t") || line.StartsWith("X\t") || line.StartsWith("END\t"))
+                    else if (line.StartsWith("E\t") || line.StartsWith("X\t") || line.StartsWith("END\t") || line.StartsWith("W\t"))
                     {
                         if (JsonNode.Parse(line[(line.IndexOf('\t') + 1)..]) is not JsonObject e) continue;
                         if (line[0] == 'X') result.Exception = e.DeepClone().AsObject();
@@ -396,6 +424,27 @@ public static class CodeDebugger
                 .WithBody(ArrowBlock(node.ExpressionBody, visited.ExpressionBody.Expression, VoidLike(m), node.SemicolonToken));
         }
 
+        // Expression lambdas (minimal API handlers, callbacks) get a stop of their own, except where they
+        // become expression trees (LINQ to a database), which cannot hold a block.
+        public override SyntaxNode? VisitParenthesizedLambdaExpression(ParenthesizedLambdaExpressionSyntax node) =>
+            LambdaBlock(node, (LambdaExpressionSyntax)base.VisitParenthesizedLambdaExpression(node)!);
+
+        public override SyntaxNode? VisitSimpleLambdaExpression(SimpleLambdaExpressionSyntax node) =>
+            LambdaBlock(node, (LambdaExpressionSyntax)base.VisitSimpleLambdaExpression(node)!);
+
+        SyntaxNode LambdaBlock(LambdaExpressionSyntax node, LambdaExpressionSyntax visited)
+        {
+            if (node.ExpressionBody is null || visited.ExpressionBody is null) return visited;
+            if (node.ExpressionBody is ThrowExpressionSyntax || node.Ancestors().Any(a => a is AttributeSyntax or QueryExpressionSyntax)) return visited;
+            if (Model.GetTypeInfo(node).ConvertedType is INamedTypeSymbol { Name: "Expression", ContainingNamespace: { } ns } && ns.ToDisplayString() == "System.Linq.Expressions") return visited;
+            if (Model.GetSymbolInfo(node).Symbol is not IMethodSymbol m || !Simple(m)) return visited;
+            if (!m.ReturnsVoid && m.ReturnType.IsRefLikeType) return visited;
+            var isVoid = VoidLike(m);
+            StatementSyntax body = isVoid ? ExpressionStatement(visited.ExpressionBody) : ReturnStatement(visited.ExpressionBody.WithLeadingTrivia(Space));
+            var block = Block(Trace(node.ExpressionBody), body);
+            return visited.WithExpressionBody(null).WithBlock(block);
+        }
+
         public override SyntaxNode? VisitLocalFunctionStatement(LocalFunctionStatementSyntax node)
         {
             var visited = (LocalFunctionStatementSyntax)base.VisitLocalFunctionStatement(node)!;
@@ -448,18 +497,45 @@ public static class CodeDebugger
             static readonly System.Reflection.Module Mine = typeof(__DojoDbg).Module;
             static readonly System.Collections.Generic.Dictionary<string, int> Values = new System.Collections.Generic.Dictionary<string, int>();
             static readonly System.Collections.Generic.Dictionary<string, int> Stacks = new System.Collections.Generic.Dictionary<string, int>();
-            static readonly System.Collections.Generic.List<(System.Reflection.MethodBase M, int F, int L)> Last = new System.Collections.Generic.List<(System.Reflection.MethodBase M, int F, int L)>();
             static readonly System.Collections.Generic.Dictionary<System.Type, int> Kinds = new System.Collections.Generic.Dictionary<System.Type, int>();
             static readonly System.Collections.Generic.Dictionary<System.Type, bool> OwnToString = new System.Collections.Generic.Dictionary<System.Type, bool>();
             static readonly int Max;
-            static int _n, _lastF = -1, _lastL, _lastS = -1;
-            static string _lastV = "[]";
+            static int _n, _reqSeq;
             static volatile bool _done;
+            static bool _full;
             static System.Exception _thrown;
             static int _thrownF = -1, _thrownL, _thrownS = -1;
             static string _thrownV = "[]";
             [System.ThreadStatic] static bool _busy;
             const int MaxItems = 30, MaxPropItems = 10, MaxMembers = 25, MaxText = 200;
+            const long WebSinkCap = 150000000;
+
+            /// <summary>Web mode (DOJO_DEBUG_WEB=1): steps are tagged with the request they run for. Live mode: Console.ReadLine reports when it waits.</summary>
+            static readonly bool Web, Live;
+            /// <summary>The request the current code runs for (0: startup or background work).</summary>
+            public static readonly System.Threading.AsyncLocal<int> Req = new System.Threading.AsyncLocal<int>();
+            static System.Threading.Timer _tick;
+
+            /// <summary>Where one flow of execution is: the program (console), startup, or one HTTP request.</summary>
+            sealed class Ctx
+            {
+                public int Id, N, F = -1, L, S = -1;
+                public string V = "[]";
+                public bool Full, Failed;
+                public System.Exception Thrown;
+                public readonly System.Collections.Generic.List<(System.Reflection.MethodBase M, int F, int L)> Last = new System.Collections.Generic.List<(System.Reflection.MethodBase M, int F, int L)>();
+            }
+            static readonly Ctx Prog = new Ctx();
+            static readonly System.Collections.Generic.Dictionary<int, Ctx> Reqs = new System.Collections.Generic.Dictionary<int, Ctx>();
+
+            static Ctx Cur()
+            {
+                if (!Web) return Prog;
+                var r = Req.Value;
+                return r != 0 && Reqs.TryGetValue(r, out var c) ? c : Prog;
+            }
+
+            static bool IsSupport(System.Reflection.MethodBase m) => m.DeclaringType?.FullName?.StartsWith("__Dojo", System.StringComparison.Ordinal) == true;
 
             [System.Runtime.CompilerServices.ModuleInitializer]
             internal static void Init() { }
@@ -480,11 +556,16 @@ public static class CodeDebugger
 
                 int.TryParse(System.Environment.GetEnvironmentVariable("DOJO_DEBUG_MAX"), out Max);
                 if (Max <= 0) Max = 20000;
+                Web = System.Environment.GetEnvironmentVariable("DOJO_DEBUG_WEB") == "1";
+                Live = Web || System.Environment.GetEnvironmentVariable("DOJO_DEBUG_LIVE") == "1";
                 var file = System.Environment.GetEnvironmentVariable("DOJO_DEBUG_OUT") ?? System.IO.Path.Combine(System.AppContext.BaseDirectory, "steps.txt");
                 Sink = new System.IO.StreamWriter(new System.IO.FileStream(file, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.Read, 1 << 16), new System.Text.UTF8Encoding(false), 1 << 16);
                 Real = System.Console.Out;
                 SyncBuf = System.IO.TextWriter.Synchronized(Buf);
                 System.Console.SetOut(SyncBuf);
+                if (Live && !Web) System.Console.SetIn(new __DojoIn(System.Console.In));
+                // A running web app prints between steps (logging): pass that on, and keep the file current for the live reader.
+                if (Web) _tick = new System.Threading.Timer(_ => Tick(), null, 200, 200);
                 System.AppDomain.CurrentDomain.ProcessExit += (_, _) => End();
                 System.AppDomain.CurrentDomain.UnhandledException += (_, e) => Crash(e.ExceptionObject as System.Exception);
                 System.AppDomain.CurrentDomain.FirstChanceException += (_, e) => Thrown(e.Exception);
@@ -497,30 +578,55 @@ public static class CodeDebugger
                 if (_busy || _done) return;          // showing a value must not record the code it happens to run
                 _busy = true;
                 var stop = false;
+                var abort = false;
                 try
                 {
                     lock (Gate)
                     {
-                        if (_done) return;
-                        var v = Vars(kv);
-                        var s = Stack(new System.Diagnostics.StackTrace(1, false), file, line);
-                        _lastF = file; _lastL = line; _lastS = s; _lastV = v;
-                        Sink.Write("E\t{\"f\":"); Sink.Write(file); Sink.Write(",\"l\":"); Sink.Write(line);
-                        Sink.Write(",\"v\":"); Sink.Write(v); Sink.Write(",\"s\":"); Sink.Write(s);
-                        Out();
-                        Sink.Write("}\n");
-                        if (++_n % 256 == 0) Sink.Flush();
-                        if (_n >= Max)
+                        var c = Cur();
+                        if (_done || _full) { }
+                        else if (c.Full) abort = c.Id > 0;
+                        else
                         {
-                            Sink.Write("STOP\n");
-                            End();
-                            stop = true;
+                            var v = Vars(kv);
+                            var s = Stack(c, new System.Diagnostics.StackTrace(1, false), file, line);
+                            c.F = file; c.L = line; c.S = s; c.V = v;
+                            Sink.Write("E\t{\"f\":"); Sink.Write(file); Sink.Write(",\"l\":"); Sink.Write(line);
+                            Sink.Write(",\"v\":"); Sink.Write(v); Sink.Write(",\"s\":"); Sink.Write(s);
+                            if (c.Id > 0) { Sink.Write(",\"r\":"); Sink.Write(c.Id); }
+                            Out();
+                            Sink.Write("}\n");
+                            if (++_n % 256 == 0) Sink.Flush();
+                            if (++c.N >= Max)
+                            {
+                                if (!Web)
+                                {
+                                    Sink.Write("STOP\n");
+                                    End();
+                                    stop = true;
+                                }
+                                else
+                                {
+                                    // A web app keeps running: this request (or startup) just stops being recorded.
+                                    c.Full = true;
+                                    Sink.Write("RT\t{\"r\":"); Sink.Write(c.Id); Sink.Write("}\n");
+                                    Sink.Flush();
+                                }
+                            }
+                            if (Web && Sink.BaseStream.Position > WebSinkCap)
+                            {
+                                _full = true;
+                                Sink.Write("FULL\n");
+                                Sink.Flush();
+                            }
                         }
                     }
                 }
                 finally { _busy = false; }
                 // Outside the lock: ProcessExit handlers may run on another thread and take it.
                 if (stop) System.Environment.Exit(0);
+                // A request past its cap is stopped, so an endless loop in a handler does not spin forever.
+                if (abort) throw new System.OperationCanceledException("The debugger stopped this request after " + Max + " steps (is a loop endless?).");
             }
 
             static void Out()
@@ -529,6 +635,98 @@ public static class CodeDebugger
                 lock (SyncBuf) { o = Buf.ToString(); Buf.GetStringBuilder().Clear(); }
                 if (o.Length == 0) return;
                 Sink.Write(",\"o\":"); Sink.Write(Q(o));
+            }
+
+            static void Tick()
+            {
+                if (_done) return;
+                try
+                {
+                    lock (Gate)
+                    {
+                        if (_done) return;
+                        string o;
+                        lock (SyncBuf) { o = Buf.ToString(); Buf.GetStringBuilder().Clear(); }
+                        if (o.Length > 0) { Sink.Write("O\t{\"o\":"); Sink.Write(Q(o)); Sink.Write("}\n"); }
+                        Sink.Flush();
+                    }
+                }
+                catch { }
+            }
+
+            // ------------------------------------------------------------ interactive input (live console sessions)
+
+            /// <summary>Console.ReadLine is about to block: record where, with the output so far, and tell the dojo.</summary>
+            internal static void Waiting()
+            {
+                if (_done || _busy) return;
+                _busy = true;
+                try
+                {
+                    lock (Gate)
+                    {
+                        if (_done) return;
+                        var c = Prog;
+                        Sink.Write("W\t{\"k\":\"input\",\"f\":"); Sink.Write(c.F); Sink.Write(",\"l\":"); Sink.Write(c.L);
+                        Sink.Write(",\"s\":"); Sink.Write(c.S); Sink.Write(",\"v\":"); Sink.Write(c.V);
+                        Out();
+                        Sink.Write("}\n");
+                        Sink.Flush();
+                    }
+                    Real.Write("\u0002WAIT\n");
+                    Real.Flush();
+                }
+                catch { }
+                finally { _busy = false; }
+            }
+
+            /// <summary>Show a line that was typed in the output, as a terminal would.</summary>
+            internal static void Echo(string line)
+            {
+                if (line != null) SyncBuf.Write(line + "\n");
+            }
+
+            // ------------------------------------------------------------ requests (web mode; called by __DojoWeb's middleware)
+
+            public static int BeginRequest(string method, string path)
+            {
+                int id;
+                lock (Gate)
+                {
+                    id = ++_reqSeq;
+                    Reqs[id] = new Ctx { Id = id };
+                    if (!_done && !_full)
+                    {
+                        Sink.Write("R\t{\"r\":"); Sink.Write(id); Sink.Write(",\"m\":"); Sink.Write(Q(method ?? ""));
+                        Sink.Write(",\"p\":"); Sink.Write(Q(Clip(path ?? "", 400))); Sink.Write("}\n");
+                        Sink.Flush();
+                    }
+                }
+                Req.Value = id;
+                return id;
+            }
+
+            public static bool Failed(int id)
+            {
+                lock (Gate) if (Reqs.TryGetValue(id, out var c)) c.Failed = true;
+                return false;
+            }
+
+            public static void EndRequest(int id, int status, long ms)
+            {
+                lock (Gate)
+                {
+                    var failed = Reqs.TryGetValue(id, out var c) && c.Failed;
+                    Reqs.Remove(id);
+                    if (_done) return;
+                    try
+                    {
+                        Sink.Write("RE\t{\"r\":"); Sink.Write(id); Sink.Write(",\"st\":"); Sink.Write(failed && status < 500 ? 500 : status);
+                        Sink.Write(",\"ms\":"); Sink.Write(ms); Sink.Write(",\"failed\":"); Sink.Write(failed ? "true" : "false"); Sink.Write("}\n");
+                        Sink.Flush();
+                    }
+                    catch { }
+                }
             }
 
             static void End()
@@ -557,9 +755,13 @@ public static class CodeDebugger
                     {
                         // Only exceptions thrown by the program's own code: the runtime throws and catches many inside itself.
                         var frame = new System.Diagnostics.StackTrace(ex, false).GetFrame(0)?.GetMethod();
-                        if (frame == null || frame.Module != Mine || frame.DeclaringType == typeof(__DojoDbg)) return;
-                        _thrown = ex; _thrownF = _lastF; _thrownL = _lastL; _thrownS = _lastS; _thrownV = _lastV;
-                        Exc("throw", ex, _lastF, _lastL, _lastS, _lastV);
+                        if (frame == null || frame.Module != Mine || IsSupport(frame)) return;
+                        var c = Cur();
+                        // An exception that travels up through awaits is thrown again at each one: record it once.
+                        if (ReferenceEquals(c.Thrown, ex) || c.Full || _full) return;
+                        c.Thrown = ex;
+                        _thrown = ex; _thrownF = c.F; _thrownL = c.L; _thrownS = c.S; _thrownV = c.V;
+                        Exc("throw", ex, c.F, c.L, c.S, c.V, c.Id);
                     }
                 }
                 catch { }
@@ -578,7 +780,8 @@ public static class CodeDebugger
                         while (inner is System.AggregateException { InnerExceptions.Count: 1 } a) inner = a.InnerException;
                         while (inner is System.Reflection.TargetInvocationException { InnerException: not null } t) inner = t.InnerException;
                         var mine = ReferenceEquals(_thrown, ex) || ReferenceEquals(_thrown, inner);
-                        Exc("crash", inner ?? ex, mine ? _thrownF : _lastF, mine ? _thrownL : _lastL, mine ? _thrownS : _lastS, mine ? _thrownV : _lastV);
+                        var c = Cur();
+                        Exc("crash", inner ?? ex, mine ? _thrownF : c.F, mine ? _thrownL : c.L, mine ? _thrownS : c.S, mine ? _thrownV : c.V, c.Id);
                     }
                     catch { }
                     _done = true;
@@ -586,12 +789,13 @@ public static class CodeDebugger
                 }
             }
 
-            static void Exc(string kind, System.Exception ex, int f, int l, int s, string v)
+            static void Exc(string kind, System.Exception ex, int f, int l, int s, string v, int r)
             {
                 Sink.Write("X\t{\"k\":\""); Sink.Write(kind); Sink.Write("\",\"ty\":"); Sink.Write(Q(ex?.GetType().FullName ?? "Exception"));
                 Sink.Write(",\"msg\":"); Sink.Write(Q(Clip(ex?.Message ?? "", 2000)));
                 Sink.Write(",\"f\":"); Sink.Write(f); Sink.Write(",\"l\":"); Sink.Write(l);
                 Sink.Write(",\"s\":"); Sink.Write(s); Sink.Write(",\"v\":"); Sink.Write(v);
+                if (r > 0) { Sink.Write(",\"r\":"); Sink.Write(r); }
                 Out();
                 Sink.Write("}\n");
                 Sink.Flush();
@@ -599,18 +803,19 @@ public static class CodeDebugger
 
             // ------------------------------------------------------------ call stack
 
-            static int Stack(System.Diagnostics.StackTrace st, int file, int line)
+            static int Stack(Ctx c, System.Diagnostics.StackTrace st, int file, int line)
             {
                 var mine = new System.Collections.Generic.List<System.Reflection.MethodBase>();
                 foreach (var fr in st.GetFrames())
                 {
                     var m = fr.GetMethod();
-                    if (m == null || m.Module != Mine || m.DeclaringType == typeof(__DojoDbg)) continue;
+                    if (m == null || m.Module != Mine || IsSupport(m)) continue;
                     mine.Add(m);
                 }
                 mine.Reverse();
                 if (mine.Count == 0) mine.Add(null);
                 var n = mine.Count;
+                var Last = c.Last;
                 if (Last.Count > n) Last.RemoveRange(n, Last.Count - n);
                 for (var i = 0; i < n - 1; i++)
                     if (i >= Last.Count) Last.Add((mine[i], -1, 0));
@@ -951,6 +1156,68 @@ public static class CodeDebugger
                     }
                 }
                 return sb.Append('"').ToString();
+            }
+        }
+
+        /// <summary>Console.In for a live session: says when ReadLine is about to wait, and echoes what it read.</summary>
+        sealed class __DojoIn : System.IO.TextReader
+        {
+            readonly System.IO.TextReader _real;
+            public __DojoIn(System.IO.TextReader real) { _real = real; }
+            public override string ReadLine()
+            {
+                __DojoDbg.Waiting();
+                var line = _real.ReadLine();
+                __DojoDbg.Echo(line);
+                return line;
+            }
+            public override int Peek() => _real.Peek();
+            public override int Read() => _real.Read();
+            public override string ReadToEnd() => _real.ReadToEnd();
+        }
+        """;
+
+    /// <summary>
+    /// Compiled into a web app being debugged: a hosting startup (found by ASP.NET Core in the app's own assembly)
+    /// adds a startup filter whose middleware runs first for every request. It tags the request (an AsyncLocal id the
+    /// recorder reads), records method, path, status and duration, and names the request in an X-Dojo-Request header.
+    /// </summary>
+    const string WebSupport = """
+        #nullable disable
+        [assembly: Microsoft.AspNetCore.Hosting.HostingStartup(typeof(__DojoWebStartup))]
+
+        sealed class __DojoWebStartup : Microsoft.AspNetCore.Hosting.IHostingStartup
+        {
+            public void Configure(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
+            {
+                builder.ConfigureServices(services => services.Insert(0,
+                    Microsoft.Extensions.DependencyInjection.ServiceDescriptor.Transient<Microsoft.AspNetCore.Hosting.IStartupFilter, __DojoWebFilter>()));
+            }
+        }
+
+        sealed class __DojoWebFilter : Microsoft.AspNetCore.Hosting.IStartupFilter
+        {
+            public System.Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> Configure(System.Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> next)
+            {
+                return app =>
+                {
+                    app.Use(inner => ctx => Handle(ctx, inner));
+                    next(app);
+                };
+            }
+
+            static async System.Threading.Tasks.Task Handle(Microsoft.AspNetCore.Http.HttpContext ctx, Microsoft.AspNetCore.Http.RequestDelegate inner)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var id = __DojoDbg.BeginRequest(ctx.Request.Method, ctx.Request.Path.ToString() + ctx.Request.QueryString.ToString());
+                ctx.Response.OnStarting(() =>
+                {
+                    ctx.Response.Headers["X-Dojo-Request"] = id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    return System.Threading.Tasks.Task.CompletedTask;
+                });
+                try { await inner(ctx); }
+                catch (System.Exception) when (__DojoDbg.Failed(id)) { }
+                finally { __DojoDbg.EndRequest(id, ctx.Response.StatusCode, sw.ElapsedMilliseconds); }
             }
         }
         """;

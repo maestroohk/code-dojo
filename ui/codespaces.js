@@ -452,7 +452,7 @@ function ide(page, space) {
   const targetSel = h('select.cs-target', { title: 'What Build, Run and Test act on', onchange: e => { target = e.target.value; localStorage.setItem(`dojo-space-target:${space}`, target); paintToolbar(); } });
   const buildBtn = h('button.btn.ghost', { type: 'button', title: 'Build (Ctrl+Shift+B)', onclick: () => runJob('build') }, '⚒ Build');
   const runBtn = h('button.btn.primary', { type: 'button', title: `Run without debugging (${DEBUG_KEYS.run} or Ctrl+Enter)`, onclick: () => run() }, '▶ Run');
-  const debugBtn = h('button.btn.ghost.cs-debug-btn', { type: 'button', title: `Debug: record the run, then step through it, backwards too (${DEBUG_KEYS.start}). Click a line number to set a breakpoint (${DEBUG_KEYS.toggle}).`, onclick: () => startDebug() }, '● Debug');
+  const debugBtn = h('button.btn.ghost.cs-debug-btn', { type: 'button', title: `Debug: record the run, then step through it, backwards too (${DEBUG_KEYS.start}). A web app keeps running and every request it answers is recorded. Click a line number to set a breakpoint (${DEBUG_KEYS.toggle}).`, onclick: () => startDebug() }, '● Debug');
   const stopBtn = h('button.btn.ghost', { type: 'button', title: 'Stop', onclick: stop }, '■ Stop');
   const testBtn = h('button.btn.ghost', { type: 'button', title: 'Run the tests', onclick: () => runJob('test') }, '✓ Test');
   const installBtn = h('button.btn.ghost', { type: 'button', onclick: () => restore() }, '⇩ Install packages');
@@ -515,7 +515,7 @@ function ide(page, space) {
       testBtn.hidden = !projects().some(p => p.kind === 'test');
       installBtn.hidden = true;
     }
-    stopBtn.disabled = !busy;
+    stopBtn.disabled = !busy && !(webDebugging() && dbgLive.alive);
     runBtn.textContent = busy && job.kind === 'run' ? '↻ Restart' : '▶ Run';
     paintStatus();
     paintRequestTab();
@@ -562,7 +562,10 @@ function ide(page, space) {
     job = r.job; showBottom('output'); paintToolbar(); pollSoon(150);
   }
 
-  async function stop() { await call(`${base}/stop`, {}).catch(() => null); pollSoon(100); }
+  async function stop() {
+    if (webDebugging() && !(job?.status === 'running')) { stopDebug(); return; }     // Stop ends the debugged app
+    await call(`${base}/stop`, {}).catch(() => null); pollSoon(100);
+  }
 
   // ------------------------------------------------------------ bottom panel: problems, output, request
 
@@ -583,7 +586,7 @@ function ide(page, space) {
   function showBottom(tab) { bottomTab = tab; paintBottom(); }
   function paintBottom() {
     const errs = problems.filter(p => p.severity === 'error').length, warns = problems.length - errs;
-    const web = runnable()?.kind === 'web' || !!job?.url;
+    const web = runnable()?.kind === 'web' || !!job?.url || webDebugging();
     put(bottomTabs,
       h(`button.tab.small${bottomTab === 'problems' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('problems') }, `Problems${problems.length ? ` (${errs} error${errs === 1 ? '' : 's'}, ${warns} warning${warns === 1 ? '' : 's'})` : ''}`),
       h(`button.tab.small${bottomTab === 'output' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('output') }, 'Output'),
@@ -595,7 +598,9 @@ function ide(page, space) {
       bottomTab === 'problems' && problemsEl,
       bottomTab === 'output' && [outEl, job?.status === 'running' && job.kind === 'run' && stdin],
       bottomTab === 'request' && requestEl,
-      bottomTab === 'debug' && debugging && dbg.output);
+      bottomTab === 'debug' && debugging && (webDebugging()
+        ? [h('div.small.muted.dbg-logl', 'The app\'s output, live (this request\'s own output is in its steps)'), appLog]
+        : [dbg.output, dbgLive?.waiting && h('div.dbg-prompt', h('span.small.warn', 'Waiting for input ▸'), dbgIn)]));
     if (bottomTab === 'output') outEl.scrollTop = outEl.scrollHeight;
   }
 
@@ -623,23 +628,30 @@ function ide(page, space) {
   let reply = null;
   function paintRequestTab() {
     const saveReq = () => sessionStorage.setItem(`dojo-space-req:${space}`, JSON.stringify(req));
-    const live = job?.status === 'running' && job.url && job.listening;
+    // While a web app is being debugged, requests go to it (and show up in the debugger's Requests list).
+    const dbgUrl = webDebugging() && dbgLive.alive && dbgLive.listening ? dbgLive.url : null;
+    const live = !!dbgUrl || (job?.status === 'running' && job.url && job.listening);
+    const baseUrl = dbgUrl || job?.url;
     const send = async () => {
       reply = { pending: true }; paintRequestTab();
       reply = await call(`${base}/send`, { method: req.method, path: req.path, body: ['GET', 'HEAD', 'DELETE'].includes(req.method) ? null : req.body, contentType: 'application/json' })
         .catch(() => ({ error: 'Could not reach the dojo server.' }));
       paintRequestTab();
+      // Debugging: open the recording of the request just sent.
+      const id = Number(reply?.headers?.find(([k]) => /^x-dojo-request$/i.test(k))?.[1]);
+      if (webDebugging() && id > 0) { await pollLive(); await loadRequest(id); }
     };
     let body = reply?.body || '';
     try { if (reply?.headers?.some(([k, v]) => /content-type/i.test(k) && /json/.test(v))) body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
     put(requestEl,
       h('div.wb-line',
         h('select.wb-method', { onchange: e => { req.method = e.target.value; saveReq(); paintRequestTab(); } }, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(m => h('option', { selected: req.method === m }, m))),
-        h('span.wb-base.mono.small', live ? job.url : '(not running)'),
+        h('span.wb-base.mono.small', live ? baseUrl : '(not running)'),
         h('input.wb-path.mono', { value: req.path, oninput: e => { req.path = e.target.value; saveReq(); }, onkeydown: e => { if (e.key === 'Enter') send(); } }),
         h('button.btn.primary.small', { type: 'button', disabled: !live, onclick: send }, 'Send')),
       !['GET', 'HEAD', 'DELETE'].includes(req.method) && h('textarea.answer.mono.cs-req-body', { rows: 4, spellcheck: false, placeholder: '{ "json": "body" }', value: req.body, oninput: e => { req.body = e.target.value; saveReq(); } }),
-      !live && h('p.muted.small', 'Run the web project, then send it requests from here, or open its URL in your browser.'),
+      !live && h('p.muted.small', webDebugging() ? 'The debugged app is not listening (yet).' : 'Run (or Debug) the web project, then send it requests from here, or open its URL in your browser.'),
+      dbgUrl && h('p.muted.small', 'Debugging: each request is recorded; it opens in the debugger when the answer comes back.'),
       reply?.pending && h('p.muted.small', 'Sending…'),
       reply?.error && h('div.wb-problem', reply.error),
       reply?.status && h('div.wb-line', h(`span.wb-status.${reply.status < 400 ? 'ok' : reply.status < 500 ? 'warn' : 'bad'}`, `${reply.status} ${reply.reason || ''}`), h('span.muted.small', `${reply.ms} ms · ${reply.size.toLocaleString()} bytes`)),
@@ -771,14 +783,21 @@ function ide(page, space) {
 
   // ------------------------------------------------------------ debugger (record the run, then move through it)
 
-  /** The console project the debugger records: the selected one if it is a console app, else the first. */
+  /** The project the debugger records: the selected one if it is a console or web app, else the first console app, else the web app. */
   function debuggable() {
     const t = target && byPath(target);
-    if (t && t.kind === 'console') return t;
-    return projects().find(p => p.kind === 'console');
+    if (t && (t.kind === 'console' || t.kind === 'web')) return t;
+    return projects().find(p => p.kind === 'console') || projects().find(p => p.kind === 'web');
   }
+  // A live session (server/CodeDebugger.Live.cs): a web app recorded per request, or a console program that asks for input.
+  let dbgLive = null, dbgReq = 0, liveTimer = null, logSeen = -1, reqTabKey = '';
+  const webDebugging = () => debugging && !!dbgLive?.web;
+  const reqsEl = h('div.dbg-reqs');
+  const appLog = h('pre.dbg-out.cs-applog');
+  const dbgIn = h('input.cs-stdin.mono.dbg-in', { placeholder: 'The program waits in Console.ReadLine: type a line and press Enter', spellcheck: false,
+    onkeydown: e => { if (e.key === 'Enter') sendInput(dbgIn.value); } });
   const sideEl = h('aside.cs-side', nugetEl);     // NuGet normally; the debugger's panels while debugging
-  const dbgStdin = h('textarea.dbg-stdin.mono', { rows: 3, spellcheck: false, placeholder: 'Input for Console.ReadLine, one line per read. Restart to use it.',
+  const dbgStdin = h('textarea.dbg-stdin.mono', { rows: 3, spellcheck: false, placeholder: 'Optional: lines for Console.ReadLine up front, one per read. Otherwise the debugger asks when the program reads.',
     value: localStorage.getItem(`dojo-space-dbg-stdin:${space}`) || '',
     oninput: e => { try { localStorage.setItem(`dojo-space-dbg-stdin:${space}`, e.target.value); } catch { } } });
   const dbg = createDebugger({
@@ -794,6 +813,7 @@ function ide(page, space) {
     bps.toggle(tab.path, line);
     tab.editor.setBreakpoints(bps.lines(tab.path));
     dbg.breakpointsChanged();
+    if (webDebugging()) pollLive();       // re-mark the requests that hit a breakpoint
   }
 
   async function showDebugLoc(file, line, kind) {
@@ -813,21 +833,100 @@ function ide(page, space) {
   function paintDebugLayout() {
     dbgHost.hidden = !debugging;
     put(dbgHost, debugging && dbg.bar);
-    put(sideEl, debugging
-      ? [dbg.side, h('section.dbg-panel.dbg-input', h('div.dbg-head', h('b', 'Program input'), h('span.small.muted', 'stdin for the recorded run')), dbgStdin)]
-      : nugetEl);
+    put(sideEl, !debugging ? nugetEl
+      : webDebugging()
+        ? [h('section.dbg-panel.dbg-requests', h('div.dbg-head', h('b', 'Requests'), h('span.small.muted', 'click one to step through it')), reqsEl), dbg.side]
+        : [dbg.side, h('section.dbg-panel.dbg-input', h('div.dbg-head', h('b', 'Program input'), h('span.small.muted', 'stdin, before the debugger asks')), dbgStdin)]);
     if (!debugging && bottomTab === 'debug') bottomTab = 'output';
+    paintRequests();
     paintBottom(); paintToolbar();
+  }
+
+  // ---- web: the request list, the app's live output, loading one request's recording
+
+  function paintRequests() {
+    if (!webDebugging()) return;
+    const L = dbgLive;
+    const row = (q, label) => h(`button.dbg-req${q.id === dbgReq ? '.active' : ''}${q.failed ? '.failed' : ''}`, {
+      type: 'button', title: `${q.steps.toLocaleString()} steps${q.throws ? ` · ${q.throws} exception${q.throws === 1 ? '' : 's'} thrown` : ''}${q.truncated ? ' · stopped at the step cap' : ''}`,
+      onclick: () => loadRequest(q.id),
+    },
+    h('span.dbg-req-mark', q.hit ? h('span.dbg-bp-dot', { title: 'Hit a breakpoint' }) : q.failed ? h('span.bad', { title: 'An exception' }, '✕') : ''),
+    label || [h('span.dbg-req-m.mono.small', q.method), h('span.dbg-req-p.mono.small', q.path)],
+    h('span.spacer'),
+    q.id > 0 && h(`span.dbg-req-st.small.${!q.done ? 'muted' : q.status < 400 ? 'ok' : q.status < 500 ? 'warn' : 'bad'}`, q.done ? String(q.status) : '…'),
+    q.id > 0 && h('span.dbg-req-ms.small.muted', q.done ? `${q.ms} ms` : ''));
+    put(reqsEl,
+      L.startup && row(L.startup, h('span.dbg-req-p.small', 'Startup')),
+      L.requests.length ? L.requests.map(q => row(q))
+        : h('div.muted.small.dbg-pad', L.alive ? (L.listening ? `Send it a request: the Request tab below, or ${L.url} in your browser.` : 'Starting the app…') : ''),
+      L.dropped > 0 && h('div.muted.small.dbg-pad', `${L.dropped} older request${L.dropped === 1 ? '' : 's'} dropped to save memory.`),
+      !L.alive && h('div.small.dbg-pad.bad', L.stopped || `The app has stopped${L.exitCode != null ? ` (exit code ${L.exitCode})` : ''}. The recorded requests are still here; Restart to run it again.`));
+  }
+
+  function paintLog() {
+    if (!dbgLive) return;
+    if (dbgLive.logTotal === logSeen) return;
+    logSeen = dbgLive.logTotal;
+    const near = appLog.scrollHeight - appLog.scrollTop - appLog.clientHeight < 40;
+    appLog.textContent = dbgLive.log || '';
+    if (near) appLog.scrollTop = appLog.scrollHeight;
+  }
+
+  async function pollLive() {
+    clearTimeout(liveTimer);
+    if (!webDebugging() || stopped) return;
+    const r = await call(`${base}/debug/session`, { breakpoints: bps.list() }).catch(() => null);
+    if (!webDebugging()) return;
+    if (r && !r.error) dbgLive = r;
+    else if (r?.error) dbgLive = { ...dbgLive, alive: false, stopped: r.error };
+    paintRequests(); paintLog(); paintStatus();
+    const key = `${dbgLive.alive}|${dbgLive.listening}|${dbgLive.url}`;
+    if (key !== reqTabKey) { reqTabKey = key; paintRequestTab(); }
+    if (dbgLive.alive) liveTimer = setTimeout(pollLive, 800);
+  }
+
+  async function loadRequest(id) {
+    const r = await call(`${base}/debug/request`, { id, breakpoints: bps.list() }).catch(() => ({ error: 'Could not reach the dojo server.' }));
+    if (!webDebugging()) return;
+    if (r.error && !r.events?.length) { setStatus(r.error); return; }
+    dbgReq = id;
+    if (r.live) dbgLive = r.live;
+    dbg.load(r);
+    paintRequests();
+    const q = id === 0 ? null : dbgLive.requests.find(x => x.id === id);
+    setStatus(q ? `debug: ${q.method} ${q.path} · ${q.steps.toLocaleString()} steps` : `debug: startup · ${(r.events || []).filter(e => !e.k).length.toLocaleString()} steps`);
+  }
+
+  // ---- console: a line for the program waiting in Console.ReadLine
+
+  async function sendInput(text) {
+    if (!dbgLive?.waiting || dbgBusy) return;
+    dbgIn.value = '';
+    dbgBusy = true; dbgIn.disabled = true; paintToolbar();
+    const from = (dbg.data?.events?.length || 1) - 1;
+    const r = await call(`${base}/debug/input`, { text, breakpoints: bps.list() }).catch(() => ({ error: 'Could not reach the dojo server.' }));
+    dbgBusy = false; dbgIn.disabled = false;
+    if (!debugging) return;
+    if (r.error && !r.events?.length) { setStatus(r.error); dbgLive = { ...dbgLive, waiting: false }; paintBottom(); paintToolbar(); return; }
+    dbgLive = r.live;
+    dbg.load(r, { from });
+    paintBottom(); paintToolbar();
+    setStatus(dbgLive?.waiting ? 'debug: the program waits for input' : `debug: ${(r.events || []).filter(e => !e.k).length.toLocaleString()} steps recorded${r.exception ? ' · it threw' : ''}`);
+    if (dbgLive?.waiting) requestAnimationFrame(() => dbgIn.focus());
   }
 
   async function startDebug() {
     const proj = debuggable();
     if (dbgBusy || !proj) return;
     if (!await saveAll()) return;
-    dbgBusy = true; statusNote = ''; setStatus(`Recording ${proj.name} for the debugger…`); paintToolbar();
-    const r = await call(`${base}/debug`, { project: proj.path, stdin: dbgStdin.value, breakpoints: bps.list() })
+    const web = proj.kind === 'web';
+    clearTimeout(liveTimer);
+    dbgBusy = true; statusNote = ''; setStatus(web ? `Starting ${proj.name} with the step recorder…` : `Recording ${proj.name} for the debugger…`); paintToolbar();
+    const r = await call(`${base}/debug`, { project: proj.path, stdin: web ? null : dbgStdin.value, breakpoints: bps.list(), interactive: !web })
       .catch(() => ({ error: 'Could not reach the dojo server.' }));
     dbgBusy = false;
+    dbgLive = r.live || null; dbgReq = 0; logSeen = -1; reqTabKey = '';
     if (r.error && !r.events?.length) {
       setStatus(r.error);
       if (r.diagnostics?.length) {
@@ -838,18 +937,27 @@ function ide(page, space) {
       return;
     }
     const steps = (r.events || []).filter(e => !e.k).length;
-    setStatus(`debug: ${steps.toLocaleString()} steps recorded in ${((r.ms || 0) / 1000).toFixed(1)}s${r.exception ? ' · it threw' : ''}`);
+    setStatus(web ? `debug: ${proj.name} runs at ${r.live?.url || '?'} · startup recorded (${steps.toLocaleString()} steps); send it requests`
+      : r.live?.waiting ? 'debug: the program waits for input'
+        : `debug: ${steps.toLocaleString()} steps recorded in ${((r.ms || 0) / 1000).toFixed(1)}s${r.exception ? ' · it threw' : ''}`);
     debugging = true;
     paintDebugLayout();
-    showBottom('debug');
+    showBottom(web ? 'request' : 'debug');
     dbg.load(r);
+    if (web) { paintRequestTab(); pollLive(); }
+    else if (dbgLive?.waiting) requestAnimationFrame(() => dbgIn.focus());
   }
 
   function stopDebug() {
+    const hadLive = !!dbgLive;
     debugging = false;
+    clearTimeout(liveTimer);
+    dbgLive = null;
+    if (hadLive) call(`${base}/debug/stop`, {}).catch(() => null);
     dbg.close();
     setStatus('');
     paintDebugLayout();
+    paintRequestTab();
   }
 
   // ------------------------------------------------------------ polling
@@ -953,6 +1061,8 @@ function ide(page, space) {
   return () => {
     stopped = true;
     clearTimeout(pollTimer);
+    clearTimeout(liveTimer);
+    if (dbgLive) call(`${base}/debug/stop`, {}).catch(() => { });     // a debugged app or waiting program ends with the page
     document.removeEventListener('keydown', onKey, true);
     document.removeEventListener('mousedown', closeMenu, true);
     window.removeEventListener('beforeunload', onUnload);
