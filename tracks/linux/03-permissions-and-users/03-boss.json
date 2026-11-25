@@ -1,0 +1,150 @@
+{
+  "title": "Boss: the permissions auditor",
+  "summary": "Apply symbolic chmod, decide access like the kernel, and flag dangerous files.",
+  "minutes": 15,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Security review",
+      "body": "Before go-live, security wants an audit of the app server's files. Each file comes as `ls -l`-style data: a 9-character mode like `rwxr-x---`, an owner and a group."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Apply symbolic chmod",
+      "prompt": "Write `string ApplyChmod(string mode, string spec)`. `mode` is 9 characters (`rw-r-----`), `spec` is comma-separated clauses like `u+x`, `go-w`, `a=r`, `o=` (who letters from `ugoa`, op `+ - =`, perms from `rwx`, possibly empty after `=`). Return the new 9-character mode.",
+      "starter": [
+        "string ApplyChmod(string mode, string spec)",
+        "{",
+        "    return mode;",
+        "}"
+      ],
+      "solution": [
+        "string ApplyChmod(string mode, string spec)",
+        "{",
+        "    var m = mode.ToCharArray();",
+        "    foreach (var clause in spec.Split(','))",
+        "    {",
+        "        int op = clause.IndexOfAny(new[] { '+', '-', '=' });",
+        "        string who = clause.Substring(0, op);",
+        "        if (who == \"\" || who.Contains('a')) who = \"ugo\";",
+        "        char sign = clause[op];",
+        "        string perms = clause.Substring(op + 1);",
+        "        foreach (char w in who)",
+        "        {",
+        "            int baseIdx = w == 'u' ? 0 : w == 'g' ? 3 : 6;",
+        "            for (int i = 0; i < 3; i++)",
+        "            {",
+        "                char p = \"rwx\"[i];",
+        "                bool listed = perms.Contains(p);",
+        "                if (sign == '+' && listed) m[baseIdx + i] = p;",
+        "                if (sign == '-' && listed) m[baseIdx + i] = '-';",
+        "                if (sign == '=') m[baseIdx + i] = listed ? p : '-';",
+        "            }",
+        "        }",
+        "    }",
+        "    return new string(m);",
+        "}"
+      ],
+      "hints": [
+        "Find the operator with `IndexOfAny`; what's before it is *who*, what's after is the perms.",
+        "`=` sets every one of the three positions: listed ones on, the others off."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"+x for all\", \"rwxr-xr-x\", ApplyChmod(\"rw-r--r--\", \"+x\"));",
+        "Dojo.Eq(\"g+w,o+r\", \"rw-rw-r--\", ApplyChmod(\"rw-r-----\", \"g+w,o+r\"));",
+        "Dojo.Eq(\"u=rw,go=\", \"rw-------\", ApplyChmod(\"rwxrwxrwx\", \"u=rw,go=\"));",
+        "Dojo.Eq(\"a-w\", \"r-xr-xr-x\", ApplyChmod(\"rwxrwxr-x\", \"a-w\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Can this user do that?",
+      "prompt": [
+        "Write `bool CanAccess(string mode, string owner, string group, string user, List<string> userGroups, char want)` where `want` is `'r'`, `'w'` or `'x'`. Follow the kernel's rule: use the **owner** triple if `user == owner`, else the **group** triple if `userGroups` contains `group`, else **other**. Only one triple is ever checked, even if a later one would allow it.",
+        "",
+        "`root` may always read and write, and may execute if **any** triple has `x`."
+      ],
+      "starter": [
+        "bool CanAccess(string mode, string owner, string group, string user, List<string> userGroups, char want)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool CanAccess(string mode, string owner, string group, string user, List<string> userGroups, char want)",
+        "{",
+        "    if (user == \"root\") return want != 'x' || mode.Contains('x');",
+        "    int offset = user == owner ? 0 : userGroups.Contains(group) ? 3 : 6;",
+        "    int idx = offset + (want == 'r' ? 0 : want == 'w' ? 1 : 2);",
+        "    return mode[idx] != '-';",
+        "}"
+      ],
+      "hints": [
+        "Pick the offset 0, 3 or 6 first, then add 0/1/2 for r/w/x.",
+        "The owner triple wins even when it is *more* restrictive than group or other."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoNone = new List<string>();",
+        "Dojo.Eq(\"owner may write\", true, CanAccess(\"rw-r-----\", \"ana\", \"devs\", \"ana\", dojoNone, 'w'));",
+        "Dojo.Eq(\"group may read\", true, CanAccess(\"rw-r-----\", \"ana\", \"devs\", \"bob\", new List<string> { \"devs\" }, 'r'));",
+        "Dojo.Eq(\"other gets nothing\", false, CanAccess(\"rw-r-----\", \"ana\", \"devs\", \"eve\", dojoNone, 'r'));",
+        "Dojo.Eq(\"owner triple wins even if stricter\", false, CanAccess(\"---rwxrwx\", \"ana\", \"devs\", \"ana\", dojoNone, 'r'));",
+        "Dojo.Eq(\"root reads anything\", true, CanAccess(\"---------\", \"ana\", \"devs\", \"root\", dojoNone, 'r'));",
+        "Dojo.Eq(\"root cannot run non-executables\", false, CanAccess(\"rw-rw-rw-\", \"ana\", \"devs\", \"root\", dojoNone, 'x'));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Audit report",
+      "prompt": [
+        "Write `List<string> Audit(List<(string Path, string Mode, string Owner)> files)` returning one finding per problem, in input order, formatted `\"<path>: <problem>\"`:",
+        "",
+        "- `world-writable` if other has `w`,",
+        "- `secret readable by others` if the path ends in `.pem`, `.key` or `.env`, or contains `/.ssh/`, and group or other has **any** permission,",
+        "- `not owned by root` if the path starts with `/etc/` and the owner isn't `root`.",
+        "",
+        "A file can produce several findings; list them in the order above."
+      ],
+      "starter": [
+        "List<string> Audit(List<(string Path, string Mode, string Owner)> files)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Audit(List<(string Path, string Mode, string Owner)> files)",
+        "{",
+        "    var findings = new List<string>();",
+        "    foreach (var (path, mode, owner) in files)",
+        "    {",
+        "        if (mode[7] == 'w') findings.Add($\"{path}: world-writable\");",
+        "        bool secret = path.EndsWith(\".pem\") || path.EndsWith(\".key\") || path.EndsWith(\".env\") || path.Contains(\"/.ssh/\");",
+        "        if (secret && mode.Substring(3) != \"------\") findings.Add($\"{path}: secret readable by others\");",
+        "        if (path.StartsWith(\"/etc/\") && owner != \"root\") findings.Add($\"{path}: not owned by root\");",
+        "    }",
+        "    return findings;",
+        "}"
+      ],
+      "hints": [
+        "Other's `w` is index 7 of the 9-character mode.",
+        "Group and other are `mode.Substring(3)`; for a secret it must be `------`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoFiles = new List<(string Path, string Mode, string Owner)> {",
+        "  (\"/srv/app/app.dll\", \"rwxr-xr-x\", \"app\"),",
+        "  (\"/srv/app/.env\", \"rw-r--r--\", \"app\"),",
+        "  (\"/tmp/upload\", \"rwxrwxrwx\", \"app\"),",
+        "  (\"/home/app/.ssh/id_ed25519\", \"rw-------\", \"app\"),",
+        "  (\"/etc/nginx/nginx.conf\", \"rw-rw-rw-\", \"deploy\") };",
+        "Dojo.Eq(\"findings\", new List<string> { \"/srv/app/.env: secret readable by others\", \"/tmp/upload: world-writable\", \"/etc/nginx/nginx.conf: world-writable\", \"/etc/nginx/nginx.conf: not owned by root\" }, Audit(dojoFiles));"
+      ]
+    }
+  ]
+}

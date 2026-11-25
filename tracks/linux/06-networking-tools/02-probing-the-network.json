@@ -1,0 +1,201 @@
+{
+  "title": "Probing the network",
+  "summary": "curl, ss, dig, ping and traceroute: find out which layer is broken.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "curl: talk HTTP from the shell",
+      "body": [
+        "```text",
+        "curl https://api.example.com/health            # GET, body to stdout",
+        "curl -i https://api.example.com/health         # include response headers",
+        "curl -v https://api.example.com/health         # verbose: DNS, TCP, TLS, request and response headers",
+        "curl -fsS -o out.json https://...              # -f fail on HTTP errors (exit 22), -s silent, -S still show errors, -o save",
+        "curl -X POST -H \"Content-Type: application/json\" -d '{\"qty\":2}' https://api.example.com/orders",
+        "curl -L http://example.com                     # follow redirects",
+        "curl -w \"%{http_code} %{time_total}\\n\" -o /dev/null -s https://...   # just status and timing",
+        "wget https://example.com/file.tar.gz           # simple downloads (resumes with -c)",
+        "```",
+        "",
+        "In scripts and health checks always use `-f`: without it curl exits 0 even on a 500."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Send JSON to the API and make the script fail on any HTTP error status.",
+      "code": "curl -__1__ -X POST -__2__ \"Content-Type: application/json\" -__3__ '{\"name\":\"ana\"}' http://localhost:5000/users",
+      "blanks": [
+        [
+          "fsS",
+          "f"
+        ],
+        "H",
+        "d"
+      ],
+      "bank": [
+        "L",
+        "o",
+        "i",
+        "X"
+      ],
+      "explain": "`-f` turns 4xx/5xx into a non-zero exit, `-H` adds a header, `-d` sends a body."
+    },
+    {
+      "type": "learn",
+      "title": "ss: who is listening?",
+      "body": [
+        "`ss` (the modern `netstat`) shows sockets.",
+        "",
+        "```text",
+        "$ sudo ss -tlnp",
+        "State   Recv-Q Send-Q Local Address:Port  Peer Address:Port Process",
+        "LISTEN  0      511          0.0.0.0:80         0.0.0.0:*     users:((\"nginx\",pid=801,fd=6))",
+        "LISTEN  0      512        127.0.0.1:5000       0.0.0.0:*     users:((\"dotnet\",pid=912,fd=210))",
+        "LISTEN  0      128          0.0.0.0:22         0.0.0.0:*     users:((\"sshd\",pid=650,fd=3))",
+        "```",
+        "",
+        "`-t` TCP, `-u` UDP, `-l` listening only, `-n` numbers not names, `-p` show the process (needs sudo for others' processes).",
+        "",
+        "**`127.0.0.1:5000` only accepts connections from the same machine.** `0.0.0.0` (or `*`, or `[::]`) means every interface. Half of \"it works on the server but not from my laptop\" tickets are this."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "From your laptop, `curl http://10.0.0.5:5000` says *Connection refused*. On the server, `curl localhost:5000` works and `ss -tlnp` shows `127.0.0.1:5000 dotnet`. What's wrong?",
+      "options": [
+        "The app listens only on loopback; bind it to 0.0.0.0 (e.g. `ASPNETCORE_URLS=http://0.0.0.0:5000`) or put a reverse proxy in front",
+        "DNS is broken",
+        "The TLS certificate expired",
+        "The laptop needs sudo"
+      ],
+      "answer": 0,
+      "explain": "Refused (not a timeout) means the host answered but nothing listens on that address:port. A timeout would point to a firewall."
+    },
+    {
+      "type": "learn",
+      "title": "dig, ping, traceroute",
+      "body": [
+        "Work **up** the layers: is the name resolving, is the host reachable, is the port open, does the app answer?",
+        "",
+        "```text",
+        "dig api.example.com +short            # name -> IP   (nslookup api.example.com is the older tool)",
+        "dig MX example.com                    # other record types",
+        "dig @8.8.8.8 api.example.com          # ask a specific resolver",
+        "ping -c 4 10.0.0.5                    # ICMP reachability and round-trip time",
+        "traceroute 10.0.0.5                   # each router hop on the way (tracepath / mtr are alternatives)",
+        "nc -zv 10.0.0.5 5432                  # is this TCP port open?",
+        "curl -v https://api.example.com       # does the app answer?",
+        "```",
+        "",
+        "Note: many cloud networks block ICMP, so **a failed ping doesn't prove the host is down**."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the checks for \"the API is unreachable\" from the lowest layer up.",
+      "lines": [
+        "dig api.example.com +short",
+        "ping -c 3 203.0.113.10",
+        "nc -zv 203.0.113.10 443",
+        "curl -v https://api.example.com/health"
+      ],
+      "explain": "Name resolution, then reachability, then the port, then the application. Each step narrows which team you need to call."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which symptom points to which cause?",
+      "buckets": [
+        "DNS",
+        "Firewall / routing",
+        "Nothing listening",
+        "The app itself"
+      ],
+      "items": [
+        [
+          "`Could not resolve host`",
+          0
+        ],
+        [
+          "connect hangs then *timed out*",
+          1
+        ],
+        [
+          "*Connection refused* instantly",
+          2
+        ],
+        [
+          "HTTP 500 with a stack trace",
+          3
+        ],
+        [
+          "`dig` returns NXDOMAIN",
+          0
+        ],
+        [
+          "HTTP 503 from the app's health check",
+          3
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print, assuming the server answers 404 in 0.12 s?",
+      "code": "curl -s -o /dev/null -w \"%{http_code}\\n\" https://api.example.com/missing; echo \"exit=$?\"",
+      "answer": [
+        "404",
+        "exit=0"
+      ],
+      "explain": "Without `-f`, curl treats any HTTP response as success, so the exit code is 0. With `-f` the exit code would be 22.",
+      "verify": false
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Parse ss -tlnp",
+      "prompt": "Write `List<(string Address, int Port, string Process)> Listening(List<string> ss)` over `ss -tlnp` output (header line first, columns separated by runs of spaces). For each `LISTEN` line take the local address and port (split at the **last** `:` so IPv6 like `[::]:443` works) and the process name inside `users:((\"...\"`. Missing process column → empty string.",
+      "starter": [
+        "List<(string Address, int Port, string Process)> Listening(List<string> ss)",
+        "{",
+        "    return new();",
+        "}"
+      ],
+      "solution": [
+        "List<(string Address, int Port, string Process)> Listening(List<string> ss)",
+        "{",
+        "    var result = new List<(string, int, string)>();",
+        "    foreach (var line in ss.Skip(1))",
+        "    {",
+        "        var f = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        if (f.Length < 5 || f[0] != \"LISTEN\") continue;",
+        "        string local = f[3];",
+        "        int colon = local.LastIndexOf(':');",
+        "        string proc = \"\";",
+        "        if (f.Length > 5)",
+        "        {",
+        "            int q = f[5].IndexOf(\"((\\\"\");",
+        "            if (q >= 0) proc = f[5].Substring(q + 3, f[5].IndexOf('\"', q + 3) - q - 3);",
+        "        }",
+        "        result.Add((local.Substring(0, colon), int.Parse(local.Substring(colon + 1)), proc));",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "Column 4 (index 3) is `Local Address:Port`.",
+        "The process name sits between `((\"` and the next `\"`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSs = new List<string> {",
+        "  \"State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process\",",
+        "  \"LISTEN 0      511          0.0.0.0:80        0.0.0.0:*    users:((\\\"nginx\\\",pid=801,fd=6))\",",
+        "  \"LISTEN 0      512        127.0.0.1:5000      0.0.0.0:*    users:((\\\"dotnet\\\",pid=912,fd=210))\",",
+        "  \"LISTEN 0      128             [::]:443          [::]:*\",",
+        "  \"ESTAB  0      0          10.0.0.5:22      10.0.0.9:51544  users:((\\\"sshd\\\",pid=7,fd=4))\" };",
+        "Dojo.Eq(\"listeners\", new List<(string Address, int Port, string Process)> { (\"0.0.0.0\", 80, \"nginx\"), (\"127.0.0.1\", 5000, \"dotnet\"), (\"[::]\", 443, \"\") }, Listening(dojoSs));"
+      ]
+    }
+  ]
+}

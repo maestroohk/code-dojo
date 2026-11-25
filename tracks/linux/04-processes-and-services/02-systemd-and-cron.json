@@ -1,0 +1,243 @@
+{
+  "title": "systemd, journalctl and cron",
+  "summary": "Run programs as services that restart themselves, read their logs, and schedule jobs.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Services with systemd",
+      "body": [
+        "A **service** is a program systemd starts at boot, restarts when it crashes, and logs for you. It's described by a **unit file**:",
+        "",
+        "```text",
+        "# /etc/systemd/system/orders-api.service",
+        "[Unit]",
+        "Description=Orders API",
+        "After=network.target",
+        "",
+        "[Service]",
+        "User=orders",
+        "WorkingDirectory=/srv/orders",
+        "ExecStart=/usr/bin/dotnet /srv/orders/Orders.Api.dll",
+        "Restart=on-failure",
+        "Environment=ASPNETCORE_URLS=http://127.0.0.1:5000",
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+        "```"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the systemctl command to its effect.",
+      "pairs": [
+        [
+          "`systemctl start orders-api`",
+          "run it now"
+        ],
+        [
+          "`systemctl enable orders-api`",
+          "start it at every boot"
+        ],
+        [
+          "`systemctl restart orders-api`",
+          "stop then start"
+        ],
+        [
+          "`systemctl status orders-api`",
+          "state, PID and the last log lines"
+        ],
+        [
+          "`systemctl daemon-reload`",
+          "re-read unit files after editing them"
+        ]
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "You edited `orders-api.service`. Arrange the steps to apply and verify the change.",
+      "lines": [
+        "sudo systemctl daemon-reload",
+        "sudo systemctl restart orders-api",
+        "systemctl status orders-api",
+        "journalctl -u orders-api -n 50"
+      ],
+      "explain": "systemd caches unit files, so reload first. Then restart, check status, and read recent logs to be sure."
+    },
+    {
+      "type": "learn",
+      "title": "Logs with journalctl",
+      "body": [
+        "systemd captures each service's stdout and stderr into the **journal**.",
+        "",
+        "```text",
+        "journalctl -u orders-api               # one unit's logs",
+        "journalctl -u orders-api -f            # follow, like tail -f",
+        "journalctl -u orders-api --since \"10 min ago\"",
+        "journalctl -p err -b                   # errors (and worse) since this boot",
+        "journalctl -u orders-api -n 100 --no-pager",
+        "```",
+        "",
+        "Priorities, most to least severe: `emerg alert crit err warning notice info debug`. `-p err` means err **or more severe**."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Follow the orders-api logs, starting with the last 20 lines.",
+      "code": "journalctl __1__ orders-api __2__ 20 __3__",
+      "blanks": [
+        "-u",
+        "-n",
+        "-f"
+      ],
+      "bank": [
+        "-p",
+        "-b",
+        "-x",
+        "--since"
+      ],
+      "explain": "`-u` picks the unit, `-n` the number of lines, `-f` follows."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`systemctl status orders-api` shows `Active: activating (auto-restart)` and `code=exited, status=150`. What's the next thing to run?",
+      "options": [
+        "`journalctl -u orders-api -n 50` to read why it exits",
+        "`kill -9 1`",
+        "`systemctl enable orders-api`",
+        "`reboot`"
+      ],
+      "answer": 0,
+      "explain": "It's crash-looping under `Restart=on-failure`. The program's own error message (bad config, port taken, missing file) is in the journal."
+    },
+    {
+      "type": "learn",
+      "title": "cron: run on a schedule",
+      "body": [
+        "`crontab -e` edits your schedule. Each line is five time fields and a command:",
+        "",
+        "```text",
+        "┌──────── minute       0-59",
+        "│ ┌────── hour         0-23",
+        "│ │ ┌──── day of month 1-31",
+        "│ │ │ ┌── month        1-12",
+        "│ │ │ │ ┌ day of week  0-7 (0 and 7 are Sunday)",
+        "* * * * *  command",
+        "",
+        "0 3 * * *     /srv/backup.sh          every day at 03:00",
+        "*/15 * * * *  /srv/poll.sh            every 15 minutes",
+        "0 9 * * 1-5   /srv/report.sh          09:00 Monday to Friday",
+        "30 2 1 * *    /srv/monthly.sh         02:30 on the 1st of each month",
+        "```",
+        "",
+        "cron runs with a minimal `PATH` and in your home directory: use absolute paths and redirect output (`>> /var/log/backup.log 2>&1`), or you'll never see the errors. (systemd **timers** are the modern alternative.)"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "When does `0 */6 * * *` run? List the times on one line, separated by spaces.",
+      "code": "0 */6 * * *",
+      "answer": "00:00 06:00 12:00 18:00",
+      "explain": "`*/6` in the hour field means every 6th hour starting from 0; minute 0 each time.",
+      "verify": false
+    },
+    {
+      "type": "sort",
+      "prompt": "Does the cron line `0 9 * * 1-5` fire at this time?",
+      "buckets": [
+        "Fires",
+        "Doesn't fire"
+      ],
+      "items": [
+        [
+          "Monday 09:00",
+          0
+        ],
+        [
+          "Friday 09:00",
+          0
+        ],
+        [
+          "Saturday 09:00",
+          1
+        ],
+        [
+          "Tuesday 09:30",
+          1
+        ],
+        [
+          "Wednesday 09:00",
+          0
+        ],
+        [
+          "Thursday 21:00",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A cron matcher",
+      "prompt": [
+        "Write `bool CronMatches(string expr, DateTime t)` for 5-field cron expressions. Each field may be:",
+        "",
+        "- `*`, a number (`5`), a range (`1-5`), a step (`*/15`, `1-30/10`, `5/20` meaning 5, 25, 45...), or a comma list of those (`0,30` or `1-5,7`).",
+        "- Day of week: 0-7, both 0 and 7 are Sunday. (`DayOfWeek` gives Sunday = 0.)",
+        "",
+        "Treat day-of-month and day-of-week simply as \"both must match\". (Real cron ORs them when both are restricted; ignore that here.)"
+      ],
+      "starter": [
+        "bool CronMatches(string expr, DateTime t)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool CronMatches(string expr, DateTime t)",
+        "{",
+        "    var f = expr.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "    int dow = (int)t.DayOfWeek;",
+        "    return Field(f[0], t.Minute, 0) && Field(f[1], t.Hour, 0) && Field(f[2], t.Day, 1)",
+        "        && Field(f[3], t.Month, 1) && (Field(f[4], dow, 0) || (dow == 0 && Field(f[4], 7, 0)));",
+        "",
+        "    bool Field(string field, int value, int min)",
+        "    {",
+        "        foreach (var part in field.Split(','))",
+        "        {",
+        "            string range = part;",
+        "            int step = 1;",
+        "            int slash = part.IndexOf('/');",
+        "            if (slash >= 0) { range = part.Substring(0, slash); step = int.Parse(part.Substring(slash + 1)); }",
+        "            int lo, hi;",
+        "            if (range == \"*\") { lo = min; hi = int.MaxValue; }",
+        "            else if (range.Contains('-')) { var b = range.Split('-'); lo = int.Parse(b[0]); hi = int.Parse(b[1]); }",
+        "            else { lo = int.Parse(range); hi = slash >= 0 ? int.MaxValue : lo; }",
+        "            if (value >= lo && value <= hi && (value - lo) % step == 0) return true;",
+        "        }",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Write a local `bool Field(string field, int value, int min)` and call it five times.",
+        "For a step, the value must be in range and `(value - start) % step == 0`. `*` starts at the field's minimum (0, or 1 for day and month)."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoMon9 = new DateTime(2031, 3, 10, 9, 0, 0);",
+        "Dojo.Eq(\"every minute\", true, CronMatches(\"* * * * *\", dojoMon9));",
+        "Dojo.Eq(\"weekday 09:00 on Monday\", true, CronMatches(\"0 9 * * 1-5\", dojoMon9));",
+        "Dojo.Eq(\"weekday 09:00 on Saturday\", false, CronMatches(\"0 9 * * 1-5\", new DateTime(2031, 3, 15, 9, 0, 0)));",
+        "Dojo.Eq(\"*/15 at :45\", true, CronMatches(\"*/15 * * * *\", new DateTime(2031, 1, 1, 4, 45, 0)));",
+        "Dojo.Eq(\"*/15 at :50\", false, CronMatches(\"*/15 * * * *\", new DateTime(2031, 1, 1, 4, 50, 0)));",
+        "Dojo.Eq(\"list 0,30\", true, CronMatches(\"0,30 * * * *\", new DateTime(2031, 1, 1, 4, 30, 0)));",
+        "Dojo.Eq(\"5/20 at :25\", true, CronMatches(\"5/20 * * * *\", new DateTime(2031, 1, 1, 4, 25, 0)));",
+        "Dojo.Eq(\"Sunday as 7\", true, CronMatches(\"0 0 * * 7\", new DateTime(2031, 3, 16, 0, 0, 0)));",
+        "Dojo.Eq(\"1st of the month 02:30\", true, CronMatches(\"30 2 1 * *\", new DateTime(2031, 4, 1, 2, 30, 0)));",
+        "Dojo.Eq(\"range with step 1-30/10 at :21\", true, CronMatches(\"1-30/10 * * * *\", new DateTime(2031, 1, 1, 0, 21, 0)));"
+      ]
+    }
+  ]
+}

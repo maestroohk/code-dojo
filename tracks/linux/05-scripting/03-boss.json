@@ -1,0 +1,165 @@
+{
+  "title": "Boss: the deploy script review",
+  "summary": "Parse arguments, model set -e, and plan log cleanup like a production script would.",
+  "minutes": 15,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Code review",
+      "body": "A teammate's deploy script misbehaves. To review it properly you're going to model what bash actually does."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Parse flags",
+      "prompt": [
+        "Write `(Dictionary<string, string> Flags, List<string> Args) ParseArgs(List<string> argv)` handling the common script convention:",
+        "",
+        "- `--name=value` and `--name value` set `Flags[name] = value`,",
+        "- a `--name` followed by nothing or by another `--flag` is a boolean: `Flags[name] = \"true\"`,",
+        "- `--` ends flag parsing: everything after it is a positional arg,",
+        "- anything else is a positional arg, in order."
+      ],
+      "starter": [
+        "(Dictionary<string, string> Flags, List<string> Args) ParseArgs(List<string> argv)",
+        "{",
+        "    return (new(), new());",
+        "}"
+      ],
+      "solution": [
+        "(Dictionary<string, string> Flags, List<string> Args) ParseArgs(List<string> argv)",
+        "{",
+        "    var flags = new Dictionary<string, string>();",
+        "    var args = new List<string>();",
+        "    for (int i = 0; i < argv.Count; i++)",
+        "    {",
+        "        string a = argv[i];",
+        "        if (a == \"--\") { args.AddRange(argv.Skip(i + 1)); break; }",
+        "        if (!a.StartsWith(\"--\")) { args.Add(a); continue; }",
+        "        string name = a.Substring(2);",
+        "        int eq = name.IndexOf('=');",
+        "        if (eq >= 0) flags[name.Substring(0, eq)] = name.Substring(eq + 1);",
+        "        else if (i + 1 < argv.Count && !argv[i + 1].StartsWith(\"--\")) flags[name] = argv[++i];",
+        "        else flags[name] = \"true\";",
+        "    }",
+        "    return (flags, args);",
+        "}"
+      ],
+      "hints": [
+        "Use an index loop, so `--name value` can consume the next item with `++i`.",
+        "Check for `--` before checking for `--name`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var (dojoF, dojoA) = ParseArgs(new List<string> { \"--env=prod\", \"--tag\", \"v1.2.0\", \"--dry-run\", \"--verbose\", \"api\", \"--\", \"--not-a-flag\" });",
+        "Dojo.Eq(\"--env=prod\", \"prod\", dojoF.GetValueOrDefault(\"env\"));",
+        "Dojo.Eq(\"--tag v1.2.0\", \"v1.2.0\", dojoF.GetValueOrDefault(\"tag\"));",
+        "Dojo.Eq(\"--dry-run before another flag is boolean\", \"true\", dojoF.GetValueOrDefault(\"dry-run\"));",
+        "Dojo.Eq(\"--verbose takes the next positional\", \"api\", dojoF.GetValueOrDefault(\"verbose\"));",
+        "Dojo.Eq(\"positionals after --\", new List<string> { \"--not-a-flag\" }, dojoA);"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "What does set -e actually do?",
+      "prompt": [
+        "Model a script. Each line is `(Cmd, Code)`: the command text and the exit code its **first** command would return. A line may be `\"cmd || fallback\"`, where the fallback always succeeds with code 0, unless the fallback is `exit N`. A command `exit N` ends the script with code N.",
+        "",
+        "Write `(List<string> Ran, int Exit) RunScript(List<(string Cmd, int Code)> lines, bool errexit)` returning the commands that ran (the part before `||`, then the fallback if it ran) and the script's exit code:",
+        "",
+        "- a failing command with no fallback stops the script with its code **only if** `errexit` (set -e); otherwise the script carries on,",
+        "- reaching the end gives exit code 0 (as if the last command succeeded; keep it simple)."
+      ],
+      "starter": [
+        "(List<string> Ran, int Exit) RunScript(List<(string Cmd, int Code)> lines, bool errexit)",
+        "{",
+        "    return (new List<string>(), 0);",
+        "}"
+      ],
+      "solution": [
+        "(List<string> Ran, int Exit) RunScript(List<(string Cmd, int Code)> lines, bool errexit)",
+        "{",
+        "    var ran = new List<string>();",
+        "    foreach (var (cmd, code) in lines)",
+        "    {",
+        "        string first = cmd;",
+        "        string? alt = null;",
+        "        int bar = cmd.IndexOf(\" || \");",
+        "        if (bar >= 0) { first = cmd.Substring(0, bar); alt = cmd.Substring(bar + 4); }",
+        "        ran.Add(first);",
+        "        if (first.StartsWith(\"exit \")) return (ran, int.Parse(first.Substring(5)));",
+        "        if (code == 0) continue;",
+        "        if (alt != null)",
+        "        {",
+        "            ran.Add(alt);",
+        "            if (alt.StartsWith(\"exit \")) return (ran, int.Parse(alt.Substring(5)));",
+        "            continue;",
+        "        }",
+        "        if (errexit) return (ran, code);",
+        "    }",
+        "    return (ran, 0);",
+        "}"
+      ],
+      "hints": [
+        "Split on `\" || \"` first.",
+        "Handle `exit N` both as a command and as a fallback."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoScript = new List<(string Cmd, int Code)> { (\"cd /srv/app\", 1), (\"rm -rf build\", 0), (\"echo done\", 0) };",
+        "var dojoR1 = RunScript(dojoScript, false);",
+        "Dojo.Eq(\"without -e it carries on in the wrong dir\", new List<string> { \"cd /srv/app\", \"rm -rf build\", \"echo done\" }, dojoR1.Ran);",
+        "Dojo.Eq(\"without -e exit 0\", 0, dojoR1.Exit);",
+        "var dojoR2 = RunScript(dojoScript, true);",
+        "Dojo.Eq(\"with -e it stops\", new List<string> { \"cd /srv/app\" }, dojoR2.Ran);",
+        "Dojo.Eq(\"with -e exit code is the failure\", 1, dojoR2.Exit);",
+        "var dojoR3 = RunScript(new List<(string Cmd, int Code)> { (\"grep -q x f || true\", 1), (\"cd /srv || exit 3\", 2), (\"echo never\", 0) }, true);",
+        "Dojo.Eq(\"|| true and || exit N\", new List<string> { \"grep -q x f\", \"true\", \"cd /srv\", \"exit 3\" }, dojoR3.Ran);",
+        "Dojo.Eq(\"exit code from fallback\", 3, dojoR3.Exit);"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Log rotation plan",
+      "prompt": [
+        "The script's last job is cleaning `/var/log/app`. Write `List<string> RotationPlan(List<(string Name, int AgeDays)> files, int compressAfter, int deleteAfter)` that returns the commands it would run, sorted by file name (ordinal):",
+        "",
+        "- `.log` files older than `deleteAfter` days → `rm <name>`,",
+        "- `.log` files older than `compressAfter` days (but not deleted) → `gzip <name>`,",
+        "- `.gz` files older than `deleteAfter` days → `rm <name>`,",
+        "- anything else is left alone. \"Older than\" means strictly greater."
+      ],
+      "starter": [
+        "List<string> RotationPlan(List<(string Name, int AgeDays)> files, int compressAfter, int deleteAfter)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> RotationPlan(List<(string Name, int AgeDays)> files, int compressAfter, int deleteAfter)",
+        "{",
+        "    var plan = new List<string>();",
+        "    foreach (var (name, age) in files.OrderBy(f => f.Name, StringComparer.Ordinal))",
+        "    {",
+        "        bool log = name.EndsWith(\".log\"), gz = name.EndsWith(\".gz\");",
+        "        if ((log || gz) && age > deleteAfter) plan.Add($\"rm {name}\");",
+        "        else if (log && age > compressAfter) plan.Add($\"gzip {name}\");",
+        "    }",
+        "    return plan;",
+        "}"
+      ],
+      "hints": [
+        "Sort first, then decide per file.",
+        "Check the delete rule before the compress rule."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoFiles = new List<(string Name, int AgeDays)> { (\"app.log\", 0), (\"app-0301.log\", 3), (\"app-0201.log\", 40), (\"app-0215.log.gz\", 20), (\"app-0101.log.gz\", 70), (\"README\", 400) };",
+        "Dojo.Eq(\"plan\", new List<string> { \"rm app-0101.log.gz\", \"rm app-0201.log\", \"gzip app-0301.log\" }, RotationPlan(dojoFiles, 1, 30));"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,140 @@
+{
+  "title": "Boss: it works on my machine",
+  "summary": "Diagnose connectivity tickets and plan an rsync deploy.",
+  "minutes": 15,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Support queue",
+      "body": "The deploy pipeline uses rsync over ssh, and three tickets are about connectivity. Model the tools to answer them."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Triage the symptom",
+      "prompt": [
+        "Write `string Diagnose(string curlError, bool listensOnAllInterfaces)` mapping what `curl` reported to the layer to investigate:",
+        "",
+        "- contains `Could not resolve host` → `\"dns\"`",
+        "- contains `timed out` → `\"firewall\"`",
+        "- contains `Connection refused` → `\"bind\"` if not `listensOnAllInterfaces`, else `\"not running\"`",
+        "- starts with `HTTP 5` → `\"app\"`",
+        "- starts with `HTTP 2` or `HTTP 3` → `\"ok\"`",
+        "- anything else → `\"unknown\"`"
+      ],
+      "starter": [
+        "string Diagnose(string curlError, bool listensOnAllInterfaces)",
+        "{",
+        "    return \"unknown\";",
+        "}"
+      ],
+      "solution": [
+        "string Diagnose(string curlError, bool listensOnAllInterfaces)",
+        "{",
+        "    if (curlError.Contains(\"Could not resolve host\")) return \"dns\";",
+        "    if (curlError.Contains(\"timed out\")) return \"firewall\";",
+        "    if (curlError.Contains(\"Connection refused\")) return listensOnAllInterfaces ? \"not running\" : \"bind\";",
+        "    if (curlError.StartsWith(\"HTTP 5\")) return \"app\";",
+        "    if (curlError.StartsWith(\"HTTP 2\") || curlError.StartsWith(\"HTTP 3\")) return \"ok\";",
+        "    return \"unknown\";",
+        "}"
+      ],
+      "hints": [
+        "A chain of `if` statements in the listed order.",
+        "Refused with a loopback-only listener is a bind problem."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"dns\", \"dns\", Diagnose(\"curl: (6) Could not resolve host: api.internal\", true));",
+        "Dojo.Eq(\"firewall\", \"firewall\", Diagnose(\"curl: (28) Failed to connect to 10.0.0.5 port 443 after 30001 ms: Connection timed out\", true));",
+        "Dojo.Eq(\"bind\", \"bind\", Diagnose(\"curl: (7) Failed to connect to 10.0.0.5 port 5000: Connection refused\", false));",
+        "Dojo.Eq(\"not running\", \"not running\", Diagnose(\"curl: (7) Failed to connect to 10.0.0.5 port 5000: Connection refused\", true));",
+        "Dojo.Eq(\"app\", \"app\", Diagnose(\"HTTP 502 Bad Gateway\", true));",
+        "Dojo.Eq(\"ok\", \"ok\", Diagnose(\"HTTP 200 OK\", true));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Plan an rsync",
+      "prompt": [
+        "Write `List<string> RsyncPlan(Dictionary<string, (long Size, long Mtime)> src, Dictionary<string, (long Size, long Mtime)> dst, bool delete)` returning what `rsync -a` (quick check mode) would do, sorted by path (ordinal):",
+        "",
+        "- path only in `src`, or in both but size **or** mtime differ → `\"send <path>\"`,",
+        "- path only in `dst` → `\"delete <path>\"` only when `delete` is true,",
+        "- identical size and mtime → nothing."
+      ],
+      "starter": [
+        "List<string> RsyncPlan(Dictionary<string, (long Size, long Mtime)> src, Dictionary<string, (long Size, long Mtime)> dst, bool delete)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> RsyncPlan(Dictionary<string, (long Size, long Mtime)> src, Dictionary<string, (long Size, long Mtime)> dst, bool delete)",
+        "{",
+        "    var plan = new List<(string Path, string Line)>();",
+        "    foreach (var (path, meta) in src)",
+        "        if (!dst.TryGetValue(path, out var d) || d != meta) plan.Add((path, $\"send {path}\"));",
+        "    if (delete)",
+        "        foreach (var path in dst.Keys)",
+        "            if (!src.ContainsKey(path)) plan.Add((path, $\"delete {path}\"));",
+        "    return plan.OrderBy(p => p.Path, StringComparer.Ordinal).Select(p => p.Line).ToList();",
+        "}"
+      ],
+      "hints": [
+        "Tuples compare by value with `!=`.",
+        "Collect (path, line) pairs, then sort by path at the end."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSrc = new Dictionary<string, (long Size, long Mtime)> { [\"app.dll\"] = (900, 200), [\"appsettings.json\"] = (40, 100), [\"new.dll\"] = (10, 300) };",
+        "var dojoDst = new Dictionary<string, (long Size, long Mtime)> { [\"app.dll\"] = (880, 150), [\"appsettings.json\"] = (40, 100), [\"old.dll\"] = (5, 50) };",
+        "Dojo.Eq(\"no --delete\", new List<string> { \"send app.dll\", \"send new.dll\" }, RsyncPlan(dojoSrc, dojoDst, false));",
+        "Dojo.Eq(\"with --delete\", new List<string> { \"send app.dll\", \"send new.dll\", \"delete old.dll\" }, RsyncPlan(dojoSrc, dojoDst, true));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Ping summary",
+      "prompt": [
+        "After the deploy, a health job pings every host. Write `string PingSummary(List<double?> rtts)` where each entry is one reply's round-trip time in ms, or `null` for a lost packet. Return the same summary lines ping prints, joined by `\\n`:",
+        "",
+        "```text",
+        "4 packets transmitted, 3 received, 25% packet loss",
+        "rtt min/avg/max = 10.000/20.000/30.000 ms",
+        "```",
+        "",
+        "Loss is a whole percentage (rounded down). Times use 3 decimals. If nothing was received, return only the first line."
+      ],
+      "starter": [
+        "string PingSummary(List<double?> rtts)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string PingSummary(List<double?> rtts)",
+        "{",
+        "    var got = rtts.Where(r => r.HasValue).Select(r => r!.Value).ToList();",
+        "    int loss = (rtts.Count - got.Count) * 100 / rtts.Count;",
+        "    string first = $\"{rtts.Count} packets transmitted, {got.Count} received, {loss}% packet loss\";",
+        "    if (got.Count == 0) return first;",
+        "    return first + \"\\n\" + $\"rtt min/avg/max = {got.Min():F3}/{got.Average():F3}/{got.Max():F3} ms\";",
+        "}"
+      ],
+      "hints": [
+        "Integer division rounds down for you.",
+        "Format with `:F3`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"some loss\", \"4 packets transmitted, 3 received, 25% packet loss\\nrtt min/avg/max = 10.000/20.000/30.000 ms\", PingSummary(new List<double?> { 10, null, 20, 30 }));",
+        "Dojo.Eq(\"rounding down\", \"3 packets transmitted, 2 received, 33% packet loss\\nrtt min/avg/max = 1.500/2.250/3.000 ms\", PingSummary(new List<double?> { 1.5, 3, null }));",
+        "Dojo.Eq(\"all lost\", \"2 packets transmitted, 0 received, 100% packet loss\", PingSummary(new List<double?> { null, null }));"
+      ]
+    }
+  ]
+}
