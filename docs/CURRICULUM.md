@@ -1065,3 +1065,34 @@ short cold-rebuild lesson per module. No merges: thin lessons are deepened in pl
 stable. Never rename lesson ids during the rollout (progress in `.state/progress.json` is keyed by them): new
 lessons take ids that sort into place, e.g. `045-dates-and-time` between `04-...` and `05-boss`, and cold
 rebuilds are `N5-cold-rebuild` lessons placed just before the boss (e.g. `055-cold-rebuild` before `06-boss`).
+
+## 5. Implementation notes: fundamentals → Delve (deviations from 2.1)
+
+Delve is built (flagship dream only, `tracks/fundamentals/track.json`); assembled from the reference solutions it
+builds and plays all five floors. Differences from the table in 2.1:
+
+- **One partial class.** Every piece is `static` members of `static partial class Delve.Game` (transform adds
+  `using System.Text; namespace Delve;`), so pieces call each other directly; a forbid rule rejects non-`static`
+  functions. `src/Engine.cs` (template) holds state, turns, fights, the shop and the score file.
+- **Files split instead of shared.** `Rules.cs` became `src/Rules.cs` (`CanOpenDoor`, `IsMonster`, `IsItem`, 02/01),
+  `src/Bounds.cs` (`IsOutsideMap`, `IsWall`, 02/02) and `src/Moves.cs` (`MoveOutcome`, 02/03); `Maze.Reachable` is
+  `src/MazeReach.cs` (`CountReachable`). Replace pieces of one file in different lessons would overwrite each other,
+  and append cannot coexist with the template stub.
+- **No party.** Delve has one hero, so "split loot" (01/04) and "min/max/avg party HP" (04/01) were dropped: the shop
+  is `ToCopper`/`Coins`/`Change` (1g = 20s, 1s = 12c) and the HUD is `Bar` + `Hud` (reusing `Level` and `Coins`).
+- **Pieces chosen to fit the game:** 01/02 `Damage` (armour blocks one point per full three, capped) + `Level`/`XpToNext`;
+  01/03 `Heal` (via `long`) + `Percent` (away-from-zero rounding); 03/02 `GameLoop(maxTurns)` calling the engine's
+  `Turn`; 04/02 `ClimbStory` (recursive story of the climb, printed on victory); 04/04 iterative `CountReachable`
+  with an explicit `Stack<int>` (recursive version shown on a card); 04/05 base-32 save codes with a check digit;
+  05/01 `Fight` prints its trace table; 05/05 the existing spiral is the key's map reveal, plus a cold
+  **Ship Delve** step (`src/Play.cs`). The template's `Play` stub plays floor 1 only.
+- **Stubs keep it playable at every stage** (e.g. `Carve` stub = one open hall, `Render` stub lists open directions,
+  `GameLoop` stub takes one command), so "Try it" means something from lesson 1.
+- **Cold rebuilds** are lessons `035-cold-rebuild` (modules 1-3) and `045-cold-rebuild` (module 4), with
+  `"cold": true`, `"coldOf"` (1-based) and their own copy of the checks; module 1 got one too (Damage). Every
+  `module.json` has `"gate": { "requires": ["boss"], "minStars": 2, "cold": [...] }`.
+- **Interleaved review** is tagged with `"review"` and done by reference copies of earlier pieces in the grading
+  template, not `uses`: C# `uses` compiles the earlier piece as a separate file, and its members are private to
+  `Delve.Game`, so the learner's top-level functions cannot call it. Making `uses` work for C# needs the engine to
+  compile the step's code inside its own `transform` (or the class to expose members) when `uses` is present.
+- One dream only, so `dojo validate` warns "declare 4 or 5"; Star Trader, Pocket Pet, Quiz Show and Farm Days remain.
