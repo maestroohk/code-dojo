@@ -258,6 +258,7 @@ function play({ title, items, mode, meta, onFinish }) {
   const total = items.length;
   let pos = 0, combo = 0, bestCombo = 0, earned = 0, mistakes = 0, firstTry = 0, answered = 0;
   let current = null, phase = 'answer', attempts = 0, hints = 0, revealed = false;
+  let furthest = 0;   // steps before this one are finished; going Back to them is a read-only review
   const replay = mode === 'lesson' && game.isDone(meta.key);
   const project = !!meta?.project;
   const boss = meta?.lesson?.kind === 'boss' || project;   // project code pays like boss code
@@ -271,6 +272,7 @@ function play({ title, items, mode, meta, onFinish }) {
   const hintBtn = h('button.btn.ghost', { type: 'button', onclick: showHint }, '💡 Hint');
   const skipBtn = h('button.btn.ghost', { type: 'button', onclick: reveal, hidden: true }, 'Show answer');
   const mainBtn = h('button.btn.primary.big', { type: 'button', onclick: submit }, 'Check');
+  const backBtn = h('button.btn.ghost.big', { type: 'button', onclick: back, title: 'Previous step' }, '← Back');
   const typeTag = h('span.tag');
 
   app.replaceChildren(
@@ -279,10 +281,11 @@ function play({ title, items, mode, meta, onFinish }) {
         h('button.icon-btn', { type: 'button', title: 'Leave', 'aria-label': 'Leave', onclick: quit }, '✕'),
         progress, comboEl, xpEl),
       h('main.play-main', h('div.play-meta', typeTag, h('span.muted.small', title)), stage, hintBox),
-      h('footer.play-foot', feedback, h('div.foot-row', h('div.foot-left', hintBtn, skipBtn), mainBtn))));
+      h('footer.play-foot', feedback, h('div.foot-row', h('div.foot-left', hintBtn, skipBtn), h('div.foot-right', backBtn, mainBtn)))));
   window.scrollTo(0, 0);
 
   const onKey = e => {
+    if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); back(); return; }
     if (e.key !== 'Enter' || e.target.matches('textarea, button, a, input')) return;
     e.preventDefault();
     submit();
@@ -311,6 +314,7 @@ function play({ title, items, mode, meta, onFinish }) {
     hintBtn.textContent = left > 0 ? `💡 Hint (${left})` : '💡 No more hints';
     skipBtn.hidden = !(phase === 'answer' && attempts >= 2 && step.type !== 'learn');
     skipBtn.textContent = step.type === 'code' ? 'Show solution' : 'Show answer';
+    backBtn.hidden = pos === 0;
   }
 
   function show() {
@@ -332,10 +336,31 @@ function play({ title, items, mode, meta, onFinish }) {
     typeTag.className = `tag type-${item.step.type}`;
     stage.replaceChildren(view.el);
     stage.classList.remove('enter'); void stage.offsetWidth; stage.classList.add('enter');
-    progress.firstChild.style.width = `${(pos / total) * 100}%`;
+    progress.firstChild.style.width = `${(furthest / total) * 100}%`;
+    if (pos < furthest) review();
     refresh();
     window.scrollTo(0, 0);
     if (item.step.type !== 'code') view.focus?.();
+  }
+
+  /** A step already finished in this session: show it settled, with nothing left to score. */
+  function review() {
+    const { item, view } = current;
+    phase = 'done';
+    if (item.step.type !== 'learn') {
+      // Code keeps the learner's own (saved) program; other steps show the right answer.
+      if (item.step.type !== 'code') { view.retry?.(); view.reveal?.(); }
+      view.lock?.(true);
+      setFeedback('info', 'Reviewing an earlier step', 'You already answered this one, so nothing here is scored again. Press Continue to move on.');
+    }
+    mainBtn.textContent = 'Continue';
+    mainBtn.disabled = false;
+  }
+
+  function back() {
+    if (pos === 0) return;
+    pos--;
+    show();
   }
 
   /** Extra XP outside the answer flow, e.g. for typing out a code sample. */
@@ -456,6 +481,7 @@ function play({ title, items, mode, meta, onFinish }) {
 
   function advance() {
     pos++;
+    furthest = Math.max(furthest, pos);
     if (pos < total) return show();
     progress.firstChild.style.width = '100%';
     current.view.destroy?.();
