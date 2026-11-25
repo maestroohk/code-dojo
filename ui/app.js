@@ -889,6 +889,10 @@ function profile() {
         h('div.badge-icon', a.icon), h('div', h('strong', a.title), h('div.muted.small', a.text)))))),
     h('section.panel',
       h('h2', 'Settings'),
+      setting('Text size', 'Make everything bigger: text, code, buttons and terminals.', h('select', {
+        onchange: e => { s.settings.textSize = e.target.value; applyTextSize(); game.save(true); },
+      }, [['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Extra large']]
+        .map(([v, label]) => h('option', { value: v, selected: (s.settings.textSize || 'normal') === v }, label)))),
       setting('Daily goal', 'XP to aim for each day.', h('select', {
         onchange: e => { s.settings.dailyGoal = Number(e.target.value); game.save(true); profile(); },
       }, [[30, 'Casual · 30 XP'], [60, 'Regular · 60 XP'], [120, 'Serious · 120 XP'], [200, 'Intense · 200 XP']]
@@ -925,9 +929,16 @@ function route() {
   }
 }
 
+function applyTextSize() {
+  document.documentElement.dataset.size = game.state.settings.textSize || 'normal';
+  const term = localStorage.getItem('termSize');
+  if (term) document.documentElement.style.setProperty('--term-size', term + 'px');
+}
+
 async function boot() {
   try {
     [tracks] = await Promise.all([api('tracks'), game.load()]);
+    applyTextSize();
   } catch (e) {
     app.replaceChildren(h('div.empty', h('h2', 'Cannot reach the dojo server'), h('p.muted', 'Start it with dojo.cmd and refresh this page.')));
     return;

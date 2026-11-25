@@ -167,7 +167,25 @@ function terminal(labId, node, { onStatus } = {}) {
   const el = h('div.nl-term', { onclick: e => { if (e.target === out && !getSelection().toString()) input.focus(); } }, out,
     h('div.nl-term-bar', h('span.nl-term-prompt', '›'), input,
       h('button.btn.ghost.small', { type: 'button', title: 'Send Ctrl+C (interrupt)', onclick: () => send('\x03') }, 'Ctrl+C'),
-      h('button.btn.ghost.small', { type: 'button', title: 'Clear the screen', onclick: () => { out.replaceChildren(); line = newLine(); } }, 'Clear')));
+      h('button.btn.ghost.small', { type: 'button', title: 'Clear the screen', onclick: () => { out.replaceChildren(); line = newLine(); } }, 'Clear'),
+      h('span.nl-term-sep'),
+      h('button.btn.ghost.small', { type: 'button', title: 'Smaller text', onclick: () => termSize(-1) }, 'A−'),
+      h('button.btn.ghost.small', { type: 'button', title: 'Bigger text', onclick: () => termSize(+1) }, 'A+'),
+      h('button.btn.ghost.small', { type: 'button', title: 'Fill the screen with this terminal (Esc to come back)', onclick: () => toggleMax() }, '⛶')));
+  // Terminal text size is remembered across labs and visits.
+  function termSize(delta) {
+    const now = Number(localStorage.getItem('termSize') || 16);
+    const next = Math.max(12, Math.min(26, now + delta * 2));
+    localStorage.setItem('termSize', next);
+    document.documentElement.style.setProperty('--term-size', next + 'px');
+  }
+  function toggleMax(force) {
+    const on = force ?? !el.classList.contains('max');
+    el.classList.toggle('max', on);
+    document.body.classList.toggle('term-max', on);
+    if (on) input.focus();
+  }
+  el.addEventListener('keydown', e => { if (e.key === 'Escape' && el.classList.contains('max')) toggleMax(false); });
   const history = [];
   let hpos = 0, ws = null, closed = false, style = {}, line = null, pending = '';
 
