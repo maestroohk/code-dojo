@@ -1,0 +1,193 @@
+{
+  "title": "Services and the three ports",
+  "summary": "A stable address in front of pods that keep changing.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Why Services exist",
+      "body": [
+        "Every pod gets its own IP, but pods come and go: a rollout replaces all of them, and each replacement has a **new IP**. Clients cannot keep a list of pod IPs.",
+        "",
+        "A **Service** is a stable virtual IP and DNS name in front of *whatever pods currently match its selector*:",
+        "",
+        "```text",
+        "                  Service shop-api  10.96.14.2:80",
+        "                   selector app=shop-api",
+        "                  /          |           \\",
+        "     pod 10.244.1.7:8080  pod 10.244.2.3:8080  pod 10.244.3.9:8080",
+        "             (only pods that are Ready are listed)",
+        "```",
+        "",
+        "The endpoints controller keeps an **EndpointSlice** listing the ready pods' IPs. kube-proxy on every node programs iptables/IPVS so traffic to `10.96.14.2:80` is spread across them.",
+        "",
+        "```text",
+        "kubectl get endpointslices -l kubernetes.io/service-name=shop-api",
+        "```",
+        "",
+        "Empty endpoints is the number one cause of \"the Service doesn't work\": the selector matches no pods, or none are Ready."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Service has no endpoints. Which is **not** a plausible cause?",
+      "options": [
+        "The Service's `type` is ClusterIP",
+        "The selector says `app: shop-api` but the pods are labelled `app: shopapi`",
+        "All pods are failing their readiness probe",
+        "The pods are in a different namespace from the Service"
+      ],
+      "answer": 0,
+      "explain": "ClusterIP is the default and normal type. A Service only selects pods in its own namespace, and only Ready pods become endpoints."
+    },
+    {
+      "type": "learn",
+      "title": "port, targetPort, containerPort",
+      "body": [
+        "Three numbers that people mix up constantly:",
+        "",
+        "```yaml",
+        "# Service",
+        "spec:",
+        "  selector: { app: shop-api }",
+        "  ports:",
+        "  - port: 80          # what CLIENTS connect to on the Service IP",
+        "    targetPort: 8080  # where the traffic is sent on the POD",
+        "---",
+        "# Pod template in the Deployment",
+        "containers:",
+        "- name: api",
+        "  ports:",
+        "  - containerPort: 8080   # documentation: the app listens on 8080",
+        "```",
+        "",
+        "```text",
+        "client --> shop-api:80 --(Service)--> podIP:8080 --> app listening on 8080",
+        "```",
+        "",
+        "`containerPort` is informational (the app listens wherever it listens), but naming it lets the Service use `targetPort: http` so the number lives in one place. If `targetPort` does not match what the app actually listens on, connections are **refused** even though endpoints look fine."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "The app listens on 5000. Clients should call the Service on 80. Fill in the numbers.",
+      "code": [
+        "kind: Service",
+        "spec:",
+        "  ports:",
+        "  - port: __1__",
+        "    targetPort: __2__",
+        "---",
+        "containers:",
+        "- name: api",
+        "  ports:",
+        "  - containerPort: __3__"
+      ],
+      "blanks": [
+        "80",
+        "5000",
+        "5000"
+      ],
+      "bank": [
+        "8080",
+        "443",
+        "30080"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Service types",
+      "body": [
+        "| type | Reachable from | How |",
+        "|---|---|---|",
+        "| **ClusterIP** (default) | inside the cluster only | virtual IP + DNS name |",
+        "| **NodePort** | outside, via `<any-node-ip>:30000-32767` | ClusterIP + a port opened on every node |",
+        "| **LoadBalancer** | outside, via a cloud load balancer IP | NodePort + the cloud provisions an LB pointing at it |",
+        "| **ExternalName** | inside | a DNS CNAME to an outside name, no proxying |",
+        "",
+        "Each type builds on the previous one. In production you usually expose **one** LoadBalancer (for the ingress controller, next lesson) and keep every app Service ClusterIP.",
+        "",
+        "A **headless** Service (`clusterIP: None`) has no virtual IP; its DNS name returns the pod IPs directly. StatefulSets use one so each pod gets its own name."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the need to the Service type.",
+      "pairs": [
+        [
+          "the orders service calls the payments service inside the cluster",
+          "ClusterIP"
+        ],
+        [
+          "quick test from your laptop on a bare-metal cluster: `node-ip:31080`",
+          "NodePort"
+        ],
+        [
+          "public IP on AKS for the ingress controller",
+          "LoadBalancer"
+        ],
+        [
+          "refer to `db.legacy.corp.example` by an in-cluster name",
+          "ExternalName"
+        ],
+        [
+          "each StatefulSet pod resolvable by name",
+          "headless (`clusterIP: None`)"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A pod fails its readiness probe while the others pass. Endpoints only include Ready pods. What does this print?",
+      "code": [
+        "var pods = new[] { (\"10.0.0.4\", true), (\"10.0.0.5\", false), (\"10.0.0.6\", true) };",
+        "var endpoints = pods.Where(p => p.Item2).Select(p => p.Item1 + \":8080\");",
+        "Console.WriteLine(string.Join(\" \", endpoints));"
+      ],
+      "answer": "10.0.0.4:8080 10.0.0.6:8080"
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Compute a Service's endpoints",
+      "prompt": [
+        "Write `List<string> Endpoints(Dictionary<string, string> selector, int targetPort, List<(string Ip, Dictionary<string, string> Labels, bool Ready)> pods)` returning `\"ip:targetPort\"` for every pod that matches the selector **and** is Ready, in input order.",
+        "",
+        "An empty selector is a special case for Services: it selects **nothing** (endpoints are then managed by hand), so return an empty list."
+      ],
+      "starter": [
+        "List<string> Endpoints(Dictionary<string, string> selector, int targetPort, List<(string Ip, Dictionary<string, string> Labels, bool Ready)> pods)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Endpoints(Dictionary<string, string> selector, int targetPort, List<(string Ip, Dictionary<string, string> Labels, bool Ready)> pods)",
+        "{",
+        "    if (selector.Count == 0) return new List<string>();",
+        "    return pods",
+        "        .Where(p => p.Ready && selector.All(kv => p.Labels.TryGetValue(kv.Key, out var v) && v == kv.Value))",
+        "        .Select(p => $\"{p.Ip}:{targetPort}\")",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoPods = new List<(string Ip, Dictionary<string, string> Labels, bool Ready)> {",
+        "    (\"10.244.1.7\", new() { [\"app\"] = \"shop-api\", [\"v\"] = \"1\" }, true),",
+        "    (\"10.244.2.3\", new() { [\"app\"] = \"shop-api\", [\"v\"] = \"2\" }, false),",
+        "    (\"10.244.3.9\", new() { [\"app\"] = \"shop-api\", [\"v\"] = \"2\" }, true),",
+        "    (\"10.244.3.10\", new() { [\"app\"] = \"shopapi\" }, true),",
+        "};",
+        "Dojo.Eq(\"app=shop-api, 8080\", new List<string> { \"10.244.1.7:8080\", \"10.244.3.9:8080\" }, Endpoints(new() { [\"app\"] = \"shop-api\" }, 8080, dojoPods));",
+        "Dojo.Eq(\"typo in pod label is not selected\", new List<string> { \"10.244.3.10:80\" }, Endpoints(new() { [\"app\"] = \"shopapi\" }, 80, dojoPods));",
+        "Dojo.Eq(\"v=2 ready only\", new List<string> { \"10.244.3.9:9000\" }, Endpoints(new() { [\"app\"] = \"shop-api\", [\"v\"] = \"2\" }, 9000, dojoPods));",
+        "Dojo.Eq(\"empty selector selects nothing\", new List<string>(), Endpoints(new(), 80, dojoPods));"
+      ],
+      "hints": [
+        "Filter on `p.Ready` and the selector, then format.",
+        "Handle `selector.Count == 0` first."
+      ]
+    }
+  ]
+}

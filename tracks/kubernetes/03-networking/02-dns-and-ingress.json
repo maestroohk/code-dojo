@@ -1,0 +1,225 @@
+{
+  "title": "DNS and Ingress",
+  "summary": "Names inside the cluster, and one front door for HTTP from outside.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Cluster DNS",
+      "body": [
+        "CoreDNS gives every Service a name:",
+        "",
+        "```text",
+        "<service>.<namespace>.svc.cluster.local",
+        "payments.shop.svc.cluster.local  -> 10.96.40.11",
+        "```",
+        "",
+        "A pod's `/etc/resolv.conf` has search domains for its own namespace, so from a pod in `shop`:",
+        "",
+        "```text",
+        "payments                         works (same namespace)",
+        "payments.shop                    works from any namespace",
+        "payments.shop.svc.cluster.local  the full name, always works",
+        "payments (from a pod in 'blog')  fails: looks for payments.blog...",
+        "```",
+        "",
+        "Debug DNS from inside the cluster, not your laptop:",
+        "",
+        "```text",
+        "kubectl run tmp --rm -it --image=busybox:1.36 -- nslookup payments.shop",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A pod in namespace `blog` must call Service `auth` in namespace `identity`. Which URL works?",
+      "options": [
+        "`http://auth.identity`",
+        "`http://auth`",
+        "`http://identity.auth`",
+        "`http://auth.blog.svc.cluster.local`"
+      ],
+      "answer": 0,
+      "explain": "Short names only resolve in your own namespace. Add `.identity` (or use the full name)."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Resolve a short name",
+      "prompt": [
+        "Write `string Fqdn(string name, string podNamespace)` that expands a name the way a pod's resolver would for Services:",
+        "",
+        "- one part (`payments`) → `payments.<podNamespace>.svc.cluster.local`",
+        "- two parts (`payments.shop`) → `payments.shop.svc.cluster.local`",
+        "- already ending in `.svc.cluster.local` → unchanged"
+      ],
+      "starter": [
+        "string Fqdn(string name, string podNamespace)",
+        "{",
+        "    return name;",
+        "}"
+      ],
+      "solution": [
+        "string Fqdn(string name, string podNamespace)",
+        "{",
+        "    if (name.EndsWith(\".svc.cluster.local\")) return name;",
+        "    var parts = name.Split('.');",
+        "    if (parts.Length == 1) return $\"{name}.{podNamespace}.svc.cluster.local\";",
+        "    return $\"{name}.svc.cluster.local\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"payments from shop\", \"payments.shop.svc.cluster.local\", Fqdn(\"payments\", \"shop\"));",
+        "Dojo.Eq(\"auth.identity from blog\", \"auth.identity.svc.cluster.local\", Fqdn(\"auth.identity\", \"blog\"));",
+        "Dojo.Eq(\"full name unchanged\", \"db.data.svc.cluster.local\", Fqdn(\"db.data.svc.cluster.local\", \"shop\"));"
+      ],
+      "hints": [
+        "Check the full suffix first.",
+        "`name.Split('.').Length` tells you how many parts there are."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Ingress",
+      "body": [
+        "One LoadBalancer per app gets expensive and gives you no HTTP routing. An **Ingress** is a set of HTTP rules; an **ingress controller** (ingress-nginx, Traefik, the cloud's gateway) is the pod that actually receives traffic and applies them.",
+        "",
+        "```text",
+        "internet --> LB 20.50.1.9 --> ingress controller pods",
+        "                                | host shop.example.com  path /api -> svc shop-api:80",
+        "                                | host shop.example.com  path /    -> svc shop-web:80",
+        "                                | host blog.example.com  path /    -> svc blog:80",
+        "```",
+        "",
+        "```yaml",
+        "apiVersion: networking.k8s.io/v1",
+        "kind: Ingress",
+        "metadata:",
+        "  name: shop",
+        "spec:",
+        "  ingressClassName: nginx",
+        "  tls:",
+        "  - hosts: [shop.example.com]",
+        "    secretName: shop-tls",
+        "  rules:",
+        "  - host: shop.example.com",
+        "    http:",
+        "      paths:",
+        "      - path: /api",
+        "        pathType: Prefix",
+        "        backend:",
+        "          service: { name: shop-api, port: { number: 80 } }",
+        "```",
+        "",
+        "An Ingress with **no controller installed does nothing**. `ingressClassName` says which controller should handle it. TLS terminates at the controller using the certificate in the Secret. (The newer **Gateway API** splits this into Gateway and HTTPRoute objects; the idea is the same.)"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the rule sending `api.shop.example.com/orders...` to Service `orders` on port 8080.",
+      "code": [
+        "rules:",
+        "- __1__: api.shop.example.com",
+        "  http:",
+        "    paths:",
+        "    - path: /orders",
+        "      pathType: __2__",
+        "      backend:",
+        "        __3__:",
+        "          name: orders",
+        "          port: { number: __4__ }"
+      ],
+      "blanks": [
+        "host",
+        "Prefix",
+        "service",
+        "8080"
+      ],
+      "bank": [
+        "hostname",
+        "Exact",
+        "pod",
+        "80"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You applied an Ingress, DNS points at the cluster, but every request times out. `kubectl get ingress` shows an empty `ADDRESS` column. Most likely?",
+      "options": [
+        "No ingress controller is installed (or `ingressClassName` names one that does not exist)",
+        "The Service type must be LoadBalancer",
+        "The pods lack a containerPort",
+        "TLS is not configured"
+      ],
+      "answer": 0,
+      "explain": "The controller fills in the ADDRESS once it has picked up the Ingress. Check `kubectl get ingressclass` and the controller's pods."
+    },
+    {
+      "type": "predict",
+      "prompt": "`pathType: Prefix` matches whole path segments, and the longest matching path wins. Which backend handles `/api/orders/7`?",
+      "code": [
+        "path /         -> shop-web",
+        "path /api      -> shop-api",
+        "path /api/admin -> admin"
+      ],
+      "answer": "shop-api",
+      "verify": false,
+      "explain": "`/api/admin` does not match. Of `/` and `/api`, the longer one wins. Note `/apiary` would *not* match `/api`: Prefix compares segments, not characters."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Route a request",
+      "prompt": [
+        "Write `string Route(string host, string path, List<(string Host, string Prefix, string Service)> rules)` that returns the Service for a request, or `\"404\"` if none matches.",
+        "",
+        "- A rule applies if its `Host` equals `host`, or its `Host` is `\"\"` (any host).",
+        "- Its prefix matches when the path equals it, or starts with it followed by `/`. Prefix `/` matches everything.",
+        "- Prefer rules with an exact host over `\"\"`; among those, the **longest** prefix wins."
+      ],
+      "starter": [
+        "string Route(string host, string path, List<(string Host, string Prefix, string Service)> rules)",
+        "{",
+        "    return \"404\";",
+        "}"
+      ],
+      "solution": [
+        "bool PrefixMatch(string prefix, string path) =>",
+        "    prefix == \"/\" || path == prefix || path.StartsWith(prefix.TrimEnd('/') + \"/\");",
+        "",
+        "string Route(string host, string path, List<(string Host, string Prefix, string Service)> rules)",
+        "{",
+        "    var best = rules",
+        "        .Where(r => (r.Host == host || r.Host == \"\") && PrefixMatch(r.Prefix, path))",
+        "        .OrderByDescending(r => r.Host == host ? 1 : 0)",
+        "        .ThenByDescending(r => r.Prefix.Length)",
+        "        .ToList();",
+        "    return best.Count > 0 ? best[0].Service : \"404\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRules = new List<(string Host, string Prefix, string Service)> {",
+        "    (\"shop.example.com\", \"/\", \"shop-web\"),",
+        "    (\"shop.example.com\", \"/api\", \"shop-api\"),",
+        "    (\"shop.example.com\", \"/api/admin\", \"admin\"),",
+        "    (\"blog.example.com\", \"/\", \"blog\"),",
+        "    (\"\", \"/healthz\", \"health\"),",
+        "};",
+        "Dojo.Eq(\"/api/orders/7\", \"shop-api\", Route(\"shop.example.com\", \"/api/orders/7\", dojoRules));",
+        "Dojo.Eq(\"/api/admin/users\", \"admin\", Route(\"shop.example.com\", \"/api/admin/users\", dojoRules));",
+        "Dojo.Eq(\"/apiary is not /api\", \"shop-web\", Route(\"shop.example.com\", \"/apiary\", dojoRules));",
+        "Dojo.Eq(\"/api exactly\", \"shop-api\", Route(\"shop.example.com\", \"/api\", dojoRules));",
+        "Dojo.Eq(\"blog host\", \"blog\", Route(\"blog.example.com\", \"/posts/1\", dojoRules));",
+        "Dojo.Eq(\"any-host rule\", \"health\", Route(\"other.example.com\", \"/healthz\", dojoRules));",
+        "Dojo.Eq(\"exact host wins over any-host\", \"shop-web\", Route(\"shop.example.com\", \"/healthz\", dojoRules));",
+        "Dojo.Eq(\"unknown host\", \"404\", Route(\"evil.example.com\", \"/\", dojoRules));"
+      ],
+      "hints": [
+        "Write a `PrefixMatch(prefix, path)` helper first: `/` matches all; otherwise equal or starts with `prefix + \"/\"`.",
+        "Sort the candidates: exact host first, then longest prefix."
+      ]
+    }
+  ]
+}

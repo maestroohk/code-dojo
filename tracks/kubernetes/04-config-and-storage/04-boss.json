@@ -1,0 +1,154 @@
+{
+  "title": "Boss: config and data",
+  "summary": "Generate config, check references, and size storage.",
+  "minutes": 20,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The scene",
+      "body": "Before a release, the platform team wants a pre-flight check: will every pod's config references resolve, what will each container see, and is there storage for every claim? Build it."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Check references",
+      "prompt": [
+        "Write `List<string> Missing(List<(string Kind, string Name, string Key)> refs, Dictionary<string, HashSet<string>> configMaps, Dictionary<string, HashSet<string>> secrets)`.",
+        "",
+        "Each ref has `Kind` `\"configmap\"` or `\"secret\"`, an object `Name`, and a `Key` (or `\"\"` for a whole-object reference like `envFrom`). Return one line per problem, in input order:",
+        "",
+        "- object missing: `\"secret shop-db not found\"`",
+        "- key missing: `\"secret shop-db has no key pasword\"`"
+      ],
+      "starter": [
+        "List<string> Missing(List<(string Kind, string Name, string Key)> refs, Dictionary<string, HashSet<string>> configMaps, Dictionary<string, HashSet<string>> secrets)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Missing(List<(string Kind, string Name, string Key)> refs, Dictionary<string, HashSet<string>> configMaps, Dictionary<string, HashSet<string>> secrets)",
+        "{",
+        "    var problems = new List<string>();",
+        "    foreach (var r in refs)",
+        "    {",
+        "        var store = r.Kind == \"secret\" ? secrets : configMaps;",
+        "        if (!store.TryGetValue(r.Name, out var keys)) problems.Add($\"{r.Kind} {r.Name} not found\");",
+        "        else if (r.Key != \"\" && !keys.Contains(r.Key)) problems.Add($\"{r.Kind} {r.Name} has no key {r.Key}\");",
+        "    }",
+        "    return problems;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoCms = new Dictionary<string, HashSet<string>> { [\"shop-config\"] = new() { \"LOG_LEVEL\", \"PAYMENTS_URL\" } };",
+        "var dojoSecs = new Dictionary<string, HashSet<string>> { [\"shop-db\"] = new() { \"password\", \"user\" } };",
+        "Dojo.Eq(\"all fine\", new List<string>(), Missing(new() { (\"configmap\", \"shop-config\", \"\"), (\"secret\", \"shop-db\", \"password\") }, dojoCms, dojoSecs));",
+        "Dojo.Eq(\"problems in order\", new List<string> { \"secret shop-db has no key pasword\", \"configmap feature-flags not found\", \"secret stripe not found\" },",
+        "    Missing(new() { (\"secret\", \"shop-db\", \"pasword\"), (\"configmap\", \"feature-flags\", \"\"), (\"configmap\", \"shop-config\", \"LOG_LEVEL\"), (\"secret\", \"stripe\", \"key\") }, dojoCms, dojoSecs));",
+        "Dojo.Eq(\"a configmap name is not a secret\", new List<string> { \"secret shop-config not found\" }, Missing(new() { (\"secret\", \"shop-config\", \"\") }, dojoCms, dojoSecs));"
+      ],
+      "hints": [
+        "Pick the right dictionary by `Kind` first.",
+        "Object missing beats key missing: check `TryGetValue` before `Contains`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Parse storage quantities",
+      "prompt": [
+        "Kubernetes quantities use binary suffixes `Ki Mi Gi Ti` (powers of 1024) and decimal ones `k M G T` (powers of 1000). Write `long Bytes(string q)` (no suffix means bytes) and `bool Fits(string request, string capacity)`.",
+        "",
+        "`Bytes(\"10Gi\")` is `10737418240`; `Bytes(\"10G\")` is `10000000000`; `Fits(\"10G\", \"10Gi\")` is true but `Fits(\"10Gi\", \"10G\")` is false."
+      ],
+      "starter": [
+        "long Bytes(string q)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "bool Fits(string request, string capacity)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "long Bytes(string q)",
+        "{",
+        "    var units = new (string Suffix, long Factor)[] {",
+        "        (\"Ki\", 1L << 10), (\"Mi\", 1L << 20), (\"Gi\", 1L << 30), (\"Ti\", 1L << 40),",
+        "        (\"k\", 1000L), (\"M\", 1000_000L), (\"G\", 1000_000_000L), (\"T\", 1000_000_000_000L) };",
+        "    foreach (var (s, f) in units)",
+        "        if (q.EndsWith(s)) return long.Parse(q[..^s.Length]) * f;",
+        "    return long.Parse(q);",
+        "}",
+        "",
+        "bool Fits(string request, string capacity) => Bytes(request) <= Bytes(capacity);"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"10Gi\", 10737418240L, Bytes(\"10Gi\"));",
+        "Dojo.Eq(\"10G\", 10000000000L, Bytes(\"10G\"));",
+        "Dojo.Eq(\"512Mi\", 536870912L, Bytes(\"512Mi\"));",
+        "Dojo.Eq(\"1Ti\", 1099511627776L, Bytes(\"1Ti\"));",
+        "Dojo.Eq(\"500k\", 500000L, Bytes(\"500k\"));",
+        "Dojo.Eq(\"plain bytes\", 4096L, Bytes(\"4096\"));",
+        "Dojo.Check(\"10G fits in 10Gi\", Fits(\"10G\", \"10Gi\"), \"\");",
+        "Dojo.Check(\"10Gi does not fit in 10G\", !Fits(\"10Gi\", \"10G\"), \"\");"
+      ],
+      "hints": [
+        "Check the two-letter binary suffixes before the one-letter decimal ones (`Gi` ends with `i`, but `G` alone must not match `Gi`).",
+        "`q[..^2]` drops the last two characters."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Render a config file",
+      "prompt": [
+        "Teams often mount a templated config file. Write `string Render(string template, Dictionary<string, string> values)` that replaces every `${NAME}` with its value. A name not in `values` throws `KeyNotFoundException` (fail the release, not production). Text without placeholders is returned unchanged.",
+        "",
+        "`Render(\"url=${HOST}:${PORT}\", { HOST = \"db\", PORT = \"5432\" })` is `\"url=db:5432\"`."
+      ],
+      "starter": [
+        "string Render(string template, Dictionary<string, string> values)",
+        "{",
+        "    return template;",
+        "}"
+      ],
+      "solution": [
+        "string Render(string template, Dictionary<string, string> values)",
+        "{",
+        "    var sb = new StringBuilder();",
+        "    int i = 0;",
+        "    while (i < template.Length)",
+        "    {",
+        "        int start = template.IndexOf(\"${\", i);",
+        "        if (start < 0) { sb.Append(template, i, template.Length - i); break; }",
+        "        sb.Append(template, i, start - i);",
+        "        int end = template.IndexOf('}', start);",
+        "        string name = template.Substring(start + 2, end - start - 2);",
+        "        if (!values.TryGetValue(name, out var v)) throw new KeyNotFoundException(name);",
+        "        sb.Append(v);",
+        "        i = end + 1;",
+        "    }",
+        "    return sb.ToString();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoV = new Dictionary<string, string> { [\"HOST\"] = \"db\", [\"PORT\"] = \"5432\", [\"DB\"] = \"shop\" };",
+        "Dojo.Eq(\"two placeholders\", \"url=db:5432\", Render(\"url=${HOST}:${PORT}\", dojoV));",
+        "Dojo.Eq(\"no placeholders\", \"plain text\", Render(\"plain text\", dojoV));",
+        "Dojo.Eq(\"repeated\", \"db/db/shop\", Render(\"${HOST}/${HOST}/${DB}\", dojoV));",
+        "Dojo.Throws<KeyNotFoundException>(\"unknown name throws\", () => Render(\"x=${NOPE}\", dojoV));"
+      ],
+      "hints": [
+        "Find `${` with `IndexOf`, then the next `}`.",
+        "Append the text between placeholders; look up the name with `TryGetValue`."
+      ]
+    }
+  ]
+}

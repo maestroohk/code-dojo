@@ -1,0 +1,174 @@
+{
+  "title": "Stage 2: Services and the database",
+  "summary": "Give the API a stable address and run PostgreSQL with its own disk.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two Services and a StatefulSet",
+      "body": [
+        "```yaml",
+        "apiVersion: v1",
+        "kind: Service",
+        "metadata: { name: shop-api, namespace: shop }",
+        "spec:",
+        "  selector: { app: shop-api }",
+        "  ports: [{ port: 80, targetPort: http }]      # 'http' is the named containerPort 8080",
+        "---",
+        "apiVersion: v1",
+        "kind: Service",
+        "metadata: { name: db, namespace: shop }",
+        "spec:",
+        "  clusterIP: None                               # headless: db-0.db.shop resolves to the pod",
+        "  selector: { app: db }",
+        "  ports: [{ port: 5432 }]",
+        "---",
+        "apiVersion: apps/v1",
+        "kind: StatefulSet",
+        "metadata: { name: db, namespace: shop }",
+        "spec:",
+        "  serviceName: db",
+        "  replicas: 1",
+        "  selector: { matchLabels: { app: db } }",
+        "  template:",
+        "    metadata: { labels: { app: db } }",
+        "    spec:",
+        "      containers:",
+        "      - name: postgres",
+        "        image: postgres:16.4",
+        "        ports: [{ containerPort: 5432 }]",
+        "        volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]",
+        "  volumeClaimTemplates:",
+        "  - metadata: { name: data }",
+        "    spec:",
+        "      accessModes: [ReadWriteOnce]",
+        "      resources: { requests: { storage: 20Gi } }",
+        "```",
+        "",
+        "The API reaches the database at `db-0.db.shop.svc.cluster.local:5432` (or simply `db:5432` from inside `shop`)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is the PVC created for `db-0` called?",
+      "options": [
+        "`data-db-0`",
+        "`db-0-data`",
+        "`data`",
+        "`pvc-db`"
+      ],
+      "answer": 0,
+      "explain": "`<template name>-<statefulset name>-<ordinal>`. It survives the pod and is reattached when `db-0` is recreated."
+    },
+    {
+      "type": "blanks",
+      "prompt": "The API pods are labelled `app: shop-api` and listen on the named port `http` (8080). Complete the Service.",
+      "code": [
+        "spec:",
+        "  type: __1__",
+        "  selector:",
+        "    app: __2__",
+        "  ports:",
+        "  - port: 80",
+        "    targetPort: __3__"
+      ],
+      "blanks": [
+        "ClusterIP",
+        "shop-api",
+        "http"
+      ],
+      "bank": [
+        "LoadBalancer",
+        "api",
+        "80",
+        "5432"
+      ],
+      "explain": "The API stays internal; stage 5's Ingress is the only way in from outside."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which object fixes each requirement?",
+      "buckets": [
+        "Service shop-api",
+        "Service db (headless)",
+        "StatefulSet db"
+      ],
+      "items": [
+        [
+          "other pods call the API at a stable name",
+          0
+        ],
+        [
+          "traffic only goes to ready API pods",
+          0
+        ],
+        [
+          "`db-0.db.shop` resolves to the database pod's IP",
+          1
+        ],
+        [
+          "the database keeps its disk when the pod moves",
+          2
+        ],
+        [
+          "the database pod is always called `db-0`",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Check the wiring",
+      "prompt": [
+        "Write `List<string> Wiring(List<(string Name, Dictionary<string, string> Selector, string TargetPort)> services, List<(string Name, Dictionary<string, string> Labels, Dictionary<string, int> Ports)> pods)`.",
+        "",
+        "For each Service, in order, return one line:",
+        "",
+        "- no pod matches its selector: `\"NAME: no pods match selector\"`",
+        "- pods match, but `TargetPort` is neither a port **name** in the pod's `Ports` nor a port **number** (as text) among its values: `\"NAME: targetPort T not found on POD\"` (first matching pod)",
+        "- otherwise `\"NAME: N pods\"` (number of matching pods)"
+      ],
+      "starter": [
+        "List<string> Wiring(List<(string Name, Dictionary<string, string> Selector, string TargetPort)> services,",
+        "                    List<(string Name, Dictionary<string, string> Labels, Dictionary<string, int> Ports)> pods)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Wiring(List<(string Name, Dictionary<string, string> Selector, string TargetPort)> services,",
+        "                    List<(string Name, Dictionary<string, string> Labels, Dictionary<string, int> Ports)> pods)",
+        "{",
+        "    var lines = new List<string>();",
+        "    foreach (var s in services)",
+        "    {",
+        "        var matching = pods.Where(p => s.Selector.Count > 0 && s.Selector.All(kv => p.Labels.TryGetValue(kv.Key, out var v) && v == kv.Value)).ToList();",
+        "        if (matching.Count == 0) { lines.Add($\"{s.Name}: no pods match selector\"); continue; }",
+        "        var bad = matching.FirstOrDefault(p => !p.Ports.ContainsKey(s.TargetPort) && !p.Ports.Values.Any(n => n.ToString() == s.TargetPort));",
+        "        if (bad.Name is not null) { lines.Add($\"{s.Name}: targetPort {s.TargetPort} not found on {bad.Name}\"); continue; }",
+        "        lines.Add($\"{s.Name}: {matching.Count} pods\");",
+        "    }",
+        "    return lines;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoPods = new List<(string Name, Dictionary<string, string> Labels, Dictionary<string, int> Ports)> {",
+        "    (\"shop-api-a\", new() { [\"app\"] = \"shop-api\" }, new() { [\"http\"] = 8080 }),",
+        "    (\"shop-api-b\", new() { [\"app\"] = \"shop-api\" }, new() { [\"http\"] = 8080 }),",
+        "    (\"db-0\", new() { [\"app\"] = \"db\" }, new() { [\"postgres\"] = 5432 }),",
+        "};",
+        "Dojo.Eq(\"stage manifests\", new List<string> { \"shop-api: 2 pods\", \"db: 1 pods\" },",
+        "    Wiring(new() { (\"shop-api\", new() { [\"app\"] = \"shop-api\" }, \"http\"), (\"db\", new() { [\"app\"] = \"db\" }, \"5432\") }, dojoPods));",
+        "Dojo.Eq(\"typo in selector\", new List<string> { \"api: no pods match selector\" }, Wiring(new() { (\"api\", new() { [\"app\"] = \"shopapi\" }, \"http\") }, dojoPods));",
+        "Dojo.Eq(\"wrong port\", new List<string> { \"shop-api: targetPort 80 not found on shop-api-a\" }, Wiring(new() { (\"shop-api\", new() { [\"app\"] = \"shop-api\" }, \"80\") }, dojoPods));",
+        "Dojo.Eq(\"number works too\", new List<string> { \"shop-api: 2 pods\" }, Wiring(new() { (\"shop-api\", new() { [\"app\"] = \"shop-api\" }, \"8080\") }, dojoPods));"
+      ],
+      "hints": [
+        "Reuse your selector matching; an empty selector matches nothing for a Service.",
+        "A tuple from `FirstOrDefault` has `Name == null` when nothing was found."
+      ]
+    }
+  ]
+}

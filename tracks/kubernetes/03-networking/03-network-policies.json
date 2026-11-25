@@ -1,0 +1,189 @@
+{
+  "title": "Network policies",
+  "summary": "By default every pod can talk to every pod. Change that.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Default allow, then isolate",
+      "body": [
+        "Out of the box the pod network is flat: any pod can reach any pod in any namespace. A **NetworkPolicy** selects pods and, once a pod is selected by any policy for a direction (ingress or egress), **only traffic some policy allows** gets through in that direction.",
+        "",
+        "```yaml",
+        "apiVersion: networking.k8s.io/v1",
+        "kind: NetworkPolicy",
+        "metadata: { name: db-allow-api, namespace: shop }",
+        "spec:",
+        "  podSelector: { matchLabels: { app: postgres } }   # protects these pods",
+        "  policyTypes: [Ingress]",
+        "  ingress:",
+        "  - from:",
+        "    - podSelector: { matchLabels: { app: shop-api } }",
+        "    ports:",
+        "    - { protocol: TCP, port: 5432 }",
+        "```",
+        "",
+        "Result: postgres pods accept TCP 5432 from `shop-api` pods in `shop`, and nothing else. Pods no policy selects are unaffected.",
+        "",
+        "> **Tip:** Policies are enforced by the network plugin (Calico, Cilium, Azure NPM...). On a cluster whose CNI does not support them, they are accepted and **silently ignored**.",
+        "",
+        "A common baseline is a **default deny** per namespace (`podSelector: {}` with no ingress rules) and then explicit allows."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Only policy in namespace `shop`: the one on the card. Which connections succeed? (Postgres listens on 5432.)",
+      "buckets": [
+        "Allowed",
+        "Blocked"
+      ],
+      "items": [
+        [
+          "from a `shop-api` pod in `shop`",
+          0
+        ],
+        [
+          "from a `shop-web` pod in `shop`",
+          1
+        ],
+        [
+          "from a `shop-api` pod in `blog`",
+          1
+        ],
+        [
+          "`shop-api` pod in `shop` to postgres port 22",
+          1
+        ],
+        [
+          "postgres pod to a `shop-api` pod on 8080 (no policy selects shop-api)",
+          0
+        ]
+      ],
+      "explain": "A bare `podSelector` in `from` only means pods in the policy's own namespace. Use `namespaceSelector` to allow other namespaces. Policies select the *destination* for ingress; the shop-api pods themselves are not restricted."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You add a default-deny ingress policy to namespace `shop`. Suddenly the ingress controller (in namespace `ingress-nginx`) gets 504s for every site. Why?",
+      "options": [
+        "The controller's traffic into `shop` pods is now denied; you must allow it with a `namespaceSelector` for `ingress-nginx`",
+        "Default deny also blocks DNS for the controller",
+        "Ingress objects are NetworkPolicies",
+        "The LoadBalancer was deleted"
+      ],
+      "answer": 0,
+      "explain": "Default deny means *everything* into those pods, including from the ingress controller and from Prometheus scraping metrics."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Allow traffic into the selected pods from any pod in namespaces labelled `team=frontend`.",
+      "code": [
+        "ingress:",
+        "- from:",
+        "  - __1__:",
+        "      matchLabels:",
+        "        __2__: frontend"
+      ],
+      "blanks": [
+        "namespaceSelector",
+        "team"
+      ],
+      "bank": [
+        "podSelector",
+        "ipBlock",
+        "app"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Egress default-deny breaks every outbound HTTP call **by name**, even to allowed IPs. What did you forget to allow?",
+      "options": [
+        "UDP and TCP port 53 to the cluster DNS (kube-dns / CoreDNS) pods",
+        "Port 443 to the API server",
+        "ICMP",
+        "Port 80 to the node"
+      ],
+      "answer": 0,
+      "explain": "Name resolution happens first. Every egress-deny setup needs an explicit DNS allow."
+    },
+    {
+      "type": "predict",
+      "prompt": "Ingress isolation in one line. A pod is selected by no policy. What does this print?",
+      "code": [
+        "bool selectedByAnyPolicy = false;",
+        "bool someRuleAllows = false;",
+        "bool allowed = !selectedByAnyPolicy || someRuleAllows;",
+        "Console.WriteLine(allowed ? \"allowed\" : \"denied\");"
+      ],
+      "answer": "allowed",
+      "explain": "Unselected pods stay wide open. Isolation only starts when a policy selects the pod."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You apply a NetworkPolicy on a kind cluster using its default CNI, and traffic is not blocked at all. Why?",
+      "options": [
+        "The network plugin does not enforce NetworkPolicy, so the object is stored but ignored",
+        "Policies take an hour to apply",
+        "kind clusters have no pod network",
+        "Policies only work on LoadBalancer Services"
+      ],
+      "answer": 0,
+      "explain": "Install a CNI that enforces policies (Calico, Cilium) when you need to test them locally. Always test that a deny actually denies."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Evaluate ingress policies",
+      "prompt": [
+        "Model ingress policies within one namespace. Each policy has a pod selector (`Target`) and a list of allowed sources, each `(Dictionary<string,string> From, int Port)`.",
+        "",
+        "Write `bool Allowed(Dictionary<string, string> src, Dictionary<string, string> dst, int port, List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> policies)`:",
+        "",
+        "- if no policy's `Target` matches `dst`, the connection is allowed",
+        "- otherwise it is allowed only if some **selecting** policy has a rule whose `From` matches `src` and whose `Port` equals `port` (`Port` 0 means any port)",
+        "",
+        "Selectors are matchLabels (empty matches all)."
+      ],
+      "starter": [
+        "bool Allowed(Dictionary<string, string> src, Dictionary<string, string> dst, int port, List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> policies)",
+        "{",
+        "    return true;",
+        "}"
+      ],
+      "solution": [
+        "bool M(Dictionary<string, string> sel, Dictionary<string, string> labels) =>",
+        "    sel.All(kv => labels.TryGetValue(kv.Key, out var v) && v == kv.Value);",
+        "",
+        "bool Allowed(Dictionary<string, string> src, Dictionary<string, string> dst, int port, List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> policies)",
+        "{",
+        "    var selecting = policies.Where(p => M(p.Target, dst)).ToList();",
+        "    if (selecting.Count == 0) return true;",
+        "    return selecting.Any(p => p.Rules.Any(r => M(r.From, src) && (r.Port == 0 || r.Port == port)));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoApi = new Dictionary<string, string> { [\"app\"] = \"shop-api\" };",
+        "var dojoWeb = new Dictionary<string, string> { [\"app\"] = \"shop-web\" };",
+        "var dojoDb = new Dictionary<string, string> { [\"app\"] = \"postgres\" };",
+        "var dojoPol = new List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> {",
+        "    (new() { [\"app\"] = \"postgres\" }, new() { (new() { [\"app\"] = \"shop-api\" }, 5432) }),",
+        "};",
+        "Dojo.Check(\"api -> db:5432 allowed\", Allowed(dojoApi, dojoDb, 5432, dojoPol), \"\");",
+        "Dojo.Check(\"web -> db:5432 denied\", !Allowed(dojoWeb, dojoDb, 5432, dojoPol), \"\");",
+        "Dojo.Check(\"api -> db:22 denied\", !Allowed(dojoApi, dojoDb, 22, dojoPol), \"\");",
+        "Dojo.Check(\"web -> api allowed (api not selected)\", Allowed(dojoWeb, dojoApi, 8080, dojoPol), \"\");",
+        "var dojoDeny = new List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> {",
+        "    (new(), new()),",
+        "    (new() { [\"app\"] = \"shop-api\" }, new() { (new() { [\"app\"] = \"shop-web\" }, 0) }),",
+        "};",
+        "Dojo.Check(\"default deny: web -> db denied\", !Allowed(dojoWeb, dojoDb, 5432, dojoDeny), \"\");",
+        "Dojo.Check(\"default deny + allow: web -> api any port\", Allowed(dojoWeb, dojoApi, 9999, dojoDeny), \"\");",
+        "Dojo.Check(\"default deny: db -> web denied\", !Allowed(dojoDb, dojoWeb, 80, dojoDeny), \"\");"
+      ],
+      "hints": [
+        "First find the policies that select `dst`. None? Allowed.",
+        "Then `Any` policy with `Any` rule matching source and port."
+      ]
+    }
+  ]
+}

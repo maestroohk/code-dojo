@@ -1,0 +1,155 @@
+{
+  "title": "Stage 1: The Deployment",
+  "summary": "Run three copies of the API and check the manifest before it reaches the cluster.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What you are building",
+      "body": [
+        "Over five stages you will take `shop/api` (an ASP.NET Core API listening on 8080) and its PostgreSQL database to a production-shaped setup in namespace `shop`:",
+        "",
+        "```text",
+        "users -> Ingress -> Service shop-api -> 3..10 api pods -> Service db -> db-0 -> PVC",
+        "                                          ^ ConfigMap + Secret",
+        "```",
+        "",
+        "Each stage has you read and complete the real manifests, then write the kind of check a platform team runs in CI before anything is applied (tools such as kubeconform, kube-linter and OPA/Kyverno policies do exactly this).",
+        "",
+        "Stage 1 is the Deployment:",
+        "",
+        "```yaml",
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata: { name: shop-api, namespace: shop, labels: { app: shop-api } }",
+        "spec:",
+        "  replicas: 3",
+        "  selector:",
+        "    matchLabels: { app: shop-api }",
+        "  template:",
+        "    metadata:",
+        "      labels: { app: shop-api, version: \"1.4.0\" }",
+        "    spec:",
+        "      containers:",
+        "      - name: api",
+        "        image: registry.example.com/shop/api:1.4.0",
+        "        ports: [{ name: http, containerPort: 8080 }]",
+        "```"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the parts that tie the Deployment to its pods.",
+      "code": [
+        "spec:",
+        "  replicas: 3",
+        "  __1__:",
+        "    matchLabels: { app: shop-api }",
+        "  __2__:",
+        "    metadata:",
+        "      labels: { app: __3__ }"
+      ],
+      "blanks": [
+        "selector",
+        "template",
+        "shop-api"
+      ],
+      "bank": [
+        "podSelector",
+        "spec",
+        "shop",
+        "pods"
+      ],
+      "explain": "The selector must match the template's labels, or the API server rejects the Deployment: *selector does not match template labels*."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is `image: shop/api:latest` a bad choice for this Deployment?",
+      "options": [
+        "`latest` does not say which version runs, so two nodes may run different builds, and changing what `latest` points to does not trigger a rollout",
+        "Kubernetes does not support the `latest` tag",
+        "`latest` images are always pulled from Docker Hub",
+        "It makes the pods BestEffort"
+      ],
+      "answer": 0,
+      "explain": "Pin a version (or better, a digest `@sha256:...`). Then the image change *is* a template change, which gives you a rollout and a rollback point."
+    },
+    {
+      "type": "predict",
+      "prompt": "Your first `kubectl apply` used `registry.example.com/shop/api:1.4.0`, but the registry is private and no pull secret exists. After a minute, what STATUS do the pods show?",
+      "code": [
+        "NAME                        READY   STATUS    RESTARTS   AGE",
+        "shop-api-6f8d9c7b4-2kx9q    0/1     ????      0          70s"
+      ],
+      "answer": "ImagePullBackOff",
+      "verify": false,
+      "accept": [
+        "imagepullbackoff",
+        "ErrImagePull"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Lint the Deployment",
+      "prompt": [
+        "Model the Deployment as a record (provided by the tests, at the bottom):",
+        "",
+        "```csharp",
+        "record Deploy(int Replicas, Dictionary<string, string> Selector, Dictionary<string, string> TemplateLabels, string Image);",
+        "```",
+        "",
+        "Write `List<string> Lint(Deploy d)` returning problems in this order:",
+        "",
+        "1. `\"selector is empty\"` if the selector has no entries; otherwise `\"selector does not match template labels\"` if some selector pair is missing from `TemplateLabels`",
+        "2. `\"replicas should be at least 2\"` if `Replicas < 2`",
+        "3. `\"image has no tag\"` if the part after the last `/` has no `:` and the image has no `@`; `\"image uses latest\"` if the tag is `latest`",
+        "",
+        "**Run checks** builds several Deployments and lints them."
+      ],
+      "starter": [
+        "List<string> Lint(Deploy d)",
+        "{",
+        "    var problems = new List<string>();",
+        "    return problems;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Lint(Deploy d)",
+        "{",
+        "    var problems = new List<string>();",
+        "    if (d.Selector.Count == 0) problems.Add(\"selector is empty\");",
+        "    else if (!d.Selector.All(kv => d.TemplateLabels.TryGetValue(kv.Key, out var v) && v == kv.Value))",
+        "        problems.Add(\"selector does not match template labels\");",
+        "    if (d.Replicas < 2) problems.Add(\"replicas should be at least 2\");",
+        "    if (!d.Image.Contains('@'))",
+        "    {",
+        "        string last = d.Image[(d.Image.LastIndexOf('/') + 1)..];",
+        "        int colon = last.IndexOf(':');",
+        "        if (colon < 0) problems.Add(\"image has no tag\");",
+        "        else if (last[(colon + 1)..] == \"latest\") problems.Add(\"image uses latest\");",
+        "    }",
+        "    return problems;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSel = new Dictionary<string, string> { [\"app\"] = \"shop-api\" };",
+        "var dojoTpl = new Dictionary<string, string> { [\"app\"] = \"shop-api\", [\"version\"] = \"1.4.0\" };",
+        "Dojo.Eq(\"the stage manifest is clean\", new List<string>(), Lint(new Deploy(3, dojoSel, dojoTpl, \"registry.example.com/shop/api:1.4.0\")));",
+        "Dojo.Eq(\"registry port is not a tag\", new List<string> { \"image has no tag\" }, Lint(new Deploy(3, dojoSel, dojoTpl, \"registry.example.com:5000/shop/api\")));",
+        "Dojo.Eq(\"latest\", new List<string> { \"image uses latest\" }, Lint(new Deploy(3, dojoSel, dojoTpl, \"shop/api:latest\")));",
+        "Dojo.Eq(\"digest is fine\", new List<string>(), Lint(new Deploy(2, dojoSel, dojoTpl, \"shop/api@sha256:abc123\")));",
+        "Dojo.Eq(\"mismatch and one replica\", new List<string> { \"selector does not match template labels\", \"replicas should be at least 2\" },",
+        "    Lint(new Deploy(1, new() { [\"app\"] = \"shop\" }, dojoTpl, \"shop/api:1.4.0\")));",
+        "Dojo.Eq(\"empty selector\", new List<string> { \"selector is empty\" }, Lint(new Deploy(3, new(), dojoTpl, \"shop/api:1.4.0\")));",
+        "",
+        "record Deploy(int Replicas, Dictionary<string, string> Selector, Dictionary<string, string> TemplateLabels, string Image);"
+      ],
+      "hints": [
+        "For the tag, look only at the text after the last `/`: `registry:5000/shop/api` has a colon, but it belongs to the registry.",
+        "`d.Image[(d.Image.LastIndexOf('/') + 1)..]` gives that last part."
+      ]
+    }
+  ]
+}

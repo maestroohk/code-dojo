@@ -1,0 +1,190 @@
+{
+  "title": "Volumes, PVs, PVCs and StorageClasses",
+  "summary": "Container filesystems are temporary; here is how data survives.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Volumes",
+      "body": [
+        "A container's own filesystem is thrown away when it restarts. A **volume** is storage attached to the **pod**:",
+        "",
+        "| Volume | Lives as long as | Use |",
+        "|---|---|---|",
+        "| `emptyDir` | the pod (survives container restarts) | scratch space, cache, sharing files between containers |",
+        "| `configMap` / `secret` | the object | config files |",
+        "| `hostPath` | the node | node agents only; dangerous for apps (ties you to one node, breaks isolation) |",
+        "| `persistentVolumeClaim` | independently of pods | databases, uploads: anything you must not lose |",
+        "",
+        "```yaml",
+        "volumes:",
+        "- name: cache",
+        "  emptyDir: { sizeLimit: 1Gi }",
+        "- name: data",
+        "  persistentVolumeClaim: { claimName: postgres-data }",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your app writes uploaded images to `/app/uploads` inside the container, with no volume. The pod is rescheduled after a node upgrade. What happens to the images?",
+      "options": [
+        "They are gone: they were in the container's writable layer on the old node",
+        "They move with the pod",
+        "They are kept in etcd",
+        "They are copied to the new node by the kubelet"
+      ],
+      "answer": 0,
+      "explain": "Use a PersistentVolumeClaim, or better for uploads, object storage (Blob Storage, S3) so any replica can read them."
+    },
+    {
+      "type": "learn",
+      "title": "PV, PVC, StorageClass",
+      "body": [
+        "```text",
+        " you write                    cluster provides",
+        "+-----------------------+     +----------------------------+",
+        "| PVC postgres-data     | --> | PV pvc-3f2a... 20Gi RWO    | --> Azure Disk / EBS / NFS ...",
+        "|  10Gi, RWO, class ssd |bind | created by StorageClass ssd|",
+        "+-----------------------+     +----------------------------+",
+        "```",
+        "",
+        "- A **PersistentVolume (PV)** is a piece of real storage in the cluster.",
+        "- A **PersistentVolumeClaim (PVC)** is a pod's *request*: \"10Gi, ReadWriteOnce, class `ssd`\".",
+        "- A **StorageClass** describes a kind of storage and the provisioner that creates PVs **on demand** (dynamic provisioning). Most clusters have a default class.",
+        "",
+        "Access modes: **RWO** ReadWriteOnce (one node at a time: block disks), **ROX** ReadOnlyMany, **RWX** ReadWriteMany (many nodes: NFS, Azure Files, EFS), **RWOP** ReadWriteOncePod.",
+        "",
+        "`reclaimPolicy: Delete` (the usual default for dynamic classes) deletes the disk when the PVC is deleted; `Retain` keeps it for manual recovery."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the access mode to the storage.",
+      "pairs": [
+        [
+          "RWO",
+          "an Azure managed disk or AWS EBS volume attached to one node"
+        ],
+        [
+          "RWX",
+          "an NFS share or Azure Files mounted by pods on many nodes"
+        ],
+        [
+          "ROX",
+          "a pre-filled dataset many pods only read"
+        ],
+        [
+          "RWOP",
+          "exactly one pod may mount it read-write"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Deployment with 3 replicas spread over 3 nodes mounts one PVC with access mode RWO backed by a cloud disk. What do you see?",
+      "options": [
+        "One pod runs; the others are stuck in `ContainerCreating` with a Multi-Attach error because the disk can attach to only one node",
+        "All three share the disk",
+        "The PVC is cloned three times",
+        "The Deployment is rejected"
+      ],
+      "answer": 0,
+      "explain": "Either use RWX storage, or a StatefulSet with `volumeClaimTemplates` so each replica gets its own disk."
+    },
+    {
+      "type": "predict",
+      "prompt": "You create a PVC asking for `storageClassName: fast-ssd`, but no such StorageClass exists. Fill in the STATUS column of `kubectl get pvc`.",
+      "code": [
+        "NAME            STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE",
+        "postgres-data   ????                                         fast-ssd       5m"
+      ],
+      "answer": "Pending",
+      "verify": false,
+      "accept": [
+        "pending"
+      ],
+      "explain": "No PV can be found or provisioned, so the claim waits. A pod using it is also `Pending` (*unbound immediate PersistentVolumeClaims*). `kubectl get storageclass` lists what exists."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the claim for 10 GiB of single-node storage from the default class.",
+      "code": [
+        "apiVersion: v1",
+        "kind: __1__",
+        "metadata:",
+        "  name: postgres-data",
+        "spec:",
+        "  accessModes: [__2__]",
+        "  resources:",
+        "    requests:",
+        "      storage: __3__"
+      ],
+      "blanks": [
+        "PersistentVolumeClaim",
+        "ReadWriteOnce",
+        "10Gi"
+      ],
+      "bank": [
+        "PersistentVolume",
+        "ReadWriteMany",
+        "10GB",
+        "StorageClass"
+      ],
+      "explain": "Omitting `storageClassName` uses the default class. `Gi` is 2^30 bytes; `G` is 10^9."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Bind claims to volumes",
+      "prompt": [
+        "Write `Dictionary<string, string> Bind(List<(string Name, int SizeGi, string Mode, string Class)> claims, List<(string Name, int SizeGi, string Mode, string Class)> volumes)`.",
+        "",
+        "For each claim **in order**, pick an unbound volume with the same `Class`, the same `Mode`, and `SizeGi >= claim.SizeGi`. If several fit, take the **smallest**; ties by name. Map claim name → volume name, or → `\"Pending\"` if none fits. Each volume binds at most once."
+      ],
+      "starter": [
+        "Dictionary<string, string> Bind(List<(string Name, int SizeGi, string Mode, string Class)> claims, List<(string Name, int SizeGi, string Mode, string Class)> volumes)",
+        "{",
+        "    var result = new Dictionary<string, string>();",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string> Bind(List<(string Name, int SizeGi, string Mode, string Class)> claims, List<(string Name, int SizeGi, string Mode, string Class)> volumes)",
+        "{",
+        "    var result = new Dictionary<string, string>();",
+        "    var used = new HashSet<string>();",
+        "    foreach (var c in claims)",
+        "    {",
+        "        var pick = volumes",
+        "            .Where(v => !used.Contains(v.Name) && v.Class == c.Class && v.Mode == c.Mode && v.SizeGi >= c.SizeGi)",
+        "            .OrderBy(v => v.SizeGi).ThenBy(v => v.Name, StringComparer.Ordinal)",
+        "            .Select(v => v.Name).FirstOrDefault();",
+        "        if (pick is null) result[c.Name] = \"Pending\";",
+        "        else { used.Add(pick); result[c.Name] = pick; }",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoVols = new List<(string Name, int SizeGi, string Mode, string Class)> {",
+        "    (\"pv-big\", 100, \"RWO\", \"ssd\"), (\"pv-10\", 10, \"RWO\", \"ssd\"), (\"pv-20\", 20, \"RWO\", \"ssd\"), (\"pv-nfs\", 50, \"RWX\", \"files\"),",
+        "};",
+        "var dojoB = Bind(new() { (\"db\", 15, \"RWO\", \"ssd\"), (\"cache\", 5, \"RWO\", \"ssd\"), (\"shared\", 10, \"RWX\", \"files\"), (\"huge\", 500, \"RWO\", \"ssd\"), (\"wrongmode\", 5, \"RWX\", \"ssd\") }, dojoVols);",
+        "Dojo.Eq(\"db gets smallest fitting (20)\", \"pv-20\", dojoB[\"db\"]);",
+        "Dojo.Eq(\"cache gets pv-10\", \"pv-10\", dojoB[\"cache\"]);",
+        "Dojo.Eq(\"shared gets nfs\", \"pv-nfs\", dojoB[\"shared\"]);",
+        "Dojo.Eq(\"huge is Pending\", \"Pending\", dojoB[\"huge\"]);",
+        "Dojo.Eq(\"wrong mode is Pending\", \"Pending\", dojoB[\"wrongmode\"]);",
+        "var dojoB2 = Bind(new() { (\"a\", 1, \"RWO\", \"ssd\"), (\"b\", 1, \"RWO\", \"ssd\"), (\"c\", 1, \"RWO\", \"ssd\"), (\"d\", 1, \"RWO\", \"ssd\") }, dojoVols);",
+        "Dojo.Eq(\"each volume binds once\", \"Pending\", dojoB2[\"d\"]);",
+        "Dojo.Eq(\"third claim gets the biggest\", \"pv-big\", dojoB2[\"c\"]);"
+      ],
+      "hints": [
+        "Keep a `HashSet<string>` of bound volume names.",
+        "Filter, then `OrderBy(v => v.SizeGi).ThenBy(v => v.Name)` and take the first."
+      ]
+    }
+  ]
+}

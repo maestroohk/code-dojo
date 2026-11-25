@@ -1,0 +1,133 @@
+{
+  "title": "Boss: follow the packet",
+  "summary": "From a URL to a pod IP, through Ingress, DNS and Service.",
+  "minutes": 20,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The scene",
+      "body": "A request arrives at `https://shop.example.com/api/cart`. It passes the ingress controller, a Service, and lands on a pod. Each hop can fail in its own way. Build the pieces of a tool that traces the path."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Trace a request",
+      "prompt": [
+        "Write `string Trace(string host, string path, List<(string Host, string Prefix, string Service)> rules, Dictionary<string, List<string>> endpoints)`:",
+        "",
+        "- pick the rule with an exactly matching host and the longest matching prefix (segment rules from the previous lesson; ignore any-host rules here). None: `\"404 no rule\"`.",
+        "- look up the Service in `endpoints`. Missing or empty: `\"503 <service> has no endpoints\"`.",
+        "- otherwise `\"<service> -> <first endpoint>\"`."
+      ],
+      "starter": [
+        "string Trace(string host, string path, List<(string Host, string Prefix, string Service)> rules, Dictionary<string, List<string>> endpoints)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "bool PrefixMatch(string prefix, string path) =>",
+        "    prefix == \"/\" || path == prefix || path.StartsWith(prefix.TrimEnd('/') + \"/\");",
+        "",
+        "string Trace(string host, string path, List<(string Host, string Prefix, string Service)> rules, Dictionary<string, List<string>> endpoints)",
+        "{",
+        "    var rule = rules.Where(r => r.Host == host && PrefixMatch(r.Prefix, path))",
+        "        .OrderByDescending(r => r.Prefix.Length).ToList();",
+        "    if (rule.Count == 0) return \"404 no rule\";",
+        "    string svc = rule[0].Service;",
+        "    if (!endpoints.TryGetValue(svc, out var eps) || eps.Count == 0) return $\"503 {svc} has no endpoints\";",
+        "    return $\"{svc} -> {eps[0]}\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRules = new List<(string Host, string Prefix, string Service)> { (\"shop.example.com\", \"/\", \"web\"), (\"shop.example.com\", \"/api\", \"api\"), (\"shop.example.com\", \"/admin\", \"admin\") };",
+        "var dojoEps = new Dictionary<string, List<string>> { [\"web\"] = new() { \"10.1.0.4:3000\" }, [\"api\"] = new() { \"10.1.0.9:8080\", \"10.1.1.2:8080\" }, [\"admin\"] = new() };",
+        "Dojo.Eq(\"api path\", \"api -> 10.1.0.9:8080\", Trace(\"shop.example.com\", \"/api/cart\", dojoRules, dojoEps));",
+        "Dojo.Eq(\"root\", \"web -> 10.1.0.4:3000\", Trace(\"shop.example.com\", \"/\", dojoRules, dojoEps));",
+        "Dojo.Eq(\"admin has no endpoints\", \"503 admin has no endpoints\", Trace(\"shop.example.com\", \"/admin\", dojoRules, dojoEps));",
+        "Dojo.Eq(\"unknown host\", \"404 no rule\", Trace(\"x.example.com\", \"/\", dojoRules, dojoEps));",
+        "Dojo.Eq(\"missing service entry\", \"503 api has no endpoints\", Trace(\"shop.example.com\", \"/api\", dojoRules, new Dictionary<string, List<string>>()));"
+      ],
+      "hints": [
+        "Reuse `PrefixMatch` from the previous lesson.",
+        "`TryGetValue` then check `Count == 0`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Spread requests round-robin",
+      "prompt": "kube-proxy in IPVS mode can spread connections round-robin. Write `Dictionary<string, int> Spread(List<string> endpoints, int requests)` returning how many requests each endpoint receives when they are handed out in turn, starting with the first. Every endpoint appears in the result, even with 0.",
+      "starter": [
+        "Dictionary<string, int> Spread(List<string> endpoints, int requests)",
+        "{",
+        "    return new Dictionary<string, int>();",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, int> Spread(List<string> endpoints, int requests)",
+        "{",
+        "    var counts = endpoints.ToDictionary(e => e, e => 0);",
+        "    for (int i = 0; i < requests; i++) counts[endpoints[i % endpoints.Count]]++;",
+        "    return counts;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoR = Spread(new List<string> { \"a\", \"b\", \"c\" }, 7);",
+        "Dojo.Eq(\"a gets 3\", 3, dojoR[\"a\"]);",
+        "Dojo.Eq(\"b gets 2\", 2, dojoR[\"b\"]);",
+        "Dojo.Eq(\"c gets 2\", 2, dojoR[\"c\"]);",
+        "var dojoR2 = Spread(new List<string> { \"x\", \"y\" }, 1);",
+        "Dojo.Eq(\"y present with 0\", 0, dojoR2[\"y\"]);"
+      ],
+      "hints": [
+        "Start every count at 0 with `ToDictionary`.",
+        "Request `i` goes to `endpoints[i % endpoints.Count]`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Diagnose a connection",
+      "prompt": [
+        "Put the checks in the order an engineer would. Write `string Diagnose(bool dnsResolves, int endpointCount, bool targetPortMatchesApp, bool policyAllows)` returning the **first** problem found:",
+        "",
+        "1. `\"dns: name does not resolve (check namespace and spelling)\"`",
+        "2. `\"endpoints: selector matches no ready pods\"`",
+        "3. `\"policy: a NetworkPolicy blocks the traffic\"`",
+        "4. `\"port: targetPort does not match the port the app listens on\"`",
+        "5. otherwise `\"ok\"`"
+      ],
+      "starter": [
+        "string Diagnose(bool dnsResolves, int endpointCount, bool targetPortMatchesApp, bool policyAllows)",
+        "{",
+        "    return \"ok\";",
+        "}"
+      ],
+      "solution": [
+        "string Diagnose(bool dnsResolves, int endpointCount, bool targetPortMatchesApp, bool policyAllows)",
+        "{",
+        "    if (!dnsResolves) return \"dns: name does not resolve (check namespace and spelling)\";",
+        "    if (endpointCount == 0) return \"endpoints: selector matches no ready pods\";",
+        "    if (!policyAllows) return \"policy: a NetworkPolicy blocks the traffic\";",
+        "    if (!targetPortMatchesApp) return \"port: targetPort does not match the port the app listens on\";",
+        "    return \"ok\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"all good\", \"ok\", Diagnose(true, 3, true, true));",
+        "Dojo.Eq(\"dns first\", \"dns: name does not resolve (check namespace and spelling)\", Diagnose(false, 0, false, false));",
+        "Dojo.Eq(\"no endpoints\", \"endpoints: selector matches no ready pods\", Diagnose(true, 0, false, false));",
+        "Dojo.Eq(\"policy before port\", \"policy: a NetworkPolicy blocks the traffic\", Diagnose(true, 2, false, false));",
+        "Dojo.Eq(\"wrong port\", \"port: targetPort does not match the port the app listens on\", Diagnose(true, 2, false, true));"
+      ],
+      "hints": [
+        "A chain of `if` statements, one per check, in the listed order."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,198 @@
+{
+  "title": "Helm, GitOps and local clusters",
+  "summary": "Package manifests, deploy them from Git, and practise on your laptop.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Helm",
+      "body": [
+        "Copy-pasting YAML for dev, test and prod drifts. **Helm** packages manifests as a **chart** with templates and a **values** file:",
+        "",
+        "```text",
+        "shop-api/",
+        "  Chart.yaml            name, version, appVersion",
+        "  values.yaml           defaults: replicaCount: 2, image.tag: \"1.4\"",
+        "  templates/",
+        "    deployment.yaml     replicas: {{ .Values.replicaCount }}",
+        "    service.yaml        image: \"shop/api:{{ .Values.image.tag }}\"",
+        "```",
+        "",
+        "```text",
+        "helm install shop ./shop-api -n shop -f values-prod.yaml --set image.tag=1.5",
+        "helm upgrade shop ./shop-api -f values-prod.yaml",
+        "helm rollback shop 3",
+        "helm template ./shop-api -f values-prod.yaml      render locally, apply nothing",
+        "helm list -n shop",
+        "```",
+        "",
+        "Values merge in order, later wins: chart `values.yaml` < each `-f` file in order < `--set`. A deployed chart is a **release**; each upgrade is a numbered **revision** you can roll back to. (Kustomize is the template-free alternative: a base plus per-environment patches, built into `kubectl apply -k`.)"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`values.yaml` has `replicaCount: 2`, `values-prod.yaml` has `replicaCount: 4`, and you run `helm upgrade shop ./chart -f values-prod.yaml --set replicaCount=6`. How many replicas?",
+      "options": [
+        "6",
+        "4",
+        "2",
+        "12"
+      ],
+      "answer": 0,
+      "explain": "`--set` beats files; later files beat earlier ones; the chart's own defaults come last."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the template line so the image tag comes from values.",
+      "code": "image: \"{{ __1__.image.__2__ }}\"",
+      "blanks": [
+        ".Values",
+        "tag"
+      ],
+      "bank": [
+        ".Chart",
+        ".Release",
+        "version"
+      ],
+      "explain": "Values from `values.yaml`, `-f` files and `--set` are all under `.Values`. `.Release.Name` and `.Chart.Version` hold other built-in data."
+    },
+    {
+      "type": "learn",
+      "title": "GitOps",
+      "body": [
+        "With **GitOps**, nobody runs `kubectl apply` or `helm upgrade` against production by hand. Instead:",
+        "",
+        "```text",
+        "developer --PR--> Git repo (manifests / Helm values)  <--watches--  Argo CD or Flux (in the cluster)",
+        "                                                                     | compares Git with the cluster",
+        "                                                                     v syncs the difference",
+        "                                                                  cluster",
+        "```",
+        "",
+        "- Git is the desired state, with history, review and easy revert (`git revert` is your rollback).",
+        "- The agent **pulls** from inside the cluster, so CI needs no cluster credentials.",
+        "- Drift (someone's manual `kubectl edit`) is detected and reverted or flagged.",
+        "",
+        "It is the reconcile loop from module 1, one level up: desired state is a Git commit."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Someone runs `kubectl scale deploy/shop-api --replicas=1` in a cluster managed by Argo CD with self-heal on. Git says 4. What happens?",
+      "options": [
+        "Argo CD sees the drift and sets replicas back to 4",
+        "Git is updated to 1",
+        "The app stays at 1 until the next commit",
+        "Argo CD deletes the Deployment"
+      ],
+      "answer": 0,
+      "explain": "If you really need 1, change it in Git. That is the point: the repo is the only way in."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the local cluster tool to its description.",
+      "pairs": [
+        [
+          "kind",
+          "Kubernetes in Docker: each node is a container; fast to create and throw away, great in CI"
+        ],
+        [
+          "minikube",
+          "a single-node cluster in a VM or container, with add-ons like ingress and metrics-server"
+        ],
+        [
+          "Docker Desktop",
+          "a one-click cluster built into Docker Desktop's settings"
+        ],
+        [
+          "k3d / k3s",
+          "a lightweight Kubernetes distribution, also popular on small edge devices"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Practising locally",
+      "body": [
+        "```text",
+        "kind create cluster --name dev",
+        "kind load docker-image shop/api:dev --name dev     # use a locally built image without a registry",
+        "kubectl config current-context                      # kind-dev",
+        "kubectl apply -f k8s/",
+        "kubectl port-forward svc/shop-api 8080:80          # browse http://localhost:8080",
+        "kind delete cluster --name dev",
+        "```",
+        "",
+        "Local images and `imagePullPolicy`: with tag `:latest` the default is `Always`, which tries the registry and fails for an image that only exists on your machine (`ErrImagePull`). Use a specific tag (`:dev`), or set `imagePullPolicy: IfNotPresent`.",
+        "",
+        "`kubectl port-forward` tunnels through the API server to a pod or Service, no Ingress needed: the quickest way to reach a ClusterIP Service from your laptop."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Merge Helm values",
+      "prompt": [
+        "Write `Dictionary<string, string> Merge(List<Dictionary<string, string>> layers)` that merges flattened values (keys like `image.tag`) in order, later layers winning.",
+        "",
+        "Then `string Render(string template, Dictionary<string, string> values)` replacing every `{{ .Values.KEY }}` (exactly one space inside each brace pair) with its value. Unknown keys render as an empty string, as Helm does."
+      ],
+      "starter": [
+        "Dictionary<string, string> Merge(List<Dictionary<string, string>> layers)",
+        "{",
+        "    return new Dictionary<string, string>();",
+        "}",
+        "",
+        "string Render(string template, Dictionary<string, string> values)",
+        "{",
+        "    return template;",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string> Merge(List<Dictionary<string, string>> layers)",
+        "{",
+        "    var result = new Dictionary<string, string>();",
+        "    foreach (var layer in layers)",
+        "        foreach (var (k, v) in layer) result[k] = v;",
+        "    return result;",
+        "}",
+        "",
+        "string Render(string template, Dictionary<string, string> values)",
+        "{",
+        "    var sb = new StringBuilder();",
+        "    int i = 0;",
+        "    const string open = \"{{ .Values.\";",
+        "    while (true)",
+        "    {",
+        "        int s = template.IndexOf(open, i);",
+        "        if (s < 0) { sb.Append(template[i..]); break; }",
+        "        int e = template.IndexOf(\" }}\", s);",
+        "        sb.Append(template[i..s]);",
+        "        string key = template[(s + open.Length)..e];",
+        "        sb.Append(values.GetValueOrDefault(key, \"\"));",
+        "        i = e + 3;",
+        "    }",
+        "    return sb.ToString();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoV = Merge(new() {",
+        "    new() { [\"replicaCount\"] = \"2\", [\"image.tag\"] = \"1.4\", [\"image.repo\"] = \"shop/api\" },",
+        "    new() { [\"replicaCount\"] = \"4\" },",
+        "    new() { [\"image.tag\"] = \"1.5\" },",
+        "});",
+        "Dojo.Eq(\"replicaCount from prod file\", \"4\", dojoV[\"replicaCount\"]);",
+        "Dojo.Eq(\"image.tag from --set\", \"1.5\", dojoV[\"image.tag\"]);",
+        "Dojo.Eq(\"Render image\", \"image: \\\"shop/api:1.5\\\"\", Render(\"image: \\\"{{ .Values.image.repo }}:{{ .Values.image.tag }}\\\"\", dojoV));",
+        "Dojo.Eq(\"Render replicas\", \"replicas: 4\", Render(\"replicas: {{ .Values.replicaCount }}\", dojoV));",
+        "Dojo.Eq(\"unknown key renders empty\", \"x=\", Render(\"x={{ .Values.nope }}\", dojoV));",
+        "Dojo.Eq(\"no placeholders\", \"kind: Service\", Render(\"kind: Service\", dojoV));"
+      ],
+      "hints": [
+        "Merge is the same overwrite loop as env precedence.",
+        "Find `{{ .Values.`, then the next ` }}`; the key is between them."
+      ]
+    }
+  ]
+}

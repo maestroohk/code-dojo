@@ -1,0 +1,197 @@
+{
+  "title": "Desired state and reconciliation",
+  "summary": "You declare what you want; controllers loop forever making it true.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Imperative vs declarative",
+      "body": [
+        "**Imperative**: you give commands. `docker run`, `docker stop`, a deploy script with twenty steps. If step 12 fails, you work out where you are.",
+        "",
+        "**Declarative**: you write down the end state and hand it over.",
+        "",
+        "```yaml",
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata:",
+        "  name: shop-api",
+        "spec:",
+        "  replicas: 3            # I want three copies...",
+        "  selector:",
+        "    matchLabels: { app: shop-api }",
+        "  template:",
+        "    metadata:",
+        "      labels: { app: shop-api }",
+        "    spec:",
+        "      containers:",
+        "      - name: api",
+        "        image: shop/api:1.4   # ...of this image",
+        "```",
+        "",
+        "`kubectl apply -f shop-api.yaml` stores this in the cluster. Run it twice and nothing changes the second time: apply is **idempotent**. Because the file *is* the truth, it lives in Git next to your code.",
+        "",
+        "Every object has the same four parts: `apiVersion`, `kind`, `metadata` (name, namespace, labels) and `spec` (what you want). The cluster adds a `status` (what it observes)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You run `kubectl apply -f shop-api.yaml` twice in a row without editing the file. What happens the second time?",
+      "options": [
+        "Nothing changes: the stored desired state already matches the file",
+        "Three more pods are created, six in total",
+        "The pods are all restarted",
+        "It fails with `AlreadyExists`"
+      ],
+      "answer": 0,
+      "explain": "Apply compares the file with what is stored and only sends the differences. `kubectl create` is the imperative command that fails with `AlreadyExists`."
+    },
+    {
+      "type": "learn",
+      "title": "The reconcile loop",
+      "body": [
+        "A **controller** is a loop that never ends:",
+        "",
+        "```text",
+        "       +--------------------+",
+        "       | read desired state |  (spec, from the API server)",
+        "       +---------+----------+",
+        "                 v",
+        "       +--------------------+",
+        "       | observe actual     |  (pods that really exist)",
+        "       +---------+----------+",
+        "                 v",
+        "       +--------------------+",
+        "       | diff -> act        |  create / delete / update",
+        "       +---------+----------+",
+        "                 |",
+        "                 +----> wait for a change, then go again",
+        "```",
+        "",
+        "The ReplicaSet controller wants 3 pods with label `app=shop-api`. It counts 2 (one crashed node). It creates 1. That is the whole trick, and it is why Kubernetes **heals**: you never told it \"restart the pod on node 3\", you told it \"three, always\".",
+        "",
+        "Controllers act on **level**, not **events**: if a message is lost, the next pass still sees the gap and fixes it."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put in order what happens after `kubectl apply -f deploy.yaml` until a container is running.",
+      "lines": [
+        "kubectl sends the manifest to the API server",
+        "The API server authenticates, validates and stores the object in etcd",
+        "The Deployment and ReplicaSet controllers see it and create Pod objects",
+        "The scheduler picks a node for each Pod and writes the choice back",
+        "The kubelet on that node sees a Pod assigned to it",
+        "The container runtime pulls the image and starts the container"
+      ],
+      "explain": "Notice that no component tells another what to do directly. Each one watches the API server for objects it cares about and writes its result back."
+    },
+    {
+      "type": "mcq",
+      "prompt": "While a pod sits in `Pending` with no node assigned, which component has not done its job yet?",
+      "options": [
+        "The scheduler",
+        "The kubelet",
+        "etcd",
+        "kube-proxy"
+      ],
+      "answer": 0,
+      "explain": "`Pending` with an empty `NODE` column means no node has been chosen. Usually that is because no node has enough free CPU or memory; `kubectl describe pod` shows the scheduler's reason under *Events*."
+    },
+    {
+      "type": "predict",
+      "prompt": "A tiny reconcile pass. What does it print?",
+      "code": [
+        "var desired = new Dictionary<string, int> { [\"web\"] = 3, [\"worker\"] = 1 };",
+        "var actual = new Dictionary<string, int> { [\"web\"] = 1, [\"worker\"] = 2, [\"old-job\"] = 1 };",
+        "foreach (var (name, want) in desired)",
+        "{",
+        "    int have = actual.GetValueOrDefault(name);",
+        "    if (have < want) Console.WriteLine($\"create {want - have} {name}\");",
+        "    if (have > want) Console.WriteLine($\"delete {have - want} {name}\");",
+        "}",
+        "foreach (var name in actual.Keys)",
+        "    if (!desired.ContainsKey(name)) Console.WriteLine($\"delete {actual[name]} {name}\");"
+      ],
+      "answer": [
+        "create 2 web",
+        "delete 1 worker",
+        "delete 1 old-job"
+      ],
+      "explain": "Things that exist but are not desired get removed too. That is what `kubectl apply --prune` and GitOps tools do for whole manifests."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the reconcile step so it closes the gap in both directions.",
+      "code": [
+        "int gap = desired __1__ actual;",
+        "if (gap __2__ 0) Create(gap);",
+        "else if (gap < 0) Delete(__3__);"
+      ],
+      "blanks": [
+        "-",
+        ">",
+        "-gap"
+      ],
+      "bank": [
+        "+",
+        "<",
+        "gap",
+        "=="
+      ],
+      "explain": "A negative gap means too many pods; delete its absolute value."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Write a reconcile loop",
+      "prompt": [
+        "Write `List<string> Reconcile(Dictionary<string, int> desired, Dictionary<string, int> actual)` that returns the actions, in this order:",
+        "",
+        "1. for each name in `desired`, sorted alphabetically: `\"create N name\"` or `\"delete N name\"` if the counts differ (nothing if equal; a missing name counts as 0)",
+        "2. then for each name only in `actual`, sorted alphabetically: `\"delete N name\"`",
+        "",
+        "```text",
+        "desired { web=3, api=2 }    actual { api=2, web=1, cron=1 }",
+        "-> [\"create 2 web\", \"delete 1 cron\"]",
+        "```"
+      ],
+      "starter": [
+        "List<string> Reconcile(Dictionary<string, int> desired, Dictionary<string, int> actual)",
+        "{",
+        "    var actions = new List<string>();",
+        "    return actions;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Reconcile(Dictionary<string, int> desired, Dictionary<string, int> actual)",
+        "{",
+        "    var actions = new List<string>();",
+        "    foreach (var name in desired.Keys.OrderBy(n => n))",
+        "    {",
+        "        int want = desired[name];",
+        "        int have = actual.GetValueOrDefault(name);",
+        "        if (have < want) actions.Add($\"create {want - have} {name}\");",
+        "        else if (have > want) actions.Add($\"delete {have - want} {name}\");",
+        "    }",
+        "    foreach (var name in actual.Keys.Where(n => !desired.ContainsKey(n)).OrderBy(n => n))",
+        "        actions.Add($\"delete {actual[name]} {name}\");",
+        "    return actions;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"example from the task\", new List<string> { \"create 2 web\", \"delete 1 cron\" },",
+        "    Reconcile(new() { [\"web\"] = 3, [\"api\"] = 2 }, new() { [\"api\"] = 2, [\"web\"] = 1, [\"cron\"] = 1 }));",
+        "Dojo.Eq(\"already in sync\", new List<string>(), Reconcile(new() { [\"a\"] = 1 }, new() { [\"a\"] = 1 }));",
+        "Dojo.Eq(\"empty cluster\", new List<string> { \"create 1 a\", \"create 2 b\" }, Reconcile(new() { [\"b\"] = 2, [\"a\"] = 1 }, new()));",
+        "Dojo.Eq(\"everything removed\", new List<string> { \"delete 1 x\", \"delete 3 y\" }, Reconcile(new(), new() { [\"y\"] = 3, [\"x\"] = 1 }));",
+        "Dojo.Eq(\"scale down\", new List<string> { \"delete 4 web\" }, Reconcile(new() { [\"web\"] = 1 }, new() { [\"web\"] = 5 }));"
+      ],
+      "hints": [
+        "`actual.GetValueOrDefault(name)` gives 0 for a missing name.",
+        "Use `desired.Keys.OrderBy(n => n)`, then `actual.Keys.Where(n => !desired.ContainsKey(n)).OrderBy(n => n)`."
+      ]
+    }
+  ]
+}

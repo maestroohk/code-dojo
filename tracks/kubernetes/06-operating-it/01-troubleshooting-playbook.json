@@ -1,0 +1,201 @@
+{
+  "title": "The troubleshooting playbook",
+  "summary": "Read the pod state, run the right command, find the fix.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "From STATUS to next command",
+      "body": [
+        "| STATUS | It means | Run | Usual fixes |",
+        "|---|---|---|---|",
+        "| `Pending` | not scheduled yet | `describe pod` â†’ Events | lower requests, add nodes, fix nodeSelector/taints, bind the PVC |",
+        "| `ContainerCreating` (stuck) | volume or network setup | `describe pod` | missing Secret/ConfigMap volume, Multi-Attach disk, CNI problems |",
+        "| `ErrImagePull` / `ImagePullBackOff` | image cannot be pulled | `describe pod` | typo in name/tag, private registry needs `imagePullSecrets` |",
+        "| `CreateContainerConfigError` | env reference missing | `describe pod` | create the ConfigMap/Secret or fix the key |",
+        "| `CrashLoopBackOff` | starts then exits, repeatedly | `logs --previous` | app error, bad config, liveness probe too aggressive, OOM |",
+        "| `OOMKilled` (last state) | over memory limit | `describe pod`, `top pod` | raise limit, fix leak, tune runtime heap |",
+        "| `Running` but `0/1` | readiness failing | `describe pod`, `logs` | dependency down, wrong probe path/port |",
+        "| `Terminating` (stuck) | finalizer or node gone | `get pod -o yaml` | wait for node, remove stuck finalizer carefully |",
+        "| `Evicted` | node pressure (disk/memory) | `describe pod` | set requests, clean node disk, ephemeral-storage limits |",
+        "",
+        "Also: `kubectl get events --sort-by=.lastTimestamp` for the namespace, and `kubectl describe node` for capacity and conditions (`MemoryPressure`, `DiskPressure`)."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the Events message from `kubectl describe pod` to the fix.",
+      "pairs": [
+        [
+          "`0/3 nodes are available: 3 Insufficient cpu.`",
+          "lower the pod's CPU request or add capacity"
+        ],
+        [
+          "`Failed to pull image \"shop/api:2.O\": not found`",
+          "fix the tag (letter O vs zero)"
+        ],
+        [
+          "`pull access denied ... authorization failed`",
+          "add `imagePullSecrets` for the private registry"
+        ],
+        [
+          "`0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector.`",
+          "fix the nodeSelector or label a node"
+        ],
+        [
+          "`Liveness probe failed: ... connection refused` then `Killing`",
+          "the probe's port is wrong or the app starts too slowly: add a startup probe"
+        ],
+        [
+          "`Multi-Attach error for volume \"pvc-...\"`",
+          "RWO disk already attached elsewhere: use one replica, RWX, or a StatefulSet"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A pod is in `CrashLoopBackOff`. `kubectl logs` is empty. `kubectl logs --previous` shows `Unhandled exception: Missing configuration 'ConnectionStrings:Default'`. What is the fix?",
+      "options": [
+        "Provide the connection string (for example env `ConnectionStrings__Default` from a Secret) and roll out",
+        "Increase the memory limit",
+        "Add a readiness probe",
+        "Delete the node"
+      ],
+      "answer": 0,
+      "explain": "The current container just started and has printed nothing yet; the crash is in the previous one. In .NET, `:` in configuration keys becomes `__` in environment variable names."
+    },
+    {
+      "type": "mcq",
+      "prompt": "After a deploy, `kubectl get pods` shows every new pod as `Running` with `READY 0/1` and the rollout is stuck. The old pods are still serving. What do you check first?",
+      "options": [
+        "The readiness probe failure in `kubectl describe pod` (path, port, or a dependency)",
+        "The node's disk",
+        "The Service type",
+        "etcd health"
+      ],
+      "answer": 0,
+      "explain": "The rollout is waiting for readiness, exactly as designed. Common causes: the new version moved its health endpoint, or listens on a different port."
+    },
+    {
+      "type": "predict",
+      "prompt": "A pod's requests are larger than any node can offer. Fill in its STATUS.",
+      "code": [
+        "NAME              READY   STATUS    RESTARTS   AGE",
+        "report-gen-9xk2   0/1     ????      0          12m"
+      ],
+      "answer": "Pending",
+      "verify": false,
+      "accept": [
+        "pending"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Logs and metrics",
+      "body": [
+        "`kubectl logs` reads what the kubelet kept on the node: it is lost when the pod is deleted, and you only see one pod at a time. Production clusters ship logs (Fluent Bit, the OpenTelemetry Collector, the cloud's agent) to a central store (Loki, Elasticsearch, Azure Monitor) where you can search across pods.",
+        "",
+        "```text",
+        "kubectl logs deploy/shop-api --since=10m          one pod of the deployment",
+        "kubectl logs -l app=shop-api --prefix --tail=50   every matching pod",
+        "kubectl top pods --sort-by=memory                 current usage (needs metrics-server)",
+        "kubectl top nodes",
+        "```",
+        "",
+        "For metrics over time, Prometheus scrapes `/metrics` from your pods and from the cluster (kube-state-metrics, node-exporter), and Grafana graphs it. Write logs to **stdout as structured JSON**; never to files inside the container.",
+        "",
+        "Alert on symptoms users feel (error rate, latency) and on `kube_pod_container_status_restarts_total` rising."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which tool answers this?",
+      "buckets": [
+        "`kubectl` right now",
+        "central logging / metrics"
+      ],
+      "items": [
+        [
+          "why did pod web-2 crash a minute ago?",
+          0
+        ],
+        [
+          "error rate of the checkout API over the last week",
+          1
+        ],
+        [
+          "which pod uses the most memory right now?",
+          0
+        ],
+        [
+          "logs of a pod deleted yesterday",
+          1
+        ],
+        [
+          "are the probes failing on the new pods?",
+          0
+        ],
+        [
+          "p99 latency trend since the last release",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Triage a pod",
+      "prompt": [
+        "Write `string Triage(string status, string ready, string lastReason)` returning the first command to run (use `POD` as the pod name):",
+        "",
+        "- `lastReason == \"OOMKilled\"` (checked first): `\"kubectl describe pod POD  # raise memory limit\"`",
+        "- `CrashLoopBackOff` or `Error`: `\"kubectl logs POD --previous\"`",
+        "- `Pending`, `ContainerCreating`, `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`: `\"kubectl describe pod POD\"`",
+        "- `Running` with the two numbers in `ready` different: `\"kubectl describe pod POD  # readiness\"`",
+        "- anything else: `\"ok\"`"
+      ],
+      "starter": [
+        "string Triage(string status, string ready, string lastReason)",
+        "{",
+        "    return \"ok\";",
+        "}"
+      ],
+      "solution": [
+        "string Triage(string status, string ready, string lastReason)",
+        "{",
+        "    if (lastReason == \"OOMKilled\") return \"kubectl describe pod POD  # raise memory limit\";",
+        "    switch (status)",
+        "    {",
+        "        case \"CrashLoopBackOff\":",
+        "        case \"Error\":",
+        "            return \"kubectl logs POD --previous\";",
+        "        case \"Pending\":",
+        "        case \"ContainerCreating\":",
+        "        case \"ImagePullBackOff\":",
+        "        case \"ErrImagePull\":",
+        "        case \"CreateContainerConfigError\":",
+        "            return \"kubectl describe pod POD\";",
+        "    }",
+        "    var parts = ready.Split('/');",
+        "    if (status == \"Running\" && parts[0] != parts[1]) return \"kubectl describe pod POD  # readiness\";",
+        "    return \"ok\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"OOM wins\", \"kubectl describe pod POD  # raise memory limit\", Triage(\"CrashLoopBackOff\", \"0/1\", \"OOMKilled\"));",
+        "Dojo.Eq(\"crash loop\", \"kubectl logs POD --previous\", Triage(\"CrashLoopBackOff\", \"0/1\", \"Error\"));",
+        "Dojo.Eq(\"pending\", \"kubectl describe pod POD\", Triage(\"Pending\", \"0/1\", \"\"));",
+        "Dojo.Eq(\"image pull\", \"kubectl describe pod POD\", Triage(\"ImagePullBackOff\", \"0/1\", \"\"));",
+        "Dojo.Eq(\"config error\", \"kubectl describe pod POD\", Triage(\"CreateContainerConfigError\", \"0/1\", \"\"));",
+        "Dojo.Eq(\"not ready\", \"kubectl describe pod POD  # readiness\", Triage(\"Running\", \"1/2\", \"\"));",
+        "Dojo.Eq(\"healthy\", \"ok\", Triage(\"Running\", \"2/2\", \"\"));",
+        "Dojo.Eq(\"completed job\", \"ok\", Triage(\"Completed\", \"0/1\", \"\"));"
+      ],
+      "hints": [
+        "Check `lastReason` before looking at `status`.",
+        "A `switch` with stacked `case` labels groups the statuses neatly."
+      ]
+    }
+  ]
+}

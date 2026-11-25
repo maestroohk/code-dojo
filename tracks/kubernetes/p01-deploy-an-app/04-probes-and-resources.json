@@ -1,0 +1,139 @@
+{
+  "title": "Stage 4: Probes and resources",
+  "summary": "Make the cluster understand when the API is healthy and how much it needs.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Production settings",
+      "body": [
+        "```yaml",
+        "containers:",
+        "- name: api",
+        "  image: registry.example.com/shop/api:1.4.0",
+        "  resources:",
+        "    requests: { cpu: 250m, memory: 256Mi }",
+        "    limits:   { memory: 512Mi }               # no CPU limit: avoid throttling",
+        "  startupProbe:",
+        "    httpGet: { path: /health/live, port: http }",
+        "    periodSeconds: 5",
+        "    failureThreshold: 24                       # up to 2 minutes to start",
+        "  livenessProbe:",
+        "    httpGet: { path: /health/live, port: http }   # process only, no DB check",
+        "    periodSeconds: 10",
+        "  readinessProbe:",
+        "    httpGet: { path: /health/ready, port: http }  # includes the DB check",
+        "    periodSeconds: 5",
+        "```",
+        "",
+        "In `Program.cs`:",
+        "",
+        "```csharp",
+        "builder.Services.AddHealthChecks().AddCheck<DbCheck>(\"db\", tags: new[] { \"ready\" });",
+        "app.MapHealthChecks(\"/health/live\", new() { Predicate = _ => false });",
+        "app.MapHealthChecks(\"/health/ready\", new() { Predicate = c => c.Tags.Contains(\"ready\") });",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "What QoS class do these API pods get?",
+      "options": [
+        "Burstable",
+        "Guaranteed",
+        "BestEffort",
+        "Critical"
+      ],
+      "answer": 0,
+      "explain": "Requests are set but do not equal limits (and there is no CPU limit), so Burstable."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the probes so a DB outage only takes pods out of rotation, never restarts them.",
+      "code": [
+        "livenessProbe:",
+        "  httpGet: { path: __1__, port: http }",
+        "readinessProbe:",
+        "  httpGet: { path: __2__, port: __3__ }"
+      ],
+      "blanks": [
+        "/health/live",
+        "/health/ready",
+        "http"
+      ],
+      "bank": [
+        "/health/db",
+        "8081",
+        "/"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "The startup probe runs every 5 s with `failureThreshold: 24`. How many seconds may the app take to start before it is restarted?",
+      "code": [
+        "int period = 5, threshold = 24;",
+        "Console.WriteLine(period * threshold);"
+      ],
+      "answer": "120"
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Production readiness check",
+      "prompt": [
+        "Write `List<string> Check(Container c)` for the record provided by the tests:",
+        "",
+        "```csharp",
+        "record Container(string? ReqCpu, string? ReqMem, string? LimMem, string? LivePath, string? ReadyPath, bool HasStartup);",
+        "```",
+        "",
+        "Return, in order:",
+        "",
+        "1. `\"missing cpu request\"`, `\"missing memory request\"` (each if null)",
+        "2. `\"missing memory limit\"` if null; otherwise `\"memory limit below request\"` if both are set and the limit (in Mi) is smaller. Memory values are `NNMi` or `NNGi`.",
+        "3. `\"missing readiness probe\"`, `\"missing liveness probe\"` (each if null)",
+        "4. `\"liveness and readiness use the same path\"` if both are set and equal",
+        "5. `\"no startup probe\"` if `!HasStartup`"
+      ],
+      "starter": [
+        "List<string> Check(Container c)",
+        "{",
+        "    var problems = new List<string>();",
+        "    return problems;",
+        "}"
+      ],
+      "solution": [
+        "int Mi(string q) => q.EndsWith(\"Gi\") ? int.Parse(q[..^2]) * 1024 : int.Parse(q[..^2]);",
+        "",
+        "List<string> Check(Container c)",
+        "{",
+        "    var problems = new List<string>();",
+        "    if (c.ReqCpu is null) problems.Add(\"missing cpu request\");",
+        "    if (c.ReqMem is null) problems.Add(\"missing memory request\");",
+        "    if (c.LimMem is null) problems.Add(\"missing memory limit\");",
+        "    else if (c.ReqMem is not null && Mi(c.LimMem) < Mi(c.ReqMem)) problems.Add(\"memory limit below request\");",
+        "    if (c.ReadyPath is null) problems.Add(\"missing readiness probe\");",
+        "    if (c.LivePath is null) problems.Add(\"missing liveness probe\");",
+        "    if (c.LivePath is not null && c.LivePath == c.ReadyPath) problems.Add(\"liveness and readiness use the same path\");",
+        "    if (!c.HasStartup) problems.Add(\"no startup probe\");",
+        "    return problems;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"stage manifest passes\", new List<string>(), Check(new Container(\"250m\", \"256Mi\", \"512Mi\", \"/health/live\", \"/health/ready\", true)));",
+        "Dojo.Eq(\"bare container\", new List<string> { \"missing cpu request\", \"missing memory request\", \"missing memory limit\", \"missing readiness probe\", \"missing liveness probe\", \"no startup probe\" },",
+        "    Check(new Container(null, null, null, null, null, false)));",
+        "Dojo.Eq(\"limit below request (Gi vs Mi)\", new List<string> { \"memory limit below request\" }, Check(new Container(\"1\", \"2Gi\", \"1536Mi\", \"/live\", \"/ready\", true)));",
+        "Dojo.Eq(\"1Gi limit is fine for 1024Mi\", new List<string>(), Check(new Container(\"1\", \"1024Mi\", \"1Gi\", \"/live\", \"/ready\", true)));",
+        "Dojo.Eq(\"same path\", new List<string> { \"liveness and readiness use the same path\" }, Check(new Container(\"1\", \"1Gi\", \"1Gi\", \"/health\", \"/health\", true)));",
+        "",
+        "record Container(string? ReqCpu, string? ReqMem, string? LimMem, string? LivePath, string? ReadyPath, bool HasStartup);"
+      ],
+      "hints": [
+        "Convert memory to Mi: `Gi` × 1024.",
+        "Follow the list in order; each check adds at most one line."
+      ]
+    }
+  ]
+}

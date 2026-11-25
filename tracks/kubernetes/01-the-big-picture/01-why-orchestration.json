@@ -1,0 +1,206 @@
+{
+  "title": "Why orchestration",
+  "summary": "From one docker run to a fleet: what Kubernetes takes off your hands.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "From one container to a fleet",
+      "body": [
+        "You already know `docker run -d -p 8080:80 shop-api:1.4`. On one laptop that is enough. In production you soon need answers to:",
+        "",
+        "- The container crashed at 3 a.m. **Who restarts it?**",
+        "- The machine died. **Who starts the container somewhere else?**",
+        "- Traffic tripled. **Who starts five more copies, and who spreads requests across them?**",
+        "- Version 1.5 is out. **Who replaces copies one at a time without downtime, and rolls back if it breaks?**",
+        "- Copies move between machines. **How do other services find them?**",
+        "",
+        "A container **orchestrator** answers all of these. Kubernetes (k8s) is the one that won: you describe *what you want running*, and it keeps the world looking like that description, on as many machines as you give it.",
+        "",
+        "> **Tip:** Kubernetes does not build images. You still `docker build` and push to a registry; Kubernetes pulls and runs them."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which job is **not** something Kubernetes does for you?",
+      "options": [
+        "Building your container image from a Dockerfile",
+        "Restarting a crashed container",
+        "Moving containers off a dead machine",
+        "Spreading traffic across copies of a service"
+      ],
+      "answer": 0,
+      "explain": "Images are built by Docker, BuildKit or your CI pipeline and pushed to a registry. Kubernetes only pulls and runs them."
+    },
+    {
+      "type": "learn",
+      "title": "Inside a cluster",
+      "body": [
+        "A **cluster** is a set of machines (**nodes**) plus a **control plane** that decides what runs where.",
+        "",
+        "```text",
+        "+------------------------- control plane --------------------------+",
+        "|  kube-apiserver   <-- every request goes through here (kubectl)  |",
+        "|  etcd             <-- the database: the desired + observed state |",
+        "|  kube-scheduler   <-- picks a node for each new pod              |",
+        "|  controller-mgr   <-- loops that fix drift (replicas, nodes...)  |",
+        "+------------------------------------------------------------------+",
+        "         |                      |                      |",
+        "+--- node-1 -------+   +--- node-2 -------+   +--- node-3 -------+",
+        "| kubelet          |   | kubelet          |   | kubelet          |",
+        "| container runtime|   | container runtime|   | container runtime|",
+        "| kube-proxy       |   | kube-proxy       |   | kube-proxy       |",
+        "| [pod] [pod]      |   | [pod]            |   | [pod] [pod] [pod]|",
+        "+------------------+   +------------------+   +------------------+",
+        "```",
+        "",
+        "- The **API server** is the only component that talks to etcd. Everything else, including `kubectl` and the kubelets, talks to the API server.",
+        "- The **kubelet** on each node watches for pods assigned to its node and asks the **container runtime** (containerd, CRI-O) to start them.",
+        "- **kube-proxy** programs the node's networking so Services work (module 3).",
+        "- A **pod** is the smallest thing Kubernetes runs: one or more containers sharing a network address."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each component to its job.",
+      "pairs": [
+        [
+          "`kube-apiserver`",
+          "the front door: validates and stores every change"
+        ],
+        [
+          "`etcd`",
+          "key-value store holding the cluster state"
+        ],
+        [
+          "`kube-scheduler`",
+          "chooses a node for each unscheduled pod"
+        ],
+        [
+          "`kubelet`",
+          "agent on each node that starts and watches its pods"
+        ],
+        [
+          "`kube-controller-manager`",
+          "runs loops that push actual state towards desired"
+        ],
+        [
+          "container runtime",
+          "pulls images and runs the containers"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Where does each piece run?",
+      "buckets": [
+        "Control plane",
+        "Every worker node"
+      ],
+      "items": [
+        [
+          "`etcd`",
+          0
+        ],
+        [
+          "`kube-scheduler`",
+          0
+        ],
+        [
+          "`kube-apiserver`",
+          0
+        ],
+        [
+          "controller manager",
+          0
+        ],
+        [
+          "`kubelet`",
+          1
+        ],
+        [
+          "`kube-proxy`",
+          1
+        ],
+        [
+          "containerd",
+          1
+        ],
+        [
+          "your application pods",
+          1
+        ]
+      ],
+      "explain": "On managed clusters (AKS, EKS, GKE) the provider runs the control plane for you; you only see and pay for the worker nodes."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The node running two of your pods loses power. What happens next, assuming the pods belong to a Deployment?",
+      "options": [
+        "The control plane notices the node is gone and new pods are scheduled on the remaining nodes",
+        "Nothing until someone runs `kubectl apply` again",
+        "The kubelet on the dead node restarts them when power returns, and not before",
+        "etcd copies the containers to another node"
+      ],
+      "answer": 0,
+      "explain": "The node stops sending heartbeats, the node controller marks it `NotReady`, its pods are evicted, and the ReplicaSet controller sees too few pods and creates replacements, which the scheduler places on healthy nodes. Expect a few minutes by default."
+    },
+    {
+      "type": "predict",
+      "prompt": "Kubernetes keeps comparing what you asked for with what is running. What does this print?",
+      "code": [
+        "int desired = 3;",
+        "int running = 1;",
+        "int toStart = desired - running;",
+        "Console.WriteLine($\"start {toStart}\");",
+        "running += toStart;",
+        "Console.WriteLine(running == desired ? \"in sync\" : \"drift\");"
+      ],
+      "answer": [
+        "start 2",
+        "in sync"
+      ],
+      "explain": "This compare-and-correct idea is the heart of Kubernetes. The next lesson makes it precise."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Plan one correction",
+      "prompt": [
+        "Write `string Plan(int desired, int running)` that says what a controller must do to make `running` match `desired`:",
+        "",
+        "- too few: `\"create N\"` (for example `Plan(3, 1)` is `\"create 2\"`)",
+        "- too many: `\"delete N\"` (`Plan(2, 5)` is `\"delete 3\"`)",
+        "- equal: `\"ok\"`",
+        "",
+        "**Run checks** calls your method with several cases."
+      ],
+      "starter": [
+        "string Plan(int desired, int running)",
+        "{",
+        "    return \"ok\";",
+        "}"
+      ],
+      "solution": [
+        "string Plan(int desired, int running)",
+        "{",
+        "    if (running < desired) return $\"create {desired - running}\";",
+        "    if (running > desired) return $\"delete {running - desired}\";",
+        "    return \"ok\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"Plan(3, 1)\", \"create 2\", Plan(3, 1));",
+        "Dojo.Eq(\"Plan(2, 5)\", \"delete 3\", Plan(2, 5));",
+        "Dojo.Eq(\"Plan(4, 4)\", \"ok\", Plan(4, 4));",
+        "Dojo.Eq(\"Plan(1, 0)\", \"create 1\", Plan(1, 0));",
+        "Dojo.Eq(\"Plan(0, 2) (scaled to zero)\", \"delete 2\", Plan(0, 2));"
+      ],
+      "hints": [
+        "Compare the two numbers first: less, more, or equal.",
+        "The count is the difference: `desired - running` or `running - desired`."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,178 @@
+{
+  "title": "Boss: on call",
+  "summary": "Turn raw cluster output into a triage report and check access.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The scene",
+      "body": "It is 02:00 and the pager says *checkout errors*. You have `kubectl get pods` output and not much patience. Build the report you wish you had."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Triage report",
+      "prompt": [
+        "Write `List<string> Report(string output)` for `kubectl get pods` text (columns `NAME READY STATUS RESTARTS AGE`, header first). For every pod that is not healthy (same rule as module 1: READY numbers differ or STATUS is not `Running`/`Completed`), return `\"NAME: STATUS -> COMMAND\"` with:",
+        "",
+        "- `CrashLoopBackOff`, `Error` â†’ `kubectl logs NAME --previous`",
+        "- `Running` (but not ready) â†’ `kubectl describe pod NAME`",
+        "- anything else â†’ `kubectl describe pod NAME`",
+        "",
+        "Order: most `RESTARTS` first (the RESTARTS column may look like `7` or `7 (2m ago)`: take the first number), then by name."
+      ],
+      "starter": [
+        "List<string> Report(string output)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Report(string output)",
+        "{",
+        "    var rows = new List<(string Name, string Status, int Restarts)>();",
+        "    foreach (var line in output.Split('\\n').Skip(1))",
+        "    {",
+        "        var c = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        if (c.Length < 4) continue;",
+        "        var ready = c[1].Split('/');",
+        "        string status = c[2];",
+        "        if (status == \"Completed\") continue;",
+        "        if (status == \"Running\" && ready[0] == ready[1]) continue;",
+        "        rows.Add((c[0], status, int.Parse(c[3])));",
+        "    }",
+        "    return rows.OrderByDescending(r => r.Restarts).ThenBy(r => r.Name, StringComparer.Ordinal)",
+        "        .Select(r => r.Status is \"CrashLoopBackOff\" or \"Error\"",
+        "            ? $\"{r.Name}: {r.Status} -> kubectl logs {r.Name} --previous\"",
+        "            : $\"{r.Name}: {r.Status} -> kubectl describe pod {r.Name}\")",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoOut = string.Join(\"\\n\", new[] {",
+        "    \"NAME                        READY   STATUS             RESTARTS      AGE\",",
+        "    \"checkout-7d9f-2xkqp         1/1     Running            0             3h\",",
+        "    \"checkout-7d9f-9lmnz         0/1     CrashLoopBackOff   7 (2m ago)    15m\",",
+        "    \"payments-55c-k2l9p          0/1     Running            0             15m\",",
+        "    \"cart-6b7-qq81a              0/1     ImagePullBackOff   0             5m\",",
+        "    \"migrate-x7k2                0/1     Completed          0             1h\",",
+        "    \"worker-0                    0/1     Error              2 (10m ago)   20m\",",
+        "});",
+        "Dojo.Eq(\"report\", new List<string> {",
+        "    \"checkout-7d9f-9lmnz: CrashLoopBackOff -> kubectl logs checkout-7d9f-9lmnz --previous\",",
+        "    \"worker-0: Error -> kubectl logs worker-0 --previous\",",
+        "    \"cart-6b7-qq81a: ImagePullBackOff -> kubectl describe pod cart-6b7-qq81a\",",
+        "    \"payments-55c-k2l9p: Running -> kubectl describe pod payments-55c-k2l9p\",",
+        "}, Report(dojoOut));",
+        "Dojo.Eq(\"all healthy\", new List<string>(), Report(\"NAME READY STATUS RESTARTS AGE\\na 1/1 Running 0 1m\"));"
+      ],
+      "hints": [
+        "After splitting on spaces, `7 (2m ago)` becomes several columns; column 3 is still the number.",
+        "Collect tuples, then sort with `OrderByDescending(...).ThenBy(...)`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Why is it Pending?",
+      "prompt": [
+        "Write `string WhyPending(int reqCpuM, int reqMemMi, Dictionary<string, string> nodeSelector, List<(string Name, int FreeCpuM, int FreeMemMi, Dictionary<string, string> Labels)> nodes)` that produces a message like the scheduler's:",
+        "",
+        "`\"0/N nodes are available: A Insufficient cpu, B Insufficient memory, C didn't match node selector.\"`",
+        "",
+        "For each node check, in order: selector mismatch (count it in C and stop), then CPU (A) and memory (B), where a node can count in both. Leave out parts whose count is 0, keep the order cpu, memory, selector, join with `\", \"`, end with `.`. If some node fits, return `\"schedulable on NAME\"` (first such node)."
+      ],
+      "starter": [
+        "string WhyPending(int reqCpuM, int reqMemMi, Dictionary<string, string> nodeSelector,",
+        "                  List<(string Name, int FreeCpuM, int FreeMemMi, Dictionary<string, string> Labels)> nodes)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string WhyPending(int reqCpuM, int reqMemMi, Dictionary<string, string> nodeSelector,",
+        "                  List<(string Name, int FreeCpuM, int FreeMemMi, Dictionary<string, string> Labels)> nodes)",
+        "{",
+        "    int cpu = 0, mem = 0, sel = 0;",
+        "    foreach (var n in nodes)",
+        "    {",
+        "        if (!nodeSelector.All(kv => n.Labels.TryGetValue(kv.Key, out var v) && v == kv.Value)) { sel++; continue; }",
+        "        bool cpuOk = n.FreeCpuM >= reqCpuM, memOk = n.FreeMemMi >= reqMemMi;",
+        "        if (cpuOk && memOk) return $\"schedulable on {n.Name}\";",
+        "        if (!cpuOk) cpu++;",
+        "        if (!memOk) mem++;",
+        "    }",
+        "    var parts = new List<string>();",
+        "    if (cpu > 0) parts.Add($\"{cpu} Insufficient cpu\");",
+        "    if (mem > 0) parts.Add($\"{mem} Insufficient memory\");",
+        "    if (sel > 0) parts.Add($\"{sel} didn't match node selector\");",
+        "    return $\"0/{nodes.Count} nodes are available: {string.Join(\", \", parts)}.\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoNodes = new List<(string Name, int FreeCpuM, int FreeMemMi, Dictionary<string, string> Labels)> {",
+        "    (\"n1\", 500, 1024, new() { [\"pool\"] = \"general\" }),",
+        "    (\"n2\", 2000, 512, new() { [\"pool\"] = \"general\" }),",
+        "    (\"gpu1\", 8000, 32768, new() { [\"pool\"] = \"gpu\" }),",
+        "};",
+        "Dojo.Eq(\"cpu, memory and selector\", \"0/3 nodes are available: 1 Insufficient cpu, 2 Insufficient memory, 1 didn't match node selector.\",",
+        "    WhyPending(1000, 2048, new() { [\"pool\"] = \"general\" }, dojoNodes));",
+        "Dojo.Eq(\"fits on gpu1 with no selector\", \"schedulable on gpu1\", WhyPending(4000, 4096, new(), dojoNodes));",
+        "Dojo.Eq(\"fits on n2\", \"schedulable on n2\", WhyPending(1000, 256, new(), dojoNodes));",
+        "Dojo.Eq(\"only selector\", \"0/3 nodes are available: 3 didn't match node selector.\", WhyPending(1, 1, new() { [\"pool\"] = \"arm\" }, dojoNodes));"
+      ],
+      "hints": [
+        "Three counters; a selector mismatch skips the resource checks for that node.",
+        "Build a list of the non-zero parts and `string.Join` them."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Who can break production?",
+      "prompt": [
+        "Write `List<string> Dangerous(List<(string Subject, string Role, string Ns)> bindings)` that flags risky grants. A binding is dangerous when:",
+        "",
+        "- `Role` is `\"cluster-admin\"` (any namespace), or",
+        "- `Role` is `\"admin\"` or `\"edit\"` and `Ns` is `\"*\"` (cluster-wide)",
+        "",
+        "Return `\"Subject: Role in Ns\"` for each, sorted by subject (ordinal), and keep input order for the same subject."
+      ],
+      "starter": [
+        "List<string> Dangerous(List<(string Subject, string Role, string Ns)> bindings)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Dangerous(List<(string Subject, string Role, string Ns)> bindings)",
+        "{",
+        "    return bindings",
+        "        .Where(b => b.Role == \"cluster-admin\" || ((b.Role == \"admin\" || b.Role == \"edit\") && b.Ns == \"*\"))",
+        "        .OrderBy(b => b.Subject, StringComparer.Ordinal)",
+        "        .Select(b => $\"{b.Subject}: {b.Role} in {b.Ns}\")",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoB = new List<(string Subject, string Role, string Ns)> {",
+        "    (\"system:serviceaccount:ci:runner\", \"cluster-admin\", \"*\"),",
+        "    (\"group:shop-devs\", \"edit\", \"shop\"),",
+        "    (\"group:platform\", \"admin\", \"*\"),",
+        "    (\"user:ana\", \"view\", \"*\"),",
+        "    (\"group:platform\", \"cluster-admin\", \"kube-system\"),",
+        "};",
+        "Dojo.Eq(\"flags\", new List<string> { \"group:platform: admin in *\", \"group:platform: cluster-admin in kube-system\", \"system:serviceaccount:ci:runner: cluster-admin in *\" }, Dangerous(dojoB));",
+        "Dojo.Eq(\"nothing risky\", new List<string>(), Dangerous(new() { (\"user:bo\", \"view\", \"shop\") }));"
+      ],
+      "hints": [
+        "`OrderBy` is stable, so equal subjects keep input order.",
+        "Write the condition exactly as the two bullets say."
+      ]
+    }
+  ]
+}

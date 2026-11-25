@@ -1,0 +1,181 @@
+{
+  "title": "Autoscaling and disruption budgets",
+  "summary": "Scale out with load, and keep enough replicas up when nodes are drained.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The Horizontal Pod Autoscaler",
+      "body": [
+        "An **HPA** adjusts a Deployment's `replicas` from metrics (CPU via metrics-server, or custom metrics):",
+        "",
+        "```text",
+        "desired = ceil( currentReplicas Ã— currentMetric / targetMetric )",
+        "```",
+        "",
+        "```yaml",
+        "apiVersion: autoscaling/v2",
+        "kind: HorizontalPodAutoscaler",
+        "metadata: { name: shop-api }",
+        "spec:",
+        "  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: shop-api }",
+        "  minReplicas: 2",
+        "  maxReplicas: 10",
+        "  metrics:",
+        "  - type: Resource",
+        "    resource:",
+        "      name: cpu",
+        "      target: { type: Utilization, averageUtilization: 60 }",
+        "```",
+        "",
+        "**Utilization is relative to the CPU request**, so an HPA on CPU does nothing useful without requests. The HPA skips changes when the ratio is within **10%** of 1.0 (tolerance), and by default waits 5 minutes of lower recommendations before scaling down (stabilisation), to avoid flapping.",
+        "",
+        "Remove `replicas` from your Deployment YAML when an HPA owns it, or every `kubectl apply` resets it."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "4 replicas at 90% average CPU, target 60%. What does this print?",
+      "code": [
+        "int current = 4;",
+        "double metric = 90, target = 60;",
+        "int desired = (int)Math.Ceiling(current * metric / target);",
+        "Console.WriteLine(desired);"
+      ],
+      "answer": "6"
+    },
+    {
+      "type": "mcq",
+      "prompt": "An HPA targets 70% CPU, but `kubectl get hpa` shows `TARGETS <unknown>/70%` and it never scales. Most likely cause?",
+      "options": [
+        "metrics-server is not installed, or the pods have no CPU requests",
+        "maxReplicas is too low",
+        "The Deployment uses RollingUpdate",
+        "The Service is ClusterIP"
+      ],
+      "answer": 0,
+      "explain": "The HPA needs a metric source and a request to compute utilisation against. `kubectl describe hpa` shows the exact error."
+    },
+    {
+      "type": "learn",
+      "title": "PodDisruptionBudgets",
+      "body": [
+        "**Voluntary disruptions** (draining a node for an upgrade, the cluster autoscaler removing a node) go through the eviction API, which respects **PodDisruptionBudgets**:",
+        "",
+        "```yaml",
+        "apiVersion: policy/v1",
+        "kind: PodDisruptionBudget",
+        "metadata: { name: shop-api }",
+        "spec:",
+        "  minAvailable: 2          # or maxUnavailable: 1",
+        "  selector: { matchLabels: { app: shop-api } }",
+        "```",
+        "",
+        "`kubectl drain node-2` evicts pods one by one and **waits** when an eviction would drop healthy `shop-api` pods below 2.",
+        "",
+        "PDBs do **not** protect against involuntary disruptions (a node crashing, OOM kills). And a PDB that can never be satisfied (`minAvailable: 3` with 3 replicas, or `maxUnavailable: 0`) blocks every drain, which stalls cluster upgrades."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Deployment with 3 replicas, PDB `minAvailable: 3`. The platform team starts a node upgrade. What happens?",
+      "options": [
+        "Draining any node with a shop-api pod hangs forever, because no eviction is ever allowed",
+        "The pods are evicted anyway",
+        "The PDB is ignored for upgrades",
+        "Kubernetes adds a 4th replica first"
+      ],
+      "answer": 0,
+      "explain": "Use `maxUnavailable: 1` (or `minAvailable` below the replica count). Some managed upgrades eventually force the drain after a timeout, which is worse than a sensible PDB."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each number to what it controls.",
+      "pairs": [
+        [
+          "`minReplicas`",
+          "HPA never scales below this"
+        ],
+        [
+          "`averageUtilization: 60`",
+          "target percentage of the CPU request"
+        ],
+        [
+          "`minAvailable: 2`",
+          "healthy pods that must remain during voluntary evictions"
+        ],
+        [
+          "`maxSurge: 1`",
+          "extra pods allowed during a rollout"
+        ],
+        [
+          "`failureThreshold: 3`",
+          "consecutive probe failures before acting"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The HPA wants 12 pods but the nodes are full, so 4 new pods are `Pending`. What adds nodes?",
+      "options": [
+        "The Cluster Autoscaler (or Karpenter / the cloud's node autoprovisioning) sees unschedulable pods and adds nodes",
+        "The HPA itself",
+        "The scheduler",
+        "The kubelet"
+      ],
+      "answer": 0,
+      "explain": "HPA scales pods, the cluster autoscaler scales nodes. The second only reacts to `Pending` pods, so pod requests drive node count."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Compute the HPA's decision",
+      "prompt": [
+        "Write `int Desired(int current, double metric, double target, int min, int max)` implementing:",
+        "",
+        "1. `ratio = metric / target`",
+        "2. if `|ratio - 1.0| <= 0.1`, keep `current`",
+        "3. otherwise `ceil(current Ã— ratio)`",
+        "4. clamp to `[min, max]`",
+        "",
+        "Also write `int AllowedDisruptions(int healthy, int minAvailable)`: how many pods may be evicted right now (never negative)."
+      ],
+      "starter": [
+        "int Desired(int current, double metric, double target, int min, int max)",
+        "{",
+        "    return current;",
+        "}",
+        "",
+        "int AllowedDisruptions(int healthy, int minAvailable)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int Desired(int current, double metric, double target, int min, int max)",
+        "{",
+        "    double ratio = metric / target;",
+        "    int desired = Math.Abs(ratio - 1.0) <= 0.1 ? current : (int)Math.Ceiling(current * ratio);",
+        "    return Math.Clamp(desired, min, max);",
+        "}",
+        "",
+        "int AllowedDisruptions(int healthy, int minAvailable) => Math.Max(0, healthy - minAvailable);"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"4 at 90% target 60%\", 6, Desired(4, 90, 60, 2, 10));",
+        "Dojo.Eq(\"within tolerance\", 4, Desired(4, 64, 60, 2, 10));",
+        "Dojo.Eq(\"scale down\", 2, Desired(5, 20, 60, 1, 10));",
+        "Dojo.Eq(\"clamped to max\", 10, Desired(8, 200, 50, 2, 10));",
+        "Dojo.Eq(\"clamped to min\", 3, Desired(3, 5, 60, 3, 10));",
+        "Dojo.Eq(\"AllowedDisruptions(3, 2)\", 1, AllowedDisruptions(3, 2));",
+        "Dojo.Eq(\"AllowedDisruptions(3, 3)\", 0, AllowedDisruptions(3, 3));",
+        "Dojo.Eq(\"AllowedDisruptions(1, 2)\", 0, AllowedDisruptions(1, 2));"
+      ],
+      "hints": [
+        "`Math.Abs(ratio - 1.0) <= 0.1` is the tolerance check.",
+        "`Math.Clamp(value, min, max)` does step 4."
+      ]
+    }
+  ]
+}

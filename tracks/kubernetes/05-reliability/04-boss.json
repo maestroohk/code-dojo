@@ -1,0 +1,145 @@
+{
+  "title": "Boss: capacity and failure",
+  "summary": "A scheduler, an OOM detector and a scaling planner.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The scene",
+      "body": [
+        "Black Friday is coming. You need to know where new pods would land, which pods are dying of memory, and how far the HPA would scale. Build the tools.",
+        "",
+        "The scheduler's core is simple: **filter** nodes that can fit the pod's requests (free = allocatable âˆ’ sum of requests already placed), then **score** the survivors and pick the best."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A tiny scheduler",
+      "prompt": [
+        "Write `Dictionary<string, string> Schedule(List<(string Name, int CpuM, int MemMi)> pods, List<(string Name, int CpuM, int MemMi)> nodes)`.",
+        "",
+        "For each pod **in order**: candidates are nodes whose free CPU and free memory are both at least the pod's requests. Pick the node with the **most free CPU** after placement (spreading); ties by node name. Map pod â†’ node name, or â†’ `\"Pending\"` if nothing fits. Placing a pod uses up its requests on that node."
+      ],
+      "starter": [
+        "Dictionary<string, string> Schedule(List<(string Name, int CpuM, int MemMi)> pods, List<(string Name, int CpuM, int MemMi)> nodes)",
+        "{",
+        "    var result = new Dictionary<string, string>();",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string> Schedule(List<(string Name, int CpuM, int MemMi)> pods, List<(string Name, int CpuM, int MemMi)> nodes)",
+        "{",
+        "    var result = new Dictionary<string, string>();",
+        "    var freeCpu = nodes.ToDictionary(n => n.Name, n => n.CpuM);",
+        "    var freeMem = nodes.ToDictionary(n => n.Name, n => n.MemMi);",
+        "    foreach (var p in pods)",
+        "    {",
+        "        var best = nodes.Select(n => n.Name)",
+        "            .Where(n => freeCpu[n] >= p.CpuM && freeMem[n] >= p.MemMi)",
+        "            .OrderByDescending(n => freeCpu[n] - p.CpuM)",
+        "            .ThenBy(n => n, StringComparer.Ordinal)",
+        "            .FirstOrDefault();",
+        "        if (best is null) { result[p.Name] = \"Pending\"; continue; }",
+        "        freeCpu[best] -= p.CpuM;",
+        "        freeMem[best] -= p.MemMi;",
+        "        result[p.Name] = best;",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoNodes = new List<(string Name, int CpuM, int MemMi)> { (\"node-a\", 2000, 4096), (\"node-b\", 1000, 8192) };",
+        "var dojoS = Schedule(new() { (\"api-1\", 500, 512), (\"api-2\", 500, 512), (\"api-3\", 500, 512), (\"db-0\", 1000, 6000), (\"big\", 3000, 100) }, dojoNodes);",
+        "Dojo.Eq(\"api-1 to most free CPU\", \"node-a\", dojoS[\"api-1\"]);",
+        "Dojo.Eq(\"api-2 node-a still has the most free CPU\", \"node-a\", dojoS[\"api-2\"]);",
+        "Dojo.Eq(\"api-3 tie broken by name\", \"node-a\", dojoS[\"api-3\"]);",
+        "Dojo.Eq(\"db-0 needs memory\", \"node-b\", dojoS[\"db-0\"]);",
+        "Dojo.Eq(\"big fits nowhere\", \"Pending\", dojoS[\"big\"]);",
+        "var dojoS2 = Schedule(new() { (\"x\", 100, 5000) }, dojoNodes);",
+        "Dojo.Eq(\"memory filter\", \"node-b\", dojoS2[\"x\"]);"
+      ],
+      "hints": [
+        "Track free CPU and memory per node in two dictionaries.",
+        "Filter, then `OrderByDescending(n => freeCpu[n] - p.CpuM).ThenBy(n => n)`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Find OOM victims",
+      "prompt": "Given lines of `kubectl get pods -o custom-columns=NAME:.metadata.name,REASON:.status.containerStatuses[0].lastState.terminated.reason,RESTARTS:.status.containerStatuses[0].restartCount` (header first; `<none>` when there is no reason), write `List<string> OomVictims(string output, int minRestarts)` returning names whose `REASON` is `OOMKilled` and whose restarts are at least `minRestarts`, sorted by restarts descending, then name.",
+      "starter": [
+        "List<string> OomVictims(string output, int minRestarts)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> OomVictims(string output, int minRestarts)",
+        "{",
+        "    return output.Split('\\n').Skip(1)",
+        "        .Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries))",
+        "        .Where(c => c.Length == 3 && c[1] == \"OOMKilled\" && int.Parse(c[2]) >= minRestarts)",
+        "        .OrderByDescending(c => int.Parse(c[2])).ThenBy(c => c[0], StringComparer.Ordinal)",
+        "        .Select(c => c[0]).ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoOut = \"NAME          REASON      RESTARTS\\nreport-1      OOMKilled   12\\napi-1         <none>      0\\napi-2         Error       3\\nworker-a      OOMKilled   4\\nworker-b      OOMKilled   12\\nbatch-z       OOMKilled   1\";",
+        "Dojo.Eq(\"minRestarts 2\", new List<string> { \"report-1\", \"worker-b\", \"worker-a\" }, OomVictims(dojoOut, 2));",
+        "Dojo.Eq(\"minRestarts 0\", new List<string> { \"report-1\", \"worker-b\", \"worker-a\", \"batch-z\" }, OomVictims(dojoOut, 0));",
+        "Dojo.Eq(\"none\", new List<string>(), OomVictims(\"NAME REASON RESTARTS\\na <none> 0\", 0));"
+      ],
+      "hints": [
+        "Split into columns like before; there are exactly three.",
+        "Sort with `OrderByDescending` on the parsed restarts, then `ThenBy` name."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Will the HPA's pods fit?",
+      "prompt": [
+        "Combine the HPA and capacity. Write `string Plan(int current, double cpuUtil, double target, int min, int max, int podCpuM, int clusterFreeCpuM)`:",
+        "",
+        "- compute desired replicas exactly as in the HPA lesson (10% tolerance, ceil, clamp)",
+        "- `extra = desired - current`; if `extra <= 0` return `\"scale to D\"`",
+        "- pods that fit = `clusterFreeCpuM / podCpuM` (integer division). If all extra pods fit, return `\"scale to D\"`; otherwise `\"scale to D, N Pending\"` where N is how many will not fit."
+      ],
+      "starter": [
+        "string Plan(int current, double cpuUtil, double target, int min, int max, int podCpuM, int clusterFreeCpuM)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Plan(int current, double cpuUtil, double target, int min, int max, int podCpuM, int clusterFreeCpuM)",
+        "{",
+        "    double ratio = cpuUtil / target;",
+        "    int desired = Math.Abs(ratio - 1.0) <= 0.1 ? current : (int)Math.Ceiling(current * ratio);",
+        "    desired = Math.Clamp(desired, min, max);",
+        "    int extra = desired - current;",
+        "    if (extra <= 0) return $\"scale to {desired}\";",
+        "    int fit = clusterFreeCpuM / podCpuM;",
+        "    return fit >= extra ? $\"scale to {desired}\" : $\"scale to {desired}, {extra - fit} Pending\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"fits\", \"scale to 6\", Plan(4, 90, 60, 2, 10, 500, 2000));",
+        "Dojo.Eq(\"not enough room\", \"scale to 10, 3 Pending\", Plan(5, 120, 60, 2, 10, 500, 1200));",
+        "Dojo.Eq(\"scale down\", \"scale to 2\", Plan(5, 20, 60, 2, 10, 500, 0));",
+        "Dojo.Eq(\"within tolerance\", \"scale to 4\", Plan(4, 63, 60, 2, 10, 500, 0));"
+      ],
+      "hints": [
+        "Reuse the HPA formula.",
+        "Integer division gives how many pods fit."
+      ]
+    }
+  ]
+}

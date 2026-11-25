@@ -1,0 +1,187 @@
+{
+  "title": "Deployments, rollouts and rollbacks",
+  "summary": "Ship a new version with no downtime, watch it, and undo it.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Deployment owns ReplicaSets",
+      "body": [
+        "A **Deployment** manages ReplicaSets; ReplicaSets manage pods.",
+        "",
+        "```text",
+        "Deployment shop-api (replicas: 3, image 1.4)",
+        "  └─ ReplicaSet shop-api-7d9f8c6b5d   (pod-template-hash for image 1.4)",
+        "       ├─ pod shop-api-7d9f8c6b5d-2xkqp",
+        "       ├─ pod shop-api-7d9f8c6b5d-9lmnz",
+        "       └─ pod shop-api-7d9f8c6b5d-qq81a",
+        "```",
+        "",
+        "Change anything in the pod **template** (image, env, resources) and the Deployment creates a **new** ReplicaSet, then scales the new one up and the old one down. Changing only `replicas` scales the current ReplicaSet and does not start a rollout.",
+        "",
+        "```text",
+        "kubectl set image deploy/shop-api api=shop/api:1.5",
+        "kubectl rollout status deploy/shop-api      waits until done (CI uses this)",
+        "kubectl rollout history deploy/shop-api",
+        "kubectl rollout undo deploy/shop-api        back to the previous ReplicaSet",
+        "```",
+        "",
+        "Old ReplicaSets are kept at 0 replicas (`revisionHistoryLimit`, default 10) precisely so `undo` is instant."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which change to a Deployment starts a new rollout (a new ReplicaSet)?",
+      "options": [
+        "Changing an environment variable in the container spec",
+        "Changing `spec.replicas` from 3 to 5",
+        "Adding a label to the Deployment's own metadata",
+        "Running `kubectl scale`"
+      ],
+      "answer": 0,
+      "explain": "Only changes under `spec.template` produce a new pod-template-hash and therefore a new ReplicaSet."
+    },
+    {
+      "type": "learn",
+      "title": "maxSurge and maxUnavailable",
+      "body": [
+        "The `RollingUpdate` strategy has two knobs, relative to `replicas`:",
+        "",
+        "- **maxSurge**: how many pods *above* `replicas` may exist during the update (default 25%, rounded **up**).",
+        "- **maxUnavailable**: how many *below* `replicas` may be unready (default 25%, rounded **down**).",
+        "",
+        "With `replicas: 4, maxSurge: 1, maxUnavailable: 0`:",
+        "",
+        "```text",
+        "step  old  new   total ready",
+        "0     4    0     4",
+        "1     4    1     5     <- surge one new pod, wait until it is Ready",
+        "2     3    1     4     <- then remove one old",
+        "3     3    2     5",
+        "4     2    2     4",
+        "...                     until old 0, new 4",
+        "```",
+        "",
+        "`maxUnavailable: 0` keeps full capacity but needs spare room in the cluster for the surge pod. The other strategy, `Recreate`, kills all old pods first: downtime, but never two versions at once (needed when versions cannot share a database schema).",
+        "",
+        "If new pods never become Ready, the rollout **stalls**: old pods keep serving, and `rollout status` eventually reports `progress deadline exceeded`. That safety net only works if you have a readiness probe (module 5)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`replicas: 10`, `maxSurge: 25%`, `maxUnavailable: 25%`. What are the most pods that can exist, and the fewest that must be available, during the rollout?",
+      "options": [
+        "13 pods at most, 8 available at least",
+        "12 at most, 7 at least",
+        "13 at most, 7 at least",
+        "12 at most, 8 at least"
+      ],
+      "answer": 0,
+      "explain": "Surge rounds up: 25% of 10 = 2.5 → 3, so 13. Unavailable rounds down: 2.5 → 2, so at least 8 available.",
+      "hints": [
+        "Surge rounds up, unavailable rounds down."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Version 1.5 is broken in production. Order the commands for a calm recovery.",
+      "lines": [
+        "kubectl rollout status deploy/shop-api",
+        "kubectl rollout history deploy/shop-api",
+        "kubectl rollout undo deploy/shop-api",
+        "kubectl rollout status deploy/shop-api",
+        "kubectl logs deploy/shop-api"
+      ],
+      "also": [
+        [
+          "kubectl rollout history deploy/shop-api",
+          "kubectl rollout status deploy/shop-api",
+          "kubectl rollout undo deploy/shop-api",
+          "kubectl rollout status deploy/shop-api",
+          "kubectl logs deploy/shop-api"
+        ]
+      ],
+      "explain": "Confirm the state, see which revisions exist, undo, wait for it to finish, then check the logs. Afterwards fix the manifest in Git too, or the next apply reintroduces 1.5."
+    },
+    {
+      "type": "predict",
+      "prompt": "Rounding the percentages. What does this print?",
+      "code": [
+        "int replicas = 6;",
+        "int surge = (int)Math.Ceiling(replicas * 0.25);",
+        "int unavailable = (int)Math.Floor(replicas * 0.25);",
+        "Console.WriteLine($\"max pods {replicas + surge}\");",
+        "Console.WriteLine($\"min available {replicas - unavailable}\");"
+      ],
+      "answer": [
+        "max pods 8",
+        "min available 5"
+      ],
+      "explain": "6 × 0.25 = 1.5: surge 2, unavailable 1."
+    },
+    {
+      "type": "predict",
+      "prompt": "You changed only the image tag and applied. Fill in the line `kubectl get rs` shows for the **old** ReplicaSet once the rollout is complete (columns DESIRED CURRENT READY).",
+      "code": [
+        "NAME                  DESIRED   CURRENT   READY   AGE",
+        "shop-api-7d9f8c6b5d   ????                        2d",
+        "shop-api-5c66f9b7d8   4         4         4       3m"
+      ],
+      "answer": "0 0 0",
+      "verify": false,
+      "accept": [
+        "0         0         0",
+        "0   0   0",
+        "0  0  0"
+      ],
+      "explain": "The old ReplicaSet is kept, scaled to zero, so `kubectl rollout undo` can scale it straight back up."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Simulate a rolling update",
+      "prompt": [
+        "Write `List<string> Rollout(int replicas, int maxSurge, int maxUnavailable)` that simulates replacing all old pods with new ones (new pods become Ready instantly). Start with `old = replicas, new = 0`. Repeat until `old == 0 && new == replicas`:",
+        "",
+        "1. **Scale up**: raise `new` as far as allowed so that `old + new <= replicas + maxSurge` and `new <= replicas`. If it changed, log `\"up   old=O new=N\"`.",
+        "2. **Scale down**: lower `old` as far as allowed so that `old + new >= replicas - maxUnavailable` and `old >= 0`. If it changed, log `\"down old=O new=N\"`.",
+        "",
+        "`Rollout(2, 1, 0)` returns `[\"up   old=2 new=1\", \"down old=1 new=1\", \"up   old=1 new=2\", \"down old=0 new=2\"]`. Assume `maxSurge + maxUnavailable >= 1`."
+      ],
+      "starter": [
+        "List<string> Rollout(int replicas, int maxSurge, int maxUnavailable)",
+        "{",
+        "    var log = new List<string>();",
+        "    int oldPods = replicas, newPods = 0;",
+        "    return log;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Rollout(int replicas, int maxSurge, int maxUnavailable)",
+        "{",
+        "    var log = new List<string>();",
+        "    int oldPods = replicas, newPods = 0;",
+        "    while (!(oldPods == 0 && newPods == replicas))",
+        "    {",
+        "        int up = Math.Min(replicas, replicas + maxSurge - oldPods);",
+        "        if (up > newPods) { newPods = up; log.Add($\"up   old={oldPods} new={newPods}\"); }",
+        "        int down = Math.Max(0, replicas - maxUnavailable - newPods);",
+        "        if (down < oldPods) { oldPods = down; log.Add($\"down old={oldPods} new={newPods}\"); }",
+        "    }",
+        "    return log;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"Rollout(2, 1, 0)\", new List<string> { \"up   old=2 new=1\", \"down old=1 new=1\", \"up   old=1 new=2\", \"down old=0 new=2\" }, Rollout(2, 1, 0));",
+        "Dojo.Eq(\"Rollout(4, 0, 1)\", new List<string> { \"down old=3 new=0\", \"up   old=3 new=1\", \"down old=2 new=1\", \"up   old=2 new=2\", \"down old=1 new=2\", \"up   old=1 new=3\", \"down old=0 new=3\", \"up   old=0 new=4\" }, Rollout(4, 0, 1));",
+        "Dojo.Eq(\"Rollout(3, 3, 0) surges all at once\", new List<string> { \"up   old=3 new=3\", \"down old=0 new=3\" }, Rollout(3, 3, 0));",
+        "Dojo.Eq(\"Rollout(4, 1, 1)\", new List<string> { \"up   old=4 new=1\", \"down old=2 new=1\", \"up   old=2 new=3\", \"down old=0 new=3\", \"up   old=0 new=4\" }, Rollout(4, 1, 1));"
+      ],
+      "hints": [
+        "The highest allowed `new` is `Math.Min(replicas, replicas + maxSurge - old)`.",
+        "The lowest allowed `old` is `Math.Max(0, replicas - maxUnavailable - new)`."
+      ]
+    }
+  ]
+}

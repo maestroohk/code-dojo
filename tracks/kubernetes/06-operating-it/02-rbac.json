@@ -1,0 +1,212 @@
+{
+  "title": "RBAC: who can do what",
+  "summary": "Roles, bindings and service accounts, and how to check permissions.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Four objects",
+      "body": [
+        "```text",
+        "Role         (namespaced)  rules: verbs on resources in ONE namespace",
+        "ClusterRole  (cluster)     same rules, usable in every namespace or for cluster-wide things (nodes)",
+        "RoleBinding                gives a Role or ClusterRole to subjects, inside ONE namespace",
+        "ClusterRoleBinding         gives a ClusterRole to subjects everywhere",
+        "```",
+        "",
+        "```yaml",
+        "apiVersion: rbac.authorization.k8s.io/v1",
+        "kind: Role",
+        "metadata: { namespace: shop, name: pod-reader }",
+        "rules:",
+        "- apiGroups: [\"\"]                 # \"\" = core group (pods, services, secrets...)",
+        "  resources: [\"pods\", \"pods/log\"]",
+        "  verbs: [\"get\", \"list\", \"watch\"]",
+        "---",
+        "kind: RoleBinding",
+        "metadata: { namespace: shop, name: devs-read-pods }",
+        "subjects:",
+        "- { kind: Group, name: shop-devs }",
+        "roleRef: { kind: Role, name: pod-reader, apiGroup: rbac.authorization.k8s.io }",
+        "```",
+        "",
+        "RBAC is **allow-only**: no deny rules. Anything not granted is forbidden (`Error from server (Forbidden)`).",
+        "",
+        "Subjects are Users and Groups (from your identity provider, e.g. Entra ID) and **ServiceAccounts** (identities for pods: `system:serviceaccount:shop:shop-api`)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A RoleBinding in namespace `shop` refers to the ClusterRole `view`. What does the subject get?",
+      "options": [
+        "Read access to most resources, but only in `shop`",
+        "Read access in every namespace",
+        "Nothing: RoleBindings cannot reference ClusterRoles",
+        "Admin in `shop`"
+      ],
+      "answer": 0,
+      "explain": "This is the usual pattern: define a role once as a ClusterRole (`view`, `edit`, `admin` are built in) and bind it per namespace."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Let the `ci-deployer` service account in `shop` update Deployments there.",
+      "code": [
+        "kind: Role",
+        "metadata: { namespace: shop, name: deployer }",
+        "rules:",
+        "- apiGroups: [\"__1__\"]",
+        "  resources: [\"__2__\"]",
+        "  verbs: [\"get\", \"list\", \"__3__\", \"update\"]",
+        "---",
+        "kind: RoleBinding",
+        "metadata: { namespace: shop, name: ci-deployer }",
+        "subjects:",
+        "- kind: __4__",
+        "  name: ci-deployer",
+        "  namespace: shop",
+        "roleRef: { kind: Role, name: deployer, apiGroup: rbac.authorization.k8s.io }"
+      ],
+      "blanks": [
+        "apps",
+        "deployments",
+        "patch",
+        "ServiceAccount"
+      ],
+      "bank": [
+        "",
+        "pods",
+        "delete",
+        "User",
+        "v1"
+      ],
+      "explain": "Deployments live in the `apps` group. `kubectl apply` needs `patch` (and `create` for new objects)."
+    },
+    {
+      "type": "learn",
+      "title": "Check before you guess",
+      "body": [
+        "```text",
+        "kubectl auth can-i list secrets -n shop",
+        "kubectl auth can-i create deployments -n shop --as=system:serviceaccount:shop:ci-deployer",
+        "kubectl auth can-i --list -n shop",
+        "```",
+        "",
+        "Good habits:",
+        "",
+        "- Give each workload its own ServiceAccount; set `automountServiceAccountToken: false` for pods that never call the API.",
+        "- Avoid `cluster-admin` bindings for people and CI; prefer namespace-scoped `edit`.",
+        "- `list`/`watch` on Secrets reveals every value, and `create pods` in a namespace lets someone mount any Secret there. Treat both as sensitive.",
+        "- Wildcards (`\"*\"`) in verbs or resources grow silently as new resources appear."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "A RoleBinding in namespace `shop` grants Role `pod-reader` (get/list/watch on pods and pods/log in core group) to user `ana`. What can ana do?",
+      "buckets": [
+        "Allowed",
+        "Forbidden"
+      ],
+      "items": [
+        [
+          "`kubectl get pods -n shop`",
+          0
+        ],
+        [
+          "`kubectl logs web-1 -n shop`",
+          0
+        ],
+        [
+          "`kubectl get pods -n blog`",
+          1
+        ],
+        [
+          "`kubectl delete pod web-1 -n shop`",
+          1
+        ],
+        [
+          "`kubectl get secrets -n shop`",
+          1
+        ],
+        [
+          "`kubectl get deploy -n shop`",
+          1
+        ]
+      ],
+      "explain": "`pods/log` is a subresource and must be granted explicitly; Deployments are in the `apps` group, which the role does not cover."
+    },
+    {
+      "type": "mcq",
+      "prompt": "CI fails with `deployments.apps \"shop-api\" is forbidden: User \"system:serviceaccount:ci:runner\" cannot patch resource \"deployments\" in API group \"apps\" in the namespace \"shop\"`. Which fix follows least privilege?",
+      "options": [
+        "A Role in `shop` allowing get/patch/update on deployments in `apps`, bound to that service account",
+        "Bind `cluster-admin` to the service account",
+        "Give the service account `edit` across all namespaces with a ClusterRoleBinding",
+        "Run CI with your personal kubeconfig"
+      ],
+      "answer": 0,
+      "explain": "The error message tells you exactly what is missing: verb, resource, API group, namespace and subject."
+    },
+    {
+      "type": "predict",
+      "prompt": "Fill in what this command prints when the service account has no permission to delete pods.",
+      "code": [
+        "$ kubectl auth can-i delete pods -n shop --as=system:serviceaccount:shop:shop-api",
+        "????"
+      ],
+      "answer": "no",
+      "verify": false,
+      "explain": "`can-i` prints `yes` or `no` (and exits 0 or 1), which makes it handy in scripts and CI checks."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A tiny authorizer",
+      "prompt": [
+        "Write `bool Can(string user, string verb, string resource, string ns, List<(string Ns, List<(string[] Verbs, string[] Resources)> Rules)> roles, List<(string User, int Role, string Ns)> bindings)`.",
+        "",
+        "`roles[i]` is a role (its `Ns` is ignored here: what counts is where it is bound). A binding gives `user` role number `Role` in namespace `Ns`; `Ns == \"*\"` means a cluster-wide binding. Allowed if any binding for this user applies to `ns` (equal, or `\"*\"`) and its role has a rule whose verbs contain `verb` or `\"*\"`, and whose resources contain `resource` or `\"*\"`."
+      ],
+      "starter": [
+        "bool Can(string user, string verb, string resource, string ns,",
+        "         List<(string Ns, List<(string[] Verbs, string[] Resources)> Rules)> roles,",
+        "         List<(string User, int Role, string Ns)> bindings)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool Can(string user, string verb, string resource, string ns,",
+        "         List<(string Ns, List<(string[] Verbs, string[] Resources)> Rules)> roles,",
+        "         List<(string User, int Role, string Ns)> bindings)",
+        "{",
+        "    return bindings",
+        "        .Where(b => b.User == user && (b.Ns == ns || b.Ns == \"*\"))",
+        "        .Any(b => roles[b.Role].Rules.Any(r =>",
+        "            (r.Verbs.Contains(verb) || r.Verbs.Contains(\"*\")) &&",
+        "            (r.Resources.Contains(resource) || r.Resources.Contains(\"*\"))));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRoles = new List<(string Ns, List<(string[] Verbs, string[] Resources)> Rules)> {",
+        "    (\"shop\", new() { (new[] { \"get\", \"list\", \"watch\" }, new[] { \"pods\", \"pods/log\" }) }),",
+        "    (\"\", new() { (new[] { \"*\" }, new[] { \"*\" }) }),",
+        "    (\"\", new() { (new[] { \"get\", \"list\" }, new[] { \"*\" }) }),",
+        "};",
+        "var dojoBind = new List<(string User, int Role, string Ns)> { (\"ana\", 0, \"shop\"), (\"ops\", 1, \"*\"), (\"ci\", 1, \"shop\"), (\"audit\", 2, \"*\") };",
+        "Dojo.Check(\"ana lists pods in shop\", Can(\"ana\", \"list\", \"pods\", \"shop\", dojoRoles, dojoBind), \"\");",
+        "Dojo.Check(\"ana cannot list pods in blog\", !Can(\"ana\", \"list\", \"pods\", \"blog\", dojoRoles, dojoBind), \"\");",
+        "Dojo.Check(\"ana cannot delete pods\", !Can(\"ana\", \"delete\", \"pods\", \"shop\", dojoRoles, dojoBind), \"\");",
+        "Dojo.Check(\"ana cannot read secrets\", !Can(\"ana\", \"get\", \"secrets\", \"shop\", dojoRoles, dojoBind), \"\");",
+        "Dojo.Check(\"ops can do anything anywhere\", Can(\"ops\", \"delete\", \"nodes\", \"kube-system\", dojoRoles, dojoBind), \"\");",
+        "Dojo.Check(\"ci is admin only in shop\", Can(\"ci\", \"delete\", \"secrets\", \"shop\", dojoRoles, dojoBind) && !Can(\"ci\", \"get\", \"pods\", \"blog\", dojoRoles, dojoBind), \"\");",
+        "Dojo.Check(\"audit reads everywhere but cannot delete\", Can(\"audit\", \"get\", \"secrets\", \"blog\", dojoRoles, dojoBind) && !Can(\"audit\", \"delete\", \"pods\", \"blog\", dojoRoles, dojoBind), \"\");",
+        "Dojo.Check(\"unknown user forbidden\", !Can(\"eve\", \"get\", \"pods\", \"shop\", dojoRoles, dojoBind), \"\");"
+      ],
+      "hints": [
+        "Filter bindings by user and namespace first.",
+        "For each, look at `roles[b.Role].Rules` and check verbs and resources, allowing `\"*\"`."
+      ]
+    }
+  ]
+}

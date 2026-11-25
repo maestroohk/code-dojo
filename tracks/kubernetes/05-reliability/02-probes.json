@@ -1,0 +1,168 @@
+{
+  "title": "Liveness, readiness and startup probes",
+  "summary": "How Kubernetes knows a container is alive, ready, or still warming up.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three questions",
+      "body": [
+        "| Probe | Question | On failure |",
+        "|---|---|---|",
+        "| **readiness** | should this pod receive traffic *now*? | removed from Service endpoints (not restarted) |",
+        "| **liveness** | is the process stuck beyond repair? | container **restarted** |",
+        "| **startup** | has it finished starting? | liveness/readiness wait; restarted if it never starts |",
+        "",
+        "```yaml",
+        "readinessProbe:",
+        "  httpGet: { path: /health/ready, port: 8080 }",
+        "  periodSeconds: 5",
+        "  failureThreshold: 3",
+        "livenessProbe:",
+        "  httpGet: { path: /health/live, port: 8080 }",
+        "  periodSeconds: 10",
+        "  failureThreshold: 3",
+        "startupProbe:",
+        "  httpGet: { path: /health/live, port: 8080 }",
+        "  periodSeconds: 5",
+        "  failureThreshold: 30       # allows up to 150 s to start",
+        "```",
+        "",
+        "Probes can be `httpGet` (2xx/3xx passes), `tcpSocket`, `grpc`, or `exec` (exit 0 passes). In ASP.NET Core, `app.MapHealthChecks(\"/health/ready\")` with tagged checks gives you both endpoints."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the situation to the probe that handles it.",
+      "pairs": [
+        [
+          "app is warming a 2-minute cache at boot",
+          "startup probe"
+        ],
+        [
+          "database is briefly down; stop sending this pod requests but don't kill it",
+          "readiness probe"
+        ],
+        [
+          "a deadlock: the process is alive but answers nothing, forever",
+          "liveness probe"
+        ],
+        [
+          "the health check is \"does `/tmp/healthy` exist?\" rather than an HTTP call",
+          "an `exec` probe"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your liveness probe calls `/health`, which checks the database. The database has a 30-second outage. What happens?",
+      "options": [
+        "Every replica fails liveness and is restarted, turning a short DB blip into a full outage and restart storm",
+        "Pods are removed from the Service until the DB returns, then come back",
+        "Nothing; liveness ignores dependencies",
+        "The database is restarted"
+      ],
+      "answer": 0,
+      "explain": "Liveness should check only the process itself. Put dependency checks in **readiness**, and even there be careful: if all replicas go unready at once, the Service has no endpoints."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the probes: restart if `/live` fails 3 times, stop traffic if `/ready` fails.",
+      "code": [
+        "__1__:",
+        "  httpGet: { path: /live, port: 8080 }",
+        "  __2__: 3",
+        "__3__:",
+        "  httpGet: { path: /ready, port: 8080 }"
+      ],
+      "blanks": [
+        "livenessProbe",
+        "failureThreshold",
+        "readinessProbe"
+      ],
+      "bank": [
+        "startupProbe",
+        "successThreshold",
+        "healthProbe"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Probe timing",
+      "body": [
+        "A probe runs every `periodSeconds`. After `failureThreshold` **consecutive** failures, it acts. One success resets the count (`successThreshold` is 1 for liveness).",
+        "",
+        "```text",
+        "period 10s, failureThreshold 3",
+        "t=0  ok   t=10 FAIL(1)  t=20 FAIL(2)  t=30 ok(reset)  t=40 FAIL(1) t=50 FAIL(2) t=60 FAIL(3) -> restart",
+        "```",
+        "",
+        "Worst-case time to detect a hang â‰ˆ `periodSeconds Ã— failureThreshold` (+ `timeoutSeconds`). Set `initialDelaySeconds` or, better, a startup probe so slow starts are not mistaken for hangs: a liveness probe that fires during startup produces an endless restart loop that looks like `CrashLoopBackOff`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A pod's readiness probe never passes, but the process does not crash. What does `kubectl get pods` show in the READY and STATUS columns? Type them as `READY STATUS`.",
+      "code": [
+        "NAME           READY   STATUS    RESTARTS   AGE",
+        "api-5d-qq2k1   ???     ???       0          4m"
+      ],
+      "answer": "0/1 Running",
+      "verify": false,
+      "accept": [
+        "0/1   Running",
+        "0/1  Running"
+      ],
+      "explain": "Running but not Ready: the container is up, so no restart; it is just not an endpoint. `kubectl describe pod` shows *Readiness probe failed: HTTP probe failed with statuscode: 503*."
+    },
+    {
+      "type": "order",
+      "prompt": "A pod starts. Put the probe phases in the order they happen.",
+      "lines": [
+        "Container process starts",
+        "Startup probe runs until it succeeds once",
+        "Liveness and readiness probes begin",
+        "Readiness succeeds and the pod is added to Service endpoints",
+        "Later, liveness fails 3 times in a row and the container is restarted"
+      ],
+      "explain": "While a startup probe is defined, liveness and readiness are held back. After a restart, the startup probe runs again."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Simulate a liveness probe",
+      "prompt": "Write `List<int> Restarts(bool[] results, int periodSeconds, int failureThreshold)`. `results[i]` is the outcome of the probe at time `i * periodSeconds`. Return the times (in seconds) at which the container is restarted. After a restart, the failure count resets to 0.",
+      "starter": [
+        "List<int> Restarts(bool[] results, int periodSeconds, int failureThreshold)",
+        "{",
+        "    return new List<int>();",
+        "}"
+      ],
+      "solution": [
+        "List<int> Restarts(bool[] results, int periodSeconds, int failureThreshold)",
+        "{",
+        "    var times = new List<int>();",
+        "    int failures = 0;",
+        "    for (int i = 0; i < results.Length; i++)",
+        "    {",
+        "        if (results[i]) { failures = 0; continue; }",
+        "        failures++;",
+        "        if (failures == failureThreshold) { times.Add(i * periodSeconds); failures = 0; }",
+        "    }",
+        "    return times;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"card example\", new List<int> { 60 }, Restarts(new[] { true, false, false, true, false, false, false }, 10, 3));",
+        "Dojo.Eq(\"all healthy\", new List<int>(), Restarts(new[] { true, true, true }, 5, 1));",
+        "Dojo.Eq(\"threshold 1\", new List<int> { 5, 10 }, Restarts(new[] { true, false, false }, 5, 1));",
+        "Dojo.Eq(\"six failures, threshold 3\", new List<int> { 20, 50 }, Restarts(new[] { false, false, false, false, false, false }, 10, 3));"
+      ],
+      "hints": [
+        "Keep a consecutive-failure counter.",
+        "Reset it on success and after each restart."
+      ]
+    }
+  ]
+}

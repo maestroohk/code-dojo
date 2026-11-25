@@ -1,0 +1,160 @@
+{
+  "title": "Stage 5: Ingress, autoscaling and the first upgrade",
+  "summary": "Open the front door, scale with load, and ship 1.5 without dropping a request.",
+  "minutes": 20,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The last pieces",
+      "body": [
+        "```yaml",
+        "apiVersion: networking.k8s.io/v1",
+        "kind: Ingress",
+        "metadata: { name: shop, namespace: shop }",
+        "spec:",
+        "  ingressClassName: nginx",
+        "  tls: [{ hosts: [shop.example.com], secretName: shop-tls }]",
+        "  rules:",
+        "  - host: shop.example.com",
+        "    http:",
+        "      paths:",
+        "      - { path: /api, pathType: Prefix, backend: { service: { name: shop-api, port: { number: 80 } } } }",
+        "---",
+        "apiVersion: autoscaling/v2",
+        "kind: HorizontalPodAutoscaler",
+        "metadata: { name: shop-api, namespace: shop }",
+        "spec:",
+        "  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: shop-api }",
+        "  minReplicas: 3",
+        "  maxReplicas: 10",
+        "  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 60 } } }]",
+        "---",
+        "apiVersion: policy/v1",
+        "kind: PodDisruptionBudget",
+        "metadata: { name: shop-api, namespace: shop }",
+        "spec: { maxUnavailable: 1, selector: { matchLabels: { app: shop-api } } }",
+        "```",
+        "",
+        "And on the Deployment: remove `replicas` (the HPA owns it) and set `strategy: { rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }`."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Release 1.5.0. Put the steps in order.",
+      "lines": [
+        "CI builds and pushes registry.example.com/shop/api:1.5.0",
+        "Change the image tag in the Deployment manifest in Git and merge the PR",
+        "Argo CD (or kubectl apply) updates the Deployment",
+        "A new ReplicaSet starts one 1.5.0 pod (maxSurge 1)",
+        "The new pod passes its readiness probe and joins the Service",
+        "One 1.4.0 pod is removed; repeat until all pods run 1.5.0"
+      ],
+      "explain": "If a 1.5.0 pod never becomes ready, the rollout stops at step 4 with every 1.4.0 pod still serving. Revert the commit to roll back."
+    },
+    {
+      "type": "mcq",
+      "prompt": "During the 1.5.0 rollout the HPA scales from 3 to 5. What does the Deployment controller do?",
+      "options": [
+        "It keeps rolling: the new replica count applies, and the controller spreads the change across the old and new ReplicaSets",
+        "It aborts the rollout",
+        "It scales only the old ReplicaSet",
+        "It ignores the HPA until the rollout finishes"
+      ],
+      "answer": 0,
+      "explain": "Rollouts and scaling compose. That is why the Deployment must not also have `replicas` set in Git, or a sync would fight the HPA."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Plan the release",
+      "prompt": [
+        "Write `List<string> Release(int replicas, int maxSurge, int maxUnavailable, bool newPodsGetReady)` that prints the rollout like the module 2 simulation, but stops if new pods never become ready.",
+        "",
+        "Start with `old = replicas, new = 0, ready = 0` (ready counts ready new pods). Loop while `old > 0 || new < replicas`:",
+        "",
+        "1. **up**: raise `new` to `min(replicas, replicas + maxSurge - old)` if higher; log `\"up   old=O new=N\"`. If `newPodsGetReady`, set `ready = new`.",
+        "2. **down**: lower `old` to `max(0, replicas - maxUnavailable - ready)` if lower; log `\"down old=O new=N\"`.",
+        "3. If neither step changed anything, log `\"stalled: new pods not ready\"` and stop.",
+        "",
+        "Finish with `\"done\"` if the loop ended normally."
+      ],
+      "starter": [
+        "List<string> Release(int replicas, int maxSurge, int maxUnavailable, bool newPodsGetReady)",
+        "{",
+        "    var log = new List<string>();",
+        "    return log;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Release(int replicas, int maxSurge, int maxUnavailable, bool newPodsGetReady)",
+        "{",
+        "    var log = new List<string>();",
+        "    int oldPods = replicas, newPods = 0, ready = 0;",
+        "    while (oldPods > 0 || newPods < replicas)",
+        "    {",
+        "        bool changed = false;",
+        "        int up = Math.Min(replicas, replicas + maxSurge - oldPods);",
+        "        if (up > newPods) { newPods = up; changed = true; log.Add($\"up   old={oldPods} new={newPods}\"); }",
+        "        if (newPodsGetReady) ready = newPods;",
+        "        int down = Math.Max(0, replicas - maxUnavailable - ready);",
+        "        if (down < oldPods) { oldPods = down; changed = true; log.Add($\"down old={oldPods} new={newPods}\"); }",
+        "        if (!changed) { log.Add(\"stalled: new pods not ready\"); return log; }",
+        "    }",
+        "    log.Add(\"done\");",
+        "    return log;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"healthy release, 3 replicas\", new List<string> { \"up   old=3 new=1\", \"down old=2 new=1\", \"up   old=2 new=2\", \"down old=1 new=2\", \"up   old=1 new=3\", \"down old=0 new=3\", \"done\" }, Release(3, 1, 0, true));",
+        "Dojo.Eq(\"broken release stalls with all old pods\", new List<string> { \"up   old=3 new=1\", \"stalled: new pods not ready\" }, Release(3, 1, 0, false));",
+        "Dojo.Eq(\"maxUnavailable 1, broken\", new List<string> { \"up   old=3 new=1\", \"down old=2 new=1\", \"up   old=2 new=2\", \"stalled: new pods not ready\" }, Release(3, 1, 1, false));"
+      ],
+      "hints": [
+        "Track whether either step changed something in a `bool changed`.",
+        "The scale-down limit uses `ready`, not `new`: unready new pods do not count as available."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Will it hold Black Friday?",
+      "prompt": [
+        "Write `string Capacity(double peakRps, double rpsPerPodAt60Cpu, int maxReplicas, int nodeFreeCpuM, int podCpuRequestM)`:",
+        "",
+        "- pods needed = `ceil(peakRps / rpsPerPodAt60Cpu)`",
+        "- pods the cluster can fit = `nodeFreeCpuM / podCpuRequestM` (integer division)",
+        "- limit = the smaller of `maxReplicas` and what fits",
+        "- if needed ≤ limit: `\"ok: N pods\"`",
+        "- else if needed > `maxReplicas` and `maxReplicas` ≤ fits: `\"raise maxReplicas to N\"`",
+        "- else: `\"add nodes: need N pods, room for F\"`"
+      ],
+      "starter": [
+        "string Capacity(double peakRps, double rpsPerPodAt60Cpu, int maxReplicas, int nodeFreeCpuM, int podCpuRequestM)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Capacity(double peakRps, double rpsPerPodAt60Cpu, int maxReplicas, int nodeFreeCpuM, int podCpuRequestM)",
+        "{",
+        "    int needed = (int)Math.Ceiling(peakRps / rpsPerPodAt60Cpu);",
+        "    int fits = nodeFreeCpuM / podCpuRequestM;",
+        "    int limit = Math.Min(maxReplicas, fits);",
+        "    if (needed <= limit) return $\"ok: {needed} pods\";",
+        "    if (needed > maxReplicas && maxReplicas <= fits) return $\"raise maxReplicas to {needed}\";",
+        "    return $\"add nodes: need {needed} pods, room for {fits}\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"comfortable\", \"ok: 4 pods\", Capacity(350, 100, 10, 4000, 250));",
+        "Dojo.Eq(\"HPA cap too low\", \"raise maxReplicas to 12\", Capacity(1150, 100, 10, 8000, 250));",
+        "Dojo.Eq(\"cluster too small\", \"add nodes: need 12 pods, room for 8\", Capacity(1150, 100, 20, 2000, 250));"
+      ],
+      "hints": [
+        "Compute the three numbers first, then the three outcomes in order."
+      ]
+    }
+  ]
+}
