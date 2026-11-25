@@ -148,6 +148,10 @@ public sealed class CSharpRunner
 
     public static CSharpParseOptions ParseOptions => Parse;
 
+    /// <summary>Everything learner code can see (BCL + ASP.NET Core + the Dojo helpers), for the code-intelligence service.</summary>
+    public IReadOnlyList<MetadataReference> IntelReferences => _webRefs;
+    public SyntaxTree[] SupportTrees => [_support, _webSupport];
+
     /// <summary>Cheap check used by the puzzle validator: does this compile, without emitting anything?</summary>
     public bool CompilesClean(string code)
     {

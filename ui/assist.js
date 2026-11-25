@@ -3,6 +3,7 @@
 // Tailwind classes inside class="..."); Ctrl+Space to complete and Ctrl+/ to toggle comments.
 // Attached to the textarea of ui/editor.js.
 
+const KIND_ICON = { method: 'ƒ', property: '◆', field: '▪', constant: 'π', event: '⚡', local: 'x', parameter: 'p', namespace: '{}', class: 'C', record: 'R', struct: 'S', interface: 'I', enum: 'E', keyword: 'k' };
 const PAIRS = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
 const VOID_TAGS = new Set('area base br col embed hr img input link meta source track wbr'.split(' '));
 
@@ -64,7 +65,7 @@ function tailwindClasses() {
 
 // ---------------------------------------------------------------- the assist
 
-export function attachAssist(area, { language = () => 'csharp', enabled = () => true, insert, onPopupHost } = {}) {
+export function attachAssist(area, { language = () => 'csharp', enabled = () => true, insert, onPopupHost, remote } = {}) {
   const popup = document.createElement('div');
   popup.className = 'ac-pop';
   popup.hidden = true;
@@ -107,13 +108,31 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
     return { word: w[1], list: [...words], min: 2 };
   }
 
+  let asked = 0, timer = null;
   function refresh(force = false) {
     if (!enabled() && !force) return close();
     const ctx = context();
     if (!ctx || (ctx.word.length < ctx.min && !force)) return close();
+    // C#: the compiler knows the real members and what is in scope; ask it (debounced).
+    if (remote && lang() === 'csharp') {
+      const ticket = ++asked;
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const list = await remote(area.selectionStart).catch(() => null);
+        if (ticket !== asked) return;
+        const now = context();
+        if (!now) return close();
+        show(now, list?.length ? list : now.list.map(label => ({ label })));
+      }, 110);
+      return;
+    }
+    show(ctx, ctx.list.map(label => ({ label })));
+  }
+
+  function show(ctx, list) {
     const w = ctx.word.toLowerCase();
-    items = ctx.list.filter(x => x.toLowerCase().startsWith(w) && x !== ctx.word)
-      .sort((a, b) => a.length - b.length || a.localeCompare(b)).slice(0, 40);
+    items = list.filter(x => x.label.toLowerCase().startsWith(w) && x.label !== ctx.word)
+      .sort((a, b) => (a.label.length - b.label.length) || a.label.localeCompare(b.label)).slice(0, 50);
     if (!items.length) return close();
     from = area.selectionStart - ctx.word.length;
     sel = 0; open = true;
@@ -124,7 +143,11 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
     popup.replaceChildren(...items.map((it, i) => {
       const d = document.createElement('div');
       d.className = 'ac-item' + (i === sel ? ' sel' : '');
-      d.textContent = it;
+      if (it.kind) {
+        const k = document.createElement('span'); k.className = `ac-kind k-${it.kind}`; k.textContent = KIND_ICON[it.kind] || '•'; k.title = it.kind; d.append(k);
+      }
+      const l = document.createElement('span'); l.className = 'ac-label'; l.textContent = it.label; d.append(l);
+      if (it.detail && i === sel) { const t = document.createElement('span'); t.className = 'ac-detail'; t.textContent = it.detail; d.append(t); }
       d.onmousedown = e => { e.preventDefault(); sel = i; accept(); };
       return d;
     }));
@@ -148,7 +171,7 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
   }
 
   function accept() {
-    const choice = items[sel];
+    const choice = items[sel].label;
     area.setSelectionRange(from, area.selectionStart);
     insert(choice);
     close();

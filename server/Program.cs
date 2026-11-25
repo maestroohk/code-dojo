@@ -156,6 +156,9 @@ app.MapPost("/api/pki", (PkiLab.Request req) => Results.Json(PkiLab.Run(req), js
 // LINQ in motion: run a query with every stage tapped, return the order items flowed through it.
 app.MapPost("/api/linqviz", async (LinqViz.Request req) => Results.Json(await LinqViz.Run(runner, req), json));
 
+// Code intelligence for the editors: type-aware completion, go to definition, references, hover.
+app.MapPost("/api/intel", (CodeIntel.Request req) => Results.Json(CodeIntel.Run(runner, req), json));
+
 // Code in motion: run a program with every statement traced (line, variables, call stack, output).
 app.MapPost("/api/trace", async (CodeTrace.Request req) => Results.Json(await CodeTrace.Run(runner, req), json));
 
