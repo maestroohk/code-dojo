@@ -1,0 +1,187 @@
+{
+  "title": "Boss: the leaky bank account",
+  "summary": "Seal up a bank account that anyone can corrupt.",
+  "minutes": 15,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The leak",
+      "body": [
+        "`Account` exposes a public `List<decimal> Transactions`, a settable `Balance`, a `bool IsFrozen` that nothing checks, and amounts as raw `decimal` that can be negative. Callers reach in and edit everything.",
+        "",
+        "You will fix it in three moves: a value object for amounts, an account that guards its own state, and a frozen state that cannot be ignored."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A value for amounts",
+      "prompt": [
+        "Write `readonly record struct Amount` that:",
+        "",
+        "- has a constructor `Amount(decimal value)` throwing `ArgumentOutOfRangeException` unless `value > 0`",
+        "- exposes `decimal Value { get; }`",
+        "- has `override string ToString()` returning the value with 2 decimals (`12.50`)"
+      ],
+      "starter": [
+        "readonly record struct Amount",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "readonly record struct Amount",
+        "{",
+        "    public decimal Value { get; }",
+        "",
+        "    public Amount(decimal value)",
+        "    {",
+        "        if (value <= 0) throw new ArgumentOutOfRangeException(nameof(value));",
+        "        Value = value;",
+        "    }",
+        "",
+        "    public override string ToString() => Value.ToString(\"F2\");",
+        "}"
+      ],
+      "template": [
+        "Dojo.Eq(\"Value\", 12.5m, new Amount(12.5m).Value);",
+        "Dojo.Eq(\"ToString\", \"12.50\", new Amount(12.5m).ToString());",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"zero is refused\", () => new Amount(0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"negative is refused\", () => new Amount(-3));",
+        "Dojo.Eq(\"equal by value\", new Amount(5m), new Amount(5m));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "An account that guards itself",
+      "prompt": [
+        "`Amount` is given. Rewrite `Account` so nobody can corrupt it:",
+        "",
+        "- `decimal Balance { get; private set; }`",
+        "- `IReadOnlyList<decimal> History` (deposits positive, withdrawals negative) backed by a private list",
+        "- `void Deposit(Amount a)` and `bool Withdraw(Amount a)` (returns `false` and changes nothing when funds are short)",
+        "",
+        "Callers must not be able to set the balance or add to the history."
+      ],
+      "starter": [
+        "readonly record struct Amount",
+        "{",
+        "    public decimal Value { get; }",
+        "    public Amount(decimal value) => Value = value > 0 ? value : throw new ArgumentOutOfRangeException(nameof(value));",
+        "}",
+        "",
+        "class Account",
+        "{",
+        "    public decimal Balance { get; set; }",
+        "    public List<decimal> History { get; } = new();",
+        "}"
+      ],
+      "solution": [
+        "readonly record struct Amount",
+        "{",
+        "    public decimal Value { get; }",
+        "    public Amount(decimal value) => Value = value > 0 ? value : throw new ArgumentOutOfRangeException(nameof(value));",
+        "}",
+        "",
+        "class Account",
+        "{",
+        "    private readonly List<decimal> _history = new();",
+        "    public decimal Balance { get; private set; }",
+        "    public IReadOnlyList<decimal> History => _history.AsReadOnly();",
+        "",
+        "    public void Deposit(Amount a)",
+        "    {",
+        "        Balance += a.Value;",
+        "        _history.Add(a.Value);",
+        "    }",
+        "",
+        "    public bool Withdraw(Amount a)",
+        "    {",
+        "        if (a.Value > Balance) return false;",
+        "        Balance -= a.Value;",
+        "        _history.Add(-a.Value);",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoAcc = new Account();",
+        "dojoAcc.Deposit(new Amount(100m));",
+        "Dojo.Eq(\"withdraw 30 works\", true, dojoAcc.Withdraw(new Amount(30m)));",
+        "Dojo.Eq(\"withdraw 500 fails\", false, dojoAcc.Withdraw(new Amount(500m)));",
+        "Dojo.Eq(\"Balance\", 70m, dojoAcc.Balance);",
+        "Dojo.Eq(\"History\", new List<decimal> { 100m, -30m }, dojoAcc.History.ToList());",
+        "Dojo.Check(\"Balance cannot be set from outside\", typeof(Account).GetProperty(\"Balance\")!.SetMethod?.IsPublic != true, \"Balance has a public setter\");",
+        "Dojo.Check(\"History is read-only\", dojoAcc.History is not List<decimal>, \"History is a List callers could cast and modify\");",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Keep a `private readonly List<decimal> _history` and expose `_history.AsReadOnly()`.",
+        "`Withdraw` starts with a guard: `if (a.Value > Balance) return false;`"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Frozen means frozen",
+      "prompt": [
+        "The bank can freeze accounts. Instead of a `bool IsFrozen` that methods might forget to check, model the account's state:",
+        "",
+        "- `abstract record AccountState;` with `record Open(decimal Balance) : AccountState;` and `record Frozen(decimal Balance, string Reason) : AccountState;`",
+        "- `static class Bank` with:",
+        "  - `static AccountState Withdraw(AccountState s, decimal amount)` returns a new `Open` with less money; a `Frozen` account, or not enough money, throws `InvalidOperationException`",
+        "  - `static AccountState Freeze(AccountState s, string reason)` turns an `Open` into `Frozen` with the same balance",
+        "",
+        "No `bool` anywhere."
+      ],
+      "starter": [
+        "class Account",
+        "{",
+        "    public decimal Balance;",
+        "    public bool IsFrozen;",
+        "    public void Withdraw(decimal amount) => Balance -= amount;",
+        "}"
+      ],
+      "solution": [
+        "abstract record AccountState;",
+        "record Open(decimal Balance) : AccountState;",
+        "record Frozen(decimal Balance, string Reason) : AccountState;",
+        "",
+        "static class Bank",
+        "{",
+        "    public static AccountState Withdraw(AccountState s, decimal amount) => s switch",
+        "    {",
+        "        Open o when amount <= o.Balance => o with { Balance = o.Balance - amount },",
+        "        Open => throw new InvalidOperationException(\"insufficient funds\"),",
+        "        Frozen f => throw new InvalidOperationException(\"frozen: \" + f.Reason),",
+        "        _ => throw new InvalidOperationException(\"unknown state\")",
+        "    };",
+        "",
+        "    public static AccountState Freeze(AccountState s, string reason) => s switch",
+        "    {",
+        "        Open o => new Frozen(o.Balance, reason),",
+        "        _ => s",
+        "    };",
+        "}"
+      ],
+      "template": [
+        "AccountState dojoS = new Open(50m);",
+        "dojoS = Bank.Withdraw(dojoS, 20m);",
+        "Dojo.Eq(\"withdraw from open\", new Open(30m) as AccountState, dojoS);",
+        "Dojo.Throws<InvalidOperationException>(\"overdraw is refused\", () => Bank.Withdraw(new Open(5m), 10m));",
+        "var dojoF = Bank.Freeze(dojoS, \"fraud check\");",
+        "Dojo.Eq(\"freeze keeps the balance\", new Frozen(30m, \"fraud check\") as AccountState, dojoF);",
+        "Dojo.Throws<InvalidOperationException>(\"frozen accounts refuse withdrawals\", () => Bank.Withdraw(dojoF, 1m));",
+        "{{CODE}}"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bbool\\b",
+          "message": "No bool flags"
+        }
+      ]
+    }
+  ]
+}

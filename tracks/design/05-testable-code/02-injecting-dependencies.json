@@ -1,0 +1,245 @@
+{
+  "title": "Injecting clocks, randomness and services",
+  "summary": "Turn hidden inputs into constructor dependencies, and write the fakes that tests use.",
+  "minutes": 11,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "An interface seam",
+      "body": [
+        "For a class with several methods that need the time, pass a clock once, in the constructor:",
+        "",
+        "```csharp",
+        "interface IClock { DateTime UtcNow { get; } }",
+        "",
+        "class SystemClock : IClock { public DateTime UtcNow => DateTime.UtcNow; }",
+        "",
+        "class FixedClock(DateTime at) : IClock { public DateTime UtcNow => at; }",
+        "",
+        "class Subscription(IClock clock, DateTime expiresUtc)",
+        "{",
+        "    public bool IsActive => clock.UtcNow < expiresUtc;",
+        "}",
+        "```",
+        "",
+        "Production wires `SystemClock`; tests use `FixedClock`. .NET 8+ ships the same idea as `TimeProvider`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var start = new DateTime(2025, 1, 1);",
+        "var clock = new FakeClock(start);",
+        "var sub = new Subscription(clock, start.AddDays(30));",
+        "Console.Write(sub.IsActive + \" \");",
+        "clock.Advance(TimeSpan.FromDays(31));",
+        "Console.Write(sub.IsActive);",
+        "",
+        "interface IClock { DateTime UtcNow { get; } }",
+        "class FakeClock(DateTime start) : IClock",
+        "{",
+        "    public DateTime UtcNow { get; private set; } = start;",
+        "    public void Advance(TimeSpan by) => UtcNow += by;",
+        "}",
+        "class Subscription(IClock clock, DateTime expires)",
+        "{",
+        "    public bool IsActive => clock.UtcNow < expires;",
+        "}"
+      ],
+      "answer": "True False",
+      "explain": "A fake clock you can move forward lets one test check a month passing in microseconds."
+    },
+    {
+      "type": "learn",
+      "title": "Kinds of test double",
+      "body": [
+        "The object you hand in during a test is a **test double**. Names worth knowing:",
+        "",
+        "- **Stub**: returns canned answers (`FixedClock`, a price lookup that always says 9.99).",
+        "- **Fake**: a working, simpler implementation (an in-memory repository instead of SQL).",
+        "- **Spy**: records how it was called so the test can check afterwards (a sender that stores messages).",
+        "- **Mock**: a spy with built-in expectations, usually from a library.",
+        "",
+        "Prefer stubs and fakes for **inputs**, spies for **outputs** you must verify (an email was sent). Do not assert on every internal call: that couples tests to implementation and makes refactoring painful."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each double to its kind.",
+      "pairs": [
+        [
+          "`class FixedClock : IClock` that always returns 9:00",
+          "Stub"
+        ],
+        [
+          "`class InMemoryUsers : IUserStore` backed by a dictionary",
+          "Fake"
+        ],
+        [
+          "`class RecordingMailer : IMailer` that keeps a `Sent` list",
+          "Spy"
+        ],
+        [
+          "A library object set up to fail the test unless `Save` is called once",
+          "Mock"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A test checks that `Checkout` called `repository.GetById` exactly twice, then `cache.Set` once. What is the risk?",
+      "options": [
+        "The test breaks when you refactor the internals, even if behaviour is still correct",
+        "The test is too fast",
+        "It needs a database",
+        "Nothing, more assertions are always better"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the stub clock used by a test.",
+      "code": [
+        "class FixedClock(DateTime at) : __1__",
+        "{",
+        "    public DateTime UtcNow => __2__;",
+        "}"
+      ],
+      "blanks": [
+        "IClock",
+        "at"
+      ],
+      "bank": [
+        "DateTime.UtcNow",
+        "SystemClock",
+        "now"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Inject the randomness",
+      "prompt": [
+        "`CouponService` hands out coupon codes using `new Random()`, so tests cannot predict them. Refactor:",
+        "",
+        "- `interface IRandom { int Next(int max); }` (returns 0 to max-1)",
+        "- `CouponService` receives an `IRandom` through its constructor",
+        "- `string NewCode()` builds 4 characters, each `Alphabet[random.Next(Alphabet.Length)]`, with `const string Alphabet = \"ABCDEFGHJKLMNPQRSTUVWXYZ23456789\"`",
+        "",
+        "The tests use their own `IRandom` that returns 0, 1, 2, 3, ..."
+      ],
+      "starter": [
+        "class CouponService",
+        "{",
+        "    const string Alphabet = \"ABCDEFGHJKLMNPQRSTUVWXYZ23456789\";",
+        "    private readonly Random _rng = new();",
+        "",
+        "    public string NewCode()",
+        "    {",
+        "        var sb = new StringBuilder();",
+        "        for (var i = 0; i < 4; i++) sb.Append(Alphabet[_rng.Next(Alphabet.Length)]);",
+        "        return sb.ToString();",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "interface IRandom { int Next(int max); }",
+        "",
+        "class CouponService(IRandom random)",
+        "{",
+        "    const string Alphabet = \"ABCDEFGHJKLMNPQRSTUVWXYZ23456789\";",
+        "    const int Length = 4;",
+        "",
+        "    public string NewCode()",
+        "    {",
+        "        var sb = new StringBuilder();",
+        "        for (var i = 0; i < Length; i++) sb.Append(Alphabet[random.Next(Alphabet.Length)]);",
+        "        return sb.ToString();",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoSvc = new CouponService(new DojoCounting());",
+        "Dojo.Eq(\"first code\", \"ABCD\", dojoSvc.NewCode());",
+        "Dojo.Eq(\"second code\", \"EFGH\", dojoSvc.NewCode());",
+        "Dojo.Eq(\"wraps at the end of the alphabet\", \"Z234\", new CouponService(new DojoCounting(23)).NewCode());",
+        "{{CODE}}",
+        "class DojoCounting(int start = 0) : IRandom",
+        "{",
+        "    private int _n = start;",
+        "    public int Next(int max) => _n++ % max;",
+        "}"
+      ],
+      "forbid": [
+        {
+          "pattern": "new\\s+Random",
+          "message": "No new Random"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Fake the store, spy the mailer",
+      "prompt": [
+        "`Signup` is given and already uses constructor injection. Write the two doubles the tests need:",
+        "",
+        "- `class InMemoryUsers : IUserStore` (a fake): `Exists` and `Add` backed by a `HashSet<string>`",
+        "- `class SpyMailer : IMailer` (a spy): records every address passed to `Welcome` in `public List<string> Sent { get; } = new();`"
+      ],
+      "starter": [
+        "interface IUserStore { bool Exists(string email); void Add(string email); }",
+        "interface IMailer { void Welcome(string email); }",
+        "",
+        "class Signup(IUserStore users, IMailer mailer)",
+        "{",
+        "    public bool Register(string email)",
+        "    {",
+        "        if (users.Exists(email)) return false;",
+        "        users.Add(email);",
+        "        mailer.Welcome(email);",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "interface IUserStore { bool Exists(string email); void Add(string email); }",
+        "interface IMailer { void Welcome(string email); }",
+        "",
+        "class Signup(IUserStore users, IMailer mailer)",
+        "{",
+        "    public bool Register(string email)",
+        "    {",
+        "        if (users.Exists(email)) return false;",
+        "        users.Add(email);",
+        "        mailer.Welcome(email);",
+        "        return true;",
+        "    }",
+        "}",
+        "",
+        "class InMemoryUsers : IUserStore",
+        "{",
+        "    private readonly HashSet<string> _emails = new();",
+        "    public bool Exists(string email) => _emails.Contains(email);",
+        "    public void Add(string email) => _emails.Add(email);",
+        "}",
+        "",
+        "class SpyMailer : IMailer",
+        "{",
+        "    public List<string> Sent { get; } = new();",
+        "    public void Welcome(string email) => Sent.Add(email);",
+        "}"
+      ],
+      "template": [
+        "var dojoMail = new SpyMailer();",
+        "var dojoSignup = new Signup(new InMemoryUsers(), dojoMail);",
+        "Dojo.Eq(\"first signup works\", true, dojoSignup.Register(\"ada@x.io\"));",
+        "Dojo.Eq(\"duplicate is refused\", false, dojoSignup.Register(\"ada@x.io\"));",
+        "Dojo.Eq(\"another user works\", true, dojoSignup.Register(\"bob@x.io\"));",
+        "Dojo.Eq(\"welcome sent once per new user\", new List<string> { \"ada@x.io\", \"bob@x.io\" }, dojoMail.Sent);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}
