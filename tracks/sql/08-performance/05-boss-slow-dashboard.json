@@ -1,0 +1,206 @@
+{
+  "title": "Case #8: The Slow Dashboard",
+  "summary": "Teodor wants a bigger server. Profile the queries, fix them, and find the deploy that broke everything.",
+  "minutes": 18,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Case #8",
+      "body": [
+        "Teodor's dashboard has gone from 2 seconds to **11**. He has a quote for a server three times the size. Rosa asks for one day first.",
+        "",
+        "You have the app's **query log** (each query's calls per page load and average time), the dashboard's daily **p95 latency** (95% of loads are faster than this), and the **deploy** history.",
+        "",
+        "Tables: `stations`, `rides` (20,000 rows), `query_log`, `dashboard_latency`, `deploys`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Clue 1: where the time goes",
+      "prompt": [
+        "Return each **query_name** with its total time per page load (**ms_per_page** = calls_per_page × avg_ms), biggest first.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`). Also `query_log(query_name, feature, calls_per_page, avg_ms)`, `dashboard_latency(day, p95_ms)` and `deploys(id, day, author, feature)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT query_name, calls_per_page * avg_ms AS ms_per_page",
+        "FROM query_log",
+        "ORDER BY ms_per_page DESC;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;",
+        "CREATE TABLE query_log (query_name TEXT PRIMARY KEY, feature TEXT, calls_per_page INTEGER, avg_ms INTEGER);",
+        "INSERT INTO query_log VALUES ('kpi_tiles','kpis',1,90),('monthly_revenue','reports',1,1800),('station_name_lookup','recent-activity',2000,4),('login_check','auth',1,3),('rider_count','kpis',1,140),('weather_widget','weather',1,250);",
+        "CREATE TABLE dashboard_latency (day TEXT PRIMARY KEY, p95_ms INTEGER);",
+        "INSERT INTO dashboard_latency VALUES ('2026-11-01',2100),('2026-11-02',2050),('2026-11-03',2300),('2026-11-04',2200),('2026-11-05',2400),('2026-11-06',10900),('2026-11-07',11200),('2026-11-08',10800),('2026-11-09',11500),('2026-11-10',11900);",
+        "CREATE TABLE deploys (id INTEGER PRIMARY KEY, day TEXT, author TEXT, feature TEXT);",
+        "INSERT INTO deploys VALUES (1,'2026-11-02','Kit Brannagh','weather'),(2,'2026-11-04','Ola Nwosu','kpis'),(3,'2026-11-06','Dane Ruiz','recent-activity'),(4,'2026-11-08','Kit Brannagh','auth'),(5,'2026-11-09','Ola Nwosu','reports');"
+      ],
+      "check": "ordered",
+      "explain": "`station_name_lookup` costs 8 seconds a page: a 4 ms query run **2,000 times**. Classic N+1. `monthly_revenue` is second at 1.8 seconds."
+    },
+    {
+      "type": "code",
+      "title": "Fix 1: the monthly report",
+      "prompt": [
+        "`monthly_revenue` runs:",
+        "",
+        "```sql",
+        "SELECT station_id, SUM(fare_cents) AS revenue FROM rides",
+        "WHERE strftime('%Y-%m', started) = '2026-10'",
+        "GROUP BY station_id;",
+        "```",
+        "",
+        "Rewrite it to be SARGable (same results).",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`). Also `query_log(query_name, feature, calls_per_page, avg_ms)`, `dashboard_latency(day, p95_ms)` and `deploys(id, day, author, feature)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT station_id, SUM(fare_cents) AS revenue",
+        "FROM rides",
+        "WHERE started >= '2026-10-01' AND started < '2026-11-01'",
+        "GROUP BY station_id;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;",
+        "CREATE TABLE query_log (query_name TEXT PRIMARY KEY, feature TEXT, calls_per_page INTEGER, avg_ms INTEGER);",
+        "INSERT INTO query_log VALUES ('kpi_tiles','kpis',1,90),('monthly_revenue','reports',1,1800),('station_name_lookup','recent-activity',2000,4),('login_check','auth',1,3),('rider_count','kpis',1,140),('weather_widget','weather',1,250);",
+        "CREATE TABLE dashboard_latency (day TEXT PRIMARY KEY, p95_ms INTEGER);",
+        "INSERT INTO dashboard_latency VALUES ('2026-11-01',2100),('2026-11-02',2050),('2026-11-03',2300),('2026-11-04',2200),('2026-11-05',2400),('2026-11-06',10900),('2026-11-07',11200),('2026-11-08',10800),('2026-11-09',11500),('2026-11-10',11900);",
+        "CREATE TABLE deploys (id INTEGER PRIMARY KEY, day TEXT, author TEXT, feature TEXT);",
+        "INSERT INTO deploys VALUES (1,'2026-11-02','Kit Brannagh','weather'),(2,'2026-11-04','Ola Nwosu','kpis'),(3,'2026-11-06','Dane Ruiz','recent-activity'),(4,'2026-11-08','Kit Brannagh','auth'),(5,'2026-11-09','Ola Nwosu','reports');"
+      ],
+      "check": "rows",
+      "forbid": [
+        {
+          "pattern": "(?i)(substr|strftime|date|datetime)\\s*\\(",
+          "message": "No function wrapped around started"
+        }
+      ],
+      "hints": [
+        "`started >= '2026-10-01' AND started < '2026-11-01'`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Fix 2: cover it",
+      "prompt": [
+        "Now give that query an index it can answer from alone: create **`rides_started_cover`** with the range column first, followed by the other columns the query reads.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`). Also `query_log(query_name, feature, calls_per_page, avg_ms)`, `dashboard_latency(day, p95_ms)` and `deploys(id, day, author, feature)`."
+      ],
+      "starter": "-- Write your CREATE INDEX below",
+      "solution": "CREATE INDEX rides_started_cover ON rides (started, station_id, fare_cents);",
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;",
+        "CREATE TABLE query_log (query_name TEXT PRIMARY KEY, feature TEXT, calls_per_page INTEGER, avg_ms INTEGER);",
+        "INSERT INTO query_log VALUES ('kpi_tiles','kpis',1,90),('monthly_revenue','reports',1,1800),('station_name_lookup','recent-activity',2000,4),('login_check','auth',1,3),('rider_count','kpis',1,140),('weather_widget','weather',1,250);",
+        "CREATE TABLE dashboard_latency (day TEXT PRIMARY KEY, p95_ms INTEGER);",
+        "INSERT INTO dashboard_latency VALUES ('2026-11-01',2100),('2026-11-02',2050),('2026-11-03',2300),('2026-11-04',2200),('2026-11-05',2400),('2026-11-06',10900),('2026-11-07',11200),('2026-11-08',10800),('2026-11-09',11500),('2026-11-10',11900);",
+        "CREATE TABLE deploys (id INTEGER PRIMARY KEY, day TEXT, author TEXT, feature TEXT);",
+        "INSERT INTO deploys VALUES (1,'2026-11-02','Kit Brannagh','weather'),(2,'2026-11-04','Ola Nwosu','kpis'),(3,'2026-11-06','Dane Ruiz','recent-activity'),(4,'2026-11-08','Kit Brannagh','auth'),(5,'2026-11-09','Ola Nwosu','reports');"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT 'rides' AS tbl, (SELECT group_concat(name) FROM (SELECT name FROM pragma_index_info(il.name) ORDER BY seqno)) AS cols, il.\"unique\" AS uniq FROM pragma_index_list('rides') AS il WHERE il.origin = 'c' ORDER BY 1, 2",
+      "hints": [
+        "`(started, station_id, fare_cents)`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Fix 3: kill the N+1",
+      "prompt": [
+        "The recent-activity panel loads the **2,000** most recent rides, then looks up each one's station name separately. Replace it with one query returning **id**, **started** and station **name** for the **2,000 most recent** rides, newest first, ties broken by id descending.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`). Also `query_log(query_name, feature, calls_per_page, avg_ms)`, `dashboard_latency(day, p95_ms)` and `deploys(id, day, author, feature)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT r.id, r.started, s.name",
+        "FROM rides AS r",
+        "JOIN stations AS s ON s.id = r.station_id",
+        "ORDER BY r.started DESC, r.id DESC",
+        "LIMIT 2000;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;",
+        "CREATE TABLE query_log (query_name TEXT PRIMARY KEY, feature TEXT, calls_per_page INTEGER, avg_ms INTEGER);",
+        "INSERT INTO query_log VALUES ('kpi_tiles','kpis',1,90),('monthly_revenue','reports',1,1800),('station_name_lookup','recent-activity',2000,4),('login_check','auth',1,3),('rider_count','kpis',1,140),('weather_widget','weather',1,250);",
+        "CREATE TABLE dashboard_latency (day TEXT PRIMARY KEY, p95_ms INTEGER);",
+        "INSERT INTO dashboard_latency VALUES ('2026-11-01',2100),('2026-11-02',2050),('2026-11-03',2300),('2026-11-04',2200),('2026-11-05',2400),('2026-11-06',10900),('2026-11-07',11200),('2026-11-08',10800),('2026-11-09',11500),('2026-11-10',11900);",
+        "CREATE TABLE deploys (id INTEGER PRIMARY KEY, day TEXT, author TEXT, feature TEXT);",
+        "INSERT INTO deploys VALUES (1,'2026-11-02','Kit Brannagh','weather'),(2,'2026-11-04','Ola Nwosu','kpis'),(3,'2026-11-06','Dane Ruiz','recent-activity'),(4,'2026-11-08','Kit Brannagh','auth'),(5,'2026-11-09','Ola Nwosu','reports');",
+        "CREATE INDEX rides_started_cover ON rides (started, station_id, fare_cents);"
+      ],
+      "check": "ordered",
+      "hints": [
+        "One JOIN, ORDER BY, LIMIT 2000."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Name the culprit",
+      "prompt": [
+        "When did it break, and who shipped it? Find the day the dashboard's p95 **jumped the most** from the previous day (use LAG), and return the **author** and **feature** of the deploy made **that day**.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`). Also `query_log(query_name, feature, calls_per_page, avg_ms)`, `dashboard_latency(day, p95_ms)` and `deploys(id, day, author, feature)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "WITH jumps AS (",
+        "    SELECT day, p95_ms - LAG(p95_ms) OVER (ORDER BY day) AS jump",
+        "    FROM dashboard_latency",
+        "), worst AS (",
+        "    SELECT day FROM jumps ORDER BY jump DESC LIMIT 1",
+        ")",
+        "SELECT d.author, d.feature",
+        "FROM deploys AS d",
+        "JOIN worst AS w ON w.day = d.day;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;",
+        "CREATE TABLE query_log (query_name TEXT PRIMARY KEY, feature TEXT, calls_per_page INTEGER, avg_ms INTEGER);",
+        "INSERT INTO query_log VALUES ('kpi_tiles','kpis',1,90),('monthly_revenue','reports',1,1800),('station_name_lookup','recent-activity',2000,4),('login_check','auth',1,3),('rider_count','kpis',1,140),('weather_widget','weather',1,250);",
+        "CREATE TABLE dashboard_latency (day TEXT PRIMARY KEY, p95_ms INTEGER);",
+        "INSERT INTO dashboard_latency VALUES ('2026-11-01',2100),('2026-11-02',2050),('2026-11-03',2300),('2026-11-04',2200),('2026-11-05',2400),('2026-11-06',10900),('2026-11-07',11200),('2026-11-08',10800),('2026-11-09',11500),('2026-11-10',11900);",
+        "CREATE TABLE deploys (id INTEGER PRIMARY KEY, day TEXT, author TEXT, feature TEXT);",
+        "INSERT INTO deploys VALUES (1,'2026-11-02','Kit Brannagh','weather'),(2,'2026-11-04','Ola Nwosu','kpis'),(3,'2026-11-06','Dane Ruiz','recent-activity'),(4,'2026-11-08','Kit Brannagh','auth'),(5,'2026-11-09','Ola Nwosu','reports');"
+      ],
+      "check": "rows",
+      "require": [
+        {
+          "pattern": "(?i)\\blag\\s*\\(",
+          "message": "Uses LAG"
+        }
+      ],
+      "hints": [
+        "LAG over dashboard_latency ordered by day gives each day's jump.",
+        "Take the biggest jump's day, then join deploys on day."
+      ],
+      "explain": "**Dane Ruiz** shipped *recent-activity* on November 6th, and p95 went from 2.4 to 10.9 seconds the same day. It's the same feature as the N+1 query. No new server needed: one join and one index, and Teodor's dashboard is back under two seconds."
+    }
+  ]
+}

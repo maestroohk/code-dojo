@@ -1,0 +1,210 @@
+{
+  "title": "Stage 4: Reporting views",
+  "summary": "Give the dashboard stable, named queries: monthly revenue and customer value.",
+  "minutes": 15,
+  "prereqs": [
+    "sql/07-designing-schemas/04-many-to-many-views-alter",
+    "sql/05-window-functions/01-ranking",
+    "sql/02-aggregation/04-case-and-conditional"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Views as the reporting layer",
+      "body": [
+        "The dashboard shouldn't know about surrogate keys and joins. Give it **views** with friendly names and exactly the columns it shows. When the model changes, you fix the view, and the dashboard keeps working.",
+        "",
+        "```sql",
+        "CREATE VIEW v_monthly_revenue AS",
+        "SELECT substr(order_date, 1, 7) AS month, channel, ...",
+        "FROM fact_sales",
+        "GROUP BY month, channel;",
+        "```",
+        "",
+        "Views can contain anything a SELECT can: joins, GROUP BY, window functions. For heavy reports on big data, warehouses *materialise* them into tables on a schedule; at Inkwell's size a plain view is instant."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "v_monthly_revenue",
+      "prompt": [
+        "Create the view **`v_monthly_revenue`** with one row per **month** (`YYYY-MM`) and **channel**, and columns:",
+        "",
+        "- `month`, `channel`",
+        "- `orders`: number of distinct orders",
+        "- `books`: total copies",
+        "- `revenue_cents`: total revenue",
+        "",
+        "Tables: `dim_customer(customer_id, email, name)`, `dim_book(book_id, isbn, title)`, `fact_sales(order_ref, order_date, customer_id, book_id, channel, qty, revenue_cents)`."
+      ],
+      "starter": "-- Write your CREATE VIEW below",
+      "solution": [
+        "CREATE VIEW v_monthly_revenue AS",
+        "SELECT substr(order_date, 1, 7) AS month, channel,",
+        "       COUNT(DISTINCT order_ref) AS orders,",
+        "       SUM(qty) AS books,",
+        "       SUM(revenue_cents) AS revenue_cents",
+        "FROM fact_sales",
+        "GROUP BY month, channel;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE raw_orders (order_ref TEXT, order_date TEXT, customer_email TEXT, customer_name TEXT, isbn TEXT, title TEXT, qty TEXT, unit_price TEXT, channel TEXT);",
+        "INSERT INTO raw_orders VALUES ('IV-1001','2026-09-02',' ana@mail.test','Ana Sousa','978-0-01','The Lantern Keeper','1','£12.50','Web'),('IV-1001','2026-09-02','ana@mail.test','Ana Sousa','978-0-05','Gardens of Copper','1','£13.50','Web'),('IV-1002','03/09/2026','BEN@mail.test','Ben Okoro','978-0-03','A Quiet Harbour','2','9.99','shop'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things',' 1','£14.00','web'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things','1','£14.00','web'),('IV-1004','21/09/2026','dmitri@mail.test','Dmitri Volkov','978-0-09','The Cartographer''s Daughter','1','16','SHOP'),('IV-1005','2026-10-01','ana@mail.test','Ana Sousa','978-0-03','A Quiet Harbour','1','£9.99','web'),('IV-1006','05/10/2026','esme@mail.test','Esme Hart','978-0-01','The Lantern Keeper','3','12.50','Shop'),('IV-1007','2026-10-12','ben@mail.test ','Ben Okoro','978-0-10','Field Notes on Foxes','2','£7.00','web'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','13.5','shop'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','£13.50','shop'),('IV-1009','02/11/2026','Chloe@Mail.test','Chloe Park','978-0-12','Small Gods of the Kitchen','1','£11.50','WEB'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-07','Orbit of Small Things','2','14','web'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-01','The Lantern Keeper','1','£12.50','web'),('IV-1011','2026-11-20','dmitri@mail.test','Dmitri Volkov','978-0-12','Small Gods of the Kitchen','1','11.50','shop');",
+        "CREATE TABLE stg_orders ( order_ref TEXT NOT NULL, order_date TEXT NOT NULL, email TEXT NOT NULL, customer_name TEXT NOT NULL, isbn TEXT NOT NULL, title TEXT NOT NULL, qty INTEGER NOT NULL CHECK (qty > 0), unit_cents INTEGER NOT NULL CHECK (unit_cents >= 0), channel TEXT NOT NULL CHECK (channel IN ('web', 'shop')), PRIMARY KEY (order_ref, isbn) );",
+        "INSERT OR IGNORE INTO stg_orders (order_ref, order_date, email, customer_name, isbn, title, qty, unit_cents, channel) SELECT trim(order_ref), CASE WHEN order_date LIKE '__/__/____' THEN substr(order_date, 7, 4) || '-' || substr(order_date, 4, 2) || '-' || substr(order_date, 1, 2) ELSE order_date END, lower(trim(customer_email)), trim(customer_name), trim(isbn), trim(title), CAST(trim(qty) AS INTEGER), CAST(ROUND(CAST(replace(trim(unit_price), '£', '') AS REAL) * 100) AS INTEGER), lower(trim(channel)) FROM raw_orders;",
+        "CREATE TABLE dim_customer (customer_id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL);",
+        "CREATE TABLE dim_book (book_id INTEGER PRIMARY KEY, isbn TEXT NOT NULL UNIQUE, title TEXT NOT NULL);",
+        "INSERT INTO dim_customer (email, name) SELECT DISTINCT email, customer_name FROM stg_orders;",
+        "INSERT INTO dim_book (isbn, title) SELECT DISTINCT isbn, title FROM stg_orders;",
+        "CREATE TABLE fact_sales ( order_ref TEXT NOT NULL, order_date TEXT NOT NULL, customer_id INTEGER NOT NULL REFERENCES dim_customer(customer_id), book_id INTEGER NOT NULL REFERENCES dim_book(book_id), channel TEXT NOT NULL, qty INTEGER NOT NULL, revenue_cents INTEGER NOT NULL, PRIMARY KEY (order_ref, book_id) );",
+        "INSERT INTO fact_sales SELECT s.order_ref, s.order_date, c.customer_id, b.book_id, s.channel, s.qty, s.qty * s.unit_cents FROM stg_orders AS s JOIN dim_customer AS c ON c.email = s.email JOIN dim_book AS b ON b.isbn = s.isbn;"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT month, channel, orders, books, revenue_cents FROM v_monthly_revenue ORDER BY month, channel",
+      "require": [
+        {
+          "pattern": "(?i)create\\s+view\\s+v_monthly_revenue",
+          "message": "Creates the view"
+        }
+      ],
+      "hints": [
+        "`COUNT(DISTINCT order_ref)` counts orders, not lines.",
+        "`substr(order_date, 1, 7)` is the month."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Order IV-1010 has two lines. Why does the view use `COUNT(DISTINCT order_ref)` rather than `COUNT(*)`?",
+      "options": [
+        "COUNT(*) counts order **lines**, so a two-book order would count as two orders",
+        "COUNT(*) skips NULLs",
+        "DISTINCT makes the view faster",
+        "Views require DISTINCT"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "code",
+      "title": "v_customer_value",
+      "prompt": [
+        "Create the view **`v_customer_value`** with one row per customer and columns **name**, **email**, **orders** (distinct orders), **revenue_cents**, and **value_rank** (`RANK()` by revenue, highest = 1).",
+        "",
+        "Tables: `dim_customer(customer_id, email, name)`, `dim_book(book_id, isbn, title)`, `fact_sales(order_ref, order_date, customer_id, book_id, channel, qty, revenue_cents)`."
+      ],
+      "starter": "-- Write your CREATE VIEW below",
+      "solution": [
+        "CREATE VIEW v_customer_value AS",
+        "SELECT c.name, c.email,",
+        "       COUNT(DISTINCT f.order_ref) AS orders,",
+        "       SUM(f.revenue_cents) AS revenue_cents,",
+        "       RANK() OVER (ORDER BY SUM(f.revenue_cents) DESC) AS value_rank",
+        "FROM fact_sales AS f",
+        "JOIN dim_customer AS c ON c.customer_id = f.customer_id",
+        "GROUP BY c.customer_id, c.name, c.email;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE raw_orders (order_ref TEXT, order_date TEXT, customer_email TEXT, customer_name TEXT, isbn TEXT, title TEXT, qty TEXT, unit_price TEXT, channel TEXT);",
+        "INSERT INTO raw_orders VALUES ('IV-1001','2026-09-02',' ana@mail.test','Ana Sousa','978-0-01','The Lantern Keeper','1','£12.50','Web'),('IV-1001','2026-09-02','ana@mail.test','Ana Sousa','978-0-05','Gardens of Copper','1','£13.50','Web'),('IV-1002','03/09/2026','BEN@mail.test','Ben Okoro','978-0-03','A Quiet Harbour','2','9.99','shop'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things',' 1','£14.00','web'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things','1','£14.00','web'),('IV-1004','21/09/2026','dmitri@mail.test','Dmitri Volkov','978-0-09','The Cartographer''s Daughter','1','16','SHOP'),('IV-1005','2026-10-01','ana@mail.test','Ana Sousa','978-0-03','A Quiet Harbour','1','£9.99','web'),('IV-1006','05/10/2026','esme@mail.test','Esme Hart','978-0-01','The Lantern Keeper','3','12.50','Shop'),('IV-1007','2026-10-12','ben@mail.test ','Ben Okoro','978-0-10','Field Notes on Foxes','2','£7.00','web'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','13.5','shop'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','£13.50','shop'),('IV-1009','02/11/2026','Chloe@Mail.test','Chloe Park','978-0-12','Small Gods of the Kitchen','1','£11.50','WEB'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-07','Orbit of Small Things','2','14','web'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-01','The Lantern Keeper','1','£12.50','web'),('IV-1011','2026-11-20','dmitri@mail.test','Dmitri Volkov','978-0-12','Small Gods of the Kitchen','1','11.50','shop');",
+        "CREATE TABLE stg_orders ( order_ref TEXT NOT NULL, order_date TEXT NOT NULL, email TEXT NOT NULL, customer_name TEXT NOT NULL, isbn TEXT NOT NULL, title TEXT NOT NULL, qty INTEGER NOT NULL CHECK (qty > 0), unit_cents INTEGER NOT NULL CHECK (unit_cents >= 0), channel TEXT NOT NULL CHECK (channel IN ('web', 'shop')), PRIMARY KEY (order_ref, isbn) );",
+        "INSERT OR IGNORE INTO stg_orders (order_ref, order_date, email, customer_name, isbn, title, qty, unit_cents, channel) SELECT trim(order_ref), CASE WHEN order_date LIKE '__/__/____' THEN substr(order_date, 7, 4) || '-' || substr(order_date, 4, 2) || '-' || substr(order_date, 1, 2) ELSE order_date END, lower(trim(customer_email)), trim(customer_name), trim(isbn), trim(title), CAST(trim(qty) AS INTEGER), CAST(ROUND(CAST(replace(trim(unit_price), '£', '') AS REAL) * 100) AS INTEGER), lower(trim(channel)) FROM raw_orders;",
+        "CREATE TABLE dim_customer (customer_id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL);",
+        "CREATE TABLE dim_book (book_id INTEGER PRIMARY KEY, isbn TEXT NOT NULL UNIQUE, title TEXT NOT NULL);",
+        "INSERT INTO dim_customer (email, name) SELECT DISTINCT email, customer_name FROM stg_orders;",
+        "INSERT INTO dim_book (isbn, title) SELECT DISTINCT isbn, title FROM stg_orders;",
+        "CREATE TABLE fact_sales ( order_ref TEXT NOT NULL, order_date TEXT NOT NULL, customer_id INTEGER NOT NULL REFERENCES dim_customer(customer_id), book_id INTEGER NOT NULL REFERENCES dim_book(book_id), channel TEXT NOT NULL, qty INTEGER NOT NULL, revenue_cents INTEGER NOT NULL, PRIMARY KEY (order_ref, book_id) );",
+        "INSERT INTO fact_sales SELECT s.order_ref, s.order_date, c.customer_id, b.book_id, s.channel, s.qty, s.qty * s.unit_cents FROM stg_orders AS s JOIN dim_customer AS c ON c.email = s.email JOIN dim_book AS b ON b.isbn = s.isbn;",
+        "CREATE VIEW v_monthly_revenue AS SELECT substr(order_date, 1, 7) AS month, channel, COUNT(DISTINCT order_ref) AS orders, SUM(qty) AS books, SUM(revenue_cents) AS revenue_cents FROM fact_sales GROUP BY month, channel;"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT name, email, orders, revenue_cents, value_rank FROM v_customer_value ORDER BY value_rank, email",
+      "require": [
+        {
+          "pattern": "(?i)\\brank\\s*\\(\\s*\\)\\s*over",
+          "message": "Uses RANK() OVER"
+        }
+      ],
+      "hints": [
+        "Group fact_sales joined to dim_customer by customer.",
+        "A window function can rank an aggregate: `RANK() OVER (ORDER BY SUM(f.revenue_cents) DESC)`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "The views are queried like tables. What does this return?",
+      "code": [
+        "SELECT month, SUM(revenue_cents)",
+        "FROM v_monthly_revenue",
+        "GROUP BY month",
+        "ORDER BY month;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE raw_orders (order_ref TEXT, order_date TEXT, customer_email TEXT, customer_name TEXT, isbn TEXT, title TEXT, qty TEXT, unit_price TEXT, channel TEXT);",
+        "INSERT INTO raw_orders VALUES ('IV-1001','2026-09-02',' ana@mail.test','Ana Sousa','978-0-01','The Lantern Keeper','1','£12.50','Web'),('IV-1001','2026-09-02','ana@mail.test','Ana Sousa','978-0-05','Gardens of Copper','1','£13.50','Web'),('IV-1002','03/09/2026','BEN@mail.test','Ben Okoro','978-0-03','A Quiet Harbour','2','9.99','shop'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things',' 1','£14.00','web'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things','1','£14.00','web'),('IV-1004','21/09/2026','dmitri@mail.test','Dmitri Volkov','978-0-09','The Cartographer''s Daughter','1','16','SHOP'),('IV-1005','2026-10-01','ana@mail.test','Ana Sousa','978-0-03','A Quiet Harbour','1','£9.99','web'),('IV-1006','05/10/2026','esme@mail.test','Esme Hart','978-0-01','The Lantern Keeper','3','12.50','Shop'),('IV-1007','2026-10-12','ben@mail.test ','Ben Okoro','978-0-10','Field Notes on Foxes','2','£7.00','web'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','13.5','shop'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','£13.50','shop'),('IV-1009','02/11/2026','Chloe@Mail.test','Chloe Park','978-0-12','Small Gods of the Kitchen','1','£11.50','WEB'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-07','Orbit of Small Things','2','14','web'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-01','The Lantern Keeper','1','£12.50','web'),('IV-1011','2026-11-20','dmitri@mail.test','Dmitri Volkov','978-0-12','Small Gods of the Kitchen','1','11.50','shop');",
+        "CREATE TABLE stg_orders ( order_ref TEXT NOT NULL, order_date TEXT NOT NULL, email TEXT NOT NULL, customer_name TEXT NOT NULL, isbn TEXT NOT NULL, title TEXT NOT NULL, qty INTEGER NOT NULL CHECK (qty > 0), unit_cents INTEGER NOT NULL CHECK (unit_cents >= 0), channel TEXT NOT NULL CHECK (channel IN ('web', 'shop')), PRIMARY KEY (order_ref, isbn) );",
+        "INSERT OR IGNORE INTO stg_orders (order_ref, order_date, email, customer_name, isbn, title, qty, unit_cents, channel) SELECT trim(order_ref), CASE WHEN order_date LIKE '__/__/____' THEN substr(order_date, 7, 4) || '-' || substr(order_date, 4, 2) || '-' || substr(order_date, 1, 2) ELSE order_date END, lower(trim(customer_email)), trim(customer_name), trim(isbn), trim(title), CAST(trim(qty) AS INTEGER), CAST(ROUND(CAST(replace(trim(unit_price), '£', '') AS REAL) * 100) AS INTEGER), lower(trim(channel)) FROM raw_orders;",
+        "CREATE TABLE dim_customer (customer_id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL);",
+        "CREATE TABLE dim_book (book_id INTEGER PRIMARY KEY, isbn TEXT NOT NULL UNIQUE, title TEXT NOT NULL);",
+        "INSERT INTO dim_customer (email, name) SELECT DISTINCT email, customer_name FROM stg_orders;",
+        "INSERT INTO dim_book (isbn, title) SELECT DISTINCT isbn, title FROM stg_orders;",
+        "CREATE TABLE fact_sales ( order_ref TEXT NOT NULL, order_date TEXT NOT NULL, customer_id INTEGER NOT NULL REFERENCES dim_customer(customer_id), book_id INTEGER NOT NULL REFERENCES dim_book(book_id), channel TEXT NOT NULL, qty INTEGER NOT NULL, revenue_cents INTEGER NOT NULL, PRIMARY KEY (order_ref, book_id) );",
+        "INSERT INTO fact_sales SELECT s.order_ref, s.order_date, c.customer_id, b.book_id, s.channel, s.qty, s.qty * s.unit_cents FROM stg_orders AS s JOIN dim_customer AS c ON c.email = s.email JOIN dim_book AS b ON b.isbn = s.isbn;",
+        "CREATE VIEW v_monthly_revenue AS SELECT substr(order_date, 1, 7) AS month, channel, COUNT(DISTINCT order_ref) AS orders, SUM(qty) AS books, SUM(revenue_cents) AS revenue_cents FROM fact_sales GROUP BY month, channel;",
+        "CREATE VIEW v_customer_value AS SELECT c.name, c.email, COUNT(DISTINCT f.order_ref) AS orders, SUM(f.revenue_cents) AS revenue_cents, RANK() OVER (ORDER BY SUM(f.revenue_cents) DESC) AS value_rank FROM fact_sales AS f JOIN dim_customer AS c ON c.customer_id = f.customer_id GROUP BY c.customer_id, c.name, c.email;"
+      ],
+      "answer": [
+        "2026-09 | 7598",
+        "2026-10 | 7499",
+        "2026-11 | 6350"
+      ],
+      "explain": "A view over a view works too: here monthly totals across both channels."
+    },
+    {
+      "type": "code",
+      "title": "Channel mix",
+      "prompt": [
+        "Using **only the views**, return each **month** with **web_cents**, **shop_cents** and **web_pct** (web's share of the month's revenue, rounded to the nearest whole number), in month order.",
+        "",
+        "Views: `v_monthly_revenue(month, channel, orders, books, revenue_cents)`, `v_customer_value(...)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT month,",
+        "       COALESCE(SUM(CASE WHEN channel = 'web' THEN revenue_cents END), 0) AS web_cents,",
+        "       COALESCE(SUM(CASE WHEN channel = 'shop' THEN revenue_cents END), 0) AS shop_cents,",
+        "       ROUND(100.0 * COALESCE(SUM(CASE WHEN channel = 'web' THEN revenue_cents END), 0) / SUM(revenue_cents)) AS web_pct",
+        "FROM v_monthly_revenue",
+        "GROUP BY month",
+        "ORDER BY month;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE raw_orders (order_ref TEXT, order_date TEXT, customer_email TEXT, customer_name TEXT, isbn TEXT, title TEXT, qty TEXT, unit_price TEXT, channel TEXT);",
+        "INSERT INTO raw_orders VALUES ('IV-1001','2026-09-02',' ana@mail.test','Ana Sousa','978-0-01','The Lantern Keeper','1','£12.50','Web'),('IV-1001','2026-09-02','ana@mail.test','Ana Sousa','978-0-05','Gardens of Copper','1','£13.50','Web'),('IV-1002','03/09/2026','BEN@mail.test','Ben Okoro','978-0-03','A Quiet Harbour','2','9.99','shop'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things',' 1','£14.00','web'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things','1','£14.00','web'),('IV-1004','21/09/2026','dmitri@mail.test','Dmitri Volkov','978-0-09','The Cartographer''s Daughter','1','16','SHOP'),('IV-1005','2026-10-01','ana@mail.test','Ana Sousa','978-0-03','A Quiet Harbour','1','£9.99','web'),('IV-1006','05/10/2026','esme@mail.test','Esme Hart','978-0-01','The Lantern Keeper','3','12.50','Shop'),('IV-1007','2026-10-12','ben@mail.test ','Ben Okoro','978-0-10','Field Notes on Foxes','2','£7.00','web'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','13.5','shop'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','£13.50','shop'),('IV-1009','02/11/2026','Chloe@Mail.test','Chloe Park','978-0-12','Small Gods of the Kitchen','1','£11.50','WEB'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-07','Orbit of Small Things','2','14','web'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-01','The Lantern Keeper','1','£12.50','web'),('IV-1011','2026-11-20','dmitri@mail.test','Dmitri Volkov','978-0-12','Small Gods of the Kitchen','1','11.50','shop');",
+        "CREATE TABLE stg_orders ( order_ref TEXT NOT NULL, order_date TEXT NOT NULL, email TEXT NOT NULL, customer_name TEXT NOT NULL, isbn TEXT NOT NULL, title TEXT NOT NULL, qty INTEGER NOT NULL CHECK (qty > 0), unit_cents INTEGER NOT NULL CHECK (unit_cents >= 0), channel TEXT NOT NULL CHECK (channel IN ('web', 'shop')), PRIMARY KEY (order_ref, isbn) );",
+        "INSERT OR IGNORE INTO stg_orders (order_ref, order_date, email, customer_name, isbn, title, qty, unit_cents, channel) SELECT trim(order_ref), CASE WHEN order_date LIKE '__/__/____' THEN substr(order_date, 7, 4) || '-' || substr(order_date, 4, 2) || '-' || substr(order_date, 1, 2) ELSE order_date END, lower(trim(customer_email)), trim(customer_name), trim(isbn), trim(title), CAST(trim(qty) AS INTEGER), CAST(ROUND(CAST(replace(trim(unit_price), '£', '') AS REAL) * 100) AS INTEGER), lower(trim(channel)) FROM raw_orders;",
+        "CREATE TABLE dim_customer (customer_id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL);",
+        "CREATE TABLE dim_book (book_id INTEGER PRIMARY KEY, isbn TEXT NOT NULL UNIQUE, title TEXT NOT NULL);",
+        "INSERT INTO dim_customer (email, name) SELECT DISTINCT email, customer_name FROM stg_orders;",
+        "INSERT INTO dim_book (isbn, title) SELECT DISTINCT isbn, title FROM stg_orders;",
+        "CREATE TABLE fact_sales ( order_ref TEXT NOT NULL, order_date TEXT NOT NULL, customer_id INTEGER NOT NULL REFERENCES dim_customer(customer_id), book_id INTEGER NOT NULL REFERENCES dim_book(book_id), channel TEXT NOT NULL, qty INTEGER NOT NULL, revenue_cents INTEGER NOT NULL, PRIMARY KEY (order_ref, book_id) );",
+        "INSERT INTO fact_sales SELECT s.order_ref, s.order_date, c.customer_id, b.book_id, s.channel, s.qty, s.qty * s.unit_cents FROM stg_orders AS s JOIN dim_customer AS c ON c.email = s.email JOIN dim_book AS b ON b.isbn = s.isbn;",
+        "CREATE VIEW v_monthly_revenue AS SELECT substr(order_date, 1, 7) AS month, channel, COUNT(DISTINCT order_ref) AS orders, SUM(qty) AS books, SUM(revenue_cents) AS revenue_cents FROM fact_sales GROUP BY month, channel;",
+        "CREATE VIEW v_customer_value AS SELECT c.name, c.email, COUNT(DISTINCT f.order_ref) AS orders, SUM(f.revenue_cents) AS revenue_cents, RANK() OVER (ORDER BY SUM(f.revenue_cents) DESC) AS value_rank FROM fact_sales AS f JOIN dim_customer AS c ON c.customer_id = f.customer_id GROUP BY c.customer_id, c.name, c.email;"
+      ],
+      "check": "ordered",
+      "forbid": [
+        {
+          "pattern": "(?i)fact_sales|dim_|stg_",
+          "message": "Reads only the views"
+        }
+      ],
+      "hints": [
+        "Pivot the channel rows into columns with SUM(CASE ...).",
+        "`100.0 *` avoids integer division."
+      ]
+    }
+  ]
+}

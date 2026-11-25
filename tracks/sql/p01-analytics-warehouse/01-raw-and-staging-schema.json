@@ -1,0 +1,176 @@
+{
+  "title": "Stage 1: Raw data and a staging schema",
+  "summary": "Profile a messy export and design the table clean data will land in.",
+  "minutes": 14,
+  "prereqs": [
+    "sql/07-designing-schemas/01-create-table",
+    "sql/07-designing-schemas/02-constraints",
+    "sql/02-aggregation/01-counting-and-totals"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The brief",
+      "body": [
+        "Rosa's last assignment isn't a case. It's a **build**. Larkspur's directors want one reliable dashboard of Inkwell & Ivy's sales, and right now all there is is a nightly CSV export dumped into a table called `raw_orders`.",
+        "",
+        "You'll build a small **analytics warehouse** in four layers, the same shape real data teams use:",
+        "",
+        "```text",
+        "Raw       raw_orders                      exactly what the source sent, never edited",
+        "Staging   stg_orders                      typed, cleaned, de-duplicated",
+        "Model     dim_customer, dim_book,         a star schema built for questions",
+        "          fact_sales",
+        "Reports   views + indexes                 what the dashboard reads",
+        "```",
+        "",
+        "Each stage starts with the database as the previous stage left it. Stage 1: understand the raw data, then design the staging table."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Profile the raw data",
+      "prompt": [
+        "Before cleaning anything, measure the mess. Return one row with:",
+        "",
+        "- **raw_rows**: all rows",
+        "- **line_items**: distinct (`order_ref`, `isbn`) pairs: the real number of order lines",
+        "- **uk_dates**: rows whose `order_date` looks like `DD/MM/YYYY` (pattern `'__/__/____'`)",
+        "- **pound_prices**: rows whose `unit_price` starts with `£`",
+        "",
+        "Tables: `raw_orders(order_ref, order_date, customer_email, customer_name, isbn, title, qty, unit_price, channel)`: every column is text, exactly as exported."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT COUNT(*) AS raw_rows,",
+        "       COUNT(DISTINCT order_ref || '/' || isbn) AS line_items,",
+        "       SUM(order_date LIKE '__/__/____') AS uk_dates,",
+        "       SUM(unit_price LIKE '£%') AS pound_prices",
+        "FROM raw_orders;"
+      ],
+      "setup": [
+        "CREATE TABLE raw_orders (order_ref TEXT, order_date TEXT, customer_email TEXT, customer_name TEXT, isbn TEXT, title TEXT, qty TEXT, unit_price TEXT, channel TEXT);",
+        "INSERT INTO raw_orders VALUES ('IV-1001','2026-09-02',' ana@mail.test','Ana Sousa','978-0-01','The Lantern Keeper','1','£12.50','Web'),('IV-1001','2026-09-02','ana@mail.test','Ana Sousa','978-0-05','Gardens of Copper','1','£13.50','Web'),('IV-1002','03/09/2026','BEN@mail.test','Ben Okoro','978-0-03','A Quiet Harbour','2','9.99','shop'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things',' 1','£14.00','web'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things','1','£14.00','web'),('IV-1004','21/09/2026','dmitri@mail.test','Dmitri Volkov','978-0-09','The Cartographer''s Daughter','1','16','SHOP'),('IV-1005','2026-10-01','ana@mail.test','Ana Sousa','978-0-03','A Quiet Harbour','1','£9.99','web'),('IV-1006','05/10/2026','esme@mail.test','Esme Hart','978-0-01','The Lantern Keeper','3','12.50','Shop'),('IV-1007','2026-10-12','ben@mail.test ','Ben Okoro','978-0-10','Field Notes on Foxes','2','£7.00','web'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','13.5','shop'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','£13.50','shop'),('IV-1009','02/11/2026','Chloe@Mail.test','Chloe Park','978-0-12','Small Gods of the Kitchen','1','£11.50','WEB'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-07','Orbit of Small Things','2','14','web'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-01','The Lantern Keeper','1','£12.50','web'),('IV-1011','2026-11-20','dmitri@mail.test','Dmitri Volkov','978-0-12','Small Gods of the Kitchen','1','11.50','shop');"
+      ],
+      "check": "rows",
+      "hints": [
+        "COUNT(DISTINCT ...) needs one expression, so glue the two columns: `order_ref || '/' || isbn`.",
+        "In SQLite a comparison is 1 or 0, so `SUM(order_date LIKE '__/__/____')` counts the matches."
+      ],
+      "explain": "15 rows but only 13 real lines: the exporter sent some lines twice. Four dates are in UK format and nine prices carry a pound sign. All of this has to be fixed on the way in."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which problem does each raw value show?",
+      "buckets": [
+        "Formatting",
+        "Duplicate",
+        "Type"
+      ],
+      "items": [
+        [
+          "`' ana@mail.test'`",
+          0
+        ],
+        [
+          "`'03/09/2026'` next to `'2026-09-02'`",
+          0
+        ],
+        [
+          "the same order line exported twice",
+          1
+        ],
+        [
+          "`qty = ' 1'` stored as text",
+          2
+        ],
+        [
+          "`'£12.50'` in a price column",
+          2
+        ],
+        [
+          "`channel` written `Web`, `web` and `WEB`",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why keep `raw_orders` untouched instead of cleaning it in place?",
+      "options": [
+        "So any cleaning bug can be fixed and the load re-run from the original data",
+        "Because UPDATE is slower than INSERT",
+        "Raw tables can't be updated in SQLite",
+        "So the dashboard can read it directly"
+      ],
+      "answer": 0,
+      "explain": "The raw layer is your source of truth. Staging is disposable: drop it, fix the query, rebuild."
+    },
+    {
+      "type": "learn",
+      "title": "Designing the staging table",
+      "body": [
+        "Staging is where data gets **real types and real rules**. Every constraint you add is a bug the database will refuse on your behalf:",
+        "",
+        "- money as **integer cents** (`unit_cents`), never floating point",
+        "- quantities as `INTEGER` with `CHECK (qty > 0)`",
+        "- a fixed set of channels: `CHECK (channel IN ('web', 'shop'))`",
+        "- a primary key on the **natural key** of an order line, `(order_ref, isbn)`, so duplicates can't get in",
+        "",
+        "If a future export contains something new and weird, the load fails loudly instead of quietly poisoning the dashboard."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Create stg_orders",
+      "prompt": [
+        "Create **`stg_orders`**:",
+        "",
+        "| column | type | rules |",
+        "|---|---|---|",
+        "| `order_ref` | `TEXT` | required |",
+        "| `order_date` | `TEXT` | required (ISO `YYYY-MM-DD`) |",
+        "| `email` | `TEXT` | required |",
+        "| `customer_name` | `TEXT` | required |",
+        "| `isbn` | `TEXT` | required |",
+        "| `title` | `TEXT` | required |",
+        "| `qty` | `INTEGER` | required, greater than 0 |",
+        "| `unit_cents` | `INTEGER` | required, 0 or more |",
+        "| `channel` | `TEXT` | required, `'web'` or `'shop'` |",
+        "",
+        "Primary key: (`order_ref`, `isbn`)."
+      ],
+      "starter": "-- Write your CREATE TABLE below",
+      "solution": [
+        "CREATE TABLE stg_orders (",
+        "    order_ref TEXT NOT NULL,",
+        "    order_date TEXT NOT NULL,",
+        "    email TEXT NOT NULL,",
+        "    customer_name TEXT NOT NULL,",
+        "    isbn TEXT NOT NULL,",
+        "    title TEXT NOT NULL,",
+        "    qty INTEGER NOT NULL CHECK (qty > 0),",
+        "    unit_cents INTEGER NOT NULL CHECK (unit_cents >= 0),",
+        "    channel TEXT NOT NULL CHECK (channel IN ('web', 'shop')),",
+        "    PRIMARY KEY (order_ref, isbn)",
+        ");"
+      ],
+      "setup": [
+        "CREATE TABLE raw_orders (order_ref TEXT, order_date TEXT, customer_email TEXT, customer_name TEXT, isbn TEXT, title TEXT, qty TEXT, unit_price TEXT, channel TEXT);",
+        "INSERT INTO raw_orders VALUES ('IV-1001','2026-09-02',' ana@mail.test','Ana Sousa','978-0-01','The Lantern Keeper','1','£12.50','Web'),('IV-1001','2026-09-02','ana@mail.test','Ana Sousa','978-0-05','Gardens of Copper','1','£13.50','Web'),('IV-1002','03/09/2026','BEN@mail.test','Ben Okoro','978-0-03','A Quiet Harbour','2','9.99','shop'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things',' 1','£14.00','web'),('IV-1003','2026-09-15','chloe@mail.test','Chloe Park','978-0-07','Orbit of Small Things','1','£14.00','web'),('IV-1004','21/09/2026','dmitri@mail.test','Dmitri Volkov','978-0-09','The Cartographer''s Daughter','1','16','SHOP'),('IV-1005','2026-10-01','ana@mail.test','Ana Sousa','978-0-03','A Quiet Harbour','1','£9.99','web'),('IV-1006','05/10/2026','esme@mail.test','Esme Hart','978-0-01','The Lantern Keeper','3','12.50','Shop'),('IV-1007','2026-10-12','ben@mail.test ','Ben Okoro','978-0-10','Field Notes on Foxes','2','£7.00','web'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','13.5','shop'),('IV-1008','2026-10-19','farid@mail.test','Farid Nasser','978-0-05','Gardens of Copper','1','£13.50','shop'),('IV-1009','02/11/2026','Chloe@Mail.test','Chloe Park','978-0-12','Small Gods of the Kitchen','1','£11.50','WEB'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-07','Orbit of Small Things','2','14','web'),('IV-1010','2026-11-07','greta@mail.test','Greta Lund','978-0-01','The Lantern Keeper','1','£12.50','web'),('IV-1011','2026-11-20','dmitri@mail.test','Dmitri Volkov','978-0-12','Small Gods of the Kitchen','1','11.50','shop');"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT 'stg_orders' AS t, 'col ' || name || ' ' || upper(type) || ' ' || CASE WHEN pk > 0 THEN 'pk' || pk ELSE 'nn' || \"notnull\" END AS d FROM pragma_table_info('stg_orders') UNION ALL SELECT 'stg_orders', 'fk ' || \"from\" || ' -> ' || \"table\" || '.' || COALESCE(\"to\", '?') || ' ' || on_delete FROM pragma_foreign_key_list('stg_orders') UNION ALL SELECT 'stg_orders', 'unique ' || (SELECT group_concat(ii.name) FROM pragma_index_info(il.name) AS ii) FROM pragma_index_list('stg_orders') AS il WHERE il.\"unique\" = 1 AND il.origin <> 'pk' UNION ALL SELECT 'stg_orders', 'check ' || (instr(upper(sql), 'CHECK') > 0) FROM sqlite_master WHERE type = 'table' AND name = 'stg_orders' ORDER BY 1, 2",
+      "require": [
+        {
+          "pattern": "(?i)primary\\s+key\\s*\\(\\s*order_ref\\s*,\\s*isbn\\s*\\)",
+          "message": "Primary key on (order_ref, isbn)"
+        }
+      ],
+      "hints": [
+        "Three CHECK constraints: qty, unit_cents and channel.",
+        "The composite key goes on its own line: `PRIMARY KEY (order_ref, isbn)`."
+      ]
+    }
+  ]
+}

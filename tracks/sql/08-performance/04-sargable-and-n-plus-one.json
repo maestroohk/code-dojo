@@ -1,0 +1,241 @@
+{
+  "title": "SARGable queries and N+1",
+  "summary": "Write conditions the index can use, know when indexes cost more than they save, and stop asking the database the same question 500 times.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "SARGable: don't hide the column",
+      "body": [
+        "A condition is **SARGable** (Search ARGument-able) when the index can be used for it. Wrap the indexed column in a function or arithmetic and it isn't:",
+        "",
+        "```sql",
+        "-- can't use an index on started: substr() must run on every row",
+        "WHERE substr(started, 1, 7) = '2026-03'",
+        "WHERE strftime('%Y', started) = '2026'",
+        "WHERE minutes + 5 > 30",
+        "",
+        "-- can: the bare column compared to constants",
+        "WHERE started >= '2026-03-01' AND started < '2026-04-01'",
+        "WHERE started >= '2026-01-01' AND started < '2027-01-01'",
+        "WHERE minutes > 25",
+        "```",
+        "",
+        "Same idea elsewhere: `WHERE YEAR(order_date) = 2026` in SQL Server or MySQL, `WHERE LOWER(email) = ...` in PostgreSQL (unless you build an index on `LOWER(email)`, an *expression index*, which SQLite supports too).",
+        "",
+        "`LIKE 'Har%'` can use an index (a prefix is a range); `LIKE '%gate'` can't."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "SARGable or not (for an index on the column used)?",
+      "buckets": [
+        "SARGable",
+        "Not SARGable"
+      ],
+      "items": [
+        [
+          "`started >= '2026-03-01'`",
+          0
+        ],
+        [
+          "`date(started) = '2026-03-01'`",
+          1
+        ],
+        [
+          "`name LIKE 'Station 1%'`",
+          0
+        ],
+        [
+          "`name LIKE '%1'`",
+          1
+        ],
+        [
+          "`fare_cents / 100 > 5`",
+          1
+        ],
+        [
+          "`fare_cents > 500`",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Rewrite the March report",
+      "prompt": [
+        "This query is correct but can't use an index on `started`:",
+        "",
+        "```sql",
+        "SELECT station_id, COUNT(*) AS rides",
+        "FROM rides",
+        "WHERE substr(started, 1, 7) = '2026-03'",
+        "GROUP BY station_id;",
+        "```",
+        "",
+        "Rewrite it so the condition compares the bare `started` column with a range. Same results.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`)."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT station_id, COUNT(*) AS rides",
+        "FROM rides",
+        "WHERE started >= '2026-03-01' AND started < '2026-04-01'",
+        "GROUP BY station_id;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;"
+      ],
+      "check": "rows",
+      "require": [
+        {
+          "pattern": "(?i)started\\s*>=?",
+          "message": "Compares started with a lower bound"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "(?i)(substr|strftime|date|datetime)\\s*\\(\\s*started",
+          "message": "No function wrapped around started"
+        }
+      ],
+      "hints": [
+        "March is `started >= '2026-03-01' AND started < '2026-04-01'`.",
+        "Use `<` the 1st of April, not `<= '2026-03-31'`, which would miss rides after midnight on the 31st."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "When indexes hurt",
+      "body": [
+        "Indexes aren't free:",
+        "",
+        "- **Every write pays.** An INSERT into a table with 6 indexes updates 7 B-trees. Write-heavy tables (logs, events) want few indexes.",
+        "- **Space.** Indexes can outgrow the table.",
+        "- **Low selectivity.** An index on `plan` (`member`/`casual`) narrows nothing; scanning is often faster than jumping back and forth for half the table. The planner knows this, if statistics are fresh (`ANALYZE` in SQLite and PostgreSQL).",
+        "- **Redundant indexes.** `(rider_id)` is redundant next to `(rider_id, started)`: the composite serves both.",
+        "",
+        "Index for the queries you actually run, check the plan, and remove indexes nothing uses."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A table receives 5,000 inserts per second and is queried once a day by a batch report. It has 8 indexes. What's the best move?",
+      "options": [
+        "Drop most of the indexes; let the daily report scan or build what it needs",
+        "Add more indexes so the report is faster",
+        "Index every column to be safe",
+        "Indexes don't affect inserts"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "learn",
+      "title": "N+1 queries",
+      "body": [
+        "The dashboard code (C# with Entity Framework Core) looks innocent:",
+        "",
+        "```csharp",
+        "var rides = db.Rides.OrderByDescending(r => r.Started).Take(500).ToList();  // 1 query",
+        "foreach (var ride in rides)",
+        "    Console.WriteLine(ride.Station.Name);   // lazy loading: 1 query PER ride",
+        "```",
+        "",
+        "That's **1 + 500 queries**: one for the rides, then `SELECT name FROM stations WHERE id = ?` five hundred times. Each is fast; together, with a network round trip each, they're slow. This is the **N+1 problem**, and ORMs make it easy to write by accident.",
+        "",
+        "The fix is one query that brings everything back together, a **join**:",
+        "",
+        "```sql",
+        "SELECT r.id, r.started, s.name",
+        "FROM rides AS r JOIN stations AS s ON s.id = r.station_id",
+        "ORDER BY r.started DESC LIMIT 500;",
+        "```",
+        "",
+        "In EF Core that's `.Include(r => r.Station)` or a projection with `.Select(...)` (see the C# track's LINQ and EF Core lessons). Spot N+1 by logging SQL: the same statement repeated with different parameters."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "How many queries does this pseudo-code send to the database?",
+      "code": [
+        "SELECT 1 + COUNT(*) AS queries",
+        "FROM (SELECT id FROM stations WHERE district = 'Docklands');",
+        "-- the app runs:",
+        "--   stations = SELECT * FROM stations WHERE district = 'Docklands'",
+        "--   for each station: SELECT COUNT(*) FROM rides WHERE station_id = ?"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;"
+      ],
+      "answer": "11",
+      "explain": "One query for the list, then one per Docklands station: 1 + 10. A single `GROUP BY` query would do it in one."
+    },
+    {
+      "type": "code",
+      "title": "One query instead of eleven",
+      "prompt": [
+        "Replace the loop from the last question with **one** query: for each **Docklands** station return its **name** and number of **rides**, sorted by **name**.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`)."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT s.name, COUNT(r.id) AS rides",
+        "FROM stations AS s",
+        "LEFT JOIN rides AS r ON r.station_id = s.id",
+        "WHERE s.district = 'Docklands'",
+        "GROUP BY s.id, s.name",
+        "ORDER BY s.name;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;"
+      ],
+      "check": "ordered",
+      "hints": [
+        "Join stations to rides and GROUP BY station.",
+        "LEFT JOIN keeps a station with no rides (there aren't any here, but there will be)."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Latest rides, no N+1",
+      "prompt": [
+        "The dashboard's recent activity panel: return the **20 most recent** rides with **id**, **started** and the station **name**, newest first (ties broken by id, highest first). One query.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`)."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT r.id, r.started, s.name",
+        "FROM rides AS r",
+        "JOIN stations AS s ON s.id = r.station_id",
+        "ORDER BY r.started DESC, r.id DESC",
+        "LIMIT 20;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;"
+      ],
+      "check": "ordered",
+      "hints": [
+        "JOIN, ORDER BY started DESC with a tie-breaker, LIMIT 20."
+      ]
+    }
+  ]
+}

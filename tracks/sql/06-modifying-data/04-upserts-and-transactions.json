@@ -1,0 +1,324 @@
+{
+  "title": "Upserts and transactions",
+  "summary": "Insert-or-update in one statement, and make several changes succeed or fail together.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "UPSERT: insert, or update if it exists",
+      "body": [
+        "The overnight job writes each station's bike count. If the station already has a row, update it; otherwise insert one. Two statements and a check is clumsy and racy. **Upsert** does it in one:",
+        "",
+        "```sql",
+        "INSERT INTO station_counts (station, bikes, updated)",
+        "VALUES ('Harbour Gate', 3, '2026-11-12')",
+        "ON CONFLICT (station) DO UPDATE",
+        "  SET bikes = excluded.bikes,",
+        "      updated = excluded.updated;",
+        "```",
+        "",
+        "- `ON CONFLICT (station)` names the unique column that might clash.",
+        "- `excluded` is the row you *tried* to insert.",
+        "- `ON CONFLICT DO NOTHING` just skips duplicates.",
+        "",
+        "```text",
+        "SQLite 3.24+, PostgreSQL   INSERT ... ON CONFLICT (key) DO UPDATE SET ...",
+        "MySQL                      INSERT ... ON DUPLICATE KEY UPDATE bikes = VALUES(bikes)",
+        "SQL Server, PG 15+, Oracle MERGE INTO station_counts USING ... WHEN MATCHED THEN UPDATE",
+        "                           WHEN NOT MATCHED THEN INSERT ...",
+        "```"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this return?",
+      "code": [
+        "INSERT INTO station_counts (station, bikes, updated) VALUES ('Mill Bridge', 4, '2026-11-12')",
+        "ON CONFLICT (station) DO UPDATE SET bikes = station_counts.bikes + excluded.bikes;",
+        "SELECT bikes, updated FROM station_counts WHERE station = 'Mill Bridge';"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (name TEXT PRIMARY KEY, district TEXT, docks INTEGER);",
+        "INSERT INTO stations VALUES ('Harbour Gate','Docklands',20),('Lantern Square','Old Town',15),('Mill Bridge','Old Town',12),('Kestrel Point','Docklands',18),('University Row','Northside',25),('Fennel Park','Northside',10);",
+        "CREATE TABLE bikes (id TEXT PRIMARY KEY, model TEXT NOT NULL, station TEXT REFERENCES stations(name), status TEXT NOT NULL DEFAULT 'ok', km INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO bikes VALUES ('B03','Glide','Fennel Park','ok',1820),('B07','Glide','Harbour Gate','ok',2410),('B12','Glide','Lantern Square','ok',1990),('B15','Volt','Mill Bridge','ok',640),('B21','Volt','Kestrel Point','repair',880),('B30','Volt','University Row','ok',310),('B44','Glide',NULL,'repair',3050),('B52','Volt','Harbour Gate','ok',120);",
+        "CREATE TABLE repairs (id INTEGER PRIMARY KEY, bike_id TEXT REFERENCES bikes(id), reported TEXT, issue TEXT, fixed INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO repairs VALUES (1,'B21','2026-11-01','flat tyre',0),(2,'B44','2026-10-20','cracked frame',0),(3,'B07','2026-10-02','brake squeal',1),(4,'B03','2026-09-15','chain',1);",
+        "CREATE TABLE incoming (id TEXT PRIMARY KEY, model TEXT);",
+        "INSERT INTO incoming VALUES ('B60','Volt'),('B61','Volt'),('B62','Glide');",
+        "CREATE TABLE station_counts (station TEXT PRIMARY KEY, bikes INTEGER NOT NULL, updated TEXT);",
+        "INSERT INTO station_counts VALUES ('Harbour Gate',2,'2026-11-01'),('Lantern Square',1,'2026-11-01'),('Mill Bridge',1,'2026-11-01');",
+        "CREATE TABLE accounts (rider TEXT PRIMARY KEY, credit INTEGER NOT NULL CHECK (credit >= 0));",
+        "INSERT INTO accounts VALUES ('ana',500),('ben',120),('mina',0);"
+      ],
+      "answer": "5 | 2026-11-01",
+      "explain": "Mill Bridge existed with 1 bike, so the UPDATE branch ran: 1 + 4. Only `bikes` was in the SET, so `updated` kept its old value."
+    },
+    {
+      "type": "code",
+      "title": "Nightly counts",
+      "prompt": [
+        "        Recount the bikes with status `ok` at every station and write the result into `station_counts` with **updated = '2026-11-12'**. Existing stations are updated; stations with no row yet are inserted. Stations with no `ok` bikes are left alone.",
+        "",
+        "        Use one `INSERT ... SELECT ... ON CONFLICT`.",
+        "",
+        "        Tables:",
+        "- `stations(name, district, docks)`",
+        "- `bikes(id, model, station, status, km)`: `status` defaults to `'ok'` and `km` to `0`; `station` is NULL for a bike in the depot",
+        "- `repairs(id, bike_id, reported, issue, fixed)`: `id` is assigned automatically; `fixed` defaults to `0`",
+        "- `incoming(id, model)`: new bikes delivered to the depot",
+        "- `station_counts(station, bikes, updated)`: `station` is the primary key",
+        "- `accounts(rider, credit)`: credit in cents, with `CHECK (credit >= 0)`"
+      ],
+      "starter": "-- Write your upsert below",
+      "solution": [
+        "INSERT INTO station_counts (station, bikes, updated)",
+        "SELECT station, COUNT(*), '2026-11-12'",
+        "FROM bikes",
+        "WHERE status = 'ok' AND station IS NOT NULL",
+        "GROUP BY station",
+        "ON CONFLICT (station) DO UPDATE",
+        "  SET bikes = excluded.bikes, updated = excluded.updated;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (name TEXT PRIMARY KEY, district TEXT, docks INTEGER);",
+        "INSERT INTO stations VALUES ('Harbour Gate','Docklands',20),('Lantern Square','Old Town',15),('Mill Bridge','Old Town',12),('Kestrel Point','Docklands',18),('University Row','Northside',25),('Fennel Park','Northside',10);",
+        "CREATE TABLE bikes (id TEXT PRIMARY KEY, model TEXT NOT NULL, station TEXT REFERENCES stations(name), status TEXT NOT NULL DEFAULT 'ok', km INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO bikes VALUES ('B03','Glide','Fennel Park','ok',1820),('B07','Glide','Harbour Gate','ok',2410),('B12','Glide','Lantern Square','ok',1990),('B15','Volt','Mill Bridge','ok',640),('B21','Volt','Kestrel Point','repair',880),('B30','Volt','University Row','ok',310),('B44','Glide',NULL,'repair',3050),('B52','Volt','Harbour Gate','ok',120);",
+        "CREATE TABLE repairs (id INTEGER PRIMARY KEY, bike_id TEXT REFERENCES bikes(id), reported TEXT, issue TEXT, fixed INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO repairs VALUES (1,'B21','2026-11-01','flat tyre',0),(2,'B44','2026-10-20','cracked frame',0),(3,'B07','2026-10-02','brake squeal',1),(4,'B03','2026-09-15','chain',1);",
+        "CREATE TABLE incoming (id TEXT PRIMARY KEY, model TEXT);",
+        "INSERT INTO incoming VALUES ('B60','Volt'),('B61','Volt'),('B62','Glide');",
+        "CREATE TABLE station_counts (station TEXT PRIMARY KEY, bikes INTEGER NOT NULL, updated TEXT);",
+        "INSERT INTO station_counts VALUES ('Harbour Gate',2,'2026-11-01'),('Lantern Square',1,'2026-11-01'),('Mill Bridge',1,'2026-11-01');",
+        "CREATE TABLE accounts (rider TEXT PRIMARY KEY, credit INTEGER NOT NULL CHECK (credit >= 0));",
+        "INSERT INTO accounts VALUES ('ana',500),('ben',120),('mina',0);"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT station, bikes, updated FROM station_counts ORDER BY station",
+      "require": [
+        {
+          "pattern": "(?i)on\\s+conflict",
+          "message": "Uses ON CONFLICT"
+        }
+      ],
+      "hints": [
+        "The SELECT is a GROUP BY station count.",
+        "SQLite needs a WHERE in an INSERT ... SELECT before ON CONFLICT, to avoid a parsing ambiguity. You have one already."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the upsert that skips riders who already exist.",
+      "code": [
+        "INSERT INTO accounts (rider, credit) VALUES ('ben', 0)",
+        "ON __1__ (rider) DO __2__;"
+      ],
+      "blanks": [
+        "CONFLICT",
+        "NOTHING"
+      ],
+      "bank": [
+        "DUPLICATE",
+        "UPDATE",
+        "IGNORE",
+        "SKIP"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Transactions: all or nothing",
+      "body": [
+        "Ana gifts Mina 200 cents of ride credit. That's **two** updates:",
+        "",
+        "```sql",
+        "BEGIN;",
+        "UPDATE accounts SET credit = credit - 200 WHERE rider = 'ana';",
+        "UPDATE accounts SET credit = credit + 200 WHERE rider = 'mina';",
+        "COMMIT;",
+        "```",
+        "",
+        "If the server dies between them, money has vanished. A **transaction** makes the group **atomic**: either every statement takes effect (`COMMIT`) or none does (`ROLLBACK`).",
+        "",
+        "Transactions give the **ACID** guarantees:",
+        "- **Atomic**: all or nothing.",
+        "- **Consistent**: constraints hold at the end.",
+        "- **Isolated**: other connections don't see your half-finished work.",
+        "- **Durable**: once committed, it survives a crash.",
+        "",
+        "SQL Server writes `BEGIN TRANSACTION`; PostgreSQL accepts `BEGIN` or `START TRANSACTION`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this return?",
+      "code": [
+        "BEGIN;",
+        "UPDATE accounts SET credit = 0;",
+        "ROLLBACK;",
+        "SELECT rider, credit FROM accounts ORDER BY rider;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (name TEXT PRIMARY KEY, district TEXT, docks INTEGER);",
+        "INSERT INTO stations VALUES ('Harbour Gate','Docklands',20),('Lantern Square','Old Town',15),('Mill Bridge','Old Town',12),('Kestrel Point','Docklands',18),('University Row','Northside',25),('Fennel Park','Northside',10);",
+        "CREATE TABLE bikes (id TEXT PRIMARY KEY, model TEXT NOT NULL, station TEXT REFERENCES stations(name), status TEXT NOT NULL DEFAULT 'ok', km INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO bikes VALUES ('B03','Glide','Fennel Park','ok',1820),('B07','Glide','Harbour Gate','ok',2410),('B12','Glide','Lantern Square','ok',1990),('B15','Volt','Mill Bridge','ok',640),('B21','Volt','Kestrel Point','repair',880),('B30','Volt','University Row','ok',310),('B44','Glide',NULL,'repair',3050),('B52','Volt','Harbour Gate','ok',120);",
+        "CREATE TABLE repairs (id INTEGER PRIMARY KEY, bike_id TEXT REFERENCES bikes(id), reported TEXT, issue TEXT, fixed INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO repairs VALUES (1,'B21','2026-11-01','flat tyre',0),(2,'B44','2026-10-20','cracked frame',0),(3,'B07','2026-10-02','brake squeal',1),(4,'B03','2026-09-15','chain',1);",
+        "CREATE TABLE incoming (id TEXT PRIMARY KEY, model TEXT);",
+        "INSERT INTO incoming VALUES ('B60','Volt'),('B61','Volt'),('B62','Glide');",
+        "CREATE TABLE station_counts (station TEXT PRIMARY KEY, bikes INTEGER NOT NULL, updated TEXT);",
+        "INSERT INTO station_counts VALUES ('Harbour Gate',2,'2026-11-01'),('Lantern Square',1,'2026-11-01'),('Mill Bridge',1,'2026-11-01');",
+        "CREATE TABLE accounts (rider TEXT PRIMARY KEY, credit INTEGER NOT NULL CHECK (credit >= 0));",
+        "INSERT INTO accounts VALUES ('ana',500),('ben',120),('mina',0);"
+      ],
+      "answer": [
+        "ana | 500",
+        "ben | 120",
+        "mina | 0"
+      ],
+      "explain": "ROLLBACK threw the UPDATE away. Every balance is untouched."
+    },
+    {
+      "type": "code",
+      "title": "A safe transfer",
+      "prompt": [
+        "        Move **100** cents of credit from **ben** to **mina**, as **one transaction**: `BEGIN`, two UPDATEs, `COMMIT`.",
+        "",
+        "        Tables:",
+        "- `stations(name, district, docks)`",
+        "- `bikes(id, model, station, status, km)`: `status` defaults to `'ok'` and `km` to `0`; `station` is NULL for a bike in the depot",
+        "- `repairs(id, bike_id, reported, issue, fixed)`: `id` is assigned automatically; `fixed` defaults to `0`",
+        "- `incoming(id, model)`: new bikes delivered to the depot",
+        "- `station_counts(station, bikes, updated)`: `station` is the primary key",
+        "- `accounts(rider, credit)`: credit in cents, with `CHECK (credit >= 0)`"
+      ],
+      "starter": "-- Write your transaction below",
+      "solution": [
+        "BEGIN;",
+        "UPDATE accounts SET credit = credit - 100 WHERE rider = 'ben';",
+        "UPDATE accounts SET credit = credit + 100 WHERE rider = 'mina';",
+        "COMMIT;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (name TEXT PRIMARY KEY, district TEXT, docks INTEGER);",
+        "INSERT INTO stations VALUES ('Harbour Gate','Docklands',20),('Lantern Square','Old Town',15),('Mill Bridge','Old Town',12),('Kestrel Point','Docklands',18),('University Row','Northside',25),('Fennel Park','Northside',10);",
+        "CREATE TABLE bikes (id TEXT PRIMARY KEY, model TEXT NOT NULL, station TEXT REFERENCES stations(name), status TEXT NOT NULL DEFAULT 'ok', km INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO bikes VALUES ('B03','Glide','Fennel Park','ok',1820),('B07','Glide','Harbour Gate','ok',2410),('B12','Glide','Lantern Square','ok',1990),('B15','Volt','Mill Bridge','ok',640),('B21','Volt','Kestrel Point','repair',880),('B30','Volt','University Row','ok',310),('B44','Glide',NULL,'repair',3050),('B52','Volt','Harbour Gate','ok',120);",
+        "CREATE TABLE repairs (id INTEGER PRIMARY KEY, bike_id TEXT REFERENCES bikes(id), reported TEXT, issue TEXT, fixed INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO repairs VALUES (1,'B21','2026-11-01','flat tyre',0),(2,'B44','2026-10-20','cracked frame',0),(3,'B07','2026-10-02','brake squeal',1),(4,'B03','2026-09-15','chain',1);",
+        "CREATE TABLE incoming (id TEXT PRIMARY KEY, model TEXT);",
+        "INSERT INTO incoming VALUES ('B60','Volt'),('B61','Volt'),('B62','Glide');",
+        "CREATE TABLE station_counts (station TEXT PRIMARY KEY, bikes INTEGER NOT NULL, updated TEXT);",
+        "INSERT INTO station_counts VALUES ('Harbour Gate',2,'2026-11-01'),('Lantern Square',1,'2026-11-01'),('Mill Bridge',1,'2026-11-01');",
+        "CREATE TABLE accounts (rider TEXT PRIMARY KEY, credit INTEGER NOT NULL CHECK (credit >= 0));",
+        "INSERT INTO accounts VALUES ('ana',500),('ben',120),('mina',0);"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT rider, credit FROM accounts ORDER BY rider",
+      "require": [
+        {
+          "pattern": "(?i)\\bbegin\\b",
+          "message": "Starts a transaction"
+        },
+        {
+          "pattern": "(?i)\\bcommit\\b",
+          "message": "Commits it"
+        }
+      ],
+      "hints": [
+        "`BEGIN;` ... two UPDATEs ... `COMMIT;`"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Mina has 0 credit. Inside a transaction you run `UPDATE accounts SET credit = credit - 50 WHERE rider = 'mina';` and it fails the `CHECK (credit >= 0)`. What should the application do?",
+      "options": [
+        "ROLLBACK, so the transaction's earlier statements are undone too",
+        "COMMIT anyway; the failed statement simply didn't happen",
+        "Retry the same statement until it succeeds",
+        "Nothing: failed statements end the transaction automatically in every database"
+      ],
+      "answer": 0,
+      "explain": "In SQLite and SQL Server a failed statement is undone but the transaction stays open, so committing would keep the *other* half of a transfer. PostgreSQL marks the whole transaction failed and only accepts ROLLBACK. Either way: roll back."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each letter of ACID to its promise.",
+      "pairs": [
+        [
+          "Atomic",
+          "every statement in the transaction applies, or none does"
+        ],
+        [
+          "Consistent",
+          "constraints are true when it commits"
+        ],
+        [
+          "Isolated",
+          "others don't see half-finished changes"
+        ],
+        [
+          "Durable",
+          "committed data survives a crash"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Storm credit",
+      "prompt": [
+        "        The storm closed the network for a day, so every rider gets **150** cents of credit, and the station counts are reset to **0** with **updated = '2026-11-13'**, **both in one transaction**.",
+        "",
+        "        Tables:",
+        "- `stations(name, district, docks)`",
+        "- `bikes(id, model, station, status, km)`: `status` defaults to `'ok'` and `km` to `0`; `station` is NULL for a bike in the depot",
+        "- `repairs(id, bike_id, reported, issue, fixed)`: `id` is assigned automatically; `fixed` defaults to `0`",
+        "- `incoming(id, model)`: new bikes delivered to the depot",
+        "- `station_counts(station, bikes, updated)`: `station` is the primary key",
+        "- `accounts(rider, credit)`: credit in cents, with `CHECK (credit >= 0)`"
+      ],
+      "starter": "-- Write your transaction below",
+      "solution": [
+        "BEGIN;",
+        "UPDATE accounts SET credit = credit + 150;",
+        "UPDATE station_counts SET bikes = 0, updated = '2026-11-13';",
+        "COMMIT;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (name TEXT PRIMARY KEY, district TEXT, docks INTEGER);",
+        "INSERT INTO stations VALUES ('Harbour Gate','Docklands',20),('Lantern Square','Old Town',15),('Mill Bridge','Old Town',12),('Kestrel Point','Docklands',18),('University Row','Northside',25),('Fennel Park','Northside',10);",
+        "CREATE TABLE bikes (id TEXT PRIMARY KEY, model TEXT NOT NULL, station TEXT REFERENCES stations(name), status TEXT NOT NULL DEFAULT 'ok', km INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO bikes VALUES ('B03','Glide','Fennel Park','ok',1820),('B07','Glide','Harbour Gate','ok',2410),('B12','Glide','Lantern Square','ok',1990),('B15','Volt','Mill Bridge','ok',640),('B21','Volt','Kestrel Point','repair',880),('B30','Volt','University Row','ok',310),('B44','Glide',NULL,'repair',3050),('B52','Volt','Harbour Gate','ok',120);",
+        "CREATE TABLE repairs (id INTEGER PRIMARY KEY, bike_id TEXT REFERENCES bikes(id), reported TEXT, issue TEXT, fixed INTEGER NOT NULL DEFAULT 0);",
+        "INSERT INTO repairs VALUES (1,'B21','2026-11-01','flat tyre',0),(2,'B44','2026-10-20','cracked frame',0),(3,'B07','2026-10-02','brake squeal',1),(4,'B03','2026-09-15','chain',1);",
+        "CREATE TABLE incoming (id TEXT PRIMARY KEY, model TEXT);",
+        "INSERT INTO incoming VALUES ('B60','Volt'),('B61','Volt'),('B62','Glide');",
+        "CREATE TABLE station_counts (station TEXT PRIMARY KEY, bikes INTEGER NOT NULL, updated TEXT);",
+        "INSERT INTO station_counts VALUES ('Harbour Gate',2,'2026-11-01'),('Lantern Square',1,'2026-11-01'),('Mill Bridge',1,'2026-11-01');",
+        "CREATE TABLE accounts (rider TEXT PRIMARY KEY, credit INTEGER NOT NULL CHECK (credit >= 0));",
+        "INSERT INTO accounts VALUES ('ana',500),('ben',120),('mina',0);"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT rider, credit FROM accounts UNION ALL SELECT station || ' ' || updated, bikes FROM station_counts ORDER BY 1",
+      "require": [
+        {
+          "pattern": "(?i)\\bbegin\\b",
+          "message": "Starts a transaction"
+        },
+        {
+          "pattern": "(?i)\\bcommit\\b",
+          "message": "Commits it"
+        }
+      ],
+      "hints": [
+        "Both UPDATEs have no WHERE on purpose: they apply to every row."
+      ]
+    }
+  ]
+}

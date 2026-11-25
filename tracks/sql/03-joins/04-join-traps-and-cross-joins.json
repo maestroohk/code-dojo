@@ -1,0 +1,304 @@
+{
+  "title": "Join traps and cross joins",
+  "summary": "Why totals double, how to stop it, and when every-row-with-every-row is what you want.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The row-explosion trap",
+      "body": [
+        "Appointment 1 has **two** prescriptions and **one** invoice of 120. Join all three:",
+        "",
+        "```sql",
+        "SELECT a.id, pr.drug, i.amount",
+        "FROM appointments AS a",
+        "JOIN prescriptions AS pr ON pr.appointment_id = a.id",
+        "JOIN invoices AS i ON i.appointment_id = a.id",
+        "WHERE a.id = 1;",
+        "```",
+        "",
+        "```text",
+        "1  Atenolol  120",
+        "1  Aspirin   120      <- the invoice appears twice",
+        "```",
+        "",
+        "Joining a row to *many* rows copies it. Now `SUM(i.amount)` says 240, and the finance team says you're wrong.",
+        "",
+        "The fixes:",
+        "- **Aggregate before joining**: total each child table in a subquery, then join the totals (one row each).",
+        "- **COUNT(DISTINCT ...)** for counts (it can't fix sums: two different 120s would merge)."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this return?",
+      "code": [
+        "SELECT COUNT(*), SUM(i.amount)",
+        "FROM invoices AS i",
+        "JOIN prescriptions AS pr ON pr.appointment_id = i.appointment_id;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE wards (id INTEGER PRIMARY KEY, name TEXT, floor INTEGER);",
+        "INSERT INTO wards VALUES (1,'Ash',1),(2,'Birch',2),(3,'Cedar',3),(4,'Juniper',4),(5,'Larch',5);",
+        "CREATE TABLE doctors (id INTEGER PRIMARY KEY, name TEXT, specialty TEXT, ward_id INTEGER REFERENCES wards(id), mentor_id INTEGER REFERENCES doctors(id));",
+        "INSERT INTO doctors VALUES (1,'Dr. Imani Cole','Cardiology',1,NULL),(2,'Dr. Hugo Barre','Cardiology',1,1),(3,'Dr. Sana Iqbal','Paediatrics',2,NULL),(4,'Dr. Lev Moreau','Paediatrics',2,3),(5,'Dr. Ruth Adeyemi','Neurology',3,1),(6,'Dr. Felix Haag','Neurology',3,5),(7,'Dr. Nora Velasquez','General',NULL,1),(8,'Dr. Owen Pryce','General',4,7);",
+        "CREATE TABLE patients (id INTEGER PRIMARY KEY, name TEXT, born INTEGER, ward_id INTEGER REFERENCES wards(id));",
+        "INSERT INTO patients VALUES (1,'Ada Moss',1958,1),(2,'Bilal Haddad',2016,2),(3,'Cora Lind',1990,NULL),(4,'Dev Patel',1975,3),(5,'Elsie Grant',2019,2),(6,'Finn O''Hara',1949,1),(7,'Gemma Rossi',1983,NULL),(8,'Hamid Sefa',2001,3);",
+        "CREATE TABLE appointments (id INTEGER PRIMARY KEY, patient_id INTEGER REFERENCES patients(id), doctor_id INTEGER REFERENCES doctors(id), day TEXT, status TEXT);",
+        "INSERT INTO appointments VALUES (1,1,1,'2026-07-01','done'),(2,2,3,'2026-07-01','done'),(3,3,7,'2026-07-01','done'),(4,4,5,'2026-07-02','done'),(5,1,2,'2026-07-02','cancelled'),(6,5,4,'2026-07-02','done'),(7,6,1,'2026-07-03','done'),(8,8,6,'2026-07-03','done'),(9,2,3,'2026-07-03','booked'),(10,4,5,'2026-07-04','booked'),(11,6,2,'2026-07-04','done');",
+        "CREATE TABLE prescriptions (id INTEGER PRIMARY KEY, appointment_id INTEGER REFERENCES appointments(id), drug TEXT, dose_mg INTEGER);",
+        "INSERT INTO prescriptions VALUES (1,1,'Atenolol',50),(2,1,'Aspirin',75),(3,2,'Amoxicillin',250),(4,4,'Levetiracetam',500),(5,6,'Paracetamol',120),(6,7,'Atenolol',25),(7,7,'Warfarin',5),(8,8,'Levetiracetam',250),(9,11,'Aspirin',75);",
+        "CREATE TABLE invoices (appointment_id INTEGER PRIMARY KEY REFERENCES appointments(id), amount INTEGER);",
+        "INSERT INTO invoices VALUES (1,120),(2,80),(3,60),(4,150),(6,80),(7,120),(8,150),(11,90);"
+      ],
+      "answer": "9 | 1030",
+      "explain": "7 invoices have a prescription, but appointments 1 and 7 have two each, so their 120 invoices appear twice: 9 rows, and a total 240 higher than the true 790."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the doctor report",
+      "prompt": [
+        "        This report should show each doctor's **name**, number of **appointments**, and number of **prescriptions**, but the appointment counts are inflated by the join to prescriptions.",
+        "",
+        "        Fix it. Only doctors with at least one appointment are needed.",
+        "",
+        "        Tables:",
+        "- `wards(id, name, floor)`",
+        "- `doctors(id, name, specialty, ward_id, mentor_id)`: `ward_id` is NULL for a doctor without a ward; `mentor_id` points at another doctor",
+        "- `patients(id, name, born, ward_id)`: `ward_id` is NULL for outpatients",
+        "- `appointments(id, patient_id, doctor_id, day, status)`: status is `done`, `cancelled` or `booked`",
+        "- `prescriptions(id, appointment_id, drug, dose_mg)`",
+        "- `invoices(appointment_id, amount)`: one per completed appointment"
+      ],
+      "starter": [
+        "SELECT d.name, COUNT(a.id) AS appointments, COUNT(pr.id) AS prescriptions",
+        "FROM doctors AS d",
+        "JOIN appointments AS a ON a.doctor_id = d.id",
+        "LEFT JOIN prescriptions AS pr ON pr.appointment_id = a.id",
+        "GROUP BY d.id, d.name;"
+      ],
+      "solution": [
+        "SELECT d.name, COUNT(DISTINCT a.id) AS appointments, COUNT(pr.id) AS prescriptions",
+        "FROM doctors AS d",
+        "JOIN appointments AS a ON a.doctor_id = d.id",
+        "LEFT JOIN prescriptions AS pr ON pr.appointment_id = a.id",
+        "GROUP BY d.id, d.name;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE wards (id INTEGER PRIMARY KEY, name TEXT, floor INTEGER);",
+        "INSERT INTO wards VALUES (1,'Ash',1),(2,'Birch',2),(3,'Cedar',3),(4,'Juniper',4),(5,'Larch',5);",
+        "CREATE TABLE doctors (id INTEGER PRIMARY KEY, name TEXT, specialty TEXT, ward_id INTEGER REFERENCES wards(id), mentor_id INTEGER REFERENCES doctors(id));",
+        "INSERT INTO doctors VALUES (1,'Dr. Imani Cole','Cardiology',1,NULL),(2,'Dr. Hugo Barre','Cardiology',1,1),(3,'Dr. Sana Iqbal','Paediatrics',2,NULL),(4,'Dr. Lev Moreau','Paediatrics',2,3),(5,'Dr. Ruth Adeyemi','Neurology',3,1),(6,'Dr. Felix Haag','Neurology',3,5),(7,'Dr. Nora Velasquez','General',NULL,1),(8,'Dr. Owen Pryce','General',4,7);",
+        "CREATE TABLE patients (id INTEGER PRIMARY KEY, name TEXT, born INTEGER, ward_id INTEGER REFERENCES wards(id));",
+        "INSERT INTO patients VALUES (1,'Ada Moss',1958,1),(2,'Bilal Haddad',2016,2),(3,'Cora Lind',1990,NULL),(4,'Dev Patel',1975,3),(5,'Elsie Grant',2019,2),(6,'Finn O''Hara',1949,1),(7,'Gemma Rossi',1983,NULL),(8,'Hamid Sefa',2001,3);",
+        "CREATE TABLE appointments (id INTEGER PRIMARY KEY, patient_id INTEGER REFERENCES patients(id), doctor_id INTEGER REFERENCES doctors(id), day TEXT, status TEXT);",
+        "INSERT INTO appointments VALUES (1,1,1,'2026-07-01','done'),(2,2,3,'2026-07-01','done'),(3,3,7,'2026-07-01','done'),(4,4,5,'2026-07-02','done'),(5,1,2,'2026-07-02','cancelled'),(6,5,4,'2026-07-02','done'),(7,6,1,'2026-07-03','done'),(8,8,6,'2026-07-03','done'),(9,2,3,'2026-07-03','booked'),(10,4,5,'2026-07-04','booked'),(11,6,2,'2026-07-04','done');",
+        "CREATE TABLE prescriptions (id INTEGER PRIMARY KEY, appointment_id INTEGER REFERENCES appointments(id), drug TEXT, dose_mg INTEGER);",
+        "INSERT INTO prescriptions VALUES (1,1,'Atenolol',50),(2,1,'Aspirin',75),(3,2,'Amoxicillin',250),(4,4,'Levetiracetam',500),(5,6,'Paracetamol',120),(6,7,'Atenolol',25),(7,7,'Warfarin',5),(8,8,'Levetiracetam',250),(9,11,'Aspirin',75);",
+        "CREATE TABLE invoices (appointment_id INTEGER PRIMARY KEY REFERENCES appointments(id), amount INTEGER);",
+        "INSERT INTO invoices VALUES (1,120),(2,80),(3,60),(4,150),(6,80),(7,120),(8,150),(11,90);"
+      ],
+      "check": "rows",
+      "hints": [
+        "An appointment with two prescriptions appears on two rows.",
+        "`COUNT(DISTINCT a.id)` counts each appointment once."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Aggregate first, then join",
+      "body": [
+        "For sums, pre-aggregate each child table so it has **one row per key**, then join:",
+        "",
+        "```sql",
+        "SELECT a.doctor_id, SUM(i.amount) AS billed, SUM(rx.n) AS prescriptions",
+        "FROM appointments AS a",
+        "JOIN invoices AS i ON i.appointment_id = a.id",
+        "LEFT JOIN (SELECT appointment_id, COUNT(*) AS n",
+        "           FROM prescriptions",
+        "           GROUP BY appointment_id) AS rx",
+        "       ON rx.appointment_id = a.id",
+        "GROUP BY a.doctor_id;",
+        "```",
+        "",
+        "The subquery in `FROM` (a **derived table**) collapses prescriptions to one row per appointment, so nothing gets copied. You'll write a lot more of these in the next module."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Billing that adds up",
+      "prompt": [
+        "        Return each **specialty** with its correct invoiced **revenue** and its number of **prescriptions**. Make sure revenue is not inflated by appointments that have several prescriptions.",
+        "",
+        "        (Correct revenue: Cardiology 330, Neurology 300, Paediatrics 160, General 60.)",
+        "",
+        "        Tables:",
+        "- `wards(id, name, floor)`",
+        "- `doctors(id, name, specialty, ward_id, mentor_id)`: `ward_id` is NULL for a doctor without a ward; `mentor_id` points at another doctor",
+        "- `patients(id, name, born, ward_id)`: `ward_id` is NULL for outpatients",
+        "- `appointments(id, patient_id, doctor_id, day, status)`: status is `done`, `cancelled` or `booked`",
+        "- `prescriptions(id, appointment_id, drug, dose_mg)`",
+        "- `invoices(appointment_id, amount)`: one per completed appointment"
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT d.specialty, SUM(i.amount) AS revenue, COALESCE(SUM(rx.n), 0) AS prescriptions",
+        "FROM invoices AS i",
+        "JOIN appointments AS a ON a.id = i.appointment_id",
+        "JOIN doctors AS d ON d.id = a.doctor_id",
+        "LEFT JOIN (SELECT appointment_id, COUNT(*) AS n FROM prescriptions GROUP BY appointment_id) AS rx",
+        "  ON rx.appointment_id = a.id",
+        "GROUP BY d.specialty;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE wards (id INTEGER PRIMARY KEY, name TEXT, floor INTEGER);",
+        "INSERT INTO wards VALUES (1,'Ash',1),(2,'Birch',2),(3,'Cedar',3),(4,'Juniper',4),(5,'Larch',5);",
+        "CREATE TABLE doctors (id INTEGER PRIMARY KEY, name TEXT, specialty TEXT, ward_id INTEGER REFERENCES wards(id), mentor_id INTEGER REFERENCES doctors(id));",
+        "INSERT INTO doctors VALUES (1,'Dr. Imani Cole','Cardiology',1,NULL),(2,'Dr. Hugo Barre','Cardiology',1,1),(3,'Dr. Sana Iqbal','Paediatrics',2,NULL),(4,'Dr. Lev Moreau','Paediatrics',2,3),(5,'Dr. Ruth Adeyemi','Neurology',3,1),(6,'Dr. Felix Haag','Neurology',3,5),(7,'Dr. Nora Velasquez','General',NULL,1),(8,'Dr. Owen Pryce','General',4,7);",
+        "CREATE TABLE patients (id INTEGER PRIMARY KEY, name TEXT, born INTEGER, ward_id INTEGER REFERENCES wards(id));",
+        "INSERT INTO patients VALUES (1,'Ada Moss',1958,1),(2,'Bilal Haddad',2016,2),(3,'Cora Lind',1990,NULL),(4,'Dev Patel',1975,3),(5,'Elsie Grant',2019,2),(6,'Finn O''Hara',1949,1),(7,'Gemma Rossi',1983,NULL),(8,'Hamid Sefa',2001,3);",
+        "CREATE TABLE appointments (id INTEGER PRIMARY KEY, patient_id INTEGER REFERENCES patients(id), doctor_id INTEGER REFERENCES doctors(id), day TEXT, status TEXT);",
+        "INSERT INTO appointments VALUES (1,1,1,'2026-07-01','done'),(2,2,3,'2026-07-01','done'),(3,3,7,'2026-07-01','done'),(4,4,5,'2026-07-02','done'),(5,1,2,'2026-07-02','cancelled'),(6,5,4,'2026-07-02','done'),(7,6,1,'2026-07-03','done'),(8,8,6,'2026-07-03','done'),(9,2,3,'2026-07-03','booked'),(10,4,5,'2026-07-04','booked'),(11,6,2,'2026-07-04','done');",
+        "CREATE TABLE prescriptions (id INTEGER PRIMARY KEY, appointment_id INTEGER REFERENCES appointments(id), drug TEXT, dose_mg INTEGER);",
+        "INSERT INTO prescriptions VALUES (1,1,'Atenolol',50),(2,1,'Aspirin',75),(3,2,'Amoxicillin',250),(4,4,'Levetiracetam',500),(5,6,'Paracetamol',120),(6,7,'Atenolol',25),(7,7,'Warfarin',5),(8,8,'Levetiracetam',250),(9,11,'Aspirin',75);",
+        "CREATE TABLE invoices (appointment_id INTEGER PRIMARY KEY REFERENCES appointments(id), amount INTEGER);",
+        "INSERT INTO invoices VALUES (1,120),(2,80),(3,60),(4,150),(6,80),(7,120),(8,150),(11,90);"
+      ],
+      "check": "rows",
+      "hints": [
+        "Collapse prescriptions to one row per appointment in a subquery first.",
+        "LEFT JOIN that subquery so appointments without prescriptions keep their invoice."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "CROSS JOIN: every combination",
+      "body": [
+        "`CROSS JOIN` pairs **every** row of one table with **every** row of the other. 3 days × 8 doctors = 24 rows. It has no ON.",
+        "",
+        "That sounds useless, until you need a **grid**: every doctor for every day, including the days they saw nobody.",
+        "",
+        "```sql",
+        "SELECT d.name, c.day, COUNT(a.id) AS seen",
+        "FROM doctors AS d",
+        "CROSS JOIN clinic_days AS c",
+        "LEFT JOIN appointments AS a ON a.doctor_id = d.id AND a.day = c.day",
+        "GROUP BY d.name, c.day;",
+        "```",
+        "",
+        "Without the cross join, a doctor with no appointments on a day has no row for it, and a chart shows a gap instead of a zero.",
+        "",
+        "> **Watch out:** `FROM a, b` with a forgotten WHERE is an *accidental* cross join. On two big tables it's billions of rows."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this return?",
+      "code": [
+        "SELECT COUNT(*)",
+        "FROM wards",
+        "CROSS JOIN clinic_days;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE wards (id INTEGER PRIMARY KEY, name TEXT, floor INTEGER);",
+        "INSERT INTO wards VALUES (1,'Ash',1),(2,'Birch',2),(3,'Cedar',3),(4,'Juniper',4),(5,'Larch',5);",
+        "CREATE TABLE doctors (id INTEGER PRIMARY KEY, name TEXT, specialty TEXT, ward_id INTEGER REFERENCES wards(id), mentor_id INTEGER REFERENCES doctors(id));",
+        "INSERT INTO doctors VALUES (1,'Dr. Imani Cole','Cardiology',1,NULL),(2,'Dr. Hugo Barre','Cardiology',1,1),(3,'Dr. Sana Iqbal','Paediatrics',2,NULL),(4,'Dr. Lev Moreau','Paediatrics',2,3),(5,'Dr. Ruth Adeyemi','Neurology',3,1),(6,'Dr. Felix Haag','Neurology',3,5),(7,'Dr. Nora Velasquez','General',NULL,1),(8,'Dr. Owen Pryce','General',4,7);",
+        "CREATE TABLE patients (id INTEGER PRIMARY KEY, name TEXT, born INTEGER, ward_id INTEGER REFERENCES wards(id));",
+        "INSERT INTO patients VALUES (1,'Ada Moss',1958,1),(2,'Bilal Haddad',2016,2),(3,'Cora Lind',1990,NULL),(4,'Dev Patel',1975,3),(5,'Elsie Grant',2019,2),(6,'Finn O''Hara',1949,1),(7,'Gemma Rossi',1983,NULL),(8,'Hamid Sefa',2001,3);",
+        "CREATE TABLE appointments (id INTEGER PRIMARY KEY, patient_id INTEGER REFERENCES patients(id), doctor_id INTEGER REFERENCES doctors(id), day TEXT, status TEXT);",
+        "INSERT INTO appointments VALUES (1,1,1,'2026-07-01','done'),(2,2,3,'2026-07-01','done'),(3,3,7,'2026-07-01','done'),(4,4,5,'2026-07-02','done'),(5,1,2,'2026-07-02','cancelled'),(6,5,4,'2026-07-02','done'),(7,6,1,'2026-07-03','done'),(8,8,6,'2026-07-03','done'),(9,2,3,'2026-07-03','booked'),(10,4,5,'2026-07-04','booked'),(11,6,2,'2026-07-04','done');",
+        "CREATE TABLE prescriptions (id INTEGER PRIMARY KEY, appointment_id INTEGER REFERENCES appointments(id), drug TEXT, dose_mg INTEGER);",
+        "INSERT INTO prescriptions VALUES (1,1,'Atenolol',50),(2,1,'Aspirin',75),(3,2,'Amoxicillin',250),(4,4,'Levetiracetam',500),(5,6,'Paracetamol',120),(6,7,'Atenolol',25),(7,7,'Warfarin',5),(8,8,'Levetiracetam',250),(9,11,'Aspirin',75);",
+        "CREATE TABLE invoices (appointment_id INTEGER PRIMARY KEY REFERENCES appointments(id), amount INTEGER);",
+        "INSERT INTO invoices VALUES (1,120),(2,80),(3,60),(4,150),(6,80),(7,120),(8,150),(11,90);",
+        "CREATE TABLE clinic_days (day TEXT PRIMARY KEY);",
+        "INSERT INTO clinic_days VALUES ('2026-07-01'),('2026-07-02'),('2026-07-03');"
+      ],
+      "answer": "15",
+      "explain": "5 wards × 3 days = 15 combinations."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each join to what it returns.",
+      "pairs": [
+        [
+          "`JOIN ... ON`",
+          "only rows with a match on both sides"
+        ],
+        [
+          "`LEFT JOIN ... ON`",
+          "all left rows, NULLs where no match"
+        ],
+        [
+          "`CROSS JOIN`",
+          "every left row paired with every right row"
+        ],
+        [
+          "`LEFT JOIN ... WHERE right.id IS NULL`",
+          "left rows with no match at all"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Ward rota grid",
+      "prompt": [
+        "        Build the grid for the ward dashboard: **every ward** for **every clinic day**, with the number of appointments that day for patients **in that ward** (**appointments**, 0 when none). Order by ward **name** then **day**.",
+        "",
+        "        Extra table: `clinic_days(day)`.",
+        "",
+        "        Tables:",
+        "- `wards(id, name, floor)`",
+        "- `doctors(id, name, specialty, ward_id, mentor_id)`: `ward_id` is NULL for a doctor without a ward; `mentor_id` points at another doctor",
+        "- `patients(id, name, born, ward_id)`: `ward_id` is NULL for outpatients",
+        "- `appointments(id, patient_id, doctor_id, day, status)`: status is `done`, `cancelled` or `booked`",
+        "- `prescriptions(id, appointment_id, drug, dose_mg)`",
+        "- `invoices(appointment_id, amount)`: one per completed appointment"
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT w.name, c.day, COUNT(a.id) AS appointments",
+        "FROM wards AS w",
+        "CROSS JOIN clinic_days AS c",
+        "LEFT JOIN patients AS p ON p.ward_id = w.id",
+        "LEFT JOIN appointments AS a ON a.patient_id = p.id AND a.day = c.day",
+        "GROUP BY w.name, c.day",
+        "ORDER BY w.name, c.day;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE wards (id INTEGER PRIMARY KEY, name TEXT, floor INTEGER);",
+        "INSERT INTO wards VALUES (1,'Ash',1),(2,'Birch',2),(3,'Cedar',3),(4,'Juniper',4),(5,'Larch',5);",
+        "CREATE TABLE doctors (id INTEGER PRIMARY KEY, name TEXT, specialty TEXT, ward_id INTEGER REFERENCES wards(id), mentor_id INTEGER REFERENCES doctors(id));",
+        "INSERT INTO doctors VALUES (1,'Dr. Imani Cole','Cardiology',1,NULL),(2,'Dr. Hugo Barre','Cardiology',1,1),(3,'Dr. Sana Iqbal','Paediatrics',2,NULL),(4,'Dr. Lev Moreau','Paediatrics',2,3),(5,'Dr. Ruth Adeyemi','Neurology',3,1),(6,'Dr. Felix Haag','Neurology',3,5),(7,'Dr. Nora Velasquez','General',NULL,1),(8,'Dr. Owen Pryce','General',4,7);",
+        "CREATE TABLE patients (id INTEGER PRIMARY KEY, name TEXT, born INTEGER, ward_id INTEGER REFERENCES wards(id));",
+        "INSERT INTO patients VALUES (1,'Ada Moss',1958,1),(2,'Bilal Haddad',2016,2),(3,'Cora Lind',1990,NULL),(4,'Dev Patel',1975,3),(5,'Elsie Grant',2019,2),(6,'Finn O''Hara',1949,1),(7,'Gemma Rossi',1983,NULL),(8,'Hamid Sefa',2001,3);",
+        "CREATE TABLE appointments (id INTEGER PRIMARY KEY, patient_id INTEGER REFERENCES patients(id), doctor_id INTEGER REFERENCES doctors(id), day TEXT, status TEXT);",
+        "INSERT INTO appointments VALUES (1,1,1,'2026-07-01','done'),(2,2,3,'2026-07-01','done'),(3,3,7,'2026-07-01','done'),(4,4,5,'2026-07-02','done'),(5,1,2,'2026-07-02','cancelled'),(6,5,4,'2026-07-02','done'),(7,6,1,'2026-07-03','done'),(8,8,6,'2026-07-03','done'),(9,2,3,'2026-07-03','booked'),(10,4,5,'2026-07-04','booked'),(11,6,2,'2026-07-04','done');",
+        "CREATE TABLE prescriptions (id INTEGER PRIMARY KEY, appointment_id INTEGER REFERENCES appointments(id), drug TEXT, dose_mg INTEGER);",
+        "INSERT INTO prescriptions VALUES (1,1,'Atenolol',50),(2,1,'Aspirin',75),(3,2,'Amoxicillin',250),(4,4,'Levetiracetam',500),(5,6,'Paracetamol',120),(6,7,'Atenolol',25),(7,7,'Warfarin',5),(8,8,'Levetiracetam',250),(9,11,'Aspirin',75);",
+        "CREATE TABLE invoices (appointment_id INTEGER PRIMARY KEY REFERENCES appointments(id), amount INTEGER);",
+        "INSERT INTO invoices VALUES (1,120),(2,80),(3,60),(4,150),(6,80),(7,120),(8,150),(11,90);",
+        "CREATE TABLE clinic_days (day TEXT PRIMARY KEY);",
+        "INSERT INTO clinic_days VALUES ('2026-07-01'),('2026-07-02'),('2026-07-03');"
+      ],
+      "check": "ordered",
+      "require": [
+        {
+          "pattern": "(?i)cross\\s+join",
+          "message": "Uses CROSS JOIN"
+        }
+      ],
+      "hints": [
+        "CROSS JOIN wards with clinic_days for the grid.",
+        "Then LEFT JOIN patients and appointments, with the day condition in ON."
+      ]
+    }
+  ]
+}

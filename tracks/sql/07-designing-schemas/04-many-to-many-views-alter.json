@@ -1,0 +1,253 @@
+{
+  "title": "Many-to-many, views and ALTER TABLE",
+  "summary": "Junction tables, saved queries, and changing a schema that already holds data.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Many-to-many needs a junction table",
+      "body": [
+        "A show has many performers, and a performer appears in many shows. Neither table can hold the link: `shows.performer_id` allows one performer per show, and a list in a cell breaks 1NF.",
+        "",
+        "The answer is a **junction table** with one row per pairing:",
+        "",
+        "```sql",
+        "CREATE TABLE show_cast (",
+        "    show_id      INTEGER NOT NULL REFERENCES shows(id),",
+        "    performer_id INTEGER NOT NULL REFERENCES performers(id),",
+        "    role         TEXT NOT NULL,                 -- facts about the pairing live here",
+        "    PRIMARY KEY (show_id, performer_id)         -- each pairing once",
+        ");",
+        "```",
+        "",
+        "Query it with two joins: shows → show_cast → performers."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which relationship needs a junction table?",
+      "options": [
+        "Students and courses: a student takes many courses, a course has many students",
+        "Orders and customers: an order has one customer",
+        "Doctors and their mentor: each doctor has at most one",
+        "Tickets and shows: a ticket is for one show"
+      ],
+      "answer": 0,
+      "explain": "The other three are one-to-many: a foreign key column on the 'many' side is enough."
+    },
+    {
+      "type": "code",
+      "title": "Cast the season",
+      "prompt": [
+        "Create the junction table **`show_cast`**: `show_id` and `performer_id` (both `INTEGER`, required, referencing `shows(id)` and `performers(id)`), `role` (`TEXT`, required), with the pair (`show_id`, `performer_id`) as the **primary key**.",
+        "",
+        "Existing tables: `shows(id, title, starts)`, `performers(id, name)`."
+      ],
+      "starter": "-- Write your CREATE TABLE below",
+      "solution": [
+        "CREATE TABLE show_cast (",
+        "    show_id INTEGER NOT NULL REFERENCES shows(id),",
+        "    performer_id INTEGER NOT NULL REFERENCES performers(id),",
+        "    role TEXT NOT NULL,",
+        "    PRIMARY KEY (show_id, performer_id)",
+        ");"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE shows (id INTEGER PRIMARY KEY, title TEXT NOT NULL, starts TEXT NOT NULL);",
+        "INSERT INTO shows VALUES (1,'The Tempest Below','2026-12-04 19:30'),(2,'Gaslight Choir','2026-12-11 19:30'),(3,'Midwinter Fools','2026-12-18 19:00');",
+        "CREATE TABLE performers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        "INSERT INTO performers VALUES (1,'Iris Vale'),(2,'Tomasz Lark'),(3,'Juniper Hale'),(4,'Otto Brandt');"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT 'show_cast' AS t, 'col ' || name || ' ' || upper(type) || ' ' || CASE WHEN pk > 0 THEN 'pk' || pk ELSE 'nn' || \"notnull\" END AS d FROM pragma_table_info('show_cast') UNION ALL SELECT 'show_cast', 'fk ' || \"from\" || ' -> ' || \"table\" || '.' || COALESCE(\"to\", '?') || ' ' || on_delete FROM pragma_foreign_key_list('show_cast') UNION ALL SELECT 'show_cast', 'unique ' || (SELECT group_concat(ii.name) FROM pragma_index_info(il.name) AS ii) FROM pragma_index_list('show_cast') AS il WHERE il.\"unique\" = 1 AND il.origin <> 'pk' UNION ALL SELECT 'show_cast', 'check ' || (instr(upper(sql), 'CHECK') > 0) FROM sqlite_master WHERE type = 'table' AND name = 'show_cast' ORDER BY 1, 2",
+      "hints": [
+        "Two foreign keys and a composite `PRIMARY KEY (show_id, performer_id)`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this return?",
+      "code": [
+        "SELECT p.name, COUNT(*) AS shows",
+        "FROM performers AS p",
+        "JOIN show_cast AS c ON c.performer_id = p.id",
+        "GROUP BY p.id, p.name",
+        "HAVING COUNT(*) > 1",
+        "ORDER BY p.name;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE shows (id INTEGER PRIMARY KEY, title TEXT NOT NULL, starts TEXT NOT NULL);",
+        "INSERT INTO shows VALUES (1,'The Tempest Below','2026-12-04 19:30'),(2,'Gaslight Choir','2026-12-11 19:30'),(3,'Midwinter Fools','2026-12-18 19:00');",
+        "CREATE TABLE performers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        "INSERT INTO performers VALUES (1,'Iris Vale'),(2,'Tomasz Lark'),(3,'Juniper Hale'),(4,'Otto Brandt');",
+        "CREATE TABLE show_cast ( show_id INTEGER NOT NULL REFERENCES shows(id), performer_id INTEGER NOT NULL REFERENCES performers(id), role TEXT NOT NULL, PRIMARY KEY (show_id, performer_id) );",
+        "INSERT INTO show_cast VALUES (1,1,'Prospera'),(1,2,'Caliban'),(2,1,'Soloist'),(2,3,'Conductor'),(3,2,'Fool'),(3,3,'Queen'),(3,4,'King');"
+      ],
+      "answer": [
+        "Iris Vale | 2",
+        "Juniper Hale | 2",
+        "Tomasz Lark | 2"
+      ],
+      "explain": "Iris, Juniper and Tomasz are each in two shows; Otto only in one."
+    },
+    {
+      "type": "learn",
+      "title": "Views: saved queries",
+      "body": [
+        "A **view** is a named SELECT that you query like a table:",
+        "",
+        "```sql",
+        "CREATE VIEW playbill AS",
+        "SELECT s.title, s.starts, p.name AS performer, c.role",
+        "FROM shows AS s",
+        "JOIN show_cast AS c ON c.show_id = s.id",
+        "JOIN performers AS p ON p.id = c.performer_id;",
+        "",
+        "SELECT * FROM playbill WHERE performer = 'Iris Vale';",
+        "```",
+        "",
+        "- A view stores **no data**: it runs its query each time, so it's always current.",
+        "- It hides complexity (the website team doesn't need to know about junction tables) and can hide columns (no fees, no emails).",
+        "- `DROP VIEW playbill;` removes it. Some databases also have *materialised* views that store the result and need refreshing."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The playbill",
+      "prompt": [
+        "Create a view **`playbill`** with columns **`title`**, **`performer`** and **`role`**: one row per performer per show.",
+        "",
+        "Tables: `shows(id, title, starts)`, `performers(id, name)`, `show_cast(show_id, performer_id, role)`."
+      ],
+      "starter": "-- Write your CREATE VIEW below",
+      "solution": [
+        "CREATE VIEW playbill AS",
+        "SELECT s.title, p.name AS performer, c.role",
+        "FROM shows AS s",
+        "JOIN show_cast AS c ON c.show_id = s.id",
+        "JOIN performers AS p ON p.id = c.performer_id;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE shows (id INTEGER PRIMARY KEY, title TEXT NOT NULL, starts TEXT NOT NULL);",
+        "INSERT INTO shows VALUES (1,'The Tempest Below','2026-12-04 19:30'),(2,'Gaslight Choir','2026-12-11 19:30'),(3,'Midwinter Fools','2026-12-18 19:00');",
+        "CREATE TABLE performers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        "INSERT INTO performers VALUES (1,'Iris Vale'),(2,'Tomasz Lark'),(3,'Juniper Hale'),(4,'Otto Brandt');",
+        "CREATE TABLE show_cast ( show_id INTEGER NOT NULL REFERENCES shows(id), performer_id INTEGER NOT NULL REFERENCES performers(id), role TEXT NOT NULL, PRIMARY KEY (show_id, performer_id) );",
+        "INSERT INTO show_cast VALUES (1,1,'Prospera'),(1,2,'Caliban'),(2,1,'Soloist'),(2,3,'Conductor'),(3,2,'Fool'),(3,3,'Queen'),(3,4,'King');"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT title, performer, role FROM playbill ORDER BY title, performer",
+      "require": [
+        {
+          "pattern": "(?i)create\\s+view\\s+playbill",
+          "message": "Creates the view"
+        }
+      ],
+      "hints": [
+        "`CREATE VIEW playbill AS SELECT ...` with the two joins.",
+        "Alias `p.name AS performer` so the column has the right name."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "ALTER TABLE",
+      "body": [
+        "Schemas change while the data stays. `ALTER TABLE` edits a table in place:",
+        "",
+        "```sql",
+        "ALTER TABLE shows ADD COLUMN runtime_min INTEGER;              -- existing rows get NULL",
+        "ALTER TABLE shows ADD COLUMN status TEXT NOT NULL DEFAULT 'on sale';  -- NOT NULL needs a DEFAULT",
+        "ALTER TABLE shows RENAME COLUMN starts TO starts_at;",
+        "ALTER TABLE shows RENAME TO productions;",
+        "ALTER TABLE shows DROP COLUMN runtime_min;                     -- SQLite 3.35+",
+        "```",
+        "",
+        "SQLite's ALTER is limited: it can't add a constraint to an existing column. The standard workaround is *create a new table, copy the rows, drop the old one, rename*. PostgreSQL and SQL Server can `ALTER TABLE ... ADD CONSTRAINT ...` directly.",
+        "",
+        "On big tables in production, some ALTERs rewrite every row and lock the table. Check before running them at noon."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the statement: add a required `status` column whose existing rows become 'on sale'.",
+      "code": "ALTER TABLE shows __1__ COLUMN status TEXT NOT NULL __2__ 'on sale';",
+      "blanks": [
+        "ADD",
+        "DEFAULT"
+      ],
+      "bank": [
+        "INSERT",
+        "SET",
+        "CHECK",
+        "VALUE"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Season two changes",
+      "prompt": [
+        "Make three changes to **`shows`**:",
+        "",
+        "1. Add **`runtime_min INTEGER`** (optional).",
+        "2. Add **`status TEXT NOT NULL DEFAULT 'on sale'`**.",
+        "3. Rename **`starts`** to **`starts_at`**.",
+        "",
+        "Then set **Midwinter Fools**' status to `'sold out'`."
+      ],
+      "starter": "-- Write your statements below",
+      "solution": [
+        "ALTER TABLE shows ADD COLUMN runtime_min INTEGER;",
+        "ALTER TABLE shows ADD COLUMN status TEXT NOT NULL DEFAULT 'on sale';",
+        "ALTER TABLE shows RENAME COLUMN starts TO starts_at;",
+        "UPDATE shows SET status = 'sold out' WHERE title = 'Midwinter Fools';"
+      ],
+      "setup": [
+        "CREATE TABLE shows (id INTEGER PRIMARY KEY, title TEXT NOT NULL, starts TEXT NOT NULL);",
+        "INSERT INTO shows VALUES (1,'The Tempest Below','2026-12-04 19:30'),(2,'Gaslight Choir','2026-12-11 19:30'),(3,'Midwinter Fools','2026-12-18 19:00');",
+        "CREATE TABLE performers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        "INSERT INTO performers VALUES (1,'Iris Vale'),(2,'Tomasz Lark'),(3,'Juniper Hale'),(4,'Otto Brandt');"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT 'shows' AS t, 'col ' || name || ' ' || upper(type) || ' ' || CASE WHEN pk > 0 THEN 'pk' || pk ELSE 'nn' || \"notnull\" END AS d FROM pragma_table_info('shows') UNION ALL SELECT 'shows', 'fk ' || \"from\" || ' -> ' || \"table\" || '.' || COALESCE(\"to\", '?') || ' ' || on_delete FROM pragma_foreign_key_list('shows') UNION ALL SELECT 'shows', 'unique ' || (SELECT group_concat(ii.name) FROM pragma_index_info(il.name) AS ii) FROM pragma_index_list('shows') AS il WHERE il.\"unique\" = 1 AND il.origin <> 'pk' UNION ALL SELECT 'shows', 'check ' || (instr(upper(sql), 'CHECK') > 0) FROM sqlite_master WHERE type = 'table' AND name = 'shows' ORDER BY 1, 2",
+      "hints": [
+        "Three ALTER TABLE statements and one UPDATE.",
+        "The column is called `starts_at` by the time the UPDATE runs, but you don't need it there."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Who's free?",
+      "prompt": [
+        "Rehearsals clash if a performer is cast in two shows. Return each pair of **show titles** that share at least one performer, plus the shared **performer** name: **show1**, **show2** (show1's id smaller), **performer**.",
+        "",
+        "Tables: `shows(id, title, starts)`, `performers(id, name)`, `show_cast(show_id, performer_id, role)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT s1.title AS show1, s2.title AS show2, p.name AS performer",
+        "FROM show_cast AS a",
+        "JOIN show_cast AS b ON b.performer_id = a.performer_id AND a.show_id < b.show_id",
+        "JOIN shows AS s1 ON s1.id = a.show_id",
+        "JOIN shows AS s2 ON s2.id = b.show_id",
+        "JOIN performers AS p ON p.id = a.performer_id;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE shows (id INTEGER PRIMARY KEY, title TEXT NOT NULL, starts TEXT NOT NULL);",
+        "INSERT INTO shows VALUES (1,'The Tempest Below','2026-12-04 19:30'),(2,'Gaslight Choir','2026-12-11 19:30'),(3,'Midwinter Fools','2026-12-18 19:00');",
+        "CREATE TABLE performers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        "INSERT INTO performers VALUES (1,'Iris Vale'),(2,'Tomasz Lark'),(3,'Juniper Hale'),(4,'Otto Brandt');",
+        "CREATE TABLE show_cast ( show_id INTEGER NOT NULL REFERENCES shows(id), performer_id INTEGER NOT NULL REFERENCES performers(id), role TEXT NOT NULL, PRIMARY KEY (show_id, performer_id) );",
+        "INSERT INTO show_cast VALUES (1,1,'Prospera'),(1,2,'Caliban'),(2,1,'Soloist'),(2,3,'Conductor'),(3,2,'Fool'),(3,3,'Queen'),(3,4,'King');"
+      ],
+      "check": "rows",
+      "hints": [
+        "Self join `show_cast` on performer_id with `a.show_id < b.show_id`.",
+        "Then join shows twice (s1, s2) and performers once."
+      ]
+    }
+  ]
+}

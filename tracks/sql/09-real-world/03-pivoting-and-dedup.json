@@ -1,0 +1,202 @@
+{
+  "title": "Pivoting and deduplication",
+  "summary": "Turn rows into columns and back, and keep one row of each duplicate.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Pivot: rows into columns",
+      "body": [
+        "Group finance wants a grid: one row per month, one column per business. The data is *long* (one row per month per business). **Pivot** it with conditional aggregation, the CASE trick from module 2:",
+        "",
+        "```sql",
+        "SELECT month,",
+        "       SUM(CASE WHEN business = 'books'   THEN revenue END) AS books,",
+        "       SUM(CASE WHEN business = 'bikes'   THEN revenue END) AS bikes,",
+        "       SUM(CASE WHEN business = 'theatre' THEN revenue END) AS theatre",
+        "FROM sales",
+        "GROUP BY month;",
+        "```",
+        "",
+        "A missing combination comes out NULL (wrap in `COALESCE(..., 0)` for a zero). SQL Server and Oracle also have a `PIVOT` operator; PostgreSQL has `crosstab` in an extension. The CASE version works everywhere.",
+        "",
+        "The reverse, **unpivot** (columns into rows), is a `UNION ALL` of one SELECT per column."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The finance grid",
+      "prompt": [
+        "Return one row per **month** (in order) with columns **books**, **bikes** and **theatre** holding that month's revenue, `0` where there is none.",
+        "",
+        "Tables: `sales(month, business, revenue)` (one row per month per business) and `contacts(id, email, name, city, updated_at)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT month,",
+        "       COALESCE(SUM(CASE WHEN business = 'books' THEN revenue END), 0) AS books,",
+        "       COALESCE(SUM(CASE WHEN business = 'bikes' THEN revenue END), 0) AS bikes,",
+        "       COALESCE(SUM(CASE WHEN business = 'theatre' THEN revenue END), 0) AS theatre",
+        "FROM sales",
+        "GROUP BY month",
+        "ORDER BY month;"
+      ],
+      "setup": [
+        "CREATE TABLE sales (month TEXT, business TEXT, revenue INTEGER, PRIMARY KEY (month, business));",
+        "INSERT INTO sales VALUES ('2026-09','books',4200),('2026-09','bikes',6100),('2026-09','theatre',3900),('2026-10','books',4600),('2026-10','bikes',5200),('2026-10','theatre',7300),('2026-11','books',5100),('2026-11','bikes',4800);",
+        "CREATE TABLE contacts (id INTEGER PRIMARY KEY, email TEXT, name TEXT, city TEXT, updated_at TEXT);",
+        "INSERT INTO contacts VALUES (1,'ana@mail.test','Ana Sousa','Port Avalon','2026-01-10'),(2,'ben@mail.test','Ben Okoro','Kestrel Bay','2026-02-01'),(3,'ana@mail.test','Ana Sousa','Elmsworth','2026-06-30'),(4,'chloe@mail.test','Chloe Park','Port Avalon','2026-03-15'),(5,'ben@mail.test','Benjamin Okoro','Kestrel Bay','2026-05-20'),(6,'ana@mail.test','Ana S.','Elmsworth','2026-04-02'),(7,'dmitri@mail.test','Dmitri Volkov','Elmsworth','2026-02-11');"
+      ],
+      "check": "ordered",
+      "hints": [
+        "One `SUM(CASE WHEN business = '...' THEN revenue END)` per column.",
+        "`COALESCE(..., 0)` for November's missing theatre revenue (it was closed for repairs)."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this unpivot return?",
+      "code": [
+        "WITH grid(month, books, bikes) AS (VALUES ('2026-09', 4200, 6100))",
+        "SELECT month, 'books', books FROM grid",
+        "UNION ALL",
+        "SELECT month, 'bikes', bikes FROM grid",
+        "ORDER BY 3;"
+      ],
+      "setup": [],
+      "answer": [
+        "2026-09 | books | 4200",
+        "2026-09 | bikes | 6100"
+      ],
+      "explain": "Each column becomes its own row. `VALUES` in a CTE is a quick way to make a tiny table."
+    },
+    {
+      "type": "learn",
+      "title": "Duplicates",
+      "body": [
+        "Ana is in `contacts` three times: she moved city, and once typed her name differently. Which row is the truth? Usually **the latest**. Number each email's rows newest first, then keep number 1:",
+        "",
+        "```sql",
+        "WITH ranked AS (",
+        "    SELECT *, ROW_NUMBER() OVER (PARTITION BY email ORDER BY updated_at DESC) AS n",
+        "    FROM contacts",
+        ")",
+        "SELECT id, email, name, city FROM ranked WHERE n = 1;",
+        "```",
+        "",
+        "To **delete** the extra rows instead, find the ids to keep and delete the rest:",
+        "",
+        "```sql",
+        "DELETE FROM contacts",
+        "WHERE id NOT IN (SELECT id FROM ranked WHERE n = 1);   -- with the CTE in front",
+        "```",
+        "",
+        "Always look before deleting: run the SELECT, then the DELETE in a transaction."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You want one row per email, **keeping the most recently updated**. Which window does that?",
+      "options": [
+        "`ROW_NUMBER() OVER (PARTITION BY email ORDER BY updated_at DESC)`, keep 1",
+        "`ROW_NUMBER() OVER (ORDER BY updated_at DESC)`, keep 1",
+        "`RANK() OVER (PARTITION BY updated_at ORDER BY email)`, keep 1",
+        "`COUNT(*) OVER (PARTITION BY email)`, keep 1"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "code",
+      "title": "Find the duplicates",
+      "prompt": [
+        "Return each **email** that appears more than once, with how many rows it has (**copies**).",
+        "",
+        "Tables: `sales(month, business, revenue)` (one row per month per business) and `contacts(id, email, name, city, updated_at)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT email, COUNT(*) AS copies",
+        "FROM contacts",
+        "GROUP BY email",
+        "HAVING COUNT(*) > 1;"
+      ],
+      "setup": [
+        "CREATE TABLE sales (month TEXT, business TEXT, revenue INTEGER, PRIMARY KEY (month, business));",
+        "INSERT INTO sales VALUES ('2026-09','books',4200),('2026-09','bikes',6100),('2026-09','theatre',3900),('2026-10','books',4600),('2026-10','bikes',5200),('2026-10','theatre',7300),('2026-11','books',5100),('2026-11','bikes',4800);",
+        "CREATE TABLE contacts (id INTEGER PRIMARY KEY, email TEXT, name TEXT, city TEXT, updated_at TEXT);",
+        "INSERT INTO contacts VALUES (1,'ana@mail.test','Ana Sousa','Port Avalon','2026-01-10'),(2,'ben@mail.test','Ben Okoro','Kestrel Bay','2026-02-01'),(3,'ana@mail.test','Ana Sousa','Elmsworth','2026-06-30'),(4,'chloe@mail.test','Chloe Park','Port Avalon','2026-03-15'),(5,'ben@mail.test','Benjamin Okoro','Kestrel Bay','2026-05-20'),(6,'ana@mail.test','Ana S.','Elmsworth','2026-04-02'),(7,'dmitri@mail.test','Dmitri Volkov','Elmsworth','2026-02-11');"
+      ],
+      "check": "rows",
+      "hints": [
+        "GROUP BY email, HAVING COUNT(*) > 1."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Latest version of everyone",
+      "prompt": [
+        "Return one row per email, the **most recently updated** one: **email**, **name**, **city**.",
+        "",
+        "Tables: `sales(month, business, revenue)` (one row per month per business) and `contacts(id, email, name, city, updated_at)`."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "WITH ranked AS (",
+        "    SELECT email, name, city, ROW_NUMBER() OVER (PARTITION BY email ORDER BY updated_at DESC) AS n",
+        "    FROM contacts",
+        ")",
+        "SELECT email, name, city FROM ranked WHERE n = 1;"
+      ],
+      "setup": [
+        "CREATE TABLE sales (month TEXT, business TEXT, revenue INTEGER, PRIMARY KEY (month, business));",
+        "INSERT INTO sales VALUES ('2026-09','books',4200),('2026-09','bikes',6100),('2026-09','theatre',3900),('2026-10','books',4600),('2026-10','bikes',5200),('2026-10','theatre',7300),('2026-11','books',5100),('2026-11','bikes',4800);",
+        "CREATE TABLE contacts (id INTEGER PRIMARY KEY, email TEXT, name TEXT, city TEXT, updated_at TEXT);",
+        "INSERT INTO contacts VALUES (1,'ana@mail.test','Ana Sousa','Port Avalon','2026-01-10'),(2,'ben@mail.test','Ben Okoro','Kestrel Bay','2026-02-01'),(3,'ana@mail.test','Ana Sousa','Elmsworth','2026-06-30'),(4,'chloe@mail.test','Chloe Park','Port Avalon','2026-03-15'),(5,'ben@mail.test','Benjamin Okoro','Kestrel Bay','2026-05-20'),(6,'ana@mail.test','Ana S.','Elmsworth','2026-04-02'),(7,'dmitri@mail.test','Dmitri Volkov','Elmsworth','2026-02-11');"
+      ],
+      "check": "rows",
+      "hints": [
+        "ROW_NUMBER partitioned by email, newest first, keep n = 1."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the statements to safely remove duplicate contacts, keeping the newest.",
+      "lines": [
+        "BEGIN;",
+        "WITH ranked AS (SELECT id, ROW_NUMBER() OVER (PARTITION BY email ORDER BY updated_at DESC) AS n FROM contacts)",
+        "DELETE FROM contacts WHERE id IN (SELECT id FROM ranked WHERE n > 1);",
+        "SELECT email, COUNT(*) FROM contacts GROUP BY email HAVING COUNT(*) > 1;",
+        "COMMIT;"
+      ],
+      "explain": "Open a transaction, delete everything but the newest per email, check no duplicates remain, then commit."
+    },
+    {
+      "type": "code",
+      "title": "Clean up for real",
+      "prompt": [
+        "Delete the duplicate contacts, keeping only the **most recently updated** row for each email.",
+        "",
+        "Tables: `sales(month, business, revenue)` (one row per month per business) and `contacts(id, email, name, city, updated_at)`."
+      ],
+      "starter": "-- Write your DELETE below",
+      "solution": [
+        "WITH ranked AS (",
+        "    SELECT id, ROW_NUMBER() OVER (PARTITION BY email ORDER BY updated_at DESC) AS n",
+        "    FROM contacts",
+        ")",
+        "DELETE FROM contacts WHERE id IN (SELECT id FROM ranked WHERE n > 1);"
+      ],
+      "setup": [
+        "CREATE TABLE sales (month TEXT, business TEXT, revenue INTEGER, PRIMARY KEY (month, business));",
+        "INSERT INTO sales VALUES ('2026-09','books',4200),('2026-09','bikes',6100),('2026-09','theatre',3900),('2026-10','books',4600),('2026-10','bikes',5200),('2026-10','theatre',7300),('2026-11','books',5100),('2026-11','bikes',4800);",
+        "CREATE TABLE contacts (id INTEGER PRIMARY KEY, email TEXT, name TEXT, city TEXT, updated_at TEXT);",
+        "INSERT INTO contacts VALUES (1,'ana@mail.test','Ana Sousa','Port Avalon','2026-01-10'),(2,'ben@mail.test','Ben Okoro','Kestrel Bay','2026-02-01'),(3,'ana@mail.test','Ana Sousa','Elmsworth','2026-06-30'),(4,'chloe@mail.test','Chloe Park','Port Avalon','2026-03-15'),(5,'ben@mail.test','Benjamin Okoro','Kestrel Bay','2026-05-20'),(6,'ana@mail.test','Ana S.','Elmsworth','2026-04-02'),(7,'dmitri@mail.test','Dmitri Volkov','Elmsworth','2026-02-11');"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT id, email, name, city FROM contacts ORDER BY id",
+      "hints": [
+        "A CTE can sit in front of DELETE: `WITH ranked AS (...) DELETE FROM contacts WHERE id IN (...)`."
+      ]
+    }
+  ]
+}

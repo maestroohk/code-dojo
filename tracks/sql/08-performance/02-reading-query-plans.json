@@ -1,0 +1,251 @@
+{
+  "title": "Reading query plans",
+  "summary": "SCAN, SEARCH, COVERING INDEX, TEMP B-TREE: what the plan is telling you, and what to do about it.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The words in a plan",
+      "body": [
+        "SQLite's plans use a small vocabulary:",
+        "",
+        "```text",
+        "SCAN rides                                         every row of the table",
+        "SEARCH rides USING INDEX rides_rider (rider_id=?)  index lookup, then fetch each row",
+        "SEARCH rides USING COVERING INDEX rides_rider (rider_id=?)",
+        "                                                   everything needed is in the index:",
+        "                                                   the table is never touched",
+        "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)       lookup by primary key",
+        "USE TEMP B-TREE FOR ORDER BY                       sort the results afterwards",
+        "USE TEMP B-TREE FOR GROUP BY                       sort to group",
+        "AUTOMATIC COVERING INDEX                           SQLite built a temporary index for",
+        "                                                   this one query: you probably want a real one",
+        "```",
+        "",
+        "Joins show one line per table, in the order they're visited. The **first** table is the outer loop; for each of its rows, the next table is searched."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each plan line to what it means.",
+      "pairs": [
+        [
+          "`SCAN rides`",
+          "reads every row of rides"
+        ],
+        [
+          "`SEARCH rides USING INDEX ix (rider_id=?)`",
+          "jumps to matching rows via ix"
+        ],
+        [
+          "`USING COVERING INDEX`",
+          "answers from the index alone"
+        ],
+        [
+          "`USE TEMP B-TREE FOR ORDER BY`",
+          "sorts the result after finding it"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "With an index on `rides (rider_id)`, this plan has two lines. Which change removes the second line?",
+      "code": [
+        "EXPLAIN QUERY PLAN",
+        "SELECT * FROM rides WHERE rider_id = 42 ORDER BY started;",
+        "",
+        "-- SEARCH rides USING INDEX rides_rider (rider_id=?)",
+        "-- USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "options": [
+        "An index on `rides (rider_id, started)`",
+        "An index on `rides (started)` alone",
+        "Adding `LIMIT 10`",
+        "Writing `ORDER BY started ASC`"
+      ],
+      "answer": 0,
+      "explain": "In an index on (rider_id, started), rider 42's entries are already sorted by started, so no separate sort is needed."
+    },
+    {
+      "type": "code",
+      "title": "Kill the sort",
+      "prompt": [
+        "The rider history page runs:",
+        "",
+        "```sql",
+        "SELECT id, started, minutes FROM rides WHERE rider_id = 42 ORDER BY started;",
+        "```",
+        "",
+        "and the plan shows `USE TEMP B-TREE FOR ORDER BY`. Replace the existing index **`rides_rider`** with an index named **`rides_rider_started`** on **`rides (rider_id, started)`**, so the rows come out of the index already sorted. (An index on (rider_id, started) serves lookups by rider_id alone too, so the old one becomes redundant.)",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`).; the index `rides_rider` on `rides (rider_id)` exists."
+      ],
+      "starter": "-- Write your statements below",
+      "solution": [
+        "DROP INDEX rides_rider;",
+        "CREATE INDEX rides_rider_started ON rides (rider_id, started);"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;",
+        "CREATE INDEX rides_rider ON rides (rider_id);"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT 'rides' AS tbl, (SELECT group_concat(name) FROM (SELECT name FROM pragma_index_info(il.name) ORDER BY seqno)) AS cols, il.\"unique\" AS uniq FROM pragma_index_list('rides') AS il WHERE il.origin = 'c' ORDER BY 1, 2",
+      "hints": [
+        "`DROP INDEX rides_rider;`",
+        "Then `CREATE INDEX rides_rider_started ON rides (rider_id, started);`"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this return? (Indexes don't change answers.)",
+      "code": [
+        "SELECT district, COUNT(*)",
+        "FROM stations",
+        "GROUP BY district",
+        "ORDER BY district;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;"
+      ],
+      "answer": [
+        "Docklands | 10",
+        "Harbourside | 10",
+        "Northside | 10",
+        "Old Town | 10"
+      ],
+      "explain": "40 stations split evenly over four districts."
+    },
+    {
+      "type": "learn",
+      "title": "Joins in the plan",
+      "body": [
+        "```sql",
+        "EXPLAIN QUERY PLAN",
+        "SELECT r.id, s.name",
+        "FROM rides AS r JOIN stations AS s ON s.id = r.station_id",
+        "WHERE r.rider_id = 42;",
+        "```",
+        "",
+        "```text",
+        "SEARCH r USING INDEX rides_rider (rider_id=?)",
+        "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)",
+        "```",
+        "",
+        "Read it as a **nested loop**: find rider 42's 40 rides via the index; for each, look up its station by primary key. 40 + 40 lookups, not 20,000.",
+        "",
+        "When the inner table has no usable index, you'll see `SCAN` on the inner line, which means *scan the inner table once per outer row*, or SQLite building an `AUTOMATIC COVERING INDEX` to rescue you. Both say: add an index on the join column."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Good sign or warning sign?",
+      "buckets": [
+        "Good sign",
+        "Warning sign"
+      ],
+      "items": [
+        [
+          "`SEARCH ... USING COVERING INDEX`",
+          0
+        ],
+        [
+          "`SCAN` on a 10-million-row table in a page that shows 20 rows",
+          1
+        ],
+        [
+          "`AUTOMATIC COVERING INDEX`",
+          1
+        ],
+        [
+          "`SEARCH ... USING INTEGER PRIMARY KEY`",
+          0
+        ],
+        [
+          "`USE TEMP B-TREE FOR ORDER BY` on millions of rows",
+          1
+        ],
+        [
+          "`SCAN` on a 40-row lookup table",
+          0
+        ]
+      ],
+      "explain": "Scanning a tiny table is fine; indexes have overhead too. Plans matter on big tables and hot queries."
+    },
+    {
+      "type": "code",
+      "title": "Group without sorting",
+      "prompt": [
+        "The busiest-stations tile runs:",
+        "",
+        "```sql",
+        "SELECT station_id, COUNT(*) FROM rides GROUP BY station_id;",
+        "```",
+        "",
+        "Its plan is `SCAN rides` plus `USE TEMP B-TREE FOR GROUP BY`: every ride is read, then sorted into groups. Create an index named **`rides_station`** that lets SQLite read the rides **already grouped**, straight from the index. Check the new plan with the Run button.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`)."
+      ],
+      "starter": "-- Write your CREATE INDEX below",
+      "solution": "CREATE INDEX rides_station ON rides (station_id);",
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT 'rides' AS tbl, (SELECT group_concat(name) FROM (SELECT name FROM pragma_index_info(il.name) ORDER BY seqno)) AS cols, il.\"unique\" AS uniq FROM pragma_index_list('rides') AS il WHERE il.origin = 'c' ORDER BY 1, 2",
+      "hints": [
+        "An index is sorted, so equal values sit next to each other: exactly what GROUP BY needs.",
+        "Index the grouped column. The plan becomes `SCAN rides USING COVERING INDEX rides_station`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A query that can use the index",
+      "prompt": [
+        "Using the index on `rides (rider_id)`, return rider **42**'s rides with the station name: **id**, **name** (the station's), **minutes**, sorted by **id**.",
+        "",
+        "Run it with `EXPLAIN QUERY PLAN` first to see both tables searched, then submit the query itself.",
+        "",
+        "Tables: `stations(id, name, district)` (40 rows) and `rides(id, rider_id, station_id, started, minutes, fare_cents)` (20,000 rows; `started` is text like `'2026-03-14 08:05:00'`)."
+      ],
+      "starter": "-- Write your query below\n",
+      "solution": [
+        "SELECT r.id, s.name, r.minutes",
+        "FROM rides AS r",
+        "JOIN stations AS s ON s.id = r.station_id",
+        "WHERE r.rider_id = 42",
+        "ORDER BY r.id;"
+      ],
+      "setup": [
+        "PRAGMA foreign_keys = ON;",
+        "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+        "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;",
+        "CREATE INDEX rides_rider ON rides (rider_id);"
+      ],
+      "check": "ordered",
+      "forbid": [
+        {
+          "pattern": "(?i)explain",
+          "message": "Submits the query, not the plan"
+        }
+      ],
+      "hints": [
+        "A plain join with `WHERE r.rider_id = 42`."
+      ]
+    }
+  ]
+}
