@@ -1,0 +1,263 @@
+{
+  "title": "Timeouts and budgets",
+  "summary": "Connect versus read timeouts, why the default is dangerous, and why inner layers must give up first.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Kinds of timeout",
+      "body": [
+        "Waiting forever is the default in more places than you'd think (Camel's HTTP client has no response limit by",
+        "default; .NET's `HttpClient` waits 100 seconds). A slow backend then holds your threads and your callers wait as",
+        "long as it does. Set limits deliberately:",
+        "",
+        "- **Connect timeout**: how long to wait to *establish* the connection (TCP, TLS). Short: 1–2 s. A long",
+        "  connect usually means the host is down or a firewall drops packets.",
+        "- **Response / read timeout**: how long to wait for the *answer* once connected. Sized from the backend's",
+        "  real latency (its p99 plus a margin), e.g. 3 s.",
+        "- **Overall deadline**: the total time the whole operation may take, across retries.",
+        "",
+        "In Camel, project-wide settings belong in configuration (and can differ per environment):",
+        "```properties",
+        "camel.component.http.connect-timeout=2000",
+        "camel.component.http.response-timeout=3000",
+        "```",
+        "A timeout surfaces as `SocketTimeoutException` (read) or a connect exception: map them to `504` / `502`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the setting to what it protects against.",
+      "pairs": [
+        [
+          "Connect timeout",
+          "A host that is down or a firewall silently dropping packets"
+        ],
+        [
+          "Response timeout",
+          "A backend that accepted the call but is stuck"
+        ],
+        [
+          "Overall deadline",
+          "Retries that together take longer than the caller will wait"
+        ],
+        [
+          "No timeout at all",
+          "Nothing: threads pile up until the integration falls over"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which limit fires?",
+      "buckets": [
+        "Connect timeout",
+        "Response timeout"
+      ],
+      "items": [
+        [
+          "The catalogue host was switched off",
+          0
+        ],
+        [
+          "A firewall silently drops the packets",
+          0
+        ],
+        [
+          "The catalogue accepted the call, then ran a slow query for 20 s",
+          1
+        ],
+        [
+          "The backend streams half a response and stalls",
+          1
+        ],
+        [
+          "The address has nothing listening and no reset ever comes back",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Budgets: inner layers give up first",
+      "body": [
+        "Every layer has a timeout, and they must **nest**:",
+        "",
+        "```text",
+        "client 10 s  >  gateway 8 s  >  integration 5 s  >  backend call 3 s",
+        "```",
+        "",
+        "If an **outer** layer gives up first, the inner one keeps working on a request nobody is waiting for, the",
+        "consumer gets the gateway's generic `504` with no trace id from you, and your logs show a \"successful\" call",
+        "finishing later. With nested budgets, the innermost layer that knows what failed answers first, with a proper",
+        "error body.",
+        "",
+        "For retries, the budget is shared: two attempts of 3 s plus backoff must still fit inside the integration's 5 s.",
+        "Passing the **remaining** time down (a deadline) is the general solution."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The gateway's timeout is 5 s, the integration's response timeout is 30 s, and the backend takes 20 s. What does the consumer see?",
+      "options": [
+        "A generic 504 from the gateway after 5 s, while the integration keeps waiting 20 s for an answer nobody will receive",
+        "A 504 with the integration's error body after 30 s",
+        "The answer after 20 s",
+        "A 502 after 20 s"
+      ],
+      "answer": 0,
+      "explain": "Make the integration's limit shorter than the gateway's, so the integration answers first with its own `BACKEND_TIMEOUT` and trace id."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "int budget = 5000, perAttempt = 2000, backoff = 300;",
+        "int used = 0, attempts = 0;",
+        "while (used + perAttempt <= budget)",
+        "{",
+        "    attempts++;",
+        "    used += perAttempt;",
+        "    if (used + backoff + perAttempt > budget) break;",
+        "    used += backoff;",
+        "}",
+        "Console.WriteLine($\"{attempts} attempts fit, worst case {used} ms\");"
+      ],
+      "answer": "2 attempts fit, worst case 4300 ms",
+      "explain": "Two 2-second attempts plus one 300 ms pause fit in 5 s; a third attempt would not. Retries must be counted against the budget."
+    },
+    {
+      "type": "code",
+      "title": "Check the timeout budgets",
+      "prompt": [
+        "Write `List<string> CheckBudgets(List<(string Layer, int TimeoutMs)> chain, int marginMs)`. `chain` lists layers from the **outside in** (client first). A timeout of `0` means none is set.",
+        "",
+        "- for each layer with `TimeoutMs == 0`: `\"{layer} has no timeout\"`;",
+        "- for each pair of neighbours where both have timeouts, the inner one must be at most `outer - marginMs`; otherwise",
+        "  `\"{inner} ({t} ms) must be at most {max} ms, inside {outer} ({ot} ms)\"`.",
+        "",
+        "Report in chain order (a layer's \"no timeout\" before the comparison with its inner neighbour)."
+      ],
+      "starter": [
+        "List<string> CheckBudgets(List<(string Layer, int TimeoutMs)> chain, int marginMs)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> CheckBudgets(List<(string Layer, int TimeoutMs)> chain, int marginMs)",
+        "{",
+        "    var problems = new List<string>();",
+        "    for (int i = 0; i < chain.Count; i++)",
+        "    {",
+        "        var (layer, t) = chain[i];",
+        "        if (t == 0) problems.Add($\"{layer} has no timeout\");",
+        "        if (i + 1 < chain.Count)",
+        "        {",
+        "            var (inner, it) = chain[i + 1];",
+        "            if (t > 0 && it > 0 && it > t - marginMs)",
+        "                problems.Add($\"{inner} ({it} ms) must be at most {t - marginMs} ms, inside {layer} ({t} ms)\");",
+        "        }",
+        "    }",
+        "    return problems;",
+        "}"
+      ],
+      "hints": [
+        "Loop with an index so you can look at `chain[i + 1]`.",
+        "Only compare when both timeouts are set."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a healthy chain\", new List<string>(), CheckBudgets(new() { (\"client\", 10000), (\"gateway\", 8000), (\"integration\", 5000), (\"backend\", 3000) }, 500));",
+        "Dojo.Eq(\"integration outlives the gateway\", new List<string> { \"integration (30000 ms) must be at most 4500 ms, inside gateway (5000 ms)\" },",
+        "    CheckBudgets(new() { (\"gateway\", 5000), (\"integration\", 30000), (\"backend\", 3000) }, 500));",
+        "Dojo.Eq(\"margin matters\", new List<string> { \"backend (4800 ms) must be at most 4500 ms, inside integration (5000 ms)\" },",
+        "    CheckBudgets(new() { (\"integration\", 5000), (\"backend\", 4800) }, 500));",
+        "Dojo.Eq(\"missing timeout\", new List<string> { \"backend has no timeout\" }, CheckBudgets(new() { (\"integration\", 5000), (\"backend\", 0) }, 500));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A deadline",
+      "prompt": [
+        "The tests declare a clock you can control:",
+        "```csharp",
+        "interface IClock { long NowMs { get; } void Sleep(int ms); }",
+        "class FakeClock : IClock { ... public void Advance(int ms) ... }",
+        "```",
+        "Write a class `Deadline`:",
+        "",
+        "- `Deadline(IClock clock, int budgetMs)`: starts now;",
+        "- `int RemainingMs`: budget minus elapsed, never below 0;",
+        "- `bool Expired`: no time left;",
+        "- `int TimeoutFor(int perCallMaxMs)`: the timeout to give the next call: the smaller of `perCallMaxMs` and the remaining time. Throw `TimeoutException` if the deadline has already expired."
+      ],
+      "starter": [
+        "class Deadline",
+        "{",
+        "    public Deadline(IClock clock, int budgetMs) { }",
+        "    public int RemainingMs => 0;",
+        "    public bool Expired => true;",
+        "    public int TimeoutFor(int perCallMaxMs) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class Deadline",
+        "{",
+        "    readonly IClock clock;",
+        "    readonly long end;",
+        "",
+        "    public Deadline(IClock clock, int budgetMs)",
+        "    {",
+        "        this.clock = clock;",
+        "        end = clock.NowMs + budgetMs;",
+        "    }",
+        "",
+        "    public int RemainingMs => (int)Math.Max(0, end - clock.NowMs);",
+        "",
+        "    public bool Expired => RemainingMs == 0;",
+        "",
+        "    public int TimeoutFor(int perCallMaxMs)",
+        "    {",
+        "        if (Expired) throw new TimeoutException(\"deadline expired\");",
+        "        return Math.Min(perCallMaxMs, RemainingMs);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Store the end time (`clock.NowMs + budgetMs`) in the constructor.",
+        "`Math.Max(0, end - clock.NowMs)` keeps it from going negative."
+      ],
+      "template": [
+        "        var dojoClock = new FakeClock();",
+        "        dojoClock.Advance(1000);",
+        "        var dojoD = new Deadline(dojoClock, 5000);",
+        "        Dojo.Eq(\"full budget at the start\", 5000, dojoD.RemainingMs);",
+        "        Dojo.Eq(\"first call gets its normal timeout\", 3000, dojoD.TimeoutFor(3000));",
+        "        dojoClock.Advance(3000);",
+        "        Dojo.Eq(\"remaining after 3 s\", 2000, dojoD.RemainingMs);",
+        "        Dojo.Eq(\"second call gets only what is left\", 2000, dojoD.TimeoutFor(3000));",
+        "        dojoClock.Advance(2500);",
+        "        Dojo.Eq(\"never negative\", 0, dojoD.RemainingMs);",
+        "        Dojo.Eq(\"expired\", true, dojoD.Expired);",
+        "        Dojo.Throws<TimeoutException>(\"no call after the deadline\", () => dojoD.TimeoutFor(3000));",
+        "        {{CODE}}",
+        "",
+        "interface IClock",
+        "{",
+        "    long NowMs { get; }",
+        "    void Sleep(int ms);",
+        "}",
+        "",
+        "class FakeClock : IClock",
+        "{",
+        "    public long NowMs { get; private set; }",
+        "    public List<int> Sleeps { get; } = new();",
+        "    public void Sleep(int ms) { Sleeps.Add(ms); NowMs += ms; }",
+        "    public void Advance(int ms) => NowMs += ms;",
+        "}"
+      ]
+    }
+  ]
+}

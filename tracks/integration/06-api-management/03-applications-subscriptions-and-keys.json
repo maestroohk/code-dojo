@@ -1,0 +1,228 @@
+{
+  "title": "Applications, subscriptions and keys",
+  "summary": "How a consumer serves itself: an application, subscriptions with plans, client-credentials keys and tokens.",
+  "minutes": 13,
+  "kind": "lesson",
+  "prereqs": [
+    "auth/04-oauth2-and-oidc/03-scopes-and-client-credentials",
+    "auth/06-api-security/01-api-keys-vs-tokens"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Applications and subscriptions",
+      "body": [
+        "In the developer portal, a consumer creates an **application**: it represents **one consumer system** (a",
+        "partner's order system, Acme's own mobile app). The application:",
+        "",
+        "- **owns the keys** (a consumer key, i.e. OAuth `client_id`, and a consumer secret);",
+        "- holds **subscriptions**: one per API it may call, each with a **business plan** (a rate-limit tier).",
+        "",
+        "One application can subscribe to many APIs and use **one token** for all of them. A publisher can **block one",
+        "subscription** (cut a misbehaving partner off one API) without touching the others.",
+        "",
+        "Limits stack: an **application** policy caps the app across all its APIs; the **subscription** plan caps it per API.",
+        "Both apply."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A partner runs two separate systems: a nightly stock sync and a customer-facing shop. How many applications should they create?",
+      "options": [
+        "Two: each system gets its own keys, limits and subscriptions, and can be blocked or rotated independently",
+        "One, shared by both systems",
+        "One per API",
+        "One per developer"
+      ],
+      "answer": 0,
+      "explain": "An application is the unit of identity, quota and revocation. If the sync misbehaves, you can block it without taking down the shop."
+    },
+    {
+      "type": "learn",
+      "title": "Keys and tokens: client credentials",
+      "body": [
+        "A machine consumer uses the OAuth 2.0 **client credentials** grant:",
+        "",
+        "```text",
+        "POST /oauth2/token",
+        "Authorization: Basic base64(consumerKey:consumerSecret)",
+        "Content-Type: application/x-www-form-urlencoded",
+        "",
+        "grant_type=client_credentials&scope=catalogue:read orders:write",
+        "```",
+        "```json",
+        "{ \"access_token\": \"eyJ...\", \"token_type\": \"Bearer\", \"expires_in\": 3600, \"scope\": \"catalogue:read orders:write\" }",
+        "```",
+        "",
+        "- Enable only the grant types the app needs (machines: client credentials only; never the password grant).",
+        "- The **secret is shown once**: put it straight into a secret store (Key Vault, a vault), never in chat or email.",
+        "  Give it an **expiry** and rotate it.",
+        "- Ask only for the scopes you need. The key manager grants the **intersection** of what you asked for and what",
+        "  the application is allowed.",
+        "- Call the API with `Authorization: Bearer <access_token>` until it expires, then get a new one."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An application policy allows 10 calls per minute in total; its subscriptions to catalogue and orders allow 100 per minute each. The app makes 8 catalogue calls and then orders calls in the same minute. Which call is the first 429?",
+      "options": [
+        "The 3rd orders call (the 11th call overall): the application-wide limit applies on top of each plan",
+        "The 101st orders call",
+        "None: the plans allow 100 each",
+        "The 9th catalogue call"
+      ],
+      "answer": 0,
+      "explain": "Limits stack. The tightest limit that applies to a call decides."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a new partner's onboarding in order.",
+      "lines": [
+        "Sign in to the developer portal",
+        "Create an application for the partner's system",
+        "Subscribe it to the APIs it needs, choosing a plan",
+        "Generate client-credentials keys; store the secret in a vault",
+        "Request an access token with the needed scopes",
+        "Call the gateway with `Authorization: Bearer <token>`"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Who should ever see it?",
+      "buckets": [
+        "Only the consumer system (in a vault)",
+        "Fine to share or log"
+      ],
+      "items": [
+        [
+          "The consumer secret",
+          0
+        ],
+        [
+          "An access token",
+          0
+        ],
+        [
+          "The consumer key (client id)",
+          1
+        ],
+        [
+          "The API's base URL",
+          1
+        ],
+        [
+          "The application's name",
+          1
+        ]
+      ],
+      "explain": "The client id is an identifier, like a username. The secret and every token are credentials: never log them in full."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var allowed = new HashSet<string> { \"catalogue:read\", \"orders:write\" };",
+        "var asked = \"catalogue:read  orders:read orders:write\".Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "var granted = asked.Where(allowed.Contains).ToList();",
+        "Console.WriteLine(string.Join(\" \", granted));",
+        "Console.WriteLine(asked.Any(s => !allowed.Contains(s)) ? \"some scopes were not granted\" : \"all granted\");"
+      ],
+      "answer": [
+        "catalogue:read orders:write",
+        "some scopes were not granted"
+      ],
+      "explain": "Some key managers silently drop unknown scopes, others reject the request with `invalid_scope`. Check the `scope` field of the response either way."
+    },
+    {
+      "type": "code",
+      "title": "A client-credentials token endpoint",
+      "prompt": [
+        "The tests declare `record App(string ClientId, string Secret, string[] AllowedScopes);`.",
+        "",
+        "Write a class `TokenEndpoint`:",
+        "",
+        "- `TokenEndpoint(IEnumerable<App> apps)`;",
+        "- `(int Status, string Body) Issue(string? authorization, string? grantType, string? scope)`:",
+        "  - `authorization` must be `Basic base64(clientId:secret)` for a known app with that exact secret; otherwise `(401, {\"error\":\"invalid_client\"})`;",
+        "  - `grantType` must be `client_credentials`; otherwise `(400, {\"error\":\"unsupported_grant_type\"})`;",
+        "  - requested scopes: split `scope` on spaces (none requested → all allowed scopes). Any requested scope the app isn't allowed → `(400, {\"error\":\"invalid_scope\"})`;",
+        "  - success: `(200, {\"access_token\":\"tok-N\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"...\"})` where `N` counts issued tokens from 1, and `scope` is the granted scopes joined by a space.",
+        "- `IReadOnlyList<string>? ScopesOf(string token)`: the scopes of an issued token, or null.",
+        "",
+        "Compare secrets with `System.Security.Cryptography.CryptographicOperations.FixedTimeEquals` on their UTF-8 bytes. Bodies are compact JSON (`System.Text.Json.JsonSerializer`). Write full type names: `using` directives can't follow the tests' code."
+      ],
+      "starter": [
+        "class TokenEndpoint",
+        "{",
+        "    public TokenEndpoint(IEnumerable<App> apps) { }",
+        "",
+        "    public (int Status, string Body) Issue(string? authorization, string? grantType, string? scope) => (500, \"\");",
+        "",
+        "    public IReadOnlyList<string>? ScopesOf(string token) => null;",
+        "}"
+      ],
+      "solution": [
+        "class TokenEndpoint",
+        "{",
+        "    readonly Dictionary<string, App> apps;",
+        "    readonly Dictionary<string, List<string>> tokens = new();",
+        "",
+        "    public TokenEndpoint(IEnumerable<App> apps) => this.apps = apps.ToDictionary(a => a.ClientId);",
+        "",
+        "    static string Err(string e) => System.Text.Json.JsonSerializer.Serialize(new { error = e });",
+        "",
+        "    public (int Status, string Body) Issue(string? authorization, string? grantType, string? scope)",
+        "    {",
+        "        App? app = null;",
+        "        if (authorization != null && authorization.StartsWith(\"Basic \"))",
+        "        {",
+        "            try",
+        "            {",
+        "                var pair = Encoding.UTF8.GetString(Convert.FromBase64String(authorization[6..].Trim()));",
+        "                var colon = pair.IndexOf(':');",
+        "                if (colon > 0 && apps.TryGetValue(pair[..colon], out var candidate) &&",
+        "                    System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(pair[(colon + 1)..]), Encoding.UTF8.GetBytes(candidate.Secret)))",
+        "                    app = candidate;",
+        "            }",
+        "            catch (FormatException) { }",
+        "        }",
+        "        if (app is null) return (401, Err(\"invalid_client\"));",
+        "        if (grantType != \"client_credentials\") return (400, Err(\"unsupported_grant_type\"));",
+        "",
+        "        var requested = (scope ?? \"\").Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();",
+        "        if (requested.Count == 0) requested = app.AllowedScopes.ToList();",
+        "        if (requested.Any(s => !app.AllowedScopes.Contains(s))) return (400, Err(\"invalid_scope\"));",
+        "",
+        "        var token = $\"tok-{tokens.Count + 1}\";",
+        "        tokens[token] = requested;",
+        "        return (200, System.Text.Json.JsonSerializer.Serialize(new { access_token = token, token_type = \"Bearer\", expires_in = 3600, scope = string.Join(\" \", requested) }));",
+        "    }",
+        "",
+        "    public IReadOnlyList<string>? ScopesOf(string token) => tokens.TryGetValue(token, out var s) ? s : null;",
+        "}"
+      ],
+      "hints": [
+        "Decode the Basic header inside a `try`: `Convert.FromBase64String` throws `FormatException` on garbage.",
+        "Split `clientId:secret` at the **first** colon; secrets may contain more.",
+        "Keep a `Dictionary<string, List<string>>` of issued tokens; its `Count` gives the next number."
+      ],
+      "template": [
+        "var dojoT = new TokenEndpoint(new[] { new App(\"shop\", \"s3cret!\", new[] { \"catalogue:read\", \"orders:write\" }), new App(\"report\", \"r3port\", new[] { \"catalogue:read\" }) });",
+        "string Basic(string id, string secret) => \"Basic \" + Convert.ToBase64String(Encoding.UTF8.GetBytes(id + \":\" + secret));",
+        "Dojo.Eq(\"no credentials\", (401, \"{\\\"error\\\":\\\"invalid_client\\\"}\"), dojoT.Issue(null, \"client_credentials\", null));",
+        "Dojo.Eq(\"wrong secret\", 401, dojoT.Issue(Basic(\"shop\", \"guess\"), \"client_credentials\", null).Status);",
+        "Dojo.Eq(\"not base64\", 401, dojoT.Issue(\"Basic !!!\", \"client_credentials\", null).Status);",
+        "Dojo.Eq(\"password grant refused\", (400, \"{\\\"error\\\":\\\"unsupported_grant_type\\\"}\"), dojoT.Issue(Basic(\"shop\", \"s3cret!\"), \"password\", null));",
+        "Dojo.Eq(\"scope not allowed\", (400, \"{\\\"error\\\":\\\"invalid_scope\\\"}\"), dojoT.Issue(Basic(\"report\", \"r3port\"), \"client_credentials\", \"orders:write\"));",
+        "Dojo.Eq(\"a narrow token\", (200, \"{\\\"access_token\\\":\\\"tok-1\\\",\\\"token_type\\\":\\\"Bearer\\\",\\\"expires_in\\\":3600,\\\"scope\\\":\\\"catalogue:read\\\"}\"),",
+        "    dojoT.Issue(Basic(\"shop\", \"s3cret!\"), \"client_credentials\", \"catalogue:read\"));",
+        "Dojo.Eq(\"no scope asked -> all allowed\", (200, \"{\\\"access_token\\\":\\\"tok-2\\\",\\\"token_type\\\":\\\"Bearer\\\",\\\"expires_in\\\":3600,\\\"scope\\\":\\\"catalogue:read orders:write\\\"}\"),",
+        "    dojoT.Issue(Basic(\"shop\", \"s3cret!\"), \"client_credentials\", null));",
+        "Dojo.Eq(\"ScopesOf an issued token\", new List<string> { \"catalogue:read\" }, dojoT.ScopesOf(\"tok-1\")?.ToList() ?? new());",
+        "Dojo.Eq(\"ScopesOf an unknown token\", null, dojoT.ScopesOf(\"tok-99\"));",
+        "{{CODE}}",
+        "record App(string ClientId, string Secret, string[] AllowedScopes);"
+      ]
+    }
+  ]
+}

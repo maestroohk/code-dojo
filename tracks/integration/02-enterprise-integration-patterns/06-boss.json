@@ -1,0 +1,218 @@
+{
+  "title": "Boss: the order pipeline",
+  "summary": "Combine translator, splitter, router, aggregator, idempotency and a dead letter channel.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The brief",
+      "body": [
+        "Acme's warehouse still exports orders as text. You are building the pipeline that turns them into",
+        "per-warehouse picking lists, survives duplicate deliveries, and parks what it cannot process."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Translate the legacy format",
+      "prompt": [
+        "The warehouse sends one line per book: `ORDER_ID;ISBN;QTY;PRICE_PENCE`, for example `A1;9780131103627;2;1299`.",
+        "",
+        "Write `string Translate(string line)` returning canonical JSON (exact property order, compact):",
+        "```json",
+        "{\"orderId\":\"A1\",\"isbn\":\"9780131103627\",\"quantity\":2,\"price\":12.99}",
+        "```",
+        "- trim each field; `price` is pence ÷ 100 as a `decimal`;",
+        "- throw `FormatException` if there are not exactly 4 fields, or quantity/pence are not integers, or quantity is not at least 1."
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "string Translate(string line)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "string Translate(string line)",
+        "{",
+        "    var f = line.Split(';').Select(s => s.Trim()).ToArray();",
+        "    if (f.Length != 4) throw new FormatException(\"expected 4 fields\");",
+        "    if (!int.TryParse(f[2], out var qty) || qty < 1) throw new FormatException(\"bad quantity\");",
+        "    if (!int.TryParse(f[3], out var pence)) throw new FormatException(\"bad price\");",
+        "    return JsonSerializer.Serialize(new { orderId = f[0], isbn = f[1], quantity = qty, price = pence / 100m });",
+        "}"
+      ],
+      "hints": [
+        "`Split(';')`, trim, check the count, `int.TryParse` both numbers.",
+        "`JsonSerializer.Serialize(new { orderId = ..., isbn = ..., quantity = ..., price = pence / 100m })`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a normal line\", \"{\\\"orderId\\\":\\\"A1\\\",\\\"isbn\\\":\\\"9780131103627\\\",\\\"quantity\\\":2,\\\"price\\\":12.99}\", Translate(\"A1;9780131103627;2;1299\"));",
+        "Dojo.Eq(\"spaces are trimmed\", \"{\\\"orderId\\\":\\\"B2\\\",\\\"isbn\\\":\\\"9780201633610\\\",\\\"quantity\\\":1,\\\"price\\\":7.5}\", Translate(\" B2 ; 9780201633610;1 ; 750 \"));",
+        "Dojo.Throws<FormatException>(\"three fields\", () => Translate(\"A1;978;2\"));",
+        "Dojo.Throws<FormatException>(\"quantity zero\", () => Translate(\"A1;978;0;100\"));",
+        "Dojo.Throws<FormatException>(\"price not a number\", () => Translate(\"A1;978;1;abc\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Picking lists",
+      "prompt": [
+        "Lines from many orders arrive as canonical JSON (as produced above). Each ISBN prefix decides the warehouse:",
+        "ISBNs starting `97801` go to `\"north\"`, everything else to `\"south\"`. Lines with `quantity` greater than `50` are",
+        "bulk orders for the `\"bulk\"` team instead, whatever their prefix.",
+        "",
+        "Write `Dictionary<string, List<string>> PickingLists(IEnumerable<string> lines)` that **routes** every line and",
+        "**aggregates** per destination: each entry is `\"{orderId}:{isbn}x{quantity}\"`, in arrival order. Only destinations",
+        "that received something appear."
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "Dictionary<string, List<string>> PickingLists(IEnumerable<string> lines)",
+        "{",
+        "    return new();",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "Dictionary<string, List<string>> PickingLists(IEnumerable<string> lines)",
+        "{",
+        "    var result = new Dictionary<string, List<string>>();",
+        "    foreach (var json in lines)",
+        "    {",
+        "        using var doc = JsonDocument.Parse(json);",
+        "        var r = doc.RootElement;",
+        "        var orderId = r.GetProperty(\"orderId\").GetString();",
+        "        var isbn = r.GetProperty(\"isbn\").GetString() ?? \"\";",
+        "        var qty = r.GetProperty(\"quantity\").GetInt32();",
+        "        var dest = qty > 50 ? \"bulk\" : isbn.StartsWith(\"97801\") ? \"north\" : \"south\";",
+        "        if (!result.TryGetValue(dest, out var list)) result[dest] = list = new();",
+        "        list.Add($\"{orderId}:{isbn}x{qty}\");",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "Decide the destination with the bulk check first, then the prefix."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoLines = new[]",
+        "{",
+        "    \"{\\\"orderId\\\":\\\"A1\\\",\\\"isbn\\\":\\\"9780131103627\\\",\\\"quantity\\\":2,\\\"price\\\":12.99}\",",
+        "    \"{\\\"orderId\\\":\\\"A1\\\",\\\"isbn\\\":\\\"9781492056355\\\",\\\"quantity\\\":1,\\\"price\\\":30}\",",
+        "    \"{\\\"orderId\\\":\\\"B7\\\",\\\"isbn\\\":\\\"9780134685991\\\",\\\"quantity\\\":60,\\\"price\\\":20}\",",
+        "    \"{\\\"orderId\\\":\\\"B7\\\",\\\"isbn\\\":\\\"9780134494166\\\",\\\"quantity\\\":3,\\\"price\\\":20}\",",
+        "};",
+        "var dojoP = PickingLists(dojoLines);",
+        "Dojo.Eq(\"north list\", new List<string> { \"A1:9780131103627x2\", \"B7:9780134494166x3\" }, dojoP.GetValueOrDefault(\"north\") ?? new());",
+        "Dojo.Eq(\"south list\", new List<string> { \"A1:9781492056355x1\" }, dojoP.GetValueOrDefault(\"south\") ?? new());",
+        "Dojo.Eq(\"bulk wins over prefix\", new List<string> { \"B7:9780134685991x60\" }, dojoP.GetValueOrDefault(\"bulk\") ?? new());",
+        "Dojo.Eq(\"no lines -> no lists\", 0, PickingLists(new string[0]).Count);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Retries, dead letters and duplicates",
+      "prompt": [
+        "Write a class `Pipeline` that delivers messages to a handler with at-least-once semantics handled properly:",
+        "",
+        "- constructor `Pipeline(Func<string, bool> handler, int maxAttempts)`: the handler returns `true` on success, `false` on a (transient) failure.",
+        "- `string Deliver(string messageId, string body)`:",
+        "  - if `messageId` was already delivered successfully → `\"duplicate\"` (handler not called);",
+        "  - otherwise call the handler up to `maxAttempts` times until it returns `true` → remember the id and return `\"ok after {n}\"` (`n` = attempts used);",
+        "  - if every attempt fails → add `\"{messageId}: {body}\"` to `DeadLetters` and return `\"dead-lettered\"`. A dead-lettered id is **not** remembered as delivered, so replaying it later is possible.",
+        "- `List<string> DeadLetters` (get-only).",
+        "- `string Replay()`: removes every dead letter and delivers each again (in order, using the stored id and body). Returns their results joined with `\", \"` (empty string if there were none)."
+      ],
+      "starter": [
+        "class Pipeline",
+        "{",
+        "    public Pipeline(Func<string, bool> handler, int maxAttempts) { }",
+        "",
+        "    public List<string> DeadLetters { get; } = new();",
+        "",
+        "    public string Deliver(string messageId, string body) => \"\";",
+        "",
+        "    public string Replay() => \"\";",
+        "}"
+      ],
+      "solution": [
+        "class Pipeline",
+        "{",
+        "    readonly Func<string, bool> handler;",
+        "    readonly int maxAttempts;",
+        "    readonly HashSet<string> delivered = new();",
+        "",
+        "    public Pipeline(Func<string, bool> handler, int maxAttempts)",
+        "    {",
+        "        this.handler = handler;",
+        "        this.maxAttempts = maxAttempts;",
+        "    }",
+        "",
+        "    public List<string> DeadLetters { get; } = new();",
+        "",
+        "    public string Deliver(string messageId, string body)",
+        "    {",
+        "        if (delivered.Contains(messageId)) return \"duplicate\";",
+        "        for (int attempt = 1; attempt <= maxAttempts; attempt++)",
+        "        {",
+        "            if (handler(body))",
+        "            {",
+        "                delivered.Add(messageId);",
+        "                return $\"ok after {attempt}\";",
+        "            }",
+        "        }",
+        "        DeadLetters.Add($\"{messageId}: {body}\");",
+        "        return \"dead-lettered\";",
+        "    }",
+        "",
+        "    public string Replay()",
+        "    {",
+        "        var parked = DeadLetters.ToList();",
+        "        DeadLetters.Clear();",
+        "        var results = new List<string>();",
+        "        foreach (var entry in parked)",
+        "        {",
+        "            var i = entry.IndexOf(\": \");",
+        "            results.Add(Deliver(entry[..i], entry[(i + 2)..]));",
+        "        }",
+        "        return string.Join(\", \", results);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `for` loop over attempts; return as soon as the handler succeeds.",
+        "In `Replay`, copy the list first, clear it, then call `Deliver` for each entry (it may dead-letter again)."
+      ],
+      "template": [
+        "var dojoFailures = new Dictionary<string, int> { [\"flaky\"] = 2, [\"broken\"] = 99 };",
+        "var dojoCalls = 0;",
+        "var dojoPipe = new Pipeline(body =>",
+        "{",
+        "    dojoCalls++;",
+        "    if (dojoFailures.TryGetValue(body, out var left) && left > 0) { dojoFailures[body] = left - 1; return false; }",
+        "    return true;",
+        "}, 3);",
+        "Dojo.Eq(\"works first time\", \"ok after 1\", dojoPipe.Deliver(\"m1\", \"fine\"));",
+        "Dojo.Eq(\"duplicate skipped\", \"duplicate\", dojoPipe.Deliver(\"m1\", \"fine\"));",
+        "Dojo.Eq(\"transient failure recovers\", \"ok after 3\", dojoPipe.Deliver(\"m2\", \"flaky\"));",
+        "Dojo.Eq(\"persistent failure is parked\", \"dead-lettered\", dojoPipe.Deliver(\"m3\", \"broken\"));",
+        "Dojo.Eq(\"dead letter keeps id and body\", new List<string> { \"m3: broken\" }, dojoPipe.DeadLetters);",
+        "Dojo.Eq(\"handler calls so far\", 7, dojoCalls);",
+        "dojoFailures[\"broken\"] = 0;",
+        "Dojo.Eq(\"replay after the fix\", \"ok after 1\", dojoPipe.Replay());",
+        "Dojo.Eq(\"dead letters emptied\", 0, dojoPipe.DeadLetters.Count);",
+        "Dojo.Eq(\"replayed message now counts as delivered\", \"duplicate\", dojoPipe.Deliver(\"m3\", \"broken\"));",
+        "Dojo.Eq(\"replay with nothing parked\", \"\", dojoPipe.Replay());",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

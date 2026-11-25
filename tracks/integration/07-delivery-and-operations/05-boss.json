@@ -1,0 +1,207 @@
+{
+  "title": "Boss: release and run",
+  "summary": "Gate a release, check every environment's configuration, and alert on what matters.",
+  "minutes": 35,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The brief",
+      "body": [
+        "Acme is promoting `catalogue-integration` from test to production. You build the checks the pipeline runs",
+        "before production, and the alert rules on-call will live with."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Same artifact, different parameters",
+      "prompt": [
+        "The tests declare `record Release(string Env, string ImageDigest, Dictionary<string, string> Params);`.",
+        "",
+        "Write `List<string> PromotionProblems(List<Release> releases, string[] requiredParams)`, in this order:",
+        "",
+        "- if the releases don't all use the **same** `ImageDigest`: `\"image differs: {env}\"` for each environment whose digest differs from the **first** release's;",
+        "- for each release (in order) and each required parameter (in order) that is missing or empty: `\"{env}: missing {param}\"`;",
+        "- for each parameter whose value contains `\"localhost\"` or `\"127.0.0.1\"` in any release other than one named `dev`: `\"{env}: {param} points at the local machine\"`;",
+        "- for each release, any parameter whose name ends with `.password`, `.secret` or `.api-key` and whose value does **not** start with `{{env:` or `vault:`: `\"{env}: {param} is a literal secret\"`."
+      ],
+      "starter": [
+        "List<string> PromotionProblems(List<Release> releases, string[] requiredParams)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> PromotionProblems(List<Release> releases, string[] requiredParams)",
+        "{",
+        "    var problems = new List<string>();",
+        "    if (releases.Count == 0) return problems;",
+        "    var digest = releases[0].ImageDigest;",
+        "    foreach (var r in releases)",
+        "        if (r.ImageDigest != digest) problems.Add($\"image differs: {r.Env}\");",
+        "    foreach (var r in releases)",
+        "        foreach (var p in requiredParams)",
+        "            if (!r.Params.TryGetValue(p, out var v) || string.IsNullOrEmpty(v)) problems.Add($\"{r.Env}: missing {p}\");",
+        "    foreach (var r in releases.Where(r => r.Env != \"dev\"))",
+        "        foreach (var (k, v) in r.Params)",
+        "            if (v.Contains(\"localhost\") || v.Contains(\"127.0.0.1\")) problems.Add($\"{r.Env}: {k} points at the local machine\");",
+        "    var secretSuffixes = new[] { \".password\", \".secret\", \".api-key\" };",
+        "    foreach (var r in releases)",
+        "        foreach (var (k, v) in r.Params)",
+        "            if (secretSuffixes.Any(k.EndsWith) && !v.StartsWith(\"{{env:\") && !v.StartsWith(\"vault:\"))",
+        "                problems.Add($\"{r.Env}: {k} is a literal secret\");",
+        "    return problems;",
+        "}"
+      ],
+      "hints": [
+        "Four separate loops, one per kind of problem, keep the required order easy.",
+        "`secretSuffixes.Any(k.EndsWith)` checks the name."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoReq = new[] { \"catalogue.url\", \"catalogue.api-key\" };",
+        "var dojoGood = new List<Release>",
+        "{",
+        "    new(\"test\", \"sha256:aa\", new() { [\"catalogue.url\"] = \"http://catalogue.test:8080\", [\"catalogue.api-key\"] = \"{{env:CATALOGUE_API_KEY}}\" }),",
+        "    new(\"prod\", \"sha256:aa\", new() { [\"catalogue.url\"] = \"http://catalogue.prod:8080\", [\"catalogue.api-key\"] = \"vault:kv/catalogue#key\" }),",
+        "};",
+        "Dojo.Eq(\"a clean promotion\", new List<string>(), PromotionProblems(dojoGood, dojoReq));",
+        "var dojoBad = new List<Release>",
+        "{",
+        "    new(\"dev\", \"sha256:aa\", new() { [\"catalogue.url\"] = \"http://localhost:8089\", [\"catalogue.api-key\"] = \"{{env:K}}\" }),",
+        "    new(\"test\", \"sha256:bb\", new() { [\"catalogue.url\"] = \"http://127.0.0.1:8089\", [\"catalogue.api-key\"] = \"{{env:K}}\" }),",
+        "    new(\"prod\", \"sha256:aa\", new() { [\"catalogue.url\"] = \"\", [\"catalogue.api-key\"] = \"hunter2\" }),",
+        "};",
+        "Dojo.Eq(\"every problem, in order\", new List<string>",
+        "{",
+        "    \"image differs: test\",",
+        "    \"prod: missing catalogue.url\",",
+        "    \"test: catalogue.url points at the local machine\",",
+        "    \"prod: catalogue.api-key is a literal secret\",",
+        "}, PromotionProblems(dojoBad, dojoReq));",
+        "record Release(string Env, string ImageDigest, Dictionary<string, string> Params);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Alert rules",
+      "prompt": [
+        "Per minute, the platform collects `record Minute(int Total, int ServerErrors, int Auth4xx, int TooMany, int P95Ms, bool HealthUp);`.",
+        "",
+        "Write `List<string> Alerts(List<Minute> minutes)` evaluating the **last 5 minutes** (or all, if fewer):",
+        "",
+        "- `\"health down\"` if the **latest** minute has `HealthUp == false`;",
+        "- `\"error rate {r}%\"` if the server errors over the window ÷ total over the window is **at least 5%** (`r` rounded down to a whole number; skip when the total is 0);",
+        "- `\"latency p95 {ms} ms\"` if the p95 was above `1000` in **every** minute of the window (one slow minute is noise), using the latest minute's value;",
+        "- `\"auth spike\"` if the latest minute's `Auth4xx` is more than **3 times** the average of the earlier minutes in the window and at least `20`;",
+        "- `\"throttling\"` if `TooMany` summed over the window is more than 10% of the total.",
+        "",
+        "In that order."
+      ],
+      "starter": [
+        "List<string> Alerts(List<Minute> minutes)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Alerts(List<Minute> minutes)",
+        "{",
+        "    var alerts = new List<string>();",
+        "    if (minutes.Count == 0) return alerts;",
+        "    var w = minutes.Skip(Math.Max(0, minutes.Count - 5)).ToList();",
+        "    var last = w[^1];",
+        "    if (!last.HealthUp) alerts.Add(\"health down\");",
+        "    var total = w.Sum(m => m.Total);",
+        "    if (total > 0 && w.Sum(m => m.ServerErrors) * 100 / total >= 5) alerts.Add($\"error rate {w.Sum(m => m.ServerErrors) * 100 / total}%\");",
+        "    if (w.All(m => m.P95Ms > 1000)) alerts.Add($\"latency p95 {last.P95Ms} ms\");",
+        "    var earlier = w.Take(w.Count - 1).ToList();",
+        "    var avg = earlier.Count == 0 ? 0 : earlier.Average(m => m.Auth4xx);",
+        "    if (last.Auth4xx >= 20 && last.Auth4xx > 3 * avg) alerts.Add(\"auth spike\");",
+        "    if (total > 0 && w.Sum(m => m.TooMany) * 10 > total) alerts.Add(\"throttling\");",
+        "    return alerts;",
+        "}"
+      ],
+      "hints": [
+        "Take the window with `Skip(Math.Max(0, count - 5))`; `w[^1]` is the latest minute.",
+        "Integer arithmetic `errors * 100 / total` rounds down for you."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Minute Ok(int p95 = 80, int auth = 2) => new(1000, 3, auth, 5, p95, true);",
+        "Dojo.Eq(\"a quiet hour\", new List<string>(), Alerts(new() { Ok(), Ok(), Ok(), Ok(), Ok(), Ok() }));",
+        "Dojo.Eq(\"error rate over the window\", new List<string> { \"error rate 6%\" },",
+        "    Alerts(new() { Ok(), new(1000, 100, 2, 5, 80, true), new(1000, 100, 2, 5, 80, true), new(1000, 100, 2, 5, 80, true), Ok() }));",
+        "Dojo.Eq(\"one slow minute is noise\", new List<string>(), Alerts(new() { Ok(), Ok(), Ok(2000), Ok(), Ok() }));",
+        "Dojo.Eq(\"slow for the whole window\", new List<string> { \"latency p95 1800 ms\" }, Alerts(new() { Ok(80), Ok(1500), Ok(1200), Ok(1100), Ok(1300), Ok(1800) }));",
+        "Dojo.Eq(\"auth spike and health\", new List<string> { \"health down\", \"auth spike\" },",
+        "    Alerts(new() { Ok(auth: 4), Ok(auth: 6), Ok(auth: 5), new(1000, 3, 90, 5, 80, false) }));",
+        "Dojo.Eq(\"throttling\", new List<string> { \"throttling\" }, Alerts(new() { new(100, 0, 0, 30, 50, true) }));",
+        "Dojo.Eq(\"no data\", new List<string>(), Alerts(new()));",
+        "record Minute(int Total, int ServerErrors, int Auth4xx, int TooMany, int P95Ms, bool HealthUp);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The onboarding gate",
+      "prompt": [
+        "Before an API goes live, the pipeline checks its onboarding record. The tests declare:",
+        "",
+        "```csharp",
+        "record Onboarding(string Name, bool HasContract, string Shape, bool HasProjectFolder, bool UsesSharedErrorHandler,",
+        "                  bool SecretsInConfig, bool PublishedOnGateway, bool MockModeOff, bool OldEndpointRetired);",
+        "```",
+        "`Shape` is `\"pass-through\"` or `\"integration\"`. Write `List<string> Gate(Onboarding o)` returning, in this order:",
+        "",
+        "- `\"{name}: no contract\"` if there is no contract;",
+        "- for a pass-through: `\"{name}: a pass-through needs no project folder\"` if it has one;",
+        "- for an integration: `\"{name}: missing project folder\"`, `\"{name}: use the shared error handler\"`, `\"{name}: secrets must come from configuration\"`, `\"{name}: turn mock mode off\"` for each missing item;",
+        "- `\"{name}: not published on the gateway\"`;",
+        "- `\"{name}: retire the old endpoint\"` if the old one still runs."
+      ],
+      "starter": [
+        "List<string> Gate(Onboarding o)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Gate(Onboarding o)",
+        "{",
+        "    var p = new List<string>();",
+        "    if (!o.HasContract) p.Add($\"{o.Name}: no contract\");",
+        "    if (o.Shape == \"pass-through\")",
+        "    {",
+        "        if (o.HasProjectFolder) p.Add($\"{o.Name}: a pass-through needs no project folder\");",
+        "    }",
+        "    else",
+        "    {",
+        "        if (!o.HasProjectFolder) p.Add($\"{o.Name}: missing project folder\");",
+        "        if (!o.UsesSharedErrorHandler) p.Add($\"{o.Name}: use the shared error handler\");",
+        "        if (!o.SecretsInConfig) p.Add($\"{o.Name}: secrets must come from configuration\");",
+        "        if (!o.MockModeOff) p.Add($\"{o.Name}: turn mock mode off\");",
+        "    }",
+        "    if (!o.PublishedOnGateway) p.Add($\"{o.Name}: not published on the gateway\");",
+        "    if (!o.OldEndpointRetired) p.Add($\"{o.Name}: retire the old endpoint\");",
+        "    return p;",
+        "}"
+      ],
+      "hints": [
+        "Follow the list top to bottom; the shape decides which middle block applies."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a finished integration\", new List<string>(), Gate(new(\"catalogue\", true, \"integration\", true, true, true, true, true, true)));",
+        "Dojo.Eq(\"a finished pass-through (mock and handler don't apply)\", new List<string>(), Gate(new(\"shipping-rates\", true, \"pass-through\", false, false, false, true, false, true)));",
+        "Dojo.Eq(\"a pass-through with a needless project\", new List<string> { \"shipping-rates: a pass-through needs no project folder\", \"shipping-rates: retire the old endpoint\" },",
+        "    Gate(new(\"shipping-rates\", true, \"pass-through\", true, false, false, true, false, false)));",
+        "Dojo.Eq(\"an unfinished integration\", new List<string>",
+        "{",
+        "    \"orders: no contract\", \"orders: use the shared error handler\", \"orders: secrets must come from configuration\",",
+        "    \"orders: turn mock mode off\", \"orders: not published on the gateway\",",
+        "}, Gate(new(\"orders\", false, \"integration\", true, false, false, false, false, true)));",
+        "record Onboarding(string Name, bool HasContract, string Shape, bool HasProjectFolder, bool UsesSharedErrorHandler, bool SecretsInConfig, bool PublishedOnGateway, bool MockModeOff, bool OldEndpointRetired);"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,217 @@
+{
+  "title": "Pipelines, repositories and onboarding",
+  "summary": "The shape of a promotion pipeline, how to lay out an integration repository, and the checklist for onboarding an existing API.",
+  "minutes": 13,
+  "kind": "lesson",
+  "prereqs": [
+    "cicd/01-concepts/02-pipelines-stages-artifacts",
+    "git/04-remotes-and-collaboration/03-force-and-pull-requests"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The shape of the pipeline",
+      "body": [
+        "Whatever the tool (Azure DevOps, GitHub Actions, GitLab), the pipeline has the same stages:",
+        "",
+        "```yaml",
+        "trigger: { branches: [main], paths: [catalogue-integration/*, contracts/catalogue-*] }",
+        "stages:",
+        "  - Build:        # runs on every merge",
+        "      - validate the routes (camel validate / lint the contract)",
+        "      - export to Maven and run the tests",
+        "      - build the image, tag it with the commit id",
+        "      - scan it (Trivy, Grype); fail on high/critical",
+        "      - push it; publish the API project as an artifact",
+        "  - Test:         # deployment job bound to the \"test\" environment",
+        "      - run the image with test parameters and secrets",
+        "      - import the API project with params-test.yaml (new revision)",
+        "      - smoke-test through the gateway",
+        "  - Production:   # same steps, production parameters, an approval, often a change window",
+        "```",
+        "",
+        "Secrets come from variable groups or environment secrets linked to a vault, never from the YAML. Agents that must",
+        "reach internal registries and gateways run **inside** the network. **Rollback** is two actions: run the previous",
+        "image tag and deploy the previous API revision."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the Build stage's steps in order.",
+      "lines": [
+        "Validate the routes and lint the contract",
+        "Run the tests",
+        "Build the image and tag it with the commit id",
+        "Scan the image for vulnerabilities",
+        "Push the image and publish the API project artifact"
+      ],
+      "explain": "Fail as early and cheaply as possible: a lint error should never cost an image build."
+    },
+    {
+      "type": "learn",
+      "title": "Repository layout",
+      "body": [
+        "Three kinds of code, three homes:",
+        "",
+        "1. **Existing backends** (the catalogue service, the warehouse system) stay in **their own** repositories with",
+        "   their own teams and pipelines. Nothing is copied into the integration platform: it calls them.",
+        "2. **Integration projects** live in **one integration repository**, a folder per project (a designer such as",
+        "   Karavan is configured with exactly one repository and branch, and each project is a folder in it).",
+        "3. **API definitions**: contracts and gateway projects with per-environment parameters, next to the integrations.",
+        "",
+        "```text",
+        "integration-platform/",
+        "  contracts/            catalogue-v1.json, orders-v1.json, shipping-rates-v1.json",
+        "  catalogue-integration/   one folder (one image, one service) per business domain",
+        "  orders-integration/",
+        "  apis/                 gateway projects + params-test.yaml / params-prod.yaml",
+        "  pipelines/",
+        "  README.md             naming, error contract, conventions",
+        "```",
+        "Note what is missing: `shipping-rates` has a contract and a gateway project but **no** integration folder: it is a pass-through."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Where does it live?",
+      "buckets": [
+        "The backend's own repository",
+        "Integration repo: a project folder",
+        "Integration repo: contracts/ or apis/"
+      ],
+      "items": [
+        [
+          "The catalogue service's C# source",
+          0
+        ],
+        [
+          "The routes that reshape catalogue answers",
+          1
+        ],
+        [
+          "`catalogue-v1.json`, the OpenAPI contract",
+          2
+        ],
+        [
+          "`params-prod.yaml` for the gateway",
+          2
+        ],
+        [
+          "The shared error handler used by the orders integration",
+          1
+        ],
+        [
+          "The warehouse system's database migrations",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Someone proposes one integration project, `acme-esb`, containing every API's routes. What is the strongest argument against it?",
+      "options": [
+        "Every change redeploys every API, one bad route or memory leak can take all of them down, and everything must scale together",
+        "Designers can't open big projects",
+        "Git can't store large folders",
+        "It would need more gateways"
+      ],
+      "answer": 0,
+      "explain": "Its only advantage is less setup on day one. One project per business domain (a handful, not dozens, never one per endpoint) isolates failures and owners."
+    },
+    {
+      "type": "order",
+      "prompt": "Onboard an existing API, in order.",
+      "lines": [
+        "Get or write its OpenAPI; decide which operations consumers really need; name the service",
+        "Decide: pass-through or integration",
+        "For an integration: create the project from the contract, mock mode first, one route per operation, the shared error handler",
+        "Commit; the pipeline builds and tests the image",
+        "Import the same contract in the gateway: endpoint, scopes, plans; deploy and publish",
+        "Consumers subscribe through the developer portal",
+        "Retire the old endpoint that did the same job"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Which pipelines does this change trigger? What does this print?",
+      "code": [
+        "var triggers = new Dictionary<string, string[]>",
+        "{",
+        "    [\"catalogue\"] = new[] { \"catalogue-integration/\", \"contracts/catalogue-\" },",
+        "    [\"orders\"] = new[] { \"orders-integration/\", \"contracts/orders-\" },",
+        "};",
+        "var changed = new[] { \"contracts/catalogue-v1.json\", \"README.md\" };",
+        "foreach (var (pipeline, prefixes) in triggers)",
+        "    Console.WriteLine($\"{pipeline}: {changed.Any(f => prefixes.Any(f.StartsWith))}\");"
+      ],
+      "answer": [
+        "catalogue: True",
+        "orders: False"
+      ],
+      "explain": "Path filters keep one domain's change from rebuilding and redeploying every other domain."
+    },
+    {
+      "type": "code",
+      "title": "Path filters",
+      "prompt": [
+        "Write `List<string> Affected(IEnumerable<string> changedFiles, Dictionary<string, string[]> pipelines)`.",
+        "Each pipeline has glob patterns; a pipeline is affected if **any** changed file matches **any** of its patterns.",
+        "Return the affected pipeline names sorted ordinally.",
+        "",
+        "Glob rules (match the whole path, `/` separated, case-sensitive):",
+        "- `**` matches any number of characters, including `/`;",
+        "- `*` matches any characters **except** `/`;",
+        "- everything else matches literally (`.` is a dot).",
+        "",
+        "Turning a glob into an anchored regex (`Regex.Escape` the literal parts) is a good approach."
+      ],
+      "starter": [
+        "List<string> Affected(IEnumerable<string> changedFiles, Dictionary<string, string[]> pipelines)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "List<string> Affected(IEnumerable<string> changedFiles, Dictionary<string, string[]> pipelines)",
+        "{",
+        "    Regex ToRegex(string glob)",
+        "    {",
+        "        var sb = new StringBuilder(\"^\");",
+        "        for (int i = 0; i < glob.Length; i++)",
+        "        {",
+        "            if (glob[i] == '*' && i + 1 < glob.Length && glob[i + 1] == '*') { sb.Append(\".*\"); i++; }",
+        "            else if (glob[i] == '*') sb.Append(\"[^/]*\");",
+        "            else sb.Append(Regex.Escape(glob[i].ToString()));",
+        "        }",
+        "        return new Regex(sb.Append('$').ToString());",
+        "    }",
+        "    var files = changedFiles.ToList();",
+        "    return pipelines.Where(p => p.Value.Select(ToRegex).Any(r => files.Any(f => r.IsMatch(f))))",
+        "                    .Select(p => p.Key)",
+        "                    .OrderBy(k => k, StringComparer.Ordinal)",
+        "                    .ToList();",
+        "}"
+      ],
+      "hints": [
+        "Walk the glob character by character: `**` → `.*`, `*` → `[^/]*`, anything else → `Regex.Escape`.",
+        "Anchor with `^` and `$` so the whole path must match."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoPipes = new Dictionary<string, string[]>",
+        "{",
+        "    [\"catalogue\"] = new[] { \"catalogue-integration/**\", \"contracts/catalogue-*.json\", \"apis/catalogue/**\" },",
+        "    [\"orders\"] = new[] { \"orders-integration/**\", \"contracts/orders-*.json\" },",
+        "    [\"docs\"] = new[] { \"*.md\" },",
+        "};",
+        "Dojo.Eq(\"a contract change\", new List<string> { \"catalogue\" }, Affected(new[] { \"contracts/catalogue-v1.json\" }, dojoPipes));",
+        "Dojo.Eq(\"deep file under a project\", new List<string> { \"orders\" }, Affected(new[] { \"orders-integration/routes/create-order.camel.yaml\" }, dojoPipes));",
+        "Dojo.Eq(\"* does not cross folders\", new List<string>(), Affected(new[] { \"contracts/old/catalogue-v0.json\", \"orders-integration.md/x\" }, dojoPipes));",
+        "Dojo.Eq(\"several pipelines, sorted\", new List<string> { \"catalogue\", \"docs\", \"orders\" }, Affected(new[] { \"README.md\", \"apis/catalogue/params-prod.yaml\", \"contracts/orders-v2.json\" }, dojoPipes));",
+        "Dojo.Eq(\"dots are literal\", new List<string>(), Affected(new[] { \"contracts/catalogue-v1xjson\" }, dojoPipes));"
+      ]
+    }
+  ]
+}

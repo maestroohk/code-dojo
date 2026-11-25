@@ -1,0 +1,212 @@
+{
+  "title": "One error contract",
+  "summary": "Every failure becomes an honest status code and the same small body with a trace id.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Honest status codes",
+      "body": [
+        "A consumer decides what to do from the **status code**, so each one must tell the truth about *whose* problem it is:",
+        "",
+        "| Status | Means | Example code |",
+        "|---|---|---|",
+        "| `400` | your request is wrong; fix it | `INVALID_REQUEST` |",
+        "| `404` | the thing you asked for doesn't exist | `BOOK_NOT_FOUND` |",
+        "| `409` | conflicts with the current state | `DUPLICATE_ORDER` |",
+        "| `502` | **a system behind us** failed (bad gateway) | `BACKEND_ERROR` |",
+        "| `503` | we are temporarily unable (overloaded, breaker open) | `SERVICE_UNAVAILABLE` |",
+        "| `504` | a system behind us was **too slow** | `BACKEND_TIMEOUT` |",
+        "| `500` | a bug or unexpected failure **in us** | `INTERNAL_ERROR` |",
+        "",
+        "(`401`, `403` and `429` are the gateway's: module 6.) Every error has the **same small body**:",
+        "",
+        "```json",
+        "{ \"code\": \"BACKEND_TIMEOUT\", \"message\": \"The catalogue did not answer in time.\", \"traceId\": \"6f2c81d4\" }",
+        "```",
+        "",
+        "No stack traces, no SQL, no backend messages: those stay in **your** logs, found by the trace id.",
+        "RFC 9457 **Problem Details** (`application/problem+json`, what ASP.NET Core's `ProblemDetails` produces) is a fine",
+        "standard alternative with the same idea."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which status should the consumer receive?",
+      "buckets": [
+        "400",
+        "404",
+        "502",
+        "504",
+        "500"
+      ],
+      "items": [
+        [
+          "The ISBN has 12 digits",
+          0
+        ],
+        [
+          "The catalogue says it has no such ISBN",
+          1
+        ],
+        [
+          "The catalogue crashes with a 500",
+          2
+        ],
+        [
+          "The catalogue takes 8 s and our limit is 3 s",
+          3
+        ],
+        [
+          "Our jq mapping throws on an unexpected null",
+          4
+        ],
+        [
+          "The order body is missing `quantity`",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The catalogue backend returns `500`. Why should the consumer get `502`, not `500`?",
+      "options": [
+        "`502` says the failure is in a system behind the integration; `500` would claim the integration itself is broken, sending people to the wrong team",
+        "`500` is reserved for gateways",
+        "`502` is retried automatically by every client",
+        "There is no difference"
+      ],
+      "answer": 0,
+      "explain": "Status codes route the on-call conversation. `502`/`504` point behind you; `500` points at you."
+    },
+    {
+      "type": "learn",
+      "title": "Mapping backend errors",
+      "body": [
+        "A backend's status code means something **to the integration**, not necessarily to the consumer:",
+        "",
+        "- backend `404` for the requested resource → `404` (same meaning: the thing doesn't exist);",
+        "- backend `409` → usually `409` (a real business conflict the consumer can act on);",
+        "- backend `400` → if you validated first, the integration built a bad request: that's **your** bug → `502` or `500`, never the backend's message;",
+        "- backend `401` / `403` → **your** service credential is wrong or expired → `502`. Never pass a `401` on:",
+        "  the consumer would think *their* token is bad;",
+        "- backend `5xx` → `502`; timeout → `504`; connection refused → `502` (or `503` while a breaker is open)."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the backend outcome to what the consumer should get.",
+      "pairs": [
+        [
+          "Backend `404` for the book",
+          "`404 BOOK_NOT_FOUND`"
+        ],
+        [
+          "Backend `401` because our API key expired",
+          "`502 BACKEND_ERROR`"
+        ],
+        [
+          "Backend took longer than the response timeout",
+          "`504 BACKEND_TIMEOUT`"
+        ],
+        [
+          "Our own validation rejected the ISBN",
+          "`400 INVALID_REQUEST`"
+        ],
+        [
+          "NullReferenceException in our mapping",
+          "`500 INTERNAL_ERROR`"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "After a credential rotation, every call through the integration returns `401` to consumers, and partners start regenerating their tokens. What went wrong in the design?",
+      "options": [
+        "The integration passed the backend's 401 straight through; it should map it to 502 and alert, because the broken credential is the integration's",
+        "Partners should have waited",
+        "The gateway should return 403 instead",
+        "Nothing; 401 is accurate"
+      ],
+      "answer": 0,
+      "explain": "A consumer can only act on errors about *their* request. Passing internal auth failures through sends dozens of teams on a hunt for a problem only you can fix."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.Json;",
+        "",
+        "string Error(int status, string code, string message, string traceId) =>",
+        "    $\"{status} \" + JsonSerializer.Serialize(new { code, message, traceId });",
+        "",
+        "Console.WriteLine(Error(504, \"BACKEND_TIMEOUT\", \"The catalogue did not answer in time.\", \"6f2c81d4\"));"
+      ],
+      "answer": "504 {\"code\":\"BACKEND_TIMEOUT\",\"message\":\"The catalogue did not answer in time.\",\"traceId\":\"6f2c81d4\"}",
+      "explain": "Anonymous types serialize their properties in declaration order, with the names as written."
+    },
+    {
+      "type": "code",
+      "title": "Map a failure to the error contract",
+      "prompt": [
+        "The tests declare `record Failure(string Kind, int? BackendStatus);` where `Kind` is `\"validation\"`, `\"timeout\"`, `\"connection\"`, `\"http\"` (with `BackendStatus`) or anything else.",
+        "",
+        "Write `(int Status, string Body) MapError(Failure f, string traceId)`. The body is compact JSON `{\"code\":...,\"message\":...,\"traceId\":...}`:",
+        "",
+        "| Failure | Status | code | message |",
+        "|---|---|---|---|",
+        "| `validation` | 400 | `INVALID_REQUEST` | `The request is not valid.` |",
+        "| `timeout` | 504 | `BACKEND_TIMEOUT` | `A backend did not answer in time.` |",
+        "| `connection` | 502 | `BACKEND_UNAVAILABLE` | `A backend could not be reached.` |",
+        "| `http` 404 | 404 | `NOT_FOUND` | `The resource does not exist.` |",
+        "| `http` 409 | 409 | `CONFLICT` | `The request conflicts with the current state.` |",
+        "| `http` anything else | 502 | `BACKEND_ERROR` | `A backend failed.` |",
+        "| anything else | 500 | `INTERNAL_ERROR` | `Something went wrong.` |"
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "(int Status, string Body) MapError(Failure f, string traceId)",
+        "{",
+        "    return (500, \"\");",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "(int Status, string Body) MapError(Failure f, string traceId)",
+        "{",
+        "    var (status, code, message) = f.Kind switch",
+        "    {",
+        "        \"validation\" => (400, \"INVALID_REQUEST\", \"The request is not valid.\"),",
+        "        \"timeout\" => (504, \"BACKEND_TIMEOUT\", \"A backend did not answer in time.\"),",
+        "        \"connection\" => (502, \"BACKEND_UNAVAILABLE\", \"A backend could not be reached.\"),",
+        "        \"http\" when f.BackendStatus == 404 => (404, \"NOT_FOUND\", \"The resource does not exist.\"),",
+        "        \"http\" when f.BackendStatus == 409 => (409, \"CONFLICT\", \"The request conflicts with the current state.\"),",
+        "        \"http\" => (502, \"BACKEND_ERROR\", \"A backend failed.\"),",
+        "        _ => (500, \"INTERNAL_ERROR\", \"Something went wrong.\"),",
+        "    };",
+        "    return (status, JsonSerializer.Serialize(new { code, message, traceId }));",
+        "}"
+      ],
+      "hints": [
+        "A tuple `switch` with `when` guards keeps the table readable.",
+        "`JsonSerializer.Serialize(new { code, message, traceId })` gives the properties in the right order."
+      ],
+      "template": [
+        "{{CODE}}",
+        "string M(Failure f) { var (s, b) = MapError(f, \"t-1\"); return $\"{s} {b}\"; }",
+        "Dojo.Eq(\"validation\", \"400 {\\\"code\\\":\\\"INVALID_REQUEST\\\",\\\"message\\\":\\\"The request is not valid.\\\",\\\"traceId\\\":\\\"t-1\\\"}\", M(new(\"validation\", null)));",
+        "Dojo.Eq(\"timeout\", \"504 {\\\"code\\\":\\\"BACKEND_TIMEOUT\\\",\\\"message\\\":\\\"A backend did not answer in time.\\\",\\\"traceId\\\":\\\"t-1\\\"}\", M(new(\"timeout\", null)));",
+        "Dojo.Eq(\"connection refused\", \"502 {\\\"code\\\":\\\"BACKEND_UNAVAILABLE\\\",\\\"message\\\":\\\"A backend could not be reached.\\\",\\\"traceId\\\":\\\"t-1\\\"}\", M(new(\"connection\", null)));",
+        "Dojo.Eq(\"backend 404\", \"404 {\\\"code\\\":\\\"NOT_FOUND\\\",\\\"message\\\":\\\"The resource does not exist.\\\",\\\"traceId\\\":\\\"t-1\\\"}\", M(new(\"http\", 404)));",
+        "Dojo.Eq(\"backend 409\", 409, MapError(new(\"http\", 409), \"x\").Status);",
+        "Dojo.Eq(\"backend 401 is our problem\", 502, MapError(new(\"http\", 401), \"x\").Status);",
+        "Dojo.Eq(\"backend 500\", \"502 {\\\"code\\\":\\\"BACKEND_ERROR\\\",\\\"message\\\":\\\"A backend failed.\\\",\\\"traceId\\\":\\\"t-1\\\"}\", M(new(\"http\", 500)));",
+        "Dojo.Eq(\"unexpected\", \"500 {\\\"code\\\":\\\"INTERNAL_ERROR\\\",\\\"message\\\":\\\"Something went wrong.\\\",\\\"traceId\\\":\\\"t-1\\\"}\", M(new(\"bug\", null)));",
+        "record Failure(string Kind, int? BackendStatus);"
+      ]
+    }
+  ]
+}

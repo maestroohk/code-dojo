@@ -1,0 +1,252 @@
+{
+  "title": "Routing: content-based router, filter, recipient list",
+  "summary": "Decide where each message goes from what it contains.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Content-based router",
+      "body": [
+        "A **content-based router** looks at a message (a header, a field in the body) and sends it to one of several",
+        "destinations. In Camel it is `choice` with `when` branches and an `otherwise`:",
+        "",
+        "```yaml",
+        "- choice:",
+        "    when:",
+        "      - expression: { simple: { expression: \"${header.country} != 'GB'\" } }",
+        "        steps: [ { to: { uri: \"direct:international\" } } ]",
+        "      - expression: { simple: { expression: \"${header.express} == 'true'\" } }",
+        "        steps: [ { to: { uri: \"direct:express\" } } ]",
+        "    otherwise:",
+        "      steps: [ { to: { uri: \"direct:standard\" } } ]",
+        "```",
+        "",
+        "It behaves exactly like `if / else if / else`: the **first** matching `when` wins and the rest are skipped.",
+        "So put the most specific conditions first."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "An express order to France arrives. What does this print?",
+      "code": [
+        "string Route(string country, bool express)",
+        "{",
+        "    if (country != \"GB\") return \"international\";",
+        "    if (express) return \"express\";",
+        "    if (country != \"GB\" && express) return \"international-express\";",
+        "    return \"standard\";",
+        "}",
+        "",
+        "Console.WriteLine(Route(\"FR\", true));",
+        "Console.WriteLine(Route(\"GB\", true));"
+      ],
+      "answer": [
+        "international",
+        "express"
+      ],
+      "explain": "The `international-express` branch can never run: a more general condition above it always matches first. That is the most common router bug."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the router's rules (top to bottom) so every order reaches the most specific destination.",
+      "lines": [
+        "when weight > 30 kg → freight",
+        "when country != GB and express → international-express",
+        "when country != GB → international",
+        "when express → express",
+        "otherwise → standard"
+      ],
+      "also": [
+        [
+          "when weight > 30 kg → freight",
+          "when country != GB and express → international-express",
+          "when express → express",
+          "when country != GB → international",
+          "otherwise → standard"
+        ]
+      ],
+      "explain": "Freight wins over everything (a 40 kg parcel can't go express). After that, the combined condition must come before either of its parts. The two single conditions never overlap with each other once the combined one is above them, so either order between them works."
+    },
+    {
+      "type": "learn",
+      "title": "Filter and recipient list",
+      "body": [
+        "Two more routing patterns:",
+        "",
+        "- **Message filter**: let a message continue only if a condition holds; otherwise it is dropped. Example: ignore",
+        "  stock events for books Acme does not sell. Log what you drop, or a \"missing message\" will cost someone a day.",
+        "- **Recipient list**: compute the list of destinations at runtime and send a copy to each. Example: a header",
+        "  `notify: email,sms` sends the confirmation to both channels.",
+        "",
+        "And the **dynamic router**, which decides the next step after each step, like a workflow engine. Use it rarely:",
+        "it makes routes hard to read."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each need to its pattern.",
+      "pairs": [
+        [
+          "Send big parcels to freight, the rest to the normal carrier",
+          "Content-based router"
+        ],
+        [
+          "Ignore events about products we don't sell",
+          "Message filter"
+        ],
+        [
+          "Notify every channel the customer opted into",
+          "Recipient list"
+        ],
+        [
+          "Decide the next hop after each step from a workflow table",
+          "Dynamic router"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A filter drops order events whose total is `0`. A producer published one such event over a queue. What does the producer see?",
+      "options": [
+        "Nothing different: the message was delivered and consumed; dropping it is invisible to the producer",
+        "An error, because the message was rejected",
+        "A `404 Not Found`",
+        "The message is redelivered forever"
+      ],
+      "answer": 0,
+      "explain": "Filtering is silent by design. That is why you log (or count) filtered messages: otherwise \"the order never arrived\" has no trace."
+    },
+    {
+      "type": "code",
+      "title": "A content-based router",
+      "prompt": [
+        "The tests declare a simple `Exchange` with `Headers` (case-insensitive) and a JSON `Body` string.",
+        "",
+        "Write `string Route(Exchange ex)` that returns the destination for a shipment:",
+        "",
+        "- body field `weightKg` (number) greater than `30` → `\"carrier:freight\"`",
+        "- header `country` not `GB` **and** body field `express` is `true` → `\"carrier:international-express\"`",
+        "- header `country` not `GB` → `\"carrier:international\"`",
+        "- body `express` is `true` → `\"carrier:express\"`",
+        "- otherwise → `\"carrier:standard\"`",
+        "",
+        "A missing `country` header counts as `GB`. Read the body with `JsonDocument.Parse(ex.Body)`; `express` may be missing (treat as `false`).",
+        "```json",
+        "{\"orderId\":\"A1\",\"weightKg\":2.5,\"express\":true}",
+        "```"
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "string Route(Exchange ex)",
+        "{",
+        "    return \"carrier:standard\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "string Route(Exchange ex)",
+        "{",
+        "    using var doc = JsonDocument.Parse(ex.Body);",
+        "    var root = doc.RootElement;",
+        "    var weight = root.TryGetProperty(\"weightKg\", out var w) ? w.GetDouble() : 0;",
+        "    var express = root.TryGetProperty(\"express\", out var e) && e.ValueKind == JsonValueKind.True;",
+        "    var country = ex.Headers.TryGetValue(\"country\", out var c) ? c : \"GB\";",
+        "    var international = country != \"GB\";",
+        "",
+        "    if (weight > 30) return \"carrier:freight\";",
+        "    if (international && express) return \"carrier:international-express\";",
+        "    if (international) return \"carrier:international\";",
+        "    if (express) return \"carrier:express\";",
+        "    return \"carrier:standard\";",
+        "}"
+      ],
+      "hints": [
+        "Parse once, read the three inputs into locals, then write the `if` chain in the order given.",
+        "`root.TryGetProperty(\"express\", out var e) && e.ValueKind == JsonValueKind.True`"
+      ],
+      "template": [
+        "        {{CODE}}",
+        "        Exchange X(string? country, string body)",
+        "        {",
+        "            var ex = new Exchange { Body = body };",
+        "            if (country != null) ex.Headers[\"Country\"] = country;",
+        "            return ex;",
+        "        }",
+        "        Dojo.Eq(\"heavy parcel -> freight\", \"carrier:freight\", Route(X(\"FR\", \"{\\\"weightKg\\\":45,\\\"express\\\":true}\")));",
+        "        Dojo.Eq(\"FR express -> international-express\", \"carrier:international-express\", Route(X(\"FR\", \"{\\\"weightKg\\\":1,\\\"express\\\":true}\")));",
+        "        Dojo.Eq(\"FR normal -> international\", \"carrier:international\", Route(X(\"FR\", \"{\\\"weightKg\\\":1}\")));",
+        "        Dojo.Eq(\"GB express -> express\", \"carrier:express\", Route(X(\"GB\", \"{\\\"weightKg\\\":1,\\\"express\\\":true}\")));",
+        "        Dojo.Eq(\"no country header counts as GB\", \"carrier:standard\", Route(X(null, \"{\\\"weightKg\\\":3,\\\"express\\\":false}\")));",
+        "        Dojo.Eq(\"exactly 30 kg is not freight\", \"carrier:standard\", Route(X(\"GB\", \"{\\\"weightKg\\\":30}\")));",
+        "",
+        "class Exchange",
+        "{",
+        "    public string Id { get; init; } = \"ex-1\";",
+        "    public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);",
+        "    public string Body { get; set; } = \"\";",
+        "    public Dictionary<string, object?> Variables { get; } = new();",
+        "}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A recipient list",
+      "prompt": [
+        "Write `List<string> Recipients(Exchange ex)` for order confirmations:",
+        "",
+        "- header `notify` holds a comma-separated list of channels, e.g. `\"email, sms ,email\"`;",
+        "- trim each entry, lowercase it, drop empty entries and duplicates (keep first-seen order);",
+        "- keep only the channels Acme supports: `email`, `sms`, `push`;",
+        "- return them as endpoint URIs: `\"notify:email\"`, `\"notify:sms\"`, ...",
+        "- no `notify` header → `[\"notify:email\"]` (the default)."
+      ],
+      "starter": [
+        "List<string> Recipients(Exchange ex)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Recipients(Exchange ex)",
+        "{",
+        "    if (!ex.Headers.TryGetValue(\"notify\", out var raw)) return new List<string> { \"notify:email\" };",
+        "    var supported = new HashSet<string> { \"email\", \"sms\", \"push\" };",
+        "    return raw.Split(',')",
+        "              .Select(s => s.Trim().ToLowerInvariant())",
+        "              .Where(s => s.Length > 0 && supported.Contains(s))",
+        "              .Distinct()",
+        "              .Select(s => \"notify:\" + s)",
+        "              .ToList();",
+        "}"
+      ],
+      "hints": [
+        "`Split(',')`, then `Select(s => s.Trim().ToLowerInvariant())`, `Where`, `Distinct()`."
+      ],
+      "template": [
+        "        {{CODE}}",
+        "        Exchange N(string? notify)",
+        "        {",
+        "            var ex = new Exchange();",
+        "            if (notify != null) ex.Headers[\"Notify\"] = notify;",
+        "            return ex;",
+        "        }",
+        "        Dojo.Eq(\"email and sms, deduplicated\", new List<string> { \"notify:email\", \"notify:sms\" }, Recipients(N(\"email, sms ,email\")));",
+        "        Dojo.Eq(\"case and spaces don't matter\", new List<string> { \"notify:push\", \"notify:sms\" }, Recipients(N(\" PUSH,Sms\")));",
+        "        Dojo.Eq(\"unsupported channels are dropped\", new List<string> { \"notify:email\" }, Recipients(N(\"fax,email,,carrier-pigeon\")));",
+        "        Dojo.Eq(\"no header -> default email\", new List<string> { \"notify:email\" }, Recipients(N(null)));",
+        "        Dojo.Eq(\"only unsupported -> empty list\", new List<string>(), Recipients(N(\"fax\")));",
+        "",
+        "class Exchange",
+        "{",
+        "    public string Id { get; init; } = \"ex-1\";",
+        "    public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);",
+        "    public string Body { get; set; } = \"\";",
+        "    public Dictionary<string, object?> Variables { get; } = new();",
+        "}"
+      ]
+    }
+  ]
+}

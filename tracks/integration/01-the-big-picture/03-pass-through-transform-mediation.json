@@ -1,0 +1,202 @@
+{
+  "title": "Pass-through, transform, mediation",
+  "summary": "Recognise the three shapes of an API, and know when an integration layer is the wrong answer.",
+  "minutes": 11,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three shapes",
+      "body": [
+        "Every API you publish falls into one of three shapes:",
+        "",
+        "- **Pass-through**: the gateway calls the backend directly. The backend already speaks a clean contract",
+        "  for consumers; the gateway only adds security, subscriptions and rate limits. No integration code.",
+        "- **Transform**: an integration sits between them and **reshapes**: validates input, renames fields, hides",
+        "  internal fields, maps backend errors to your error contract.",
+        "- **Mediation**: the integration does more than reshape. It adds a backend credential consumers must never see,",
+        "  translates in both directions, bridges protocols (REST in, SOAP or a database out), or **orchestrates**",
+        "  several backend calls into one answer.",
+        "",
+        "```text",
+        "pass-through:  gateway ───────────────► backend",
+        "transform:     gateway ──► integration ──► backend      (reshape, hide, map errors)",
+        "mediation:     gateway ──► integration ──► backend A + backend B + secret key",
+        "```"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which shape is it?",
+      "buckets": [
+        "Pass-through",
+        "Transform",
+        "Mediation"
+      ],
+      "items": [
+        [
+          "The shipping-rates service already returns a clean, documented JSON contract",
+          0
+        ],
+        [
+          "The catalogue returns `internalCost`, which consumers must never see",
+          1
+        ],
+        [
+          "Rename `sku_code` to `isbn` and map a backend 404 to our error body",
+          1
+        ],
+        [
+          "The carrier API needs Acme's own API key on every call",
+          2
+        ],
+        [
+          "Consumers send JSON; the billing system only speaks SOAP",
+          2
+        ],
+        [
+          "One `GET /orders/{id}` answer combines the order service and the carrier's tracking API",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "When NOT to add an integration layer",
+      "body": [
+        "An integration layer costs latency, code, a container to run, and an on-call rotation. Skip it when:",
+        "",
+        "- **The API is a pass-through.** Publish it on the gateway. A Camel route that forwards bytes unchanged adds",
+        "  nothing but a hop.",
+        "- **The logic is business logic.** Pricing, eligibility and stock rules belong in the service that owns the",
+        "  data. An integration that \"just adds one rule\" becomes the hidden owner of the business.",
+        "- **You would build one giant project.** One project holding every API means every change redeploys every API.",
+        "  Split by business domain.",
+        "",
+        "And never publish a **generic \"do anything\" endpoint** (run any query the caller writes, call any internal URL the caller names,",
+        "proxy any URL). Onboarding an existing API means *choosing what to expose*, not exposing everything it can do:",
+        "replace it with specific operations."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The shipping-rates service has a clean OpenAPI contract, no secrets to add and nothing to hide. Consumers need it behind a token and a rate limit. What do you build?",
+      "options": [
+        "Publish it on the gateway as a pass-through, with no integration layer",
+        "A Camel route that forwards the request unchanged",
+        "A new microservice that wraps it",
+        "Nothing: let consumers call it directly"
+      ],
+      "answer": 0,
+      "explain": "The gateway alone gives you tokens, subscriptions and limits. A forwarding route would only add latency and something to maintain. Calling it directly would skip the gateway's protection."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An existing reporting API has `POST /execute` that runs whatever SQL text the caller sends. A partner wants report data. What do you do?",
+      "options": [
+        "Never publish it as is: design specific operations (for example `GET /reports/sales?month=`) in an integration that runs only the queries you chose",
+        "Publish it behind the gateway, since the gateway checks tokens",
+        "Publish it, but rate-limit it to 10 calls a minute",
+        "Publish it and document which queries partners may send"
+      ],
+      "answer": 0,
+      "explain": "A token proves who the caller is; it does not limit *what* a generic endpoint lets them do. Every table in the database becomes part of your public API."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each smell to the better design.",
+      "pairs": [
+        [
+          "Route that forwards requests byte for byte",
+          "Publish the backend as a pass-through on the gateway"
+        ],
+        [
+          "Discount rules inside an integration route",
+          "Move the rule into the service that owns prices"
+        ],
+        [
+          "One integration project with every API in it",
+          "One project per business domain"
+        ],
+        [
+          "Endpoint that runs any query the caller sends",
+          "Specific, named operations"
+        ],
+        [
+          "Backend password typed into the consumer's app",
+          "Integration adds the backend credential from configuration"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "string Shape(bool hidesFields, bool addsSecret, bool combinesCalls)",
+        "{",
+        "    if (addsSecret || combinesCalls) return \"mediation\";",
+        "    if (hidesFields) return \"transform\";",
+        "    return \"pass-through\";",
+        "}",
+        "",
+        "Console.WriteLine(Shape(false, false, false));",
+        "Console.WriteLine(Shape(true, false, false));",
+        "Console.WriteLine(Shape(true, true, false));"
+      ],
+      "answer": [
+        "pass-through",
+        "transform",
+        "mediation"
+      ],
+      "explain": "Check the strongest need first. An API that both hides fields and adds a secret is mediation: it needs everything a transform does, and more."
+    },
+    {
+      "type": "code",
+      "title": "Onboarding decisions",
+      "prompt": [
+        "The tests declare:",
+        "",
+        "```csharp",
+        "record ApiFacts(bool GenericExecute, bool NeedsBackendSecret, bool CallsSeveralBackends,",
+        "                bool ProtocolChange, bool HidesFields, bool RenamesFields, bool NeedsValidation);",
+        "```",
+        "",
+        "Write `string Onboard(ApiFacts f)` returning, in this order of precedence:",
+        "",
+        "1. `\"redesign\"` if `GenericExecute` (never publish a do-anything endpoint);",
+        "2. `\"mediation\"` if it needs a backend secret, calls several backends, or changes protocol;",
+        "3. `\"transform\"` if it hides fields, renames fields or needs validation;",
+        "4. otherwise `\"pass-through\"`."
+      ],
+      "starter": [
+        "string Onboard(ApiFacts f)",
+        "{",
+        "    return \"pass-through\";",
+        "}"
+      ],
+      "solution": [
+        "string Onboard(ApiFacts f)",
+        "{",
+        "    if (f.GenericExecute) return \"redesign\";",
+        "    if (f.NeedsBackendSecret || f.CallsSeveralBackends || f.ProtocolChange) return \"mediation\";",
+        "    if (f.HidesFields || f.RenamesFields || f.NeedsValidation) return \"transform\";",
+        "    return \"pass-through\";",
+        "}"
+      ],
+      "hints": [
+        "Check the conditions in exactly the order listed and `return` as soon as one matches."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"clean contract -> pass-through\", \"pass-through\", Onboard(new ApiFacts(false, false, false, false, false, false, false)));",
+        "Dojo.Eq(\"hides internalCost -> transform\", \"transform\", Onboard(new ApiFacts(false, false, false, false, true, false, false)));",
+        "Dojo.Eq(\"needs validation only -> transform\", \"transform\", Onboard(new ApiFacts(false, false, false, false, false, false, true)));",
+        "Dojo.Eq(\"SOAP backend -> mediation\", \"mediation\", Onboard(new ApiFacts(false, false, false, true, false, false, false)));",
+        "Dojo.Eq(\"secret + renames -> mediation\", \"mediation\", Onboard(new ApiFacts(false, true, false, false, false, true, false)));",
+        "Dojo.Eq(\"two backends -> mediation\", \"mediation\", Onboard(new ApiFacts(false, false, true, false, false, false, false)));",
+        "Dojo.Eq(\"generic execute -> redesign, whatever else is true\", \"redesign\", Onboard(new ApiFacts(true, true, true, true, true, true, true)));",
+        "record ApiFacts(bool GenericExecute, bool NeedsBackendSecret, bool CallsSeveralBackends, bool ProtocolChange, bool HidesFields, bool RenamesFields, bool NeedsValidation);"
+      ]
+    }
+  ]
+}

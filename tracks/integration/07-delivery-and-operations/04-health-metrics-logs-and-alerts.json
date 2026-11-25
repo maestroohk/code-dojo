@@ -1,0 +1,254 @@
+{
+  "title": "Health, metrics, logs and alerts",
+  "summary": "Know it is healthy, see how it performs, find what failed, and avoid the dashboard that always says zero failures.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Health and metrics",
+      "body": [
+        "Three questions every day: **is it healthy? how is it performing? what exactly failed?**",
+        "",
+        "- **Health** endpoints (`/q/health`, `/health`; liveness and readiness): status up/down with checks for the Camel",
+        "  context and each route. Containers, Kubernetes and load balancers call them to decide whether to send traffic or",
+        "  restart. ASP.NET Core's `MapHealthChecks` is the same idea.",
+        "- **Metrics** (Prometheus format): counters such as total, succeeded and failed exchanges per route, plus timings.",
+        "  Prometheus scrapes them, Grafana draws them, alert rules fire on them. The gateway has its own analytics",
+        "  (calls per API, per application, per status code)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A route's dashboard shows **0 failed exchanges** all week, yet consumers received hundreds of 400, 404, 502 and 504 responses. Why?",
+      "options": [
+        "The error handler handles every failure, and a handled exchange counts as succeeded; count the error route's exchanges or the HTTP status codes instead",
+        "Prometheus drops error metrics",
+        "The consumers' clients are miscounting",
+        "4xx and 5xx are not errors"
+      ],
+      "answer": 0,
+      "explain": "This is the \"zero failures\" trap. A metric that counts *unhandled* exceptions measures how good your error handler is, not how healthy the service is."
+    },
+    {
+      "type": "learn",
+      "title": "Logs with trace ids",
+      "body": [
+        "A log line is only useful if you can **find** it. Put the trace id on every line, and keep secrets and personal",
+        "data out:",
+        "",
+        "```text",
+        "2026-03-02T10:42:07.118Z INFO  [6f2c81d4] get-book isbn=9780134757599 -> catalogue 200 in 41 ms",
+        "2026-03-02T10:42:09.502Z ERROR [9b01aa3e] get-book isbn=9780000000500 -> catalogue 500 (BACKEND_ERROR)",
+        "```",
+        "",
+        "Ship logs from every container to one place (Fluent Bit or a similar agent into OpenSearch, Elastic, Loki,",
+        "Application Insights), so a search for `9b01aa3e` covers the gateway, every integration and the backends, for",
+        "every day, not just one container's console. Never log tokens, secrets or full request bodies with personal data."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "What should you alert on?",
+      "buckets": [
+        "Integration",
+        "Gateway",
+        "Platform"
+      ],
+      "items": [
+        [
+          "Health check down, or the container restarting",
+          0
+        ],
+        [
+          "Error-route exchanges per minute rising",
+          0
+        ],
+        [
+          "p95 latency above the agreed level",
+          0
+        ],
+        [
+          "Sudden spike of 401 and 403 (an attack or a broken client)",
+          1
+        ],
+        [
+          "429s per application rising",
+          1
+        ],
+        [
+          "A TLS certificate expiring within 21 days",
+          2
+        ],
+        [
+          "The gateway product two security releases behind",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which metric best tells you consumers are being hurt?",
+      "options": [
+        "The rate of 5xx responses (and latency) per API at the gateway, compared with the total",
+        "The JVM's heap size",
+        "The number of routes deployed",
+        "The count of failed exchanges in a route that handles all errors"
+      ],
+      "answer": 0,
+      "explain": "Measure what consumers experience: status codes and latency at the edge. Internal counters are for diagnosis."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var statuses = new[] { 200, 200, 404, 200, 502, 504, 200, 400, 200, 200 };",
+        "var handledFailures = 0;   // what a route's \"failed exchanges\" counter sees",
+        "var serverErrors = statuses.Count(s => s >= 500);",
+        "var clientErrors = statuses.Count(s => s >= 400 && s < 500);",
+        "Console.WriteLine($\"failed exchanges: {handledFailures}\");",
+        "Console.WriteLine($\"5xx rate: {serverErrors * 100 / statuses.Length}%, 4xx rate: {clientErrors * 100 / statuses.Length}%\");"
+      ],
+      "answer": [
+        "failed exchanges: 0",
+        "5xx rate: 20%, 4xx rate: 20%"
+      ],
+      "explain": "A 20% server-error rate with a 'failed' counter of zero: count outcomes by status code."
+    },
+    {
+      "type": "code",
+      "title": "Metrics that count correctly",
+      "prompt": [
+        "Write a class `Metrics`:",
+        "",
+        "- `void Record(string route, int status, int latencyMs)`: one request outcome;",
+        "- `string Snapshot(string route)`: `\"total={n} ok={2xx/3xx} client_errors={4xx} server_errors={5xx} p95={ms}\"` for that route (`p95=0` with no data);",
+        "- p95: sort the latencies ascending and take the element at index `ceil(0.95 × count) − 1` (the nearest-rank method);",
+        "- `double ErrorRate(string route)`: server errors ÷ total (`0` with no data). 4xx are the consumer's errors and don't count here."
+      ],
+      "starter": [
+        "class Metrics",
+        "{",
+        "    public void Record(string route, int status, int latencyMs) { }",
+        "    public string Snapshot(string route) => \"\";",
+        "    public double ErrorRate(string route) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class Metrics",
+        "{",
+        "    readonly Dictionary<string, List<(int Status, int Latency)>> data = new();",
+        "",
+        "    public void Record(string route, int status, int latencyMs)",
+        "    {",
+        "        if (!data.TryGetValue(route, out var list)) data[route] = list = new();",
+        "        list.Add((status, latencyMs));",
+        "    }",
+        "",
+        "    public string Snapshot(string route)",
+        "    {",
+        "        var list = data.GetValueOrDefault(route) ?? new();",
+        "        var ok = list.Count(x => x.Status < 400);",
+        "        var client = list.Count(x => x.Status >= 400 && x.Status < 500);",
+        "        var server = list.Count(x => x.Status >= 500);",
+        "        var p95 = 0;",
+        "        if (list.Count > 0)",
+        "        {",
+        "            var sorted = list.Select(x => x.Latency).OrderBy(x => x).ToList();",
+        "            p95 = sorted[(int)Math.Ceiling(0.95 * sorted.Count) - 1];",
+        "        }",
+        "        return $\"total={list.Count} ok={ok} client_errors={client} server_errors={server} p95={p95}\";",
+        "    }",
+        "",
+        "    public double ErrorRate(string route)",
+        "    {",
+        "        var list = data.GetValueOrDefault(route);",
+        "        return list is null || list.Count == 0 ? 0 : (double)list.Count(x => x.Status >= 500) / list.Count;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Store `(status, latency)` pairs per route.",
+        "Nearest-rank p95: `sorted[(int)Math.Ceiling(0.95 * count) - 1]`."
+      ],
+      "template": [
+        "var dojoM = new Metrics();",
+        "var dojoLat = new[] { 40, 35, 120, 38, 3000, 2900, 41, 12, 39, 44, 37, 36, 43, 42, 40, 39, 38, 45, 41, 40 };",
+        "var dojoSt = new[] { 200, 200, 404, 200, 502, 504, 200, 400, 200, 200, 200, 200, 200, 200, 200, 200, 200, 201, 200, 200 };",
+        "for (int i = 0; i < dojoLat.Length; i++) dojoM.Record(\"get-book\", dojoSt[i], dojoLat[i]);",
+        "dojoM.Record(\"create-order\", 201, 80);",
+        "Dojo.Eq(\"get-book snapshot\", \"total=20 ok=16 client_errors=2 server_errors=2 p95=2900\", dojoM.Snapshot(\"get-book\"));",
+        "Dojo.Eq(\"error rate counts 5xx only\", 0.1, dojoM.ErrorRate(\"get-book\"));",
+        "Dojo.Eq(\"routes are separate\", \"total=1 ok=1 client_errors=0 server_errors=0 p95=80\", dojoM.Snapshot(\"create-order\"));",
+        "Dojo.Eq(\"no data\", \"total=0 ok=0 client_errors=0 server_errors=0 p95=0\", dojoM.Snapshot(\"nothing\"));",
+        "Dojo.Eq(\"no data error rate\", 0.0, dojoM.ErrorRate(\"nothing\"));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Find the journey of one request",
+      "prompt": [
+        "Support has a trace id. Log lines from several services look like",
+        "`\"{timestamp} {LEVEL} [{traceId}] {service} {message}\"`, e.g. `\"2026-03-02T10:42:09.502Z ERROR [9b01aa3e] catalogue-integration backend 500\"`.",
+        "",
+        "Write `(List<string> Journey, string? FirstError) Investigate(IEnumerable<string> lines, string traceId)`:",
+        "",
+        "- `Journey`: the lines containing exactly `[traceId]`, sorted by timestamp (the timestamps are ISO-8601, so ordinal string order works), formatted as `\"{service}: {message}\"`;",
+        "- `FirstError`: the earliest `ERROR` line of that journey in the same format, or null.",
+        "- Ignore malformed lines (fewer than 5 space-separated parts, or a third part not in `[...]`)."
+      ],
+      "starter": [
+        "(List<string> Journey, string? FirstError) Investigate(IEnumerable<string> lines, string traceId)",
+        "{",
+        "    return (new List<string>(), null);",
+        "}"
+      ],
+      "solution": [
+        "(List<string> Journey, string? FirstError) Investigate(IEnumerable<string> lines, string traceId)",
+        "{",
+        "    var entries = new List<(string Time, string Level, string Text)>();",
+        "    foreach (var line in lines)",
+        "    {",
+        "        var parts = line.Split(' ', 5);",
+        "        if (parts.Length < 5 || !parts[2].StartsWith(\"[\") || !parts[2].EndsWith(\"]\")) continue;",
+        "        if (parts[2] != \"[\" + traceId + \"]\") continue;",
+        "        entries.Add((parts[0], parts[1], $\"{parts[3]}: {parts[4]}\"));",
+        "    }",
+        "    var sorted = entries.OrderBy(e => e.Time, StringComparer.Ordinal).ToList();",
+        "    var firstError = sorted.FirstOrDefault(e => e.Level == \"ERROR\").Text;",
+        "    return (sorted.Select(e => e.Text).ToList(), firstError);",
+        "}"
+      ],
+      "hints": [
+        "`line.Split(' ', 5)` keeps the message (which contains spaces) in one piece.",
+        "Sort by the timestamp string; `FirstOrDefault` on a tuple list gives a default tuple whose `Text` is null."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoLogs = new[]",
+        "{",
+        "    \"2026-03-02T10:42:09.610Z ERROR [9b01aa3e] gateway 502 returned to shop-app\",",
+        "    \"2026-03-02T10:42:09.100Z INFO [9b01aa3e] gateway GET /catalogue/v1/books/9780000000500 app=shop-app\",",
+        "    \"2026-03-02T10:42:09.300Z INFO [6f2c81d4] catalogue-integration get-book 200\",",
+        "    \"garbage line\",",
+        "    \"2026-03-02T10:42:09.502Z ERROR [9b01aa3e] catalogue-integration backend answered 500\",",
+        "    \"2026-03-02T10:42:09.480Z ERROR [9b01aa3e] catalogue NullReferenceException in PriceRules\",",
+        "    \"2026-03-02T10:42:09.200Z INFO [9b01aa3e] catalogue-integration get-book isbn=9780000000500\",",
+        "};",
+        "var (dojoJ, dojoE) = Investigate(dojoLogs, \"9b01aa3e\");",
+        "Dojo.Eq(\"the journey in time order\", new List<string>",
+        "{",
+        "    \"gateway: GET /catalogue/v1/books/9780000000500 app=shop-app\",",
+        "    \"catalogue-integration: get-book isbn=9780000000500\",",
+        "    \"catalogue: NullReferenceException in PriceRules\",",
+        "    \"catalogue-integration: backend answered 500\",",
+        "    \"gateway: 502 returned to shop-app\",",
+        "}, dojoJ);",
+        "Dojo.Eq(\"the root cause is the earliest error\", \"catalogue: NullReferenceException in PriceRules\", dojoE);",
+        "Dojo.Eq(\"an unknown id\", 0, Investigate(dojoLogs, \"nope\").Journey.Count);",
+        "Dojo.Eq(\"no errors -> null\", null, Investigate(dojoLogs, \"6f2c81d4\").FirstError);"
+      ]
+    }
+  ]
+}

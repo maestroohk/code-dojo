@@ -1,0 +1,235 @@
+{
+  "title": "Retries with backoff",
+  "summary": "Retry what is transient and safe, wait longer each time, and never multiply retries across layers.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What to retry",
+      "body": [
+        "A retry helps only if the failure is **transient** and the operation is **safe to repeat**.",
+        "",
+        "- **Transient**: connection refused or reset, `502`, `503`, `504`, timeouts, and `429` (after `Retry-After`).",
+        "- **Permanent**: `400`, `401`, `403`, `404`, `409`, `422`. Retrying just repeats the same answer, slower.",
+        "- **Safe to repeat** (idempotent): `GET`, `HEAD`, `PUT`, `DELETE` by definition. A `POST` (create an order, charge a",
+        "  card) only with an **idempotency key** the backend honours (lesson 5). Without one, a retried POST after a",
+        "  timeout may create the order twice: the first attempt might have succeeded."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Retry or not?",
+      "buckets": [
+        "Retry",
+        "Don't retry"
+      ],
+      "items": [
+        [
+          "`GET /books/1` → 503",
+          0
+        ],
+        [
+          "`GET /books/1` → 404",
+          1
+        ],
+        [
+          "`GET /books/1` → connection reset",
+          0
+        ],
+        [
+          "`POST /orders` (no idempotency key) → timeout",
+          1
+        ],
+        [
+          "`POST /orders` with `Idempotency-Key` → 502",
+          0
+        ],
+        [
+          "`PUT /books/1/price` → 400",
+          1
+        ],
+        [
+          "`GET /stock/1` → 429 with `Retry-After: 2`",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Exponential backoff and jitter",
+      "body": [
+        "Retrying immediately hammers a backend that is already struggling. Wait **longer each time**, up to a cap:",
+        "",
+        "```text",
+        "delay(n) = min(cap, base × 2^(n−1))      base 100 ms, cap 2 s:  100, 200, 400, 800, 1600, 2000, ...",
+        "```",
+        "",
+        "Add **jitter** (a random part of the delay) so a thousand clients that failed together don't all retry at the",
+        "same instant. In Camel this is the redelivery policy:",
+        "",
+        "```yaml",
+        "- onException:",
+        "    exception: [ java.net.SocketTimeoutException, java.net.ConnectException ]",
+        "    redeliveryPolicy:",
+        "      maximumRedeliveries: 2",
+        "      redeliveryDelay: 100",
+        "      useExponentialBackOff: true",
+        "      backOffMultiplier: 2",
+        "      maximumRedeliveryDelay: 2000",
+        "```",
+        "In .NET, Polly's retry strategy does the same. Deterministic tests use a **fake clock** instead of really sleeping."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "int Delay(int n, int baseMs, int capMs) => (int)Math.Min(capMs, baseMs * Math.Pow(2, n - 1));",
+        "",
+        "Console.WriteLine(string.Join(\", \", Enumerable.Range(1, 6).Select(n => Delay(n, 100, 2000))));"
+      ],
+      "answer": "100, 200, 400, 800, 1600, 2000"
+    },
+    {
+      "type": "mcq",
+      "prompt": "The consumer's SDK retries 3 times, the gateway retries 3 times, and the integration retries 3 times. The backend is down. How many calls reach it for one user click?",
+      "options": [
+        "27: retries multiply across layers, turning an outage into a flood",
+        "9",
+        "3",
+        "1, because retries are coordinated"
+      ],
+      "answer": 0,
+      "explain": "Retry in **one** layer, the one closest to the failing backend that knows whether the operation is safe to repeat; the others should fail fast."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the redelivery policy: at most 3 retries, starting at 200 ms, doubling each time.",
+      "code": [
+        "redeliveryPolicy:",
+        "  __1__: 3",
+        "  redeliveryDelay: __2__",
+        "  useExponentialBackOff: true",
+        "  __3__: 2"
+      ],
+      "blanks": [
+        "maximumRedeliveries",
+        "200",
+        "backOffMultiplier"
+      ],
+      "bank": [
+        "retries",
+        "maxAttempts",
+        "2000",
+        "multiplier",
+        "delayFactor"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Safe to retry?",
+      "prompt": [
+        "Write `bool ShouldRetry(string method, int status, bool hasIdempotencyKey)`:",
+        "",
+        "- only transient outcomes: `status` is `429`, `502`, `503`, `504`, or `0` (the tests use 0 for \"no response: timeout or connection error\");",
+        "- only safe operations: `GET`, `HEAD`, `PUT`, `DELETE` (ignore case), or `POST`/`PATCH` **with** an idempotency key."
+      ],
+      "starter": [
+        "bool ShouldRetry(string method, int status, bool hasIdempotencyKey)",
+        "{",
+        "    return true;",
+        "}"
+      ],
+      "solution": [
+        "bool ShouldRetry(string method, int status, bool hasIdempotencyKey)",
+        "{",
+        "    var transient = status is 0 or 429 or 502 or 503 or 504;",
+        "    var m = method.ToUpperInvariant();",
+        "    var safe = m is \"GET\" or \"HEAD\" or \"PUT\" or \"DELETE\" || (m is \"POST\" or \"PATCH\" && hasIdempotencyKey);",
+        "    return transient && safe;",
+        "}"
+      ],
+      "hints": [
+        "Compute two booleans, `transient` and `safe`, and return both."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"GET 503\", true, ShouldRetry(\"GET\", 503, false));",
+        "Dojo.Eq(\"GET 404\", false, ShouldRetry(\"GET\", 404, false));",
+        "Dojo.Eq(\"get timeout (lower case)\", true, ShouldRetry(\"get\", 0, false));",
+        "Dojo.Eq(\"POST timeout without key\", false, ShouldRetry(\"POST\", 0, false));",
+        "Dojo.Eq(\"POST 502 with key\", true, ShouldRetry(\"POST\", 502, true));",
+        "Dojo.Eq(\"PUT 400\", false, ShouldRetry(\"PUT\", 400, false));",
+        "Dojo.Eq(\"DELETE 429\", true, ShouldRetry(\"DELETE\", 429, false));",
+        "Dojo.Eq(\"POST 200 never retries\", false, ShouldRetry(\"POST\", 200, true));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Retry with exponential backoff",
+      "prompt": [
+        "The tests declare `IClock` / `FakeClock` (as in the previous lesson; `Sleep` records the delay and moves time on).",
+        "",
+        "Write `(int Status, int Attempts) Execute(Func<int> call, int maxAttempts, int baseDelayMs, int capDelayMs, IClock clock)`:",
+        "",
+        "- call `call()`; it returns a status code (`0` = no response);",
+        "- if the status is `429`, `502`, `503`, `504` or `0` and attempts remain, `clock.Sleep(delay)` and try again, with `delay = min(cap, base × 2^(n−1))` for the n-th retry;",
+        "- never sleep after the last attempt; any other status returns immediately;",
+        "- return the last status and how many attempts were made."
+      ],
+      "starter": [
+        "(int Status, int Attempts) Execute(Func<int> call, int maxAttempts, int baseDelayMs, int capDelayMs, IClock clock)",
+        "{",
+        "    return (call(), 1);",
+        "}"
+      ],
+      "solution": [
+        "(int Status, int Attempts) Execute(Func<int> call, int maxAttempts, int baseDelayMs, int capDelayMs, IClock clock)",
+        "{",
+        "    var attempt = 0;",
+        "    while (true)",
+        "    {",
+        "        attempt++;",
+        "        var status = call();",
+        "        var transient = status is 0 or 429 or 502 or 503 or 504;",
+        "        if (!transient || attempt >= maxAttempts) return (status, attempt);",
+        "        var delay = (int)Math.Min(capDelayMs, baseDelayMs * Math.Pow(2, attempt - 1));",
+        "        clock.Sleep(delay);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A loop that counts attempts and returns when the status is not transient or attempts are used up.",
+        "Compute the delay from the attempt number *before* the next try: `base * 2^(attempt - 1)`."
+      ],
+      "template": [
+        "        {{CODE}}",
+        "        Func<int> Script(params int[] statuses) { var i = 0; return () => statuses[Math.Min(i++, statuses.Length - 1)]; }",
+        "        var dojoC1 = new FakeClock();",
+        "        Dojo.Eq(\"recovers on the third attempt\", (200, 3), Execute(Script(503, 0, 200), 5, 100, 2000, dojoC1));",
+        "        Dojo.Eq(\"waited 100 then 200 ms\", new List<int> { 100, 200 }, dojoC1.Sleeps);",
+        "        var dojoC2 = new FakeClock();",
+        "        Dojo.Eq(\"gives up after maxAttempts\", (503, 4), Execute(Script(503), 4, 500, 1500, dojoC2));",
+        "        Dojo.Eq(\"delays are capped and there is no sleep after the last attempt\", new List<int> { 500, 1000, 1500 }, dojoC2.Sleeps);",
+        "        var dojoC3 = new FakeClock();",
+        "        Dojo.Eq(\"404 is returned at once\", (404, 1), Execute(Script(404, 200), 5, 100, 2000, dojoC3));",
+        "        Dojo.Eq(\"no sleeping for a permanent error\", 0, dojoC3.Sleeps.Count);",
+        "",
+        "interface IClock",
+        "{",
+        "    long NowMs { get; }",
+        "    void Sleep(int ms);",
+        "}",
+        "",
+        "class FakeClock : IClock",
+        "{",
+        "    public long NowMs { get; private set; }",
+        "    public List<int> Sleeps { get; } = new();",
+        "    public void Sleep(int ms) { Sleeps.Add(ms); NowMs += ms; }",
+        "    public void Advance(int ms) => NowMs += ms;",
+        "}"
+      ]
+    }
+  ]
+}

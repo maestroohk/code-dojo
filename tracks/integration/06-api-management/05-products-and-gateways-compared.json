@@ -1,0 +1,192 @@
+{
+  "title": "API products, and gateways compared",
+  "summary": "Many services behind one address, bundles for partners, the path-collision trap, and WSO2 versus APISIX versus Kong.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One gateway, many services",
+      "body": [
+        "A platform publishes **one API per service** on **one gateway address**:",
+        "",
+        "```text",
+        "https://api.acme.example/catalogue/v1/books/{isbn}     → catalogue integration (transform)",
+        "https://api.acme.example/orders/v1/orders              → orders integration (mediation)",
+        "https://api.acme.example/shipping-rates/v1/quote       → shipping-rates service (pass-through)",
+        "```",
+        "",
+        "- The **context** (`/catalogue`) is a **business noun**, never a system name: systems get replaced, consumers stay.",
+        "- Version **per service**: orders v2 ships without touching catalogue v1.",
+        "- Resources are **relative**: `/catalogue/v1/books/{isbn}`, not `/catalogue/v1/catalogue/books/...`.",
+        "- Keep each API small (a handful of operations). One API with dozens of resources means every change risks all of them."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which context is the best choice for the API in front of the warehouse system the shop calls \"inventory\"?",
+      "options": [
+        "`/inventory`",
+        "`/wms-2000`",
+        "`/warehouse-system-api`",
+        "`/api`"
+      ],
+      "answer": 0,
+      "explain": "Name the business capability. When the warehouse system is replaced, `/inventory` still makes sense and no consumer has to change."
+    },
+    {
+      "type": "learn",
+      "title": "API products",
+      "body": [
+        "Sometimes a partner should see **one** API, not three. An **API product** bundles **selected operations** from",
+        "several APIs under **one context** and **one subscription**:",
+        "",
+        "```text",
+        "/partner/v1/books/{isbn}     → from catalogue v1",
+        "/partner/v1/orders           → from orders v1",
+        "/partner/v1/quote            → from shipping-rates v1",
+        "```",
+        "",
+        "Each operation still goes to its own backend; only the packaging changes. The catch: paths are **flattened**",
+        "under one context, so two operations that were distinct in their own APIs can **collide**. `GET /{isbn}` from",
+        "catalogue and `GET /{orderId}` from orders both become `GET /partner/v1/{x}`, and the gateway will route",
+        "every such call to whichever it matches first. Design distinctive paths (`/books/{isbn}`, `/orders/{id}`)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A product includes catalogue's `GET /{isbn}` and orders' `GET /{orderId}`. A partner calls `GET /partner/v1/A1` for an order and gets `400 INVALID_REQUEST` from the catalogue integration. What happened?",
+      "options": [
+        "The two templates collide after flattening; the gateway routed the call to catalogue, whose ISBN validation rejected it",
+        "The order doesn't exist",
+        "The partner lacks a scope",
+        "The orders integration is down"
+      ],
+      "answer": 0,
+      "explain": "Validation in the integration saved the backend from garbage (defence in depth), but the real fix is distinctive paths."
+    },
+    {
+      "type": "learn",
+      "title": "Gateways compared, at a high level",
+      "body": [
+        "| | **WSO2 API Manager** | **Apache APISIX** | **Kong Gateway** |",
+        "|---|---|---|---|",
+        "| Shape | full API management: gateway, key manager, publisher, developer portal, admin | a fast gateway (NGINX/OpenResty, config in etcd) with many plugins | a fast gateway (NGINX/OpenResty) with plugins; management features in paid tiers |",
+        "| OpenAPI import, portal | built in | limited; dashboard is basic | developer portal and management mostly in the enterprise product |",
+        "| OAuth key manager | built in (or external IdP) | delegates to an IdP such as Keycloak (`openid-connect` plugin) | plugins; usually an external IdP |",
+        "| Rate limiting | tiers, plans, traffic manager | `limit-count`, `limit-req` plugins | `rate-limiting` plugins |",
+        "| Configured via | portals, REST APIs, `apictl` | Admin API (JSON), declarative YAML | Admin API, declarative `deck` |",
+        "",
+        "Cloud services (Azure API Management, AWS API Gateway, Google Apigee) offer the same concepts as managed services.",
+        "When choosing, check **current** licensing and patch policy (what security fixes the free edition gets, and when),",
+        "whether a portal and role-based access are included, and how well it fits your pipelines."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the need to the product feature.",
+      "pairs": [
+        [
+          "Partners must self-serve keys and read docs",
+          "A developer portal"
+        ],
+        [
+          "Existing company-wide identity provider",
+          "An external key manager (Keycloak, Entra ID)"
+        ],
+        [
+          "Promote API definitions from a pipeline",
+          "A CLI / declarative config (`apictl`, `deck`, YAML)"
+        ],
+        [
+          "Protect a fragile backend from everyone together",
+          "An API-level (advanced) rate limit"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "string Shape(string template) => string.Join(\"/\", template.Split('/', StringSplitOptions.RemoveEmptyEntries)",
+        "    .Select(s => s.StartsWith(\"{\") ? \"{}\" : s.ToLowerInvariant()));",
+        "",
+        "var ops = new[] { (\"catalogue\", \"GET /{isbn}\"), (\"orders\", \"GET /{orderId}\"), (\"orders\", \"GET /orders/{id}\") };",
+        "foreach (var g in ops.GroupBy(o => o.Item2.Split(' ')[0] + \" \" + Shape(o.Item2.Split(' ')[1])))",
+        "    Console.WriteLine($\"{g.Key}: {string.Join(\", \", g.Select(o => o.Item1))}\");"
+      ],
+      "answer": [
+        "GET {}: catalogue, orders",
+        "GET orders/{}: orders"
+      ],
+      "explain": "Normalise parameter names away, and identical shapes reveal the collision."
+    },
+    {
+      "type": "code",
+      "title": "Find product collisions",
+      "prompt": [
+        "The tests declare `record ProductOp(string Api, string Method, string Path);` (paths are relative to the product context).",
+        "",
+        "Write `List<string> Collisions(List<ProductOp> ops)`. Two operations **collide** when they have the same method (ignore case) and the same number of segments, and at every position the segments are equal (ignore case) **or at least one of them is a `{parameter}`** (a parameter matches any literal, so `/{isbn}` and `/search` collide too).",
+        "",
+        "Return one line per colliding pair, in input order (`i < j`): `\"{METHOD} {path1} ({api1}) vs {path2} ({api2})\"` with the method upper-cased."
+      ],
+      "starter": [
+        "List<string> Collisions(List<ProductOp> ops)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Collisions(List<ProductOp> ops)",
+        "{",
+        "    string[] Seg(string p) => p.Split('/', StringSplitOptions.RemoveEmptyEntries);",
+        "    bool IsParam(string s) => s.StartsWith(\"{\") && s.EndsWith(\"}\");",
+        "    bool Collide(ProductOp a, ProductOp b)",
+        "    {",
+        "        if (!string.Equals(a.Method, b.Method, StringComparison.OrdinalIgnoreCase)) return false;",
+        "        var x = Seg(a.Path); var y = Seg(b.Path);",
+        "        if (x.Length != y.Length) return false;",
+        "        for (int i = 0; i < x.Length; i++)",
+        "            if (!IsParam(x[i]) && !IsParam(y[i]) && !string.Equals(x[i], y[i], StringComparison.OrdinalIgnoreCase)) return false;",
+        "        return true;",
+        "    }",
+        "    var result = new List<string>();",
+        "    for (int i = 0; i < ops.Count; i++)",
+        "        for (int j = i + 1; j < ops.Count; j++)",
+        "            if (Collide(ops[i], ops[j]))",
+        "                result.Add($\"{ops[i].Method.ToUpperInvariant()} {ops[i].Path} ({ops[i].Api}) vs {ops[j].Path} ({ops[j].Api})\");",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "Compare every pair `i < j` with a local `Collide(a, b)` function.",
+        "A position is fine if either side is a parameter or the literals are equal."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoBad = new List<ProductOp>",
+        "{",
+        "    new(\"catalogue\", \"GET\", \"/{isbn}\"),",
+        "    new(\"orders\", \"get\", \"/{orderId}\"),",
+        "    new(\"catalogue\", \"GET\", \"/search\"),",
+        "    new(\"orders\", \"POST\", \"/{orderId}\"),",
+        "    new(\"shipping\", \"GET\", \"/quote/{postcode}\"),",
+        "};",
+        "Dojo.Eq(\"every colliding pair\", new List<string>",
+        "{",
+        "    \"GET /{isbn} (catalogue) vs /{orderId} (orders)\",",
+        "    \"GET /{isbn} (catalogue) vs /search (catalogue)\",",
+        "    \"GET /{orderId} (orders) vs /search (catalogue)\",",
+        "}, Collisions(dojoBad));",
+        "var dojoGood = new List<ProductOp>",
+        "{",
+        "    new(\"catalogue\", \"GET\", \"/books/{isbn}\"), new(\"orders\", \"GET\", \"/orders/{id}\"),",
+        "    new(\"orders\", \"POST\", \"/orders\"), new(\"shipping\", \"GET\", \"/quotes/{postcode}\"),",
+        "};",
+        "Dojo.Eq(\"distinctive paths don't collide\", new List<string>(), Collisions(dojoGood));",
+        "record ProductOp(string Api, string Method, string Path);"
+      ]
+    }
+  ]
+}

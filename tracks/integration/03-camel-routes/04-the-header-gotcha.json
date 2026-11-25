@@ -1,0 +1,306 @@
+{
+  "title": "The header gotcha",
+  "summary": "Why a backend returns 404 only when called through your route, why the caller then sees 204, and four ways to stop headers leaking in both directions.",
+  "minutes": 15,
+  "kind": "lesson",
+  "prereqs": [
+    "networking/09-edge/01-proxies-and-balancers"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What platform-http puts on the exchange",
+      "body": [
+        "When `platform-http` receives `GET /books/9780131103627` with a token, the exchange starts with headers like:",
+        "",
+        "```text",
+        "isbn               = 9780131103627          (path parameter)",
+        "CamelHttpMethod    = GET",
+        "CamelHttpUri       = /books/9780131103627",
+        "CamelHttpPath      = /books/9780131103627   (roughly: the part after the route's base)",
+        "Authorization      = Bearer eyJ...          (every header the client sent)",
+        "Cookie, User-Agent, X-Forwarded-For, ...",
+        "```",
+        "",
+        "Now the route calls the backend with `toD: http:catalogue:8080/api/books/${header.isbn}`.",
+        "The HTTP **producer** looks at the message headers to build its request, and that is where it goes wrong."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Called directly, `GET http://catalogue:8080/api/books/9780131103627` returns 200. Called through your route, the backend logs a request for a strange path and returns 404. What is the most likely cause?",
+      "options": [
+        "Incoming `CamelHttp*` headers (path/URI) from the caller's request are still on the exchange and the HTTP producer uses them to change the outgoing URL",
+        "The backend is down",
+        "`toD` cannot contain a port number",
+        "The gateway rewrote the path"
+      ],
+      "answer": 0,
+      "explain": "Headers flow from step to step unless you remove them. The producer reads `CamelHttpUri` and `CamelHttpPath` as instructions."
+    },
+    {
+      "type": "learn",
+      "title": "The producer's rules, simplified",
+      "body": [
+        "A simplified model of what Camel's HTTP producer does with message headers:",
+        "",
+        "1. **Address**: if a `CamelHttpUri` header exists, it **overrides** the endpoint's address",
+        "   (unless `bridgeEndpoint=true`). Then a `CamelHttpPath` header is **appended**.",
+        "2. **Method**: a `CamelHttpMethod` header sets the verb (an incoming `POST` stays a `POST`).",
+        "3. **Headers**: every other message header is **sent to the backend** as an HTTP header,",
+        "   including the caller's `Authorization` and `Cookie`.",
+        "",
+        "So the caller's path gets glued onto (or replaces) yours, and the caller's token reaches a backend that should",
+        "never see it. The URL is wrong, the backend answers 404 or the producer throws, and if a default dead letter",
+        "channel catches that exception, the caller gets an empty **204** and the real error is only in the log."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Using the simplified rules, what does this print?",
+      "code": [
+        "var endpoint = \"http://catalogue:8080/api/books/9780131103627\";",
+        "var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)",
+        "{",
+        "    [\"CamelHttpPath\"] = \"/books/9780131103627\",",
+        "    [\"Authorization\"] = \"Bearer abc\",",
+        "    [\"isbn\"] = \"9780131103627\",",
+        "};",
+        "var bridge = false;",
+        "var url = (!bridge && headers.TryGetValue(\"CamelHttpUri\", out var u) ? u : endpoint)",
+        "          + headers.GetValueOrDefault(\"CamelHttpPath\", \"\");",
+        "Console.WriteLine(url);",
+        "Console.WriteLine(string.Join(\",\", headers.Keys.Where(k => !k.StartsWith(\"Camel\"))));"
+      ],
+      "answer": [
+        "http://catalogue:8080/api/books/9780131103627/books/9780131103627",
+        "Authorization,isbn"
+      ],
+      "explain": "The caller's path is appended to yours, and both `Authorization` and `isbn` are sent on as HTTP headers."
+    },
+    {
+      "type": "learn",
+      "title": "Four fixes",
+      "body": [
+        "**A. `removeHeaders` before the call**: explicit and visible in a review.",
+        "```yaml",
+        "- removeHeaders: { pattern: \"*\", excludePattern: isbn }",
+        "- toD: http:catalogue:8080/api/books/${header.isbn}",
+        "```",
+        "**B. `bridgeEndpoint=true`**: made for transparent **proxies**. It ignores `CamelHttpUri` but still forwards",
+        "the caller's headers (and the caller's path by design). Wrong intent for an integration.",
+        "",
+        "**C. Component options** such as `skipRequestHeaders=true` / `skipControlHeaders=true`: they work, but they hide",
+        "inside each HTTP step's settings, are easy to miss in review, and must be repeated on every call.",
+        "",
+        "**D. Copy what you need into variables, then remove every header**: the cleanest. Nothing from the caller leaks.",
+        "```yaml",
+        "- setVariable: { name: isbn, simple: \"${header.isbn}\" }",
+        "- removeHeaders: { pattern: \"*\" }",
+        "- toD: http:catalogue:8080/api/books/${variable.isbn}?httpMethod=GET",
+        "```",
+        "Setting `httpMethod` explicitly also stops an incoming verb from leaking into the outgoing call."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each fix to its trade-off.",
+      "pairs": [
+        [
+          "`removeHeaders` with an exclude",
+          "Visible and explicit, but the kept header still travels"
+        ],
+        [
+          "`bridgeEndpoint=true`",
+          "Meant for proxies: still forwards the caller's headers"
+        ],
+        [
+          "`skipRequestHeaders` on the component",
+          "Works, but hidden in settings and repeated per step"
+        ],
+        [
+          "Variables + remove every header",
+          "Nothing from the caller leaks at all"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The other direction: response headers",
+      "body": [
+        "The backend's **response** headers land on the exchange too, and when the route ends they become **your**",
+        "response headers. That is how `Server: Apache/2.4.41`, `X-Powered-By`, internal ids, debug headers and even",
+        "`Set-Cookie` from a backend reach consumers.",
+        "",
+        "Clean up on the way out, then set what you mean to send:",
+        "",
+        "```yaml",
+        "- toD: http:catalogue:8080/api/books/${variable.isbn}?httpMethod=GET",
+        "- setBody: { jq: \"{isbn: .isbn, title: .title}\" }",
+        "- removeHeaders: { pattern: \"*\" }",
+        "- setHeader: { name: Content-Type, constant: application/json }",
+        "```",
+        "",
+        "Removing every header also removed `Content-Type`, so set it again, with **Constant**: nothing varies."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Should it reach the other side?",
+      "buckets": [
+        "Strip it",
+        "Send it (set deliberately)"
+      ],
+      "items": [
+        [
+          "The consumer's `Authorization` header, towards the backend",
+          0
+        ],
+        [
+          "The consumer's `Cookie`, towards the backend",
+          0
+        ],
+        [
+          "`CamelHttpPath` from the incoming request",
+          0
+        ],
+        [
+          "The backend's `Server: nginx/1.18` header, towards the consumer",
+          0
+        ],
+        [
+          "`X-Trace-Id`, so the backend logs the same id",
+          1
+        ],
+        [
+          "The backend's own API key, added by the integration from configuration",
+          1
+        ],
+        [
+          "`Content-Type: application/json` on your response",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An allowlist for outbound headers",
+      "prompt": [
+        "Write `Dictionary<string, string> OutboundHeaders(IDictionary<string, string> exchangeHeaders, IEnumerable<string> allow, IDictionary<string, string> add)`:",
+        "",
+        "- start from **nothing** (an allowlist, not a blocklist) and copy only headers whose name is in `allow` (ignore case);",
+        "- never copy a header starting with `Camel` (ignore case), even if allowed;",
+        "- then set every entry of `add` (these are the integration's own headers, e.g. the backend API key), overwriting;",
+        "- the result is case-insensitive."
+      ],
+      "starter": [
+        "Dictionary<string, string> OutboundHeaders(IDictionary<string, string> exchangeHeaders, IEnumerable<string> allow, IDictionary<string, string> add)",
+        "{",
+        "    return new Dictionary<string, string>(exchangeHeaders, StringComparer.OrdinalIgnoreCase);",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string> OutboundHeaders(IDictionary<string, string> exchangeHeaders, IEnumerable<string> allow, IDictionary<string, string> add)",
+        "{",
+        "    var allowed = new HashSet<string>(allow, StringComparer.OrdinalIgnoreCase);",
+        "    var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);",
+        "    foreach (var (name, value) in exchangeHeaders)",
+        "    {",
+        "        if (name.StartsWith(\"Camel\", StringComparison.OrdinalIgnoreCase)) continue;",
+        "        if (allowed.Contains(name)) result[name] = value;",
+        "    }",
+        "    foreach (var (name, value) in add) result[name] = value;",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "Build a case-insensitive `HashSet` from `allow`.",
+        "Loop over the incoming headers, skip `Camel*`, copy the allowed ones; then loop over `add`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoIn = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)",
+        "{",
+        "    [\"CamelHttpPath\"] = \"/books/1\", [\"CamelHttpUri\"] = \"/books/1\", [\"Authorization\"] = \"Bearer abc\",",
+        "    [\"Cookie\"] = \"session=1\", [\"x-trace-id\"] = \"t-9\", [\"isbn\"] = \"1\",",
+        "};",
+        "var dojoOut = OutboundHeaders(dojoIn, new[] { \"X-Trace-Id\", \"CamelHttpPath\" }, new Dictionary<string, string> { [\"X-Api-Key\"] = \"{{catalogue.key}}\" });",
+        "Dojo.Eq(\"only the allowed header and the added one\", new List<string> { \"X-Api-Key\", \"x-trace-id\" }, dojoOut.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList());",
+        "Dojo.Check(\"Authorization does not leak\", !dojoOut.ContainsKey(\"authorization\"), \"the caller's token was copied\");",
+        "Dojo.Check(\"Camel headers never leak, even if allowed\", !dojoOut.ContainsKey(\"CamelHttpPath\"), \"CamelHttpPath was copied\");",
+        "Dojo.Eq(\"trace id copied\", \"t-9\", dojoOut.GetValueOrDefault(\"X-TRACE-ID\"));",
+        "var dojoOver = OutboundHeaders(dojoIn, new[] { \"Cookie\" }, new Dictionary<string, string> { [\"cookie\"] = \"ours\" });",
+        "Dojo.Eq(\"added headers win\", \"ours\", dojoOver.GetValueOrDefault(\"Cookie\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the leaky call",
+      "prompt": [
+        "`BackendCall` models what the HTTP producer would send for the route's exchange, using the simplified rules from this lesson.",
+        "It is **leaky**: the backend gets the caller's path glued on, and receives the caller's `Authorization`.",
+        "",
+        "Apply **fix D**: copy the `isbn` header into the variable `isbn`, remove **every** header, then build the request from the variable:",
+        "",
+        "- URL: `http://catalogue:8080/api/books/` + the isbn, URL-escaped with `Uri.EscapeDataString`;",
+        "- method: always `\"GET\"` (don't take it from `CamelHttpMethod`);",
+        "- headers: only `X-Trace-Id` set to the exchange id.",
+        "",
+        "Keep the method signature. The tests also check that the exchange has no headers left afterwards and the variable is set."
+      ],
+      "starter": [
+        "(string Method, string Url, Dictionary<string, string> Headers) BackendCall(Exchange ex)",
+        "{",
+        "    var endpoint = \"http://catalogue:8080/api/books/\" + ex.Headers.GetValueOrDefault(\"isbn\", \"\");",
+        "    var url = (ex.Headers.TryGetValue(\"CamelHttpUri\", out var u) ? u : endpoint)",
+        "              + ex.Headers.GetValueOrDefault(\"CamelHttpPath\", \"\");",
+        "    var method = ex.Headers.GetValueOrDefault(\"CamelHttpMethod\", \"GET\");",
+        "    var sent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);",
+        "    foreach (var (k, v) in ex.Headers)",
+        "        if (!k.StartsWith(\"Camel\")) sent[k] = v;",
+        "    return (method, url, sent);",
+        "}"
+      ],
+      "solution": [
+        "(string Method, string Url, Dictionary<string, string> Headers) BackendCall(Exchange ex)",
+        "{",
+        "    ex.Variables[\"isbn\"] = ex.Headers.GetValueOrDefault(\"isbn\", \"\");",
+        "    ex.Headers.Clear();",
+        "    var isbn = ex.Variables[\"isbn\"]?.ToString() ?? \"\";",
+        "    var url = \"http://catalogue:8080/api/books/\" + Uri.EscapeDataString(isbn);",
+        "    var sent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [\"X-Trace-Id\"] = ex.Id };",
+        "    return (\"GET\", url, sent);",
+        "}"
+      ],
+      "hints": [
+        "Store the isbn first: `ex.Variables[\"isbn\"] = ex.Headers.GetValueOrDefault(\"isbn\", \"\");`",
+        "Then `ex.Headers.Clear();` and build everything from the variable and `ex.Id`."
+      ],
+      "template": [
+        "        {{CODE}}",
+        "        var dojoEx = new Exchange { Id = \"ex-7\" };",
+        "        dojoEx.Headers[\"isbn\"] = \"978 0131103627\";",
+        "        dojoEx.Headers[\"CamelHttpMethod\"] = \"POST\";",
+        "        dojoEx.Headers[\"CamelHttpUri\"] = \"/books/978 0131103627\";",
+        "        dojoEx.Headers[\"CamelHttpPath\"] = \"/books/978 0131103627\";",
+        "        dojoEx.Headers[\"Authorization\"] = \"Bearer secret\";",
+        "        dojoEx.Headers[\"Cookie\"] = \"a=b\";",
+        "        var (dojoM, dojoU, dojoH) = BackendCall(dojoEx);",
+        "        Dojo.Eq(\"URL comes from the variable only\", \"http://catalogue:8080/api/books/978%200131103627\", dojoU);",
+        "        Dojo.Eq(\"method is explicit\", \"GET\", dojoM);",
+        "        Dojo.Eq(\"only X-Trace-Id is sent\", \"X-Trace-Id=ex-7\", string.Join(\";\", dojoH.Select(kv => kv.Key + \"=\" + kv.Value)));",
+        "        Dojo.Eq(\"variable isbn was set\", (object?)\"978 0131103627\", dojoEx.Variables.GetValueOrDefault(\"isbn\"));",
+        "        Dojo.Eq(\"no headers left on the exchange\", 0, dojoEx.Headers.Count);",
+        "",
+        "class Exchange",
+        "{",
+        "    public string Id { get; init; } = \"ex-1\";",
+        "    public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);",
+        "    public string Body { get; set; } = \"\";",
+        "    public Dictionary<string, object?> Variables { get; } = new();",
+        "}"
+      ]
+    }
+  ]
+}

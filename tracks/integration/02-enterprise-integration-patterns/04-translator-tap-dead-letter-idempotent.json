@@ -1,0 +1,202 @@
+{
+  "title": "Translator, wire tap, dead letter, idempotent consumer",
+  "summary": "Four patterns that keep integrations correct when formats differ and messages fail or repeat.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Message translator and canonical models",
+      "body": [
+        "A **message translator** converts one format into another: the warehouse's CSV into the shop's JSON, a SOAP",
+        "response into a REST answer. It is the most common step in any integration.",
+        "",
+        "With many systems, teams often define a **canonical data model**: one agreed shape for a `Book` or an `Order`",
+        "inside the platform, so each system needs one translator (to and from canonical) instead of one per partner.",
+        "Keep it small and versioned: a canonical model that tries to describe everything becomes a committee."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The warehouse sends `ISBN;TITLE;PRICE_PENCE`, the shop wants JSON, and two new partners want JSON too. Without a canonical model, how many translators exist for the 4 systems in the worst case, and with one?",
+      "options": [
+        "Up to 12 one-way translators without; 8 with (one in and one out per system)",
+        "4 either way",
+        "1 with a canonical model",
+        "16 without, 4 with"
+      ],
+      "answer": 0,
+      "explain": "Each ordered pair of 4 systems is `4 × 3 = 12`. With a canonical model each system translates to it and from it: `2 × 4 = 8`, and adding a fifth system costs 2, not 8."
+    },
+    {
+      "type": "learn",
+      "title": "Wire tap and dead letter channel",
+      "body": [
+        "- A **wire tap** sends a **copy** of the message to a second destination (an audit log, an analytics topic)",
+        "  without affecting the main flow. It must be a copy: if the tap changes a shared object, it changes the real",
+        "  message too. It should also be asynchronous, so a slow audit system cannot slow down orders.",
+        "- A **dead letter channel (DLC)** is where messages go when processing has failed and every retry is used up.",
+        "  Nothing is lost: the message is parked with its error so somebody can inspect, fix and **replay** it.",
+        "",
+        "> **Warning:** in a request-reply route, a dead letter channel that *handles* the failure makes the exchange",
+        "> \"successful\". The caller then receives an empty `200` or `204` while the order was never placed. Module 5",
+        "> shows how to turn failures into honest error responses."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A route uses a dead letter channel with default settings. The backend is down. The HTTP caller receives `204 No Content`. Why?",
+      "options": [
+        "The dead letter channel marked the failure as handled, so the exchange completed \"successfully\" with an empty body",
+        "The backend returned 204",
+        "The gateway converts 5xx into 204",
+        "HTTP clients show 204 for timeouts"
+      ],
+      "answer": 0,
+      "explain": "This exact symptom is common in Camel projects. The failure is in the logs, but the caller has no way to know. Fixing it means building an error response in the error handler."
+    },
+    {
+      "type": "learn",
+      "title": "Idempotent consumer",
+      "body": [
+        "Most brokers and webhooks guarantee **at-least-once** delivery: after a crash or a lost acknowledgement the",
+        "same message arrives again. If \"charge the card\" runs twice, a customer pays twice.",
+        "",
+        "An **idempotent consumer** remembers the ids of messages it has processed and skips repeats:",
+        "",
+        "```text",
+        "receive ─► read message id ─► seen before? ─yes─► skip (acknowledge)",
+        "                                  │no",
+        "                                  ▼",
+        "                               process ─► remember id ─► acknowledge",
+        "```",
+        "",
+        "The store must be **shared** by every instance (a database table, Redis), **durable**, and **expire** old ids.",
+        "If processing fails, the id must *not* be remembered, so the redelivery can try again."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the idempotent consumer's steps in order.",
+      "lines": [
+        "Receive the message",
+        "Read its message id (or idempotency key)",
+        "Look the id up in the shared store",
+        "If it was seen, acknowledge and stop",
+        "Process the message",
+        "Record the id in the store",
+        "Acknowledge the message"
+      ],
+      "explain": "Recording the id only after successful processing means a crash mid-way leads to a retry, not a lost message. (For stronger guarantees, record and process in one database transaction.)"
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var seen = new HashSet<string>();",
+        "var charged = 0;",
+        "foreach (var id in new[] { \"m1\", \"m2\", \"m1\", \"m3\", \"m2\" })",
+        "{",
+        "    if (!seen.Add(id)) { Console.WriteLine($\"skip {id}\"); continue; }",
+        "    charged++;",
+        "}",
+        "Console.WriteLine($\"charged {charged}\");"
+      ],
+      "answer": [
+        "skip m1",
+        "skip m2",
+        "charged 3"
+      ],
+      "explain": "`HashSet.Add` returns `false` when the item is already there, which is exactly the \"seen before?\" check."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the pattern to the problem it solves.",
+      "pairs": [
+        [
+          "Message translator",
+          "The warehouse speaks CSV, the shop speaks JSON"
+        ],
+        [
+          "Wire tap",
+          "Audit every order without slowing it down"
+        ],
+        [
+          "Dead letter channel",
+          "Keep failed messages for inspection and replay"
+        ],
+        [
+          "Idempotent consumer",
+          "The broker delivered the same payment twice"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An idempotent consumer",
+      "prompt": [
+        "Write a class `IdempotentConsumer`:",
+        "",
+        "- constructor `IdempotentConsumer(Action<string> handler)`: the real processing, given the message body;",
+        "- `bool Receive(string messageId, string body)`:",
+        "  - if `messageId` was already processed successfully, do nothing and return `false`;",
+        "  - otherwise call `handler(body)`; if it succeeds, remember the id and return `true`;",
+        "  - if `handler` throws, **do not** remember the id and let the exception propagate (so a redelivery can retry).",
+        "- `int Processed`: how many messages were processed successfully."
+      ],
+      "starter": [
+        "class IdempotentConsumer",
+        "{",
+        "    public IdempotentConsumer(Action<string> handler) { }",
+        "",
+        "    public int Processed => 0;",
+        "",
+        "    public bool Receive(string messageId, string body)",
+        "    {",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class IdempotentConsumer",
+        "{",
+        "    readonly Action<string> handler;",
+        "    readonly HashSet<string> done = new();",
+        "",
+        "    public IdempotentConsumer(Action<string> handler) => this.handler = handler;",
+        "",
+        "    public int Processed => done.Count;",
+        "",
+        "    public bool Receive(string messageId, string body)",
+        "    {",
+        "        if (done.Contains(messageId)) return false;",
+        "        handler(body);",
+        "        done.Add(messageId);",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep a `HashSet<string>` of processed ids.",
+        "Call the handler *before* adding the id: if it throws, the `Add` never runs."
+      ],
+      "template": [
+        "var dojoCharged = new List<string>();",
+        "var dojoFailOnce = true;",
+        "var dojoC = new IdempotentConsumer(body =>",
+        "{",
+        "    if (body == \"flaky\" && dojoFailOnce) { dojoFailOnce = false; throw new InvalidOperationException(\"card service down\"); }",
+        "    dojoCharged.Add(body);",
+        "});",
+        "Dojo.Eq(\"first delivery is processed\", true, dojoC.Receive(\"m1\", \"charge 10\"));",
+        "Dojo.Eq(\"duplicate is skipped\", false, dojoC.Receive(\"m1\", \"charge 10\"));",
+        "Dojo.Eq(\"a new id is processed\", true, dojoC.Receive(\"m2\", \"charge 5\"));",
+        "Dojo.Throws<InvalidOperationException>(\"a failing handler propagates its exception\", () => dojoC.Receive(\"m3\", \"flaky\"));",
+        "Dojo.Eq(\"the redelivery of the failed message is processed\", true, dojoC.Receive(\"m3\", \"flaky\"));",
+        "Dojo.Eq(\"each charge happened exactly once\", new List<string> { \"charge 10\", \"charge 5\", \"flaky\" }, dojoCharged);",
+        "Dojo.Eq(\"Processed counts successes\", 3, dojoC.Processed);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,208 @@
+{
+  "title": "Queues, topics and brokers",
+  "summary": "Point-to-point versus publish-subscribe, consumer groups, delivery guarantees, and where Kafka and RabbitMQ fit.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Queues and topics",
+      "body": [
+        "Messaging systems offer two kinds of channel:",
+        "",
+        "- **Queue (point-to-point)**: each message is delivered to **one** consumer. Several consumers on the same",
+        "  queue **compete** for messages, which spreads the load. Use it for **commands**: \"pick order A1\".",
+        "- **Topic (publish-subscribe)**: each message is delivered to **every subscription**. Use it for **events**:",
+        "  \"order A1 shipped\" interests billing, email and analytics.",
+        "",
+        "Inside one subscription you can again have competing consumers. That is the model behind **Kafka consumer",
+        "groups** and behind **RabbitMQ** exchanges bound to one queue per subscriber.",
+        "",
+        "Synchronous request-reply can also run over messaging: the request carries a `replyTo` address and a",
+        "**correlation id**, and the reply is matched back by that id."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Queue or topic?",
+      "buckets": [
+        "Queue (one consumer)",
+        "Topic (every subscriber)"
+      ],
+      "items": [
+        [
+          "Send `PickOrder A1` to the warehouse workers",
+          0
+        ],
+        [
+          "Announce `OrderShipped` to billing, email and analytics",
+          1
+        ],
+        [
+          "Resize uploaded cover images with five workers",
+          0
+        ],
+        [
+          "Broadcast `PriceChanged` to every shop front",
+          1
+        ],
+        [
+          "Hand one invoice to the billing system to post",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Kafka and RabbitMQ at a glance",
+      "body": [
+        "| | **RabbitMQ** | **Apache Kafka** |",
+        "|---|---|---|",
+        "| Model | broker routes messages from **exchanges** to **queues**; consumers acknowledge and the message is removed | an append-only **log** split into **partitions**; consumers track their own **offset** |",
+        "| Replay | gone once acknowledged | kept for a retention period; a new consumer can read from the start |",
+        "| Ordering | per queue | per **partition** (so pick the key that must stay ordered, e.g. the order id) |",
+        "| Scaling consumers | more consumers on a queue | up to one consumer per partition per group |",
+        "| Typical use | task queues, commands, request-reply | event streams, many readers, high volume, replay |",
+        "",
+        "Camel speaks both (`rabbitmq:` / `spring-rabbitmq:` and `kafka:` components), as do JMS brokers and cloud services",
+        "such as Azure Service Bus."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Kafka topic has **2 partitions**. A consumer group runs **3 consumers**. What happens?",
+      "options": [
+        "Two consumers each own one partition; the third is idle until a rebalance gives it work",
+        "Each consumer gets a third of the messages",
+        "All three receive every message",
+        "Kafka refuses the third consumer"
+      ],
+      "answer": 0,
+      "explain": "Within a group a partition has one owner at a time. The partition count caps a group's parallelism, so size it for the consumers you expect."
+    },
+    {
+      "type": "learn",
+      "title": "Delivery guarantees",
+      "body": [
+        "- **At-most-once**: acknowledge before processing. A crash loses the message. Fine for metrics you can afford to drop.",
+        "- **At-least-once**: acknowledge after processing. A crash causes a **redelivery**, so duplicates happen.",
+        "  This is the default you should design for.",
+        "- **Exactly-once**: only inside one system's transaction boundary (Kafka transactions, a database).",
+        "  Across systems, the practical answer is **at-least-once plus an idempotent consumer**, sometimes called",
+        "  *effectively once*."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the guarantee to its failure mode.",
+      "pairs": [
+        [
+          "At-most-once",
+          "A crash can lose a message"
+        ],
+        [
+          "At-least-once",
+          "A crash can deliver a message twice"
+        ],
+        [
+          "Effectively-once",
+          "Duplicates arrive but are detected and skipped"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Three workers compete on one queue. What does this print?",
+      "code": [
+        "var workers = new[] { \"w1\", \"w2\", \"w3\" };",
+        "var next = 0;",
+        "foreach (var msg in new[] { \"A1\", \"A2\", \"A3\", \"A4\" })",
+        "{",
+        "    Console.WriteLine($\"{workers[next]} <- {msg}\");",
+        "    next = (next + 1) % workers.Length;",
+        "}"
+      ],
+      "answer": [
+        "w1 <- A1",
+        "w2 <- A2",
+        "w3 <- A3",
+        "w1 <- A4"
+      ],
+      "explain": "Competing consumers share the work: each message goes to exactly one of them."
+    },
+    {
+      "type": "code",
+      "title": "A tiny broker",
+      "prompt": [
+        "Model topics with consumer groups (the Kafka shape; a RabbitMQ queue per subscriber behaves the same).",
+        "",
+        "Write a class `Broker`:",
+        "",
+        "- `void Subscribe(string topic, string group, string consumer)`: adds a consumer to a group on a topic. Groups and topics are created on first use. Keep consumers in the order they subscribed.",
+        "- `List<string> Publish(string topic, string message)`: delivers the message **once to every group** on the topic, to **one consumer** in each group, chosen round-robin per group (first message to the group's first consumer, next to the second, and so on, wrapping around). Return the deliveries as `\"{group}/{consumer}: {message}\"`, groups in the order they first subscribed. A topic with no groups returns an empty list."
+      ],
+      "starter": [
+        "class Broker",
+        "{",
+        "    public void Subscribe(string topic, string group, string consumer) { }",
+        "",
+        "    public List<string> Publish(string topic, string message)",
+        "    {",
+        "        return new List<string>();",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class Broker",
+        "{",
+        "    class Group",
+        "    {",
+        "        public string Name = \"\";",
+        "        public List<string> Consumers = new();",
+        "        public int Next;",
+        "    }",
+        "",
+        "    readonly Dictionary<string, List<Group>> topics = new();",
+        "",
+        "    public void Subscribe(string topic, string group, string consumer)",
+        "    {",
+        "        if (!topics.TryGetValue(topic, out var groups)) topics[topic] = groups = new();",
+        "        var g = groups.FirstOrDefault(x => x.Name == group);",
+        "        if (g is null) groups.Add(g = new Group { Name = group });",
+        "        g.Consumers.Add(consumer);",
+        "    }",
+        "",
+        "    public List<string> Publish(string topic, string message)",
+        "    {",
+        "        var result = new List<string>();",
+        "        if (!topics.TryGetValue(topic, out var groups)) return result;",
+        "        foreach (var g in groups)",
+        "        {",
+        "            var consumer = g.Consumers[g.Next % g.Consumers.Count];",
+        "            g.Next++;",
+        "            result.Add($\"{g.Name}/{consumer}: {message}\");",
+        "        }",
+        "        return result;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Per topic, keep a list of groups; per group, a list of consumers and a counter.",
+        "`g.Consumers[g.Next % g.Consumers.Count]`, then increment `g.Next`."
+      ],
+      "template": [
+        "var dojoB = new Broker();",
+        "dojoB.Subscribe(\"order-shipped\", \"billing\", \"b1\");",
+        "dojoB.Subscribe(\"order-shipped\", \"email\", \"e1\");",
+        "dojoB.Subscribe(\"order-shipped\", \"email\", \"e2\");",
+        "dojoB.Subscribe(\"pick-order\", \"warehouse\", \"w1\");",
+        "Dojo.Eq(\"every group gets the event once\", new List<string> { \"billing/b1: A1\", \"email/e1: A1\" }, dojoB.Publish(\"order-shipped\", \"A1\"));",
+        "Dojo.Eq(\"round-robin inside a group\", new List<string> { \"billing/b1: A2\", \"email/e2: A2\" }, dojoB.Publish(\"order-shipped\", \"A2\"));",
+        "Dojo.Eq(\"round-robin wraps around\", new List<string> { \"billing/b1: A3\", \"email/e1: A3\" }, dojoB.Publish(\"order-shipped\", \"A3\"));",
+        "Dojo.Eq(\"topics are independent\", new List<string> { \"warehouse/w1: P1\" }, dojoB.Publish(\"pick-order\", \"P1\"));",
+        "Dojo.Eq(\"unknown topic delivers nothing\", new List<string>(), dojoB.Publish(\"nobody\", \"x\"));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

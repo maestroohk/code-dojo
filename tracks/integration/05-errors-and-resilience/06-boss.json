@@ -1,0 +1,227 @@
+{
+  "title": "Boss: the resilient order call",
+  "summary": "Idempotent order creation, a resilient catalogue client, and trace ids that survive everything.",
+  "minutes": 35,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The brief",
+      "body": [
+        "Acme's integration creates orders and looks up books. Partners retry, the catalogue has bad days, and support needs",
+        "trace ids. You build the three pieces that make the integration boringly reliable."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Idempotent order creation",
+      "prompt": [
+        "Write a class `IdempotentOrders`:",
+        "",
+        "- `IdempotentOrders(Func<string, (int Status, string Body)> create)`: `create(body)` really creates the order;",
+        "- `(int Status, string Body, bool Replayed) Post(string? idempotencyKey, string body)`:",
+        "  - no key (null or empty) → `(400, \"{\\\"code\\\":\\\"IDEMPOTENCY_KEY_REQUIRED\\\"}\", false)`;",
+        "  - a new key → call `create`, store the key with the body and the result, return it with `Replayed = false`. Store only results with status below 500, so a failed attempt can be retried with the same key;",
+        "  - a known key with the **same** body → the stored result with `Replayed = true` (don't call `create`);",
+        "  - a known key with a **different** body → `(422, \"{\\\"code\\\":\\\"IDEMPOTENCY_KEY_REUSED\\\"}\", false)`."
+      ],
+      "starter": [
+        "class IdempotentOrders",
+        "{",
+        "    public IdempotentOrders(Func<string, (int Status, string Body)> create) { }",
+        "",
+        "    public (int Status, string Body, bool Replayed) Post(string? idempotencyKey, string body)",
+        "    {",
+        "        return (500, \"\", false);",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class IdempotentOrders",
+        "{",
+        "    readonly Func<string, (int Status, string Body)> create;",
+        "    readonly Dictionary<string, (string Request, int Status, string Body)> seen = new();",
+        "",
+        "    public IdempotentOrders(Func<string, (int Status, string Body)> create) => this.create = create;",
+        "",
+        "    public (int Status, string Body, bool Replayed) Post(string? idempotencyKey, string body)",
+        "    {",
+        "        if (string.IsNullOrEmpty(idempotencyKey)) return (400, \"{\\\"code\\\":\\\"IDEMPOTENCY_KEY_REQUIRED\\\"}\", false);",
+        "        if (seen.TryGetValue(idempotencyKey, out var prior))",
+        "            return prior.Request == body ? (prior.Status, prior.Body, true) : (422, \"{\\\"code\\\":\\\"IDEMPOTENCY_KEY_REUSED\\\"}\", false);",
+        "",
+        "        var (status, result) = create(body);",
+        "        if (status < 500) seen[idempotencyKey] = (body, status, result);",
+        "        return (status, result, false);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Store `(request body, status, response body)` per key.",
+        "Check the stored request body to tell a retry from a reused key."
+      ],
+      "template": [
+        "var dojoCreated = 0;",
+        "var dojoFailNext = false;",
+        "var dojoOrders = new IdempotentOrders(body =>",
+        "{",
+        "    if (dojoFailNext) { dojoFailNext = false; return (502, \"{\\\"code\\\":\\\"BACKEND_ERROR\\\"}\"); }",
+        "    dojoCreated++;",
+        "    return (201, $\"{{\\\"orderId\\\":\\\"A{dojoCreated}\\\"}}\");",
+        "});",
+        "Dojo.Eq(\"no key\", (400, \"{\\\"code\\\":\\\"IDEMPOTENCY_KEY_REQUIRED\\\"}\", false), dojoOrders.Post(null, \"{\\\"isbn\\\":\\\"1\\\"}\"));",
+        "Dojo.Eq(\"first post creates\", (201, \"{\\\"orderId\\\":\\\"A1\\\"}\", false), dojoOrders.Post(\"k1\", \"{\\\"isbn\\\":\\\"1\\\"}\"));",
+        "Dojo.Eq(\"retry is replayed\", (201, \"{\\\"orderId\\\":\\\"A1\\\"}\", true), dojoOrders.Post(\"k1\", \"{\\\"isbn\\\":\\\"1\\\"}\"));",
+        "Dojo.Eq(\"only one order was created\", 1, dojoCreated);",
+        "Dojo.Eq(\"same key, different body\", (422, \"{\\\"code\\\":\\\"IDEMPOTENCY_KEY_REUSED\\\"}\", false), dojoOrders.Post(\"k1\", \"{\\\"isbn\\\":\\\"2\\\"}\"));",
+        "dojoFailNext = true;",
+        "Dojo.Eq(\"a 5xx is not stored\", 502, dojoOrders.Post(\"k2\", \"{\\\"isbn\\\":\\\"3\\\"}\").Status);",
+        "Dojo.Eq(\"so the retry with the same key creates the order\", (201, \"{\\\"orderId\\\":\\\"A2\\\"}\", false), dojoOrders.Post(\"k2\", \"{\\\"isbn\\\":\\\"3\\\"}\"));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A resilient catalogue client",
+      "prompt": [
+        "The tests declare `IClock` / `FakeClock`. Combine a retry and a breaker into `class CatalogueClient`:",
+        "",
+        "- `CatalogueClient(Func<string, int> backend, IClock clock)`: `backend(isbn)` returns a status (`0` = timeout);",
+        "- `(int Status, int Attempts) Get(string isbn)`:",
+        "  - if the breaker is open (it opened less than `10000` ms ago) → `(503, 0)` without calling;",
+        "  - otherwise try up to **3** attempts; retry on `0`, `502`, `503`, `504`, sleeping `100` then `200` ms (`clock.Sleep`);",
+        "  - the **call** (all its attempts) counts as one failure for the breaker if it ends in `0` or `>= 500`; after **2** failed calls in a row the breaker opens; any other outcome resets the count;",
+        "  - after the cool-down, a call is allowed through again (half-open is not needed here: just reset the count when it succeeds).",
+        "  - return the final status and attempts used."
+      ],
+      "starter": [
+        "class CatalogueClient",
+        "{",
+        "    public CatalogueClient(Func<string, int> backend, IClock clock) { }",
+        "",
+        "    public (int Status, int Attempts) Get(string isbn) => (500, 0);",
+        "}"
+      ],
+      "solution": [
+        "class CatalogueClient",
+        "{",
+        "    readonly Func<string, int> backend;",
+        "    readonly IClock clock;",
+        "    int failedCalls;",
+        "    long? openedAt;",
+        "",
+        "    public CatalogueClient(Func<string, int> backend, IClock clock)",
+        "    {",
+        "        this.backend = backend;",
+        "        this.clock = clock;",
+        "    }",
+        "",
+        "    public (int Status, int Attempts) Get(string isbn)",
+        "    {",
+        "        if (openedAt is long t && clock.NowMs - t < 10000) return (503, 0);",
+        "        openedAt = null;",
+        "",
+        "        var delays = new[] { 100, 200 };",
+        "        int status = 0, attempt = 0;",
+        "        while (true)",
+        "        {",
+        "            attempt++;",
+        "            status = backend(isbn);",
+        "            var transient = status is 0 or 502 or 503 or 504;",
+        "            if (!transient || attempt == 3) break;",
+        "            clock.Sleep(delays[attempt - 1]);",
+        "        }",
+        "",
+        "        if (status == 0 || status >= 500)",
+        "        {",
+        "            failedCalls++;",
+        "            if (failedCalls >= 2) openedAt = clock.NowMs;",
+        "        }",
+        "        else failedCalls = 0;",
+        "        return (status, attempt);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Write the retry loop first, then count the whole call's outcome for the breaker.",
+        "Store `openedAt` as a `long?`; clear it when the cool-down has passed."
+      ],
+      "template": [
+        "        var dojoClock = new FakeClock();",
+        "        var dojoScript = new Queue<int>(new[] { 503, 200,   404,   0, 0, 0,   503, 503, 503,   200 });",
+        "        var dojoCalls = 0;",
+        "        var dojoClient = new CatalogueClient(isbn => { dojoCalls++; return dojoScript.Count > 0 ? dojoScript.Dequeue() : 200; }, dojoClock);",
+        "        Dojo.Eq(\"retry then success\", (200, 2), dojoClient.Get(\"1\"));",
+        "        Dojo.Eq(\"404 is final\", (404, 1), dojoClient.Get(\"2\"));",
+        "        Dojo.Eq(\"three timeouts\", (0, 3), dojoClient.Get(\"3\"));",
+        "        Dojo.Eq(\"slept 100, 100, 200 so far\", new List<int> { 100, 100, 200 }, dojoClock.Sleeps);",
+        "        Dojo.Eq(\"second failed call\", (503, 3), dojoClient.Get(\"4\"));",
+        "        Dojo.Eq(\"breaker open: fail fast\", (503, 0), dojoClient.Get(\"5\"));",
+        "        Dojo.Eq(\"no backend call while open\", 9, dojoCalls);",
+        "        dojoClock.Advance(10000);",
+        "        Dojo.Eq(\"after the cool-down calls go through\", (200, 1), dojoClient.Get(\"6\"));",
+        "        {{CODE}}",
+        "",
+        "interface IClock",
+        "{",
+        "    long NowMs { get; }",
+        "    void Sleep(int ms);",
+        "}",
+        "",
+        "class FakeClock : IClock",
+        "{",
+        "    public long NowMs { get; private set; }",
+        "    public List<int> Sleeps { get; } = new();",
+        "    public void Sleep(int ms) { Sleeps.Add(ms); NowMs += ms; }",
+        "    public void Advance(int ms) => NowMs += ms;",
+        "}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Trace ids that survive",
+      "prompt": [
+        "Write `(string TraceId, Dictionary<string, string> Outbound, string ErrorBody) Trace(Dictionary<string, string> incoming, string exchangeId, string errorCode)`:",
+        "",
+        "- `TraceId`: the incoming `X-Trace-Id` header (any case) if it is 8 to 64 characters of letters, digits and `-`; otherwise `exchangeId` (never trust a malformed id: it ends up in logs);",
+        "- `Outbound`: the headers to send to the backend: **only** `X-Trace-Id` (case-insensitive dictionary), whatever arrived;",
+        "- `ErrorBody`: compact `{\"code\":\"<errorCode>\",\"traceId\":\"<TraceId>\"}`."
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "using System.Text.RegularExpressions;",
+        "",
+        "(string TraceId, Dictionary<string, string> Outbound, string ErrorBody) Trace(Dictionary<string, string> incoming, string exchangeId, string errorCode)",
+        "{",
+        "    return (\"\", new Dictionary<string, string>(incoming), \"\");",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "using System.Text.RegularExpressions;",
+        "",
+        "(string TraceId, Dictionary<string, string> Outbound, string ErrorBody) Trace(Dictionary<string, string> incoming, string exchangeId, string errorCode)",
+        "{",
+        "    var given = incoming.FirstOrDefault(kv => string.Equals(kv.Key, \"X-Trace-Id\", StringComparison.OrdinalIgnoreCase)).Value;",
+        "    var traceId = given != null && Regex.IsMatch(given, \"^[A-Za-z0-9-]{8,64}$\") ? given : exchangeId;",
+        "    var outbound = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [\"X-Trace-Id\"] = traceId };",
+        "    return (traceId, outbound, JsonSerializer.Serialize(new { code = errorCode, traceId }));",
+        "}"
+      ],
+      "hints": [
+        "Find the header case-insensitively; the tests pass an ordinary dictionary.",
+        "`Regex.IsMatch(given, \"^[A-Za-z0-9-]{8,64}$\")` checks the shape."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoA = Trace(new() { [\"x-trace-id\"] = \"6f2c81d4-aa\", [\"Authorization\"] = \"Bearer t\" }, \"ex-1\", \"BACKEND_ERROR\");",
+        "Dojo.Eq(\"keeps a well-formed incoming id\", \"6f2c81d4-aa\", dojoA.TraceId);",
+        "Dojo.Eq(\"only the trace id goes to the backend\", \"X-Trace-Id=6f2c81d4-aa\", string.Join(\";\", dojoA.Outbound.Select(kv => kv.Key + \"=\" + kv.Value)));",
+        "Dojo.Eq(\"error body carries it\", \"{\\\"code\\\":\\\"BACKEND_ERROR\\\",\\\"traceId\\\":\\\"6f2c81d4-aa\\\"}\", dojoA.ErrorBody);",
+        "Dojo.Eq(\"no incoming id -> exchange id\", \"ex-12345\", Trace(new(), \"ex-12345\", \"X\").TraceId);",
+        "Dojo.Eq(\"malformed id is replaced\", \"ex-12345\", Trace(new() { [\"X-Trace-Id\"] = \"bad id\\nINJECTED log line\" }, \"ex-12345\", \"X\").TraceId);",
+        "Dojo.Eq(\"too short is replaced\", \"ex-12345\", Trace(new() { [\"X-Trace-Id\"] = \"abc\" }, \"ex-12345\", \"X\").TraceId);"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,248 @@
+{
+  "title": "Scopes, rate limits and 429",
+  "summary": "401 versus 403, a scope per operation, rate-limit levels, a token bucket, and Retry-After.",
+  "minutes": 14,
+  "kind": "lesson",
+  "prereqs": [
+    "auth/01-foundations/01-authn-vs-authz"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A scope per operation",
+      "body": [
+        "A **subscription** answers \"may this application call this API at all?\". A **scope** answers a finer question:",
+        "\"may this **token** use this **operation**?\"",
+        "",
+        "```text",
+        "GET  /catalogue/v1/books/{isbn}   requires  catalogue:read",
+        "POST /orders/v1/orders            requires  orders:write",
+        "```",
+        "",
+        "A read-only reporting app gets only `catalogue:read`; even if its token leaks, it cannot create orders.",
+        "In ASP.NET Core terms a scope is an `[Authorize(Policy = ...)]` on one action. Scopes can also be **bound to",
+        "roles**, so only applications owned by certain users can obtain them.",
+        "",
+        "Remember: scope changes take effect when you **deploy a new revision**."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "What does the gateway answer?",
+      "buckets": [
+        "401",
+        "403",
+        "429",
+        "200"
+      ],
+      "items": [
+        [
+          "No `Authorization` header",
+          0
+        ],
+        [
+          "A token that expired 5 minutes ago",
+          0
+        ],
+        [
+          "A valid token without `orders:write` on `POST /orders`",
+          1
+        ],
+        [
+          "A valid token from an app not subscribed to the API",
+          1
+        ],
+        [
+          "A valid, scoped token, but the app's plan of 10 calls/min is used up",
+          2
+        ],
+        [
+          "A valid token with the right scope, under the limit",
+          3
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A partner reports: \"we get 403 with a valid token on POST /orders, but GET /books works\". What is the most likely cause?",
+      "options": [
+        "The token was requested without the `orders:write` scope (or the app may not obtain it)",
+        "The token expired",
+        "The partner exceeded the rate limit",
+        "The orders backend is down"
+      ],
+      "answer": 0,
+      "explain": "403 with a valid token means \"known, but not allowed\": a missing scope or subscription. An expired token is a 401; an exceeded limit is a 429; a backend failure is a 5xx."
+    },
+    {
+      "type": "learn",
+      "title": "Rate-limit levels",
+      "body": [
+        "Gateways limit traffic at several levels, and they combine:",
+        "",
+        "- **Application** policy: one app across all its APIs.",
+        "- **Subscription** plan (business plan, tier): one app on one API, e.g. Bronze 1,000/min, Gold 5,000/min.",
+        "- **API / resource** (advanced) policy: everyone together on one API or operation, to **protect the backend**.",
+        "- **Custom / deny** policies: rules on IP, header or user; block a client entirely.",
+        "",
+        "When a limit is hit the gateway answers **`429 Too Many Requests`**, ideally with **`Retry-After`** (seconds),",
+        "and the call never reaches the backend. Across several gateway nodes counts are shared asynchronously, so",
+        "distributed limits are **approximate**: treat them as protection, not precise billing."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A plan allows 5 calls per minute. A test makes 12 quick calls; the first 429 arrives on call 7, not call 6. Is the gateway broken?",
+      "options": [
+        "No: gateway nodes report counts to the traffic manager asynchronously, so distributed limits overshoot slightly",
+        "Yes: limits must be exact",
+        "The plan is really 6 per minute",
+        "The first call doesn't count"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "learn",
+      "title": "The token bucket",
+      "body": [
+        "The most common algorithm behind rate limits is the **token bucket**:",
+        "",
+        "- a bucket holds up to `capacity` tokens and starts full;",
+        "- it **refills** continuously at `rate` tokens per second (never above capacity);",
+        "- each request takes one token; with no token left, the request is rejected with `429`.",
+        "",
+        "Capacity sets the allowed **burst**, the rate sets the **sustained** throughput. When rejecting, the time until",
+        "one token is available is exactly what `Retry-After` should say:",
+        "",
+        "```text",
+        "retryAfterSeconds = ceil((1 − tokens) / rate)",
+        "```"
+      ],
+      "trace": {
+        "code": [
+          "double capacity = 3, rate = 1, tokens = 3;",
+          "long last = 0;",
+          "long[] arrivals = { 0, 0, 0, 0, 1500 };",
+          "foreach (var now in arrivals)",
+          "{",
+          "    tokens = Math.Min(capacity, tokens + (now - last) / 1000.0 * rate);",
+          "    last = now;",
+          "    var ok = tokens >= 1;",
+          "    if (ok) tokens -= 1;",
+          "    Console.WriteLine($\"{now} ms: {(ok ? \"allowed\" : \"429\")}\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Capacity 2, refill 1 token every 2 seconds (rate 0.5/s). Calls at 0 ms, 0 ms, 0 ms, 1000 ms, 3000 ms. What does this print?",
+      "code": [
+        "double capacity = 2, rate = 0.5, tokens = 2;",
+        "long last = 0;",
+        "foreach (var now in new long[] { 0, 0, 0, 1000, 3000 })",
+        "{",
+        "    tokens = Math.Min(capacity, tokens + (now - last) / 1000.0 * rate);",
+        "    last = now;",
+        "    if (tokens >= 1) { tokens -= 1; Console.WriteLine($\"{now}: ok\"); }",
+        "    else Console.WriteLine($\"{now}: 429 retry after {Math.Ceiling((1 - tokens) / rate)}s\");",
+        "}"
+      ],
+      "answer": [
+        "0: ok",
+        "0: ok",
+        "0: 429 retry after 2s",
+        "1000: 429 retry after 1s",
+        "3000: ok"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A token bucket",
+      "prompt": [
+        "The tests declare `interface IClock { long NowMs { get; } }` and a `FakeClock` with `Advance(ms)`.",
+        "",
+        "Write a class `TokenBucket`:",
+        "",
+        "- `TokenBucket(IClock clock, int capacity, double ratePerSecond)`: starts full;",
+        "- `(bool Allowed, int RetryAfterSeconds) TryTake()`: refill for the time elapsed since the last call (capped at capacity), then take one token if at least one is available → `(true, 0)`; otherwise `(false, ceil((1 - tokens) / rate))`.",
+        "- `double Tokens` (for the tests): the current count **after** refilling to now."
+      ],
+      "starter": [
+        "class TokenBucket",
+        "{",
+        "    public TokenBucket(IClock clock, int capacity, double ratePerSecond) { }",
+        "    public double Tokens => 0;",
+        "    public (bool Allowed, int RetryAfterSeconds) TryTake() => (true, 0);",
+        "}"
+      ],
+      "solution": [
+        "class TokenBucket",
+        "{",
+        "    readonly IClock clock;",
+        "    readonly int capacity;",
+        "    readonly double rate;",
+        "    double tokens;",
+        "    long last;",
+        "",
+        "    public TokenBucket(IClock clock, int capacity, double ratePerSecond)",
+        "    {",
+        "        this.clock = clock;",
+        "        this.capacity = capacity;",
+        "        rate = ratePerSecond;",
+        "        tokens = capacity;",
+        "        last = clock.NowMs;",
+        "    }",
+        "",
+        "    void Refill()",
+        "    {",
+        "        var now = clock.NowMs;",
+        "        tokens = Math.Min(capacity, tokens + (now - last) / 1000.0 * rate);",
+        "        last = now;",
+        "    }",
+        "",
+        "    public double Tokens { get { Refill(); return tokens; } }",
+        "",
+        "    public (bool Allowed, int RetryAfterSeconds) TryTake()",
+        "    {",
+        "        Refill();",
+        "        if (tokens >= 1)",
+        "        {",
+        "            tokens -= 1;",
+        "            return (true, 0);",
+        "        }",
+        "        return (false, (int)Math.Ceiling((1 - tokens) / rate));",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Store the time of the last refill; refill by `(now - last) / 1000.0 * rate`, capped.",
+        "`Math.Ceiling((1 - tokens) / rate)` gives the seconds until one token exists."
+      ],
+      "template": [
+        "        var dojoClock = new FakeClock();",
+        "        var dojoB = new TokenBucket(dojoClock, 3, 1.0);",
+        "        Dojo.Eq(\"burst of 3 allowed\", new List<bool> { true, true, true }, new List<bool> { dojoB.TryTake().Allowed, dojoB.TryTake().Allowed, dojoB.TryTake().Allowed });",
+        "        Dojo.Eq(\"4th is rejected with Retry-After 1\", (false, 1), dojoB.TryTake());",
+        "        dojoClock.Advance(500);",
+        "        Dojo.Eq(\"half a token after 500 ms\", 0.5, dojoB.Tokens);",
+        "        Dojo.Eq(\"still rejected, retry after 1\", (false, 1), dojoB.TryTake());",
+        "        dojoClock.Advance(500);",
+        "        Dojo.Eq(\"one token after a second\", (true, 0), dojoB.TryTake());",
+        "        dojoClock.Advance(60000);",
+        "        Dojo.Eq(\"never above capacity\", 3.0, dojoB.Tokens);",
+        "        var dojoSlow = new TokenBucket(dojoClock, 1, 0.1);",
+        "        dojoSlow.TryTake();",
+        "        Dojo.Eq(\"slow refill: retry after 10 s\", (false, 10), dojoSlow.TryTake());",
+        "        {{CODE}}",
+        "",
+        "interface IClock { long NowMs { get; } }",
+        "class FakeClock : IClock",
+        "{",
+        "    public long NowMs { get; private set; }",
+        "    public void Advance(int ms) => NowMs += ms;",
+        "}"
+      ]
+    }
+  ]
+}

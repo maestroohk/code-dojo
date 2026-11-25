@@ -1,0 +1,232 @@
+{
+  "title": "Circuit breakers, idempotency keys and trace ids",
+  "summary": "Stop calling what is broken, make repeats harmless, and follow one request through every layer.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Circuit breaker",
+      "body": [
+        "Retries help with blips. When a backend is **down**, retries just add load and make every caller wait for timeouts.",
+        "A **circuit breaker** notices and **fails fast**:",
+        "",
+        "```text",
+        "CLOSED ──(N failures in a row)──► OPEN ──(after cool-down)──► HALF-OPEN",
+        "  ▲                                 │ fail fast, no calls          │ let one trial call through",
+        "  └──────────(trial succeeds)───────┴──────(trial fails)──► OPEN ◄─┘",
+        "```",
+        "",
+        "While open, the integration answers at once with `503 SERVICE_UNAVAILABLE` (or a **fallback**: cached data, a",
+        "default), and the backend gets room to recover. In Camel: the `circuitBreaker` EIP (Resilience4j) with an",
+        "`onFallback` block. In .NET: Polly's circuit breaker."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the state to its behaviour.",
+      "pairs": [
+        [
+          "Closed",
+          "Calls go through; failures are counted"
+        ],
+        [
+          "Open",
+          "Calls fail fast without touching the backend"
+        ],
+        [
+          "Half-open",
+          "One trial call decides whether to close again"
+        ],
+        [
+          "Fallback",
+          "What to answer instead while the breaker is open"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A breaker opens after 2 failures in a row and stays open for 3 calls (counting calls instead of time, to keep it simple). What does this print?",
+      "code": [
+        "var state = \"closed\"; int failures = 0, openFor = 0;",
+        "foreach (var backendUp in new[] { false, false, true, true, true, true, true })",
+        "{",
+        "    if (state == \"open\") { Console.Write(\"fast-fail \"); if (--openFor == 0) state = \"half-open\"; continue; }",
+        "    if (backendUp) { Console.Write(\"ok \"); failures = 0; state = \"closed\"; }",
+        "    else { Console.Write(\"fail \"); if (++failures >= 2 || state == \"half-open\") { state = \"open\"; openFor = 3; } }",
+        "}"
+      ],
+      "answer": "fail fail fast-fail fast-fail fast-fail ok ok",
+      "explain": "During the open period the backend was already back, but nobody called it: fail-fast trades a little availability for a lot of protection."
+    },
+    {
+      "type": "learn",
+      "title": "Idempotency keys",
+      "body": [
+        "A `POST /orders` times out. Did the order get created? The client can't know, so it retries, and may create a",
+        "**second** order. The fix is an **idempotency key**:",
+        "",
+        "```text",
+        "POST /orders",
+        "Idempotency-Key: 7f3a2c9e-...",
+        "```",
+        "",
+        "The server stores *key → response* for a while (say 24 h):",
+        "",
+        "- first request with a key: process it, store the response;",
+        "- same key, **same** body: return the **stored** response, without processing again;",
+        "- same key, **different** body: reject (`422` or `409`): the client is reusing keys by mistake.",
+        "",
+        "Now retries (by the consumer, the gateway or the integration) are harmless. Stripe-style APIs popularised this;",
+        "an IETF draft standardises the `Idempotency-Key` header."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A partner's `POST /orders` timed out at the gateway, they retried, and now the customer has two identical orders. Which change prevents this?",
+      "options": [
+        "Require an `Idempotency-Key` on order creation and return the stored response for a repeated key",
+        "Increase the gateway timeout to 60 s",
+        "Tell the partner never to retry",
+        "Retry POSTs in the integration instead"
+      ],
+      "answer": 0,
+      "explain": "Longer timeouts only make the window smaller. With a key, the second request is recognised as a repeat whatever the timing."
+    },
+    {
+      "type": "learn",
+      "title": "Trace ids end to end",
+      "body": [
+        "When a consumer reports \"my call failed at 10:42\", you need to find **that** request in the gateway, the",
+        "integration and the backend logs. Give every request one id and carry it everywhere:",
+        "",
+        "1. Accept an incoming id (`X-Trace-Id`, or the W3C `traceparent` header) if it is well-formed; otherwise generate one",
+        "   (the exchange id is a fine default).",
+        "2. Copy it into a **variable** before you `removeHeaders`, so it survives the clean-up.",
+        "3. Send it to the backend **deliberately**, as one chosen header.",
+        "4. Put it on **every log line**: `\"[\" + traceId + \"] ...\"`.",
+        "5. Return it in every error body **and** as a response header.",
+        "",
+        "Then support searches one id and sees the whole journey. Tracing systems (OpenTelemetry) build on the same idea."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "A consumer reports a failure with trace id `6f2c81d4`. Put support's steps in order.",
+      "lines": [
+        "Search the gateway logs for 6f2c81d4: which application, which operation, what status",
+        "Search the integration logs for 6f2c81d4: the caught exception",
+        "See that the catalogue backend answered 500 for that ISBN",
+        "Search the backend's logs for the same id",
+        "Fix the cause, then reply to the consumer quoting the id"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A circuit breaker",
+      "prompt": [
+        "The tests declare `IClock` / `FakeClock`. Write a class `CircuitBreaker`:",
+        "",
+        "- `CircuitBreaker(IClock clock, int failureThreshold, int openMs)`;",
+        "- `string State`: `\"closed\"`, `\"open\"` or `\"half-open\"`;",
+        "- `int Call(Func<int> backend)`: returns a status code.",
+        "  - **open**: if `openMs` has passed since it opened, become `\"half-open\"` and continue below; otherwise return `503` **without** calling the backend;",
+        "  - call the backend. A status of `500` or higher (or `0`) is a **failure**, anything else a success;",
+        "  - success: reset the failure count, state `\"closed\"`;",
+        "  - failure: count it; in `\"half-open\"`, or when the count reaches `failureThreshold`, open (remember the time). Return the backend's status."
+      ],
+      "starter": [
+        "class CircuitBreaker",
+        "{",
+        "    public CircuitBreaker(IClock clock, int failureThreshold, int openMs) { }",
+        "    public string State => \"closed\";",
+        "    public int Call(Func<int> backend) => backend();",
+        "}"
+      ],
+      "solution": [
+        "class CircuitBreaker",
+        "{",
+        "    readonly IClock clock;",
+        "    readonly int threshold;",
+        "    readonly int openMs;",
+        "    int failures;",
+        "    long openedAt;",
+        "",
+        "    public CircuitBreaker(IClock clock, int failureThreshold, int openMs)",
+        "    {",
+        "        this.clock = clock;",
+        "        threshold = failureThreshold;",
+        "        this.openMs = openMs;",
+        "    }",
+        "",
+        "    public string State { get; private set; } = \"closed\";",
+        "",
+        "    public int Call(Func<int> backend)",
+        "    {",
+        "        if (State == \"open\")",
+        "        {",
+        "            if (clock.NowMs - openedAt < openMs) return 503;",
+        "            State = \"half-open\";",
+        "        }",
+        "        var status = backend();",
+        "        var failed = status == 0 || status >= 500;",
+        "        if (!failed)",
+        "        {",
+        "            failures = 0;",
+        "            State = \"closed\";",
+        "            return status;",
+        "        }",
+        "        failures++;",
+        "        if (State == \"half-open\" || failures >= threshold)",
+        "        {",
+        "            State = \"open\";",
+        "            openedAt = clock.NowMs;",
+        "        }",
+        "        return status;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep `failures` and `openedAt` as fields; make `State` a property with a private setter.",
+        "Handle the open state first: either fail fast or move to half-open and fall through to the normal call."
+      ],
+      "template": [
+        "        var dojoClock = new FakeClock();",
+        "        var dojoCalls = 0;",
+        "        var dojoUp = false;",
+        "        int Backend() { dojoCalls++; return dojoUp ? 200 : 503; }",
+        "        var dojoCb = new CircuitBreaker(dojoClock, 3, 10000);",
+        "        Dojo.Eq(\"failures pass through while closed\", new List<int> { 503, 503 }, new List<int> { dojoCb.Call(Backend), dojoCb.Call(Backend) });",
+        "        Dojo.Eq(\"still closed after 2 failures\", \"closed\", dojoCb.State);",
+        "        dojoCb.Call(Backend);",
+        "        Dojo.Eq(\"opens on the 3rd failure\", \"open\", dojoCb.State);",
+        "        Dojo.Eq(\"open: fails fast with 503\", 503, dojoCb.Call(Backend));",
+        "        Dojo.Eq(\"open: the backend was not called\", 3, dojoCalls);",
+        "        dojoClock.Advance(10000);",
+        "        Dojo.Eq(\"after the cool-down a failed trial reopens\", 503, dojoCb.Call(Backend));",
+        "        Dojo.Eq(\"reopened\", \"open\", dojoCb.State);",
+        "        Dojo.Eq(\"the trial did call the backend\", 4, dojoCalls);",
+        "        dojoClock.Advance(10000);",
+        "        dojoUp = true;",
+        "        Dojo.Eq(\"a successful trial closes it\", 200, dojoCb.Call(Backend));",
+        "        Dojo.Eq(\"closed again\", \"closed\", dojoCb.State);",
+        "        Dojo.Eq(\"a 404 is not a failure\", 404, new CircuitBreaker(dojoClock, 1, 1000).Call(() => 404));",
+        "        {{CODE}}",
+        "",
+        "interface IClock",
+        "{",
+        "    long NowMs { get; }",
+        "    void Sleep(int ms);",
+        "}",
+        "",
+        "class FakeClock : IClock",
+        "{",
+        "    public long NowMs { get; private set; }",
+        "    public List<int> Sleeps { get; } = new();",
+        "    public void Sleep(int ms) { Sleeps.Add(ms); NowMs += ms; }",
+        "    public void Advance(int ms) => NowMs += ms;",
+        "}"
+      ]
+    }
+  ]
+}

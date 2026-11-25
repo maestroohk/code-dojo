@@ -1,0 +1,234 @@
+{
+  "title": "Gateway, integration, backend: what goes where",
+  "summary": "Three layers with three different jobs, and the rules that keep them apart.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three layers, three jobs",
+      "body": [
+        "A consumer never talks to a backend directly. The request crosses two layers first:",
+        "",
+        "```text",
+        "consumer ──► API gateway ──► integration ──► backend",
+        " (token)    who? how often?   how to talk     business rules",
+        "                              to backends     and data",
+        "```",
+        "",
+        "| Layer | Owns | Examples |",
+        "|---|---|---|",
+        "| **Gateway** | Who may call and how often | tokens, API keys, subscriptions, scopes, rate limits, quotas, TLS, analytics, developer portal |",
+        "| **Integration** | How to talk to backends | routing, protocol bridging, transforming data, combining several calls, mapping errors, retries, adding backend credentials |",
+        "| **Backend** | What the business does | prices, stock rules, order state, the database |",
+        "",
+        "In .NET terms: the gateway is like Azure API Management in front of your services; the integration layer is",
+        "like an ASP.NET Core service using `HttpClient`, a mapper and Polly, but assembled from ready-made components."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which layer owns it?",
+      "buckets": [
+        "Gateway",
+        "Integration",
+        "Backend"
+      ],
+      "items": [
+        [
+          "Reject calls without a valid token",
+          0
+        ],
+        [
+          "Allow 100 requests per minute per partner",
+          0
+        ],
+        [
+          "Rename the warehouse's `sku_code` to `isbn`",
+          1
+        ],
+        [
+          "Call the catalogue and the warehouse, then merge the answers",
+          1
+        ],
+        [
+          "Add the carrier's secret API key to outgoing calls",
+          1
+        ],
+        [
+          "Decide whether a customer qualifies for free delivery",
+          2
+        ],
+        [
+          "Store the order in the database",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Three rules",
+      "body": [
+        "1. **Never rely on the integration layer alone for security.** The gateway enforces who may call. The",
+        "   integration still validates input (defence in depth), but it is not the lock on the front door.",
+        "2. **Never hide business transformation inside the gateway.** Gateway policies are configuration in a",
+        "   product's UI; they are rarely code-reviewed or unit-tested. Mapping and orchestration belong in the",
+        "   integration layer, in Git, with tests.",
+        "3. **A pure pass-through needs no integration layer.** If a backend already speaks a clean contract,",
+        "   publish it on the gateway directly. Every extra hop costs latency and something else to run.",
+        "",
+        "Business rules belong in neither: they live in the backend that owns the data."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A team proposes computing loyalty discounts in a script inside the API gateway, \"because every request passes through it anyway\". What is the best answer?",
+      "options": [
+        "No: discount rules are business logic and belong in the backend that owns orders and prices",
+        "Yes: the gateway sees every request, so it is the most efficient place",
+        "Yes, as long as the script is short",
+        "No: put it in the integration layer's error handler instead"
+      ],
+      "answer": 0,
+      "explain": "The gateway is for access and traffic policy. Business rules hidden in a gateway script are invisible to the team that owns pricing, hard to test and hard to version."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An old bus \"secured\" an API by checking that a `X-Client-Name` header was present. What is wrong with that?",
+      "options": [
+        "Anyone can send any header; presence of a header proves nothing about who the caller is",
+        "Nothing, header checks are standard authentication",
+        "Header names must be lowercase",
+        "It should have checked the `User-Agent` header instead"
+      ],
+      "answer": 0,
+      "explain": "Authentication needs a secret or a signed credential the caller cannot invent: an API key, an OAuth2 token, a client certificate. Checking it is the gateway's job."
+    },
+    {
+      "type": "learn",
+      "title": "Layers as functions",
+      "body": [
+        "Each layer can be modelled as a function that takes a request and returns a response, wrapping the next layer.",
+        "It is exactly how ASP.NET Core middleware works.",
+        "",
+        "```csharp",
+        "delegate Res Handler(Req r);",
+        "",
+        "Handler Gateway(Handler next) => r =>",
+        "    r.Headers.ContainsKey(\"Authorization\") ? next(r) : new Res(401, \"unauthorized\");",
+        "",
+        "Handler app = Gateway(Integration(Backend));",
+        "```",
+        "",
+        "The gateway can answer on its own (401, 403, 429) and the call never reaches anything behind it."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var calls = 0;",
+        "Func<string?, int> backend = token => { calls++; return 200; };",
+        "Func<string?, int> gateway = token => token == \"good\" ? backend(token) : 401;",
+        "",
+        "Console.WriteLine(gateway(null));",
+        "Console.WriteLine(gateway(\"bad\"));",
+        "Console.WriteLine(gateway(\"good\"));",
+        "Console.WriteLine($\"backend calls: {calls}\");"
+      ],
+      "answer": [
+        "401",
+        "401",
+        "200",
+        "backend calls: 1"
+      ],
+      "explain": "Rejected calls stop at the gateway. That protects every system behind it from load and from unauthenticated traffic."
+    },
+    {
+      "type": "order",
+      "prompt": "Put one request's journey in order.",
+      "lines": [
+        "The consumer app asks the key manager for a token (client credentials)",
+        "It calls the gateway with `Authorization: Bearer <token>`",
+        "The gateway checks the token, the subscription, the scope and the rate limit",
+        "The gateway removes the consumer's token and forwards the call to the integration",
+        "The integration calls the backend, transforms the answer and maps any error",
+        "The response travels back; both layers log the same correlation id"
+      ],
+      "explain": "Each layer does its own job once. Notice that the consumer's token never reaches the backend."
+    },
+    {
+      "type": "code",
+      "title": "A gateway in front",
+      "prompt": [
+        "The tests declare these types (you don't write them):",
+        "",
+        "```csharp",
+        "record Req(string Path, Dictionary<string, string> Headers);",
+        "record Res(int Status, string Body);",
+        "delegate Res Handler(Req r);",
+        "```",
+        "",
+        "Write `Handler Gateway(Handler next, HashSet<string> validTokens)` that returns a handler which:",
+        "",
+        "- answers `new Res(401, \"unauthorized\")` when there is no `Authorization` header, it does not start with `Bearer `, or the token after it is not in `validTokens`;",
+        "- otherwise calls `next` with a **new** `Req`: same path, a **copy** of the headers **without** `Authorization` (the consumer's token must not reach the backend). Don't change the caller's dictionary.",
+        "",
+        "Header names are case-insensitive: build the copy with `StringComparer.OrdinalIgnoreCase`."
+      ],
+      "starter": [
+        "Handler Gateway(Handler next, HashSet<string> validTokens)",
+        "{",
+        "    return r => next(r);",
+        "}"
+      ],
+      "solution": [
+        "Handler Gateway(Handler next, HashSet<string> validTokens)",
+        "{",
+        "    return r =>",
+        "    {",
+        "        if (!r.Headers.TryGetValue(\"Authorization\", out var auth) || !auth.StartsWith(\"Bearer \"))",
+        "            return new Res(401, \"unauthorized\");",
+        "        var token = auth[\"Bearer \".Length..];",
+        "        if (!validTokens.Contains(token))",
+        "            return new Res(401, \"unauthorized\");",
+        "",
+        "        var headers = new Dictionary<string, string>(r.Headers, StringComparer.OrdinalIgnoreCase);",
+        "        headers.Remove(\"Authorization\");",
+        "        return next(new Req(r.Path, headers));",
+        "    };",
+        "}"
+      ],
+      "hints": [
+        "Return a lambda `r => { ... }`.",
+        "`new Dictionary<string, string>(r.Headers, StringComparer.OrdinalIgnoreCase)` copies the headers; then `Remove(\"Authorization\")`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSeen = new List<Req>();",
+        "Handler dojoBackend = r => { dojoSeen.Add(r); return new Res(200, \"book \" + r.Path); };",
+        "var dojoApp = Gateway(dojoBackend, new HashSet<string> { \"t-123\" });",
+        "Dictionary<string, string> H(params (string, string)[] kv)",
+        "{",
+        "    var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);",
+        "    foreach (var (k, v) in kv) d[k] = v;",
+        "    return d;",
+        "}",
+        "Dojo.Eq(\"no Authorization header -> 401\", 401, dojoApp(new Req(\"/books/1\", H())).Status);",
+        "Dojo.Eq(\"Basic scheme -> 401\", 401, dojoApp(new Req(\"/books/1\", H((\"Authorization\", \"Basic abc\")))).Status);",
+        "Dojo.Eq(\"unknown token -> 401\", 401, dojoApp(new Req(\"/books/1\", H((\"Authorization\", \"Bearer nope\")))).Status);",
+        "Dojo.Eq(\"rejected calls never reach the backend\", 0, dojoSeen.Count);",
+        "var dojoIn = H((\"Authorization\", \"Bearer t-123\"), (\"X-Trace-Id\", \"abc\"));",
+        "var dojoOk = dojoApp(new Req(\"/books/1\", dojoIn));",
+        "Dojo.Eq(\"valid token -> backend answers 200\", 200, dojoOk.Status);",
+        "Dojo.Eq(\"backend got the same path\", \"/books/1\", dojoSeen.Count == 1 ? dojoSeen[0].Path : \"\");",
+        "Dojo.Check(\"backend did not receive Authorization\", dojoSeen.Count == 1 && !dojoSeen[0].Headers.ContainsKey(\"authorization\"), \"the token leaked to the backend\");",
+        "Dojo.Check(\"other headers are kept\", dojoSeen.Count == 1 && dojoSeen[0].Headers.ContainsKey(\"X-Trace-Id\"), \"X-Trace-Id was lost\");",
+        "Dojo.Check(\"the caller's dictionary is unchanged\", dojoIn.ContainsKey(\"Authorization\"), \"you removed the header from the caller's own dictionary\");",
+        "record Req(string Path, Dictionary<string, string> Headers);",
+        "record Res(int Status, string Body);",
+        "delegate Res Handler(Req r);"
+      ]
+    }
+  ]
+}

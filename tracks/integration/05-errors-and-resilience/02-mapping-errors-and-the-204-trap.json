@@ -1,0 +1,234 @@
+{
+  "title": "Where errors are mapped, and the empty-204 trap",
+  "summary": "doTry, onException, status checks and a central error route; why a dead letter channel can turn failures into success.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Four places to map errors",
+      "body": [
+        "| Where | How | ASP.NET analogy |",
+        "|---|---|---|",
+        "| **`doTry` / `doCatch`** in a route | local try/catch around steps | try/catch in each action |",
+        "| **`onException`** in a route configuration | declarative, per exception type, shared by routes | exception filters |",
+        "| **`throwExceptionOnFailure=false`** on the HTTP call, then a `choice` on `CamelHttpResponseCode` | no exceptions; inspect the status | checking `response.StatusCode` |",
+        "| **One central error route** that every failure is sent to | one place builds every error response | `app.UseExceptionHandler(...)` |",
+        "",
+        "Local handling repeats in every route. A **central** route (fed by the error handler or `onException`) gives",
+        "every operation in a project the same error contract for free. Many teams copy one standard error-handler",
+        "file into every project."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the technique to its trade-off.",
+      "pairs": [
+        [
+          "`doTry` / `doCatch`",
+          "Local and explicit, but repeated in every route"
+        ],
+        [
+          "`onException` by type",
+          "Declarative and shared, like exception filters"
+        ],
+        [
+          "`throwExceptionOnFailure=false` + `choice`",
+          "No exceptions, but the status checks repeat per call"
+        ],
+        [
+          "Central error route",
+          "One place produces every error response"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The empty-204 trap",
+      "body": [
+        "A **dead letter channel** error handler sends a failed exchange to another endpoint and marks the failure as",
+        "**handled**. Handled means: as far as the caller is concerned, the exchange **succeeded**.",
+        "",
+        "If that endpoint just logs, the exchange finishes with no body and no status code, and `platform-http` answers:",
+        "",
+        "```text",
+        "HTTP/1.1 204 No Content",
+        "```",
+        "",
+        "The order was never placed, the backend never answered, and the consumer is told everything is fine.",
+        "Dashboards counting failed exchanges stay at **zero** too (module 7).",
+        "",
+        "The fix is to make the error route **build the response**:",
+        "",
+        "```yaml",
+        "- route:",
+        "    from:",
+        "      uri: direct:errorHandler",
+        "      steps:",
+        "        - log: \"[${exchangeId}] ${exception}\"",
+        "        - removeHeaders: { pattern: \"*\" }",
+        "        - choice: ...            # decide status and code (next card)",
+        "        - setHeader: { name: CamelHttpResponseCode, simple: \"${variable.status}\" }",
+        "        - setHeader: { name: Content-Type, constant: application/json }",
+        "        - setBody:   { simple: '{\"code\":\"${variable.code}\",\"traceId\":\"${exchangeId}\"}' }",
+        "```",
+        "`CamelHttpResponseCode` is how a route chooses its HTTP status, like `Response.StatusCode`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A client receives `204` with an empty body whenever the catalogue backend is down. Where do you look first?",
+      "options": [
+        "The project's error handler: a dead letter channel is handling the failure without setting a status code and body",
+        "The catalogue's logs: it must be returning 204",
+        "The gateway's rate-limit policy",
+        "The client's HTTP library"
+      ],
+      "answer": 0,
+      "explain": "204 for a failure is the signature of a handled-but-unanswered exception. The real error is in the integration's log."
+    },
+    {
+      "type": "learn",
+      "title": "Deciding the status: order matters",
+      "body": [
+        "The decision is an `if / else if` chain over the caught exception, and the **first match wins**:",
+        "",
+        "```yaml",
+        "- choice:",
+        "    when:",
+        "      - simple: \"${exception} is 'org.apache.camel.ValidationException'\"",
+        "        steps: [ { setVariable: { name: status, constant: \"400\" } }, { setVariable: { name: code, constant: INVALID_REQUEST } } ]",
+        "      - simple: \"${exception} is 'java.net.SocketTimeoutException'\"",
+        "        steps: [ ...504 BACKEND_TIMEOUT... ]",
+        "      - simple: \"${exception} is 'org.apache.camel.http.base.HttpOperationFailedException' && ${exception.statusCode} == 404\"",
+        "        steps: [ ...404 BOOK_NOT_FOUND... ]",
+        "      - simple: \"${exception} is 'org.apache.camel.http.base.HttpOperationFailedException'\"",
+        "        steps: [ ...502 BACKEND_ERROR... ]",
+        "    otherwise:",
+        "      steps: [ ...500 INTERNAL_ERROR... ]",
+        "```",
+        "",
+        "- The HTTP component throws `HttpOperationFailedException` for any non-2xx answer (`throwExceptionOnFailure`",
+        "  is on by default), carrying the backend's `statusCode`.",
+        "- Check the **type before** reading `statusCode`: a timeout has no status code, and `&&` stops at the first false.",
+        "- The specific `404` check must come before the general HTTP failure check."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Order the error route's checks, top to bottom.",
+      "lines": [
+        "is ValidationException → 400",
+        "is SocketTimeoutException → 504",
+        "is HttpOperationFailedException && statusCode == 404 → 404",
+        "is HttpOperationFailedException → 502",
+        "otherwise → 500"
+      ],
+      "also": [
+        [
+          "is SocketTimeoutException → 504",
+          "is ValidationException → 400",
+          "is HttpOperationFailedException && statusCode == 404 → 404",
+          "is HttpOperationFailedException → 502",
+          "otherwise → 500"
+        ]
+      ],
+      "explain": "Validation and timeouts are disjoint types, so they could swap. The two HTTP checks cannot: the general one would swallow the 404s."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the error route's response steps.",
+      "code": [
+        "- setHeader:",
+        "    name: __1__",
+        "    simple: \"${variable.status}\"",
+        "- setHeader:",
+        "    name: Content-Type",
+        "    __2__: application/json",
+        "- setBody:",
+        "    simple: '{\"code\":\"${variable.code}\",\"traceId\":\"${__3__}\"}'"
+      ],
+      "blanks": [
+        "CamelHttpResponseCode",
+        "constant",
+        "exchangeId"
+      ],
+      "bank": [
+        "Status",
+        "CamelHttpStatus",
+        "simple",
+        "header.traceId",
+        "routeId"
+      ],
+      "explain": "`CamelHttpResponseCode` sets the HTTP status; `Content-Type` never varies, so Constant; the exchange id is the trace id."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the error handler",
+      "prompt": [
+        "The tests declare these exception types (Java-style names, as Camel throws them):",
+        "",
+        "```csharp",
+        "class ValidationException : Exception",
+        "class SocketTimeoutException : Exception",
+        "class ConnectException : Exception",
+        "class HttpOperationFailedException : Exception { int StatusCode }",
+        "```",
+        "",
+        "`Handle` is the project's central error route: it receives the caught exception and returns the HTTP status and code",
+        "for the response. It has **three** bugs: unexpected exceptions produce an empty `204`, 404s from the backend come",
+        "out as 502, and it crashes on a timeout. Fix it so that it maps:",
+        "",
+        "validation → `400 INVALID_REQUEST`; timeout → `504 BACKEND_TIMEOUT`; connection refused → `502 BACKEND_UNAVAILABLE`;",
+        "HTTP 404 → `404 NOT_FOUND`; other HTTP failures → `502 BACKEND_ERROR`; anything else → `500 INTERNAL_ERROR`."
+      ],
+      "starter": [
+        "(int Status, string Code) Handle(Exception ex)",
+        "{",
+        "    if (ex is ValidationException) return (400, \"INVALID_REQUEST\");",
+        "    var backendStatus = ((HttpOperationFailedException)ex).StatusCode;",
+        "    if (ex is HttpOperationFailedException) return (502, \"BACKEND_ERROR\");",
+        "    if (ex is HttpOperationFailedException && backendStatus == 404) return (404, \"NOT_FOUND\");",
+        "    if (ex is SocketTimeoutException) return (504, \"BACKEND_TIMEOUT\");",
+        "    if (ex is ConnectException) return (502, \"BACKEND_UNAVAILABLE\");",
+        "    return (204, \"\");",
+        "}"
+      ],
+      "solution": [
+        "(int Status, string Code) Handle(Exception ex)",
+        "{",
+        "    if (ex is ValidationException) return (400, \"INVALID_REQUEST\");",
+        "    if (ex is SocketTimeoutException) return (504, \"BACKEND_TIMEOUT\");",
+        "    if (ex is ConnectException) return (502, \"BACKEND_UNAVAILABLE\");",
+        "    if (ex is HttpOperationFailedException http && http.StatusCode == 404) return (404, \"NOT_FOUND\");",
+        "    if (ex is HttpOperationFailedException) return (502, \"BACKEND_ERROR\");",
+        "    return (500, \"INTERNAL_ERROR\");",
+        "}"
+      ],
+      "hints": [
+        "The cast on line 3 throws for every non-HTTP exception: use a type pattern `ex is HttpOperationFailedException http && http.StatusCode == 404` instead.",
+        "Specific before general: the 404 check must come before the general HTTP check.",
+        "The last line decides what unexpected failures look like."
+      ],
+      "template": [
+        "        {{CODE}}",
+        "        Dojo.Eq(\"validation\", (400, \"INVALID_REQUEST\"), Handle(new ValidationException(\"bad isbn\")));",
+        "        await Dojo.TryAsync(\"timeout\", async () => { await Task.Yield(); Dojo.Eq(\"timeout -> 504\", (504, \"BACKEND_TIMEOUT\"), Handle(new SocketTimeoutException())); });",
+        "        Dojo.Try(\"connection refused\", () => Dojo.Eq(\"connection refused -> 502\", (502, \"BACKEND_UNAVAILABLE\"), Handle(new ConnectException())));",
+        "        Dojo.Eq(\"backend 404\", (404, \"NOT_FOUND\"), Handle(new HttpOperationFailedException(404, \"no row\")));",
+        "        Dojo.Eq(\"backend 500\", (502, \"BACKEND_ERROR\"), Handle(new HttpOperationFailedException(500, \"boom\")));",
+        "        Dojo.Try(\"unexpected\", () => Dojo.Eq(\"anything else -> 500, never 204\", (500, \"INTERNAL_ERROR\"), Handle(new NullReferenceException())));",
+        "",
+        "class ValidationException : Exception { public ValidationException(string m) : base(m) { } }",
+        "class SocketTimeoutException : Exception { public SocketTimeoutException() : base(\"Read timed out\") { } }",
+        "class ConnectException : Exception { public ConnectException() : base(\"Connection refused\") { } }",
+        "class HttpOperationFailedException : Exception",
+        "{",
+        "    public int StatusCode { get; }",
+        "    public HttpOperationFailedException(int statusCode, string body) : base($\"HTTP operation failed with status {statusCode}: {body}\") => StatusCode = statusCode;",
+        "}"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,273 @@
+{
+  "title": "Splitter, aggregator and enricher",
+  "summary": "Break a message into parts, put results back together, and add data from another system.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Splitter",
+      "body": [
+        "A **splitter** turns one message with many items into many messages with one item each.",
+        "An order with three lines becomes three messages, one per book, so each can be checked against the",
+        "warehouse independently.",
+        "",
+        "```yaml",
+        "- split:",
+        "    expression: { jsonpath: { expression: \"$.lines[*]\" } }",
+        "    steps:",
+        "      - to: { uri: \"direct:checkStock\" }",
+        "```",
+        "",
+        "Each part remembers where it came from: Camel sets `CamelSplitIndex` (0, 1, 2), `CamelSplitSize` (3) and",
+        "`CamelSplitComplete` (true on the last part). Copy the parent's correlation id (here the order id) onto each part."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var lines = new[] { \"9780131103627\", \"9780201633610\", \"9781492056355\" };",
+        "for (int i = 0; i < lines.Length; i++)",
+        "{",
+        "    var last = i == lines.Length - 1;",
+        "    Console.WriteLine($\"A1 part {i + 1}/{lines.Length} {lines[i]}{(last ? \" (complete)\" : \"\")}\");",
+        "}"
+      ],
+      "answer": [
+        "A1 part 1/3 9780131103627",
+        "A1 part 2/3 9780201633610",
+        "A1 part 3/3 9781492056355 (complete)"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Aggregator",
+      "body": [
+        "An **aggregator** does the reverse: it collects related messages and combines them into one. It needs three decisions:",
+        "",
+        "1. **Correlation**: which messages belong together? (the order id)",
+        "2. **Completion**: when is a group done? After `n` messages (`completionSize`), after a quiet period",
+        "   (`completionTimeout`), or when a predicate says so.",
+        "3. **Strategy**: how to merge two messages into one (append to a list, sum, keep the latest).",
+        "",
+        "Camel's `split` can aggregate its own parts directly with an `aggregationStrategy`, which is the",
+        "**scatter-gather** shape: fan out, then gather the answers."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An aggregator completes on `completionSize = 3`. One of the three stock checks for order A1 is lost. What happens?",
+      "options": [
+        "Group A1 waits forever (and holds memory) unless you also set a completion timeout",
+        "The aggregator completes with two parts after one minute by default",
+        "Camel throws an exception immediately",
+        "The other two messages are redelivered"
+      ],
+      "answer": 0,
+      "explain": "Always pair a size with a timeout, and decide what a partial result means for the business (\"2 of 3 lines confirmed\")."
+    },
+    {
+      "type": "learn",
+      "title": "Enricher and content filter",
+      "body": [
+        "- A **content enricher** calls another system to **add** data: take each order line and add the current stock",
+        "  level from the warehouse. In Camel: `enrich` (calls an endpoint and merges the answer) or `pollEnrich`",
+        "  (reads from a file or queue).",
+        "- A **content filter** **removes** data: drop `internalCost` before the message leaves. (Not to be confused",
+        "  with the *message filter*, which drops whole messages.)",
+        "",
+        "Both are just transformations with a purpose. Name them so a reviewer knows the intent."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which pattern is it?",
+      "buckets": [
+        "Splitter",
+        "Aggregator",
+        "Content enricher",
+        "Content filter"
+      ],
+      "items": [
+        [
+          "One message per order line",
+          0
+        ],
+        [
+          "Combine three stock answers into one order summary",
+          1
+        ],
+        [
+          "Add the warehouse's stock level to each line",
+          2
+        ],
+        [
+          "Remove `internalCost` before replying",
+          3
+        ],
+        [
+          "Wait until all parcels of a shipment are scanned, then send one event",
+          1
+        ],
+        [
+          "Look up the customer's name from the CRM by id",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Split an order",
+      "prompt": [
+        "The tests declare `Exchange` (`Id`, case-insensitive `Headers`, `Body`, `Variables`).",
+        "",
+        "Write `List<Exchange> Split(Exchange order)`. The body is an order:",
+        "```json",
+        "{\"orderId\":\"A1\",\"lines\":[{\"isbn\":\"9780131103627\",\"qty\":2},{\"isbn\":\"9780201633610\",\"qty\":1}]}",
+        "```",
+        "Return one exchange per line, in order:",
+        "",
+        "- `Id` = `\"{order.Id}-{index}\"` (index from 0);",
+        "- `Body` = that line as compact JSON, `{\"isbn\":\"9780131103627\",\"qty\":2}`. Build it with `JsonSerializer.Serialize(new { isbn, qty })` rather than `GetRawText()`, which keeps the sender's spacing;",
+        "- a copy of every header of the order, plus `OrderId`, `SplitIndex` and `SplitSize` (as strings).",
+        "",
+        "An order with no `lines` (or an empty array) returns an empty list."
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "List<Exchange> Split(Exchange order)",
+        "{",
+        "    return new List<Exchange>();",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "List<Exchange> Split(Exchange order)",
+        "{",
+        "    using var doc = JsonDocument.Parse(order.Body);",
+        "    var root = doc.RootElement;",
+        "    var orderId = root.GetProperty(\"orderId\").GetString() ?? \"\";",
+        "    var result = new List<Exchange>();",
+        "    if (!root.TryGetProperty(\"lines\", out var lines) || lines.ValueKind != JsonValueKind.Array) return result;",
+        "",
+        "    var size = lines.GetArrayLength();",
+        "    var index = 0;",
+        "    foreach (var line in lines.EnumerateArray())",
+        "    {",
+        "        var part = new Exchange",
+        "        {",
+        "            Id = $\"{order.Id}-{index}\",",
+        "            Body = JsonSerializer.Serialize(new { isbn = line.GetProperty(\"isbn\").GetString(), qty = line.GetProperty(\"qty\").GetInt32() }),",
+        "        };",
+        "        foreach (var (k, v) in order.Headers) part.Headers[k] = v;",
+        "        part.Headers[\"OrderId\"] = orderId;",
+        "        part.Headers[\"SplitIndex\"] = index.ToString();",
+        "        part.Headers[\"SplitSize\"] = size.ToString();",
+        "        result.Add(part);",
+        "        index++;",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "`foreach (var line in lines.EnumerateArray())` with a counter.",
+        "Copy the order's headers into each new part's dictionary, then add the three new ones."
+      ],
+      "template": [
+        "        {{CODE}}",
+        "        var dojoOrder = new Exchange { Id = \"ex-9\", Body = \"{\\\"orderId\\\":\\\"A1\\\", \\\"lines\\\": [ {\\\"isbn\\\":\\\"9780131103627\\\", \\\"qty\\\":2}, {\\\"isbn\\\":\\\"9780201633610\\\",\\\"qty\\\":1} ]}\" };",
+        "        dojoOrder.Headers[\"X-Trace-Id\"] = \"t-1\";",
+        "        var dojoParts = Split(dojoOrder);",
+        "        Dojo.Eq(\"two parts\", 2, dojoParts.Count);",
+        "        if (dojoParts.Count == 2)",
+        "        {",
+        "            Dojo.Eq(\"part ids\", new List<string> { \"ex-9-0\", \"ex-9-1\" }, dojoParts.Select(p => p.Id).ToList());",
+        "            Dojo.Eq(\"first body\", \"{\\\"isbn\\\":\\\"9780131103627\\\",\\\"qty\\\":2}\", dojoParts[0].Body);",
+        "            Dojo.Eq(\"second body\", \"{\\\"isbn\\\":\\\"9780201633610\\\",\\\"qty\\\":1}\", dojoParts[1].Body);",
+        "            Dojo.Eq(\"headers copied\", \"t-1\", dojoParts[1].Headers.GetValueOrDefault(\"x-trace-id\"));",
+        "            Dojo.Eq(\"correlation header\", \"A1\", dojoParts[0].Headers.GetValueOrDefault(\"OrderId\"));",
+        "            Dojo.Eq(\"index and size\", \"1/2\", dojoParts[1].Headers.GetValueOrDefault(\"SplitIndex\") + \"/\" + dojoParts[1].Headers.GetValueOrDefault(\"SplitSize\"));",
+        "            Dojo.Check(\"parts don't share the order's headers\", !dojoOrder.Headers.ContainsKey(\"SplitIndex\"), \"you wrote into the original order's headers\");",
+        "        }",
+        "        Dojo.Eq(\"no lines -> no parts\", 0, Split(new Exchange { Id = \"e\", Body = \"{\\\"orderId\\\":\\\"B\\\"}\" }).Count);",
+        "        Dojo.Eq(\"empty lines -> no parts\", 0, Split(new Exchange { Id = \"e\", Body = \"{\\\"orderId\\\":\\\"B\\\",\\\"lines\\\":[]}\" }).Count);",
+        "",
+        "class Exchange",
+        "{",
+        "    public string Id { get; init; } = \"ex-1\";",
+        "    public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);",
+        "    public string Body { get; set; } = \"\";",
+        "    public Dictionary<string, object?> Variables { get; } = new();",
+        "}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Aggregate the answers",
+      "prompt": [
+        "Each split part was checked against the warehouse. The answers come back **in any order, interleaved across orders**.",
+        "",
+        "Write a class `StockAggregator` with",
+        "`string? Offer(string orderId, int expected, string isbn, bool inStock)`:",
+        "",
+        "- collect answers per `orderId` (the correlation key);",
+        "- return `null` until `expected` answers for that order have arrived;",
+        "- on the completing answer return `\"{orderId}: {n}/{expected} in stock\"`, followed, if any are missing, by `\" missing \"` and the out-of-stock ISBNs sorted and joined with `,`:",
+        "  `\"A1: 1/3 in stock missing 978-2,978-3\"`;",
+        "- then **forget** the group, so memory does not grow (a later answer for the same id starts a new group).",
+        "- `int OpenGroups` returns how many groups are waiting."
+      ],
+      "starter": [
+        "class StockAggregator",
+        "{",
+        "    public int OpenGroups => 0;",
+        "",
+        "    public string? Offer(string orderId, int expected, string isbn, bool inStock)",
+        "    {",
+        "        return null;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class StockAggregator",
+        "{",
+        "    readonly Dictionary<string, List<(string Isbn, bool InStock)>> groups = new();",
+        "",
+        "    public int OpenGroups => groups.Count;",
+        "",
+        "    public string? Offer(string orderId, int expected, string isbn, bool inStock)",
+        "    {",
+        "        if (!groups.TryGetValue(orderId, out var list)) groups[orderId] = list = new();",
+        "        list.Add((isbn, inStock));",
+        "        if (list.Count < expected) return null;",
+        "",
+        "        groups.Remove(orderId);",
+        "        var n = list.Count(x => x.InStock);",
+        "        var missing = list.Where(x => !x.InStock).Select(x => x.Isbn).OrderBy(x => x, StringComparer.Ordinal).ToList();",
+        "        var text = $\"{orderId}: {n}/{expected} in stock\";",
+        "        return missing.Count == 0 ? text : text + \" missing \" + string.Join(\",\", missing);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `Dictionary<string, List<(string Isbn, bool InStock)>>` keyed by order id.",
+        "When the list reaches `expected`, remove the key before returning the summary."
+      ],
+      "template": [
+        "var dojoAgg = new StockAggregator();",
+        "Dojo.Eq(\"A1 first answer -> waiting\", null, dojoAgg.Offer(\"A1\", 3, \"978-1\", true));",
+        "Dojo.Eq(\"B7 first answer -> waiting\", null, dojoAgg.Offer(\"B7\", 1 + 1, \"978-9\", true));",
+        "Dojo.Eq(\"two groups open\", 2, dojoAgg.OpenGroups);",
+        "Dojo.Eq(\"A1 second answer -> waiting\", null, dojoAgg.Offer(\"A1\", 3, \"978-3\", false));",
+        "Dojo.Eq(\"B7 completes, all in stock\", \"B7: 2/2 in stock\", dojoAgg.Offer(\"B7\", 2, \"978-8\", true));",
+        "Dojo.Eq(\"A1 completes with missing isbns sorted\", \"A1: 1/3 in stock missing 978-2,978-3\", dojoAgg.Offer(\"A1\", 3, \"978-2\", false));",
+        "Dojo.Eq(\"completed groups are forgotten\", 0, dojoAgg.OpenGroups);",
+        "Dojo.Eq(\"a single-line order completes at once\", \"C1: 0/1 in stock missing 978-5\", dojoAgg.Offer(\"C1\", 1, \"978-5\", false));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

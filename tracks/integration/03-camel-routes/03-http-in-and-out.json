@@ -1,0 +1,292 @@
+{
+  "title": "HTTP in and out: platform-http, REST DSL, to and toD",
+  "summary": "Three ways to expose HTTP, how path parameters arrive, why 405 differs from 404, and when an endpoint must be dynamic.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three ways to expose HTTP",
+      "body": [
+        "1. **platform-http**: one route per path, on the web server the runtime already has (like Kestrel).",
+        "   `from: platform-http:/books/{isbn}?httpMethodRestrict=GET`. Simplest; ideal for learning.",
+        "2. **REST DSL**: one definition lists several verbs and paths, each forwarding to a `direct:` route. Like a",
+        "   controller with several actions.",
+        "   ```yaml",
+        "   - rest:",
+        "       path: /books",
+        "       get:",
+        "         - path: /{isbn}",
+        "           to: direct:getBook",
+        "       post:",
+        "         - to: direct:createBook",
+        "   ```",
+        "3. **Contract-first REST DSL**: the REST definition is generated from an OpenAPI file, and each operation goes to",
+        "   `direct:<operationId>`. Best for real APIs with several operations (module 4).",
+        "",
+        "In all three, a path parameter `{isbn}` arrives as a **header** called `isbn`.",
+        "`httpMethodRestrict=GET` makes other verbs answer **405 Method Not Allowed**, like `MapGet` versus `Map`."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which way of exposing HTTP fits best?",
+      "buckets": [
+        "platform-http",
+        "REST DSL",
+        "Contract-first (OpenAPI)"
+      ],
+      "items": [
+        [
+          "A one-off webhook receiver: `POST /hooks/carrier`",
+          0
+        ],
+        [
+          "A quick learning spike with one endpoint",
+          0
+        ],
+        [
+          "Five operations on `/orders`, no contract yet",
+          1
+        ],
+        [
+          "A partner API whose OpenAPI contract was agreed first",
+          2
+        ],
+        [
+          "An API whose docs, gateway and mocks must all come from one file",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the REST definition: `GET /books/{isbn}` goes to `direct:getBook`.",
+      "code": [
+        "- rest:",
+        "    path: /books",
+        "    __1__:",
+        "      - path: /__2__",
+        "        to: __3__"
+      ],
+      "blanks": [
+        "get",
+        "{isbn}",
+        "direct:getBook"
+      ],
+      "bank": [
+        "post",
+        ":isbn",
+        "getBook",
+        "http:getBook"
+      ],
+      "explain": "REST DSL paths use `{name}` templates, and `to` must name an endpoint URI, here an in-process `direct:` route."
+    },
+    {
+      "type": "learn",
+      "title": "to versus toD",
+      "body": [
+        "Calling a backend is a **producer** step:",
+        "",
+        "- **`to`**: a **fixed** URI, resolved once when the route starts and reused. `{{placeholders}}` are fine,",
+        "  because they are filled at startup.",
+        "- **`toD`** (*to dynamic*): the URI is evaluated **for every message**, so it can contain Simple:",
+        "  `toD: http:catalogue:8080/api/books/${variable.isbn}`. In Karavan this is the **Dynamic** switch.",
+        "",
+        "```yaml",
+        "- to:  \"http:catalogue:8080/api/health\"               # same every time",
+        "- toD: \"http:catalogue:8080/api/books/${variable.isbn}\" # different per message",
+        "```",
+        "",
+        "The price of `toD`: Camel creates and caches one endpoint per distinct URI (the cache is bounded,",
+        "`cacheSize`). Fine for ids; for millions of distinct values, keep the URI fixed and pass the variable",
+        "part as a header or query option instead."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A route has `to: http:catalogue:8080/api/books/${header.isbn}` (not `toD`). What happens?",
+      "options": [
+        "The `${...}` is not evaluated per message, so every call uses the literal text and fails or hits the wrong URL; use `toD`",
+        "Camel evaluates it anyway; `to` and `toD` are aliases",
+        "It works, but slower",
+        "Camel refuses to start because `to` cannot contain `/`"
+      ],
+      "answer": 0,
+      "explain": "Only `toD` evaluates the URI per exchange. This is one of the first mistakes everyone makes."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var cache = new HashSet<string>();",
+        "foreach (var isbn in new[] { \"111\", \"222\", \"111\", \"333\", \"222\" })",
+        "{",
+        "    var uri = $\"http:catalogue:8080/api/books/{isbn}\";",
+        "    Console.WriteLine(cache.Add(uri) ? $\"new endpoint {isbn}\" : $\"reuse {isbn}\");",
+        "}",
+        "Console.WriteLine($\"endpoints: {cache.Count}\");"
+      ],
+      "answer": [
+        "new endpoint 111",
+        "new endpoint 222",
+        "reuse 111",
+        "new endpoint 333",
+        "reuse 222",
+        "endpoints: 3"
+      ],
+      "explain": "That is the endpoint cache `toD` keeps: one endpoint per distinct resolved URI."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`from: platform-http:/books/{isbn}?httpMethodRestrict=GET`. A client sends `DELETE /books/123`. What does it get?",
+      "options": [
+        "`405 Method Not Allowed`",
+        "`404 Not Found`",
+        "`200 OK` with the book",
+        "`403 Forbidden`"
+      ],
+      "answer": 0,
+      "explain": "The path exists but the verb is not allowed: 405. A 404 means no route matches the path at all. Getting this right tells clients whether to fix the URL or the method."
+    },
+    {
+      "type": "code",
+      "title": "Match a path template",
+      "prompt": [
+        "Write `Dictionary<string, string>? Match(string template, string path)`:",
+        "",
+        "- split both on `/` (ignore empty segments, so leading and trailing slashes don't matter);",
+        "- segment counts must be equal;",
+        "- a template segment `{name}` matches any non-empty segment and captures it, URL-decoded (`Uri.UnescapeDataString`);",
+        "- other segments must be equal, ignoring case;",
+        "- return the captured values (an empty dictionary when there are none), or `null` if it does not match.",
+        "",
+        "```text",
+        "Match(\"/books/{isbn}/reviews\", \"/books/978%2D1/reviews\") -> { isbn: \"978-1\" }",
+        "Match(\"/books/{isbn}\", \"/books\")                          -> null",
+        "```"
+      ],
+      "starter": [
+        "Dictionary<string, string>? Match(string template, string path)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string>? Match(string template, string path)",
+        "{",
+        "    var t = template.Split('/', StringSplitOptions.RemoveEmptyEntries);",
+        "    var p = path.Split('/', StringSplitOptions.RemoveEmptyEntries);",
+        "    if (t.Length != p.Length) return null;",
+        "    var values = new Dictionary<string, string>();",
+        "    for (int i = 0; i < t.Length; i++)",
+        "    {",
+        "        if (t[i].StartsWith(\"{\") && t[i].EndsWith(\"}\"))",
+        "            values[t[i][1..^1]] = Uri.UnescapeDataString(p[i]);",
+        "        else if (!string.Equals(t[i], p[i], StringComparison.OrdinalIgnoreCase))",
+        "            return null;",
+        "    }",
+        "    return values;",
+        "}"
+      ],
+      "hints": [
+        "`Split('/', StringSplitOptions.RemoveEmptyEntries)` on both.",
+        "`t[i][1..^1]` strips the braces from `{isbn}`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"captures isbn\", \"978-1\", Match(\"/books/{isbn}/reviews\", \"/books/978%2D1/reviews\")?.GetValueOrDefault(\"isbn\"));",
+        "Dojo.Eq(\"too short -> null\", null, Match(\"/books/{isbn}\", \"/books\"));",
+        "Dojo.Eq(\"too long -> null\", null, Match(\"/books/{isbn}\", \"/books/1/2\"));",
+        "Dojo.Eq(\"literal mismatch -> null\", null, Match(\"/books/{isbn}\", \"/authors/1\"));",
+        "Dojo.Eq(\"literals ignore case\", 0, Match(\"/Books/Health\", \"/books/health\")?.Count ?? -1);",
+        "Dojo.Eq(\"two parameters\", \"o1|2\", string.Join(\"|\", (Match(\"/orders/{id}/lines/{n}\", \"/orders/o1/lines/2/\") ?? new()).Values));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "404 or 405?",
+      "prompt": [
+        "The tests declare `record RouteDef(string Method, string Template, string Id);` and give you `Match` from the previous step (already in your editor below; keep it).",
+        "",
+        "Write `(int Status, string? RouteId, Dictionary<string, string>? Params) Dispatch(List<RouteDef> routes, string method, string path)`:",
+        "",
+        "- the first route whose template matches **and** whose method equals `method` (ignore case) → `(200, its Id, the params)`;",
+        "- otherwise, if some template matched but no method did → `(405, null, null)`;",
+        "- otherwise → `(404, null, null)`."
+      ],
+      "starter": [
+        "Dictionary<string, string>? Match(string template, string path)",
+        "{",
+        "    var t = template.Split('/', StringSplitOptions.RemoveEmptyEntries);",
+        "    var p = path.Split('/', StringSplitOptions.RemoveEmptyEntries);",
+        "    if (t.Length != p.Length) return null;",
+        "    var values = new Dictionary<string, string>();",
+        "    for (int i = 0; i < t.Length; i++)",
+        "    {",
+        "        if (t[i].StartsWith(\"{\") && t[i].EndsWith(\"}\"))",
+        "            values[t[i][1..^1]] = Uri.UnescapeDataString(p[i]);",
+        "        else if (!string.Equals(t[i], p[i], StringComparison.OrdinalIgnoreCase))",
+        "            return null;",
+        "    }",
+        "    return values;",
+        "}",
+        "",
+        "(int Status, string? RouteId, Dictionary<string, string>? Params) Dispatch(List<RouteDef> routes, string method, string path)",
+        "{",
+        "    return (404, null, null);",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string>? Match(string template, string path)",
+        "{",
+        "    var t = template.Split('/', StringSplitOptions.RemoveEmptyEntries);",
+        "    var p = path.Split('/', StringSplitOptions.RemoveEmptyEntries);",
+        "    if (t.Length != p.Length) return null;",
+        "    var values = new Dictionary<string, string>();",
+        "    for (int i = 0; i < t.Length; i++)",
+        "    {",
+        "        if (t[i].StartsWith(\"{\") && t[i].EndsWith(\"}\"))",
+        "            values[t[i][1..^1]] = Uri.UnescapeDataString(p[i]);",
+        "        else if (!string.Equals(t[i], p[i], StringComparison.OrdinalIgnoreCase))",
+        "            return null;",
+        "    }",
+        "    return values;",
+        "}",
+        "",
+        "(int Status, string? RouteId, Dictionary<string, string>? Params) Dispatch(List<RouteDef> routes, string method, string path)",
+        "{",
+        "    var pathMatched = false;",
+        "    foreach (var r in routes)",
+        "    {",
+        "        var values = Match(r.Template, path);",
+        "        if (values is null) continue;",
+        "        pathMatched = true;",
+        "        if (string.Equals(r.Method, method, StringComparison.OrdinalIgnoreCase)) return (200, r.Id, values);",
+        "    }",
+        "    return pathMatched ? (405, null, null) : (404, null, null);",
+        "}"
+      ],
+      "hints": [
+        "Track whether any template matched in a `bool`.",
+        "Only return 405 after looking at every route: a later route may allow the method."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRoutes = new List<RouteDef>",
+        "{",
+        "    new(\"GET\", \"/books/{isbn}\", \"getBook\"),",
+        "    new(\"PUT\", \"/books/{isbn}\", \"updateBook\"),",
+        "    new(\"POST\", \"/orders\", \"createOrder\"),",
+        "};",
+        "var dojoA = Dispatch(dojoRoutes, \"get\", \"/books/123\");",
+        "Dojo.Eq(\"GET book -> getBook\", \"200 getBook 123\", $\"{dojoA.Status} {dojoA.RouteId} {dojoA.Params?.GetValueOrDefault(\"isbn\")}\");",
+        "Dojo.Eq(\"PUT book -> updateBook\", \"updateBook\", Dispatch(dojoRoutes, \"PUT\", \"/books/123\").RouteId);",
+        "Dojo.Eq(\"DELETE book -> 405\", 405, Dispatch(dojoRoutes, \"DELETE\", \"/books/123\").Status);",
+        "Dojo.Eq(\"GET /orders -> 405\", 405, Dispatch(dojoRoutes, \"GET\", \"/orders\").Status);",
+        "Dojo.Eq(\"unknown path -> 404\", 404, Dispatch(dojoRoutes, \"GET\", \"/authors/1\").Status);",
+        "record RouteDef(string Method, string Template, string Id);"
+      ]
+    }
+  ]
+}
