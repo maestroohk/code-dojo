@@ -1,0 +1,186 @@
+{
+  "title": "CMD versus ENTRYPOINT",
+  "summary": "How the start command is assembled, why exec form matters for PID 1, and how to override both.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two halves of one command",
+      "body": [
+        "The process a container starts is **ENTRYPOINT + CMD**, where the arguments you type after the image name **replace CMD**:",
+        "",
+        "| Dockerfile | `docker run img` | `docker run img world` |",
+        "|---|---|---|",
+        "| `CMD [\"echo\", \"hello\"]` | `echo hello` | `world` (CMD replaced) |",
+        "| `ENTRYPOINT [\"echo\", \"hello\"]` | `echo hello` | `echo hello world` |",
+        "| `ENTRYPOINT [\"echo\"]` + `CMD [\"hello\"]` | `echo hello` | `echo world` |",
+        "",
+        "- Use **CMD** alone for the usual case: a sensible default people can replace (`docker run myapp bash`).",
+        "- Use **ENTRYPOINT** when the image *is* one program and run arguments are its flags, like a CLI tool.",
+        "- Use both when you want a fixed program with default arguments.",
+        "",
+        "`docker run --entrypoint sh img` replaces the entrypoint too. That is the debugging escape hatch."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "The image `greeter` was built from `ENTRYPOINT [\"echo\", \"hello\"]`. What does this print?",
+      "code": "docker run --rm greeter world",
+      "answer": "hello world",
+      "verify": false,
+      "explain": "Run arguments are appended to the ENTRYPOINT."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The image `greeter2` was built from `CMD [\"echo\", \"hello\"]`. What happens with `docker run --rm greeter2 world`?",
+      "options": [
+        "Docker tries to run a program called `world` and fails: `executable file not found`",
+        "It prints `hello world`",
+        "It prints `world`",
+        "It prints `hello`"
+      ],
+      "answer": 0,
+      "explain": "With only CMD, run arguments replace the whole command, so `world` becomes the program to execute."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each Dockerfile with what `docker run img --version` executes.",
+      "pairs": [
+        [
+          "`CMD [\"node\", \"app.js\"]`",
+          "`--version`"
+        ],
+        [
+          "`ENTRYPOINT [\"node\"]`",
+          "`node --version`"
+        ],
+        [
+          "`ENTRYPOINT [\"node\"]` + `CMD [\"app.js\"]`",
+          "`node --version` (CMD dropped)"
+        ],
+        [
+          "`ENTRYPOINT [\"node\", \"app.js\"]`",
+          "`node app.js --version`"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "PID 1 and stopping cleanly",
+      "body": [
+        "`docker stop` sends **SIGTERM** to the container's PID 1, waits 10 seconds, then sends **SIGKILL**.",
+        "",
+        "With **shell form**, PID 1 is `/bin/sh`, and your app is its child. `sh` does not forward SIGTERM, so your app never hears it and is killed after 10 seconds: in-flight requests are cut, nothing is flushed.",
+        "",
+        "```text",
+        "CMD dotnet Api.dll              CMD [\"dotnet\", \"Api.dll\"]",
+        "PID 1  /bin/sh -c \"dotnet...\"   PID 1  dotnet Api.dll   ◀── SIGTERM arrives here",
+        "PID 7  └─ dotnet Api.dll                                    graceful shutdown",
+        "```",
+        "",
+        "If you need a shell script as entrypoint (to prepare config, say), end it with `exec \"$@\"` or `exec dotnet Api.dll`, so the app *replaces* the shell as PID 1."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Every `docker stop api` takes exactly 10 seconds and the app logs nothing about shutting down. The Dockerfile ends with `CMD dotnet Api.dll`. What is the fix?",
+      "options": [
+        "Use exec form, `CMD [\"dotnet\", \"Api.dll\"]`, so the app is PID 1 and receives SIGTERM",
+        "Run `docker stop -t 30` to give it more time",
+        "Add `EXPOSE 80` so Docker can reach the app",
+        "Use `docker kill` instead of `docker stop`"
+      ],
+      "answer": 0,
+      "explain": "Ten seconds is the SIGKILL timeout. A longer timeout or `kill` only hides the problem: the signal never reaches the app."
+    },
+    {
+      "type": "blanks",
+      "prompt": "A CLI image: `docker run tool` should run `tool --help`, and `docker run tool scan .` should run `tool scan .`.",
+      "code": [
+        "__1__ [\"tool\"]",
+        "__2__ [\"--help\"]"
+      ],
+      "blanks": [
+        "ENTRYPOINT",
+        "CMD"
+      ],
+      "bank": [
+        "RUN",
+        "EXPOSE",
+        "SHELL"
+      ],
+      "explain": "ENTRYPOINT fixes the program; CMD gives the default arguments that run arguments replace."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A container exits immediately and you want to look around inside its image. Which command gives you a shell even though the ENTRYPOINT is `[\"dotnet\", \"Api.dll\"]`?",
+      "options": [
+        "`docker run --rm -it --entrypoint sh acme/api:1.4`",
+        "`docker run --rm -it acme/api:1.4 sh`",
+        "`docker exec -it acme/api:1.4 sh`",
+        "`docker start -it acme/api:1.4 sh`"
+      ],
+      "answer": 0,
+      "explain": "The second one runs `dotnet Api.dll sh`, because arguments are appended to an ENTRYPOINT. `exec` needs a running container, not an image."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Assemble the start command",
+      "prompt": [
+        "Write `string FinalCommand(string? entrypoint, string? cmd, string runArgs)`.",
+        "",
+        "- `entrypoint` and `cmd` are exec-form JSON arrays like `[\"dotnet\", \"Api.dll\"]`, or `null` when the Dockerfile does not set them.",
+        "- `runArgs` is what the user typed after the image name, space-separated, or `\"\"`.",
+        "",
+        "The result is the entrypoint's items, followed by the run arguments if there are any, otherwise the CMD's items, all joined by single spaces. If that is empty, return `error: no command specified`.",
+        "",
+        "| entrypoint | cmd | runArgs | result |",
+        "|---|---|---|---|",
+        "| `null` | `[\"node\", \"server.js\"]` | `\"\"` | `node server.js` |",
+        "| `[\"dotnet\", \"Api.dll\"]` | `null` | `--urls http://+:5000` | `dotnet Api.dll --urls http://+:5000` |",
+        "| `[\"curl\"]` | `[\"--help\"]` | `-s example.com` | `curl -s example.com` |",
+        "",
+        "A helper `List<string> ParseArray(string? json)` that strips `[` `]`, splits on `,` and trims spaces and quotes is enough; no JSON library needed."
+      ],
+      "starter": [
+        "string FinalCommand(string? entrypoint, string? cmd, string runArgs)",
+        "{",
+        "    // your code here",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "List<string> ParseArray(string? json)",
+        "{",
+        "    if (json == null) return new List<string>();",
+        "    string inner = json.Trim().TrimStart('[').TrimEnd(']');",
+        "    return inner.Split(',').Select(p => p.Trim().Trim('\"')).Where(p => p != \"\").ToList();",
+        "}",
+        "",
+        "string FinalCommand(string? entrypoint, string? cmd, string runArgs)",
+        "{",
+        "    var parts = ParseArray(entrypoint);",
+        "    var args = runArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();",
+        "    parts.AddRange(args.Count > 0 ? args : ParseArray(cmd));",
+        "    return parts.Count == 0 ? \"error: no command specified\" : string.Join(\" \", parts);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"CMD only\", \"node server.js\", FinalCommand(null, \"[\\\"node\\\", \\\"server.js\\\"]\", \"\"));",
+        "Dojo.Eq(\"CMD replaced\", \"node repl.js\", FinalCommand(null, \"[\\\"node\\\", \\\"server.js\\\"]\", \"node repl.js\"));",
+        "Dojo.Eq(\"ENTRYPOINT only\", \"dotnet Api.dll\", FinalCommand(\"[\\\"dotnet\\\", \\\"Api.dll\\\"]\", null, \"\"));",
+        "Dojo.Eq(\"ENTRYPOINT plus run args\", \"dotnet Api.dll --urls http://+:5000\", FinalCommand(\"[\\\"dotnet\\\", \\\"Api.dll\\\"]\", null, \"--urls http://+:5000\"));",
+        "Dojo.Eq(\"both, defaults\", \"curl --help\", FinalCommand(\"[\\\"curl\\\"]\", \"[\\\"--help\\\"]\", \"\"));",
+        "Dojo.Eq(\"both, args replace CMD\", \"curl -s example.com\", FinalCommand(\"[\\\"curl\\\"]\", \"[\\\"--help\\\"]\", \"-s example.com\"));",
+        "Dojo.Eq(\"nothing at all\", \"error: no command specified\", FinalCommand(null, null, \"\"));"
+      ],
+      "hints": [
+        "Start from the entrypoint items, then add either the run args or the CMD items.",
+        "`runArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries)` gives an empty array for `\"\"`."
+      ]
+    }
+  ]
+}

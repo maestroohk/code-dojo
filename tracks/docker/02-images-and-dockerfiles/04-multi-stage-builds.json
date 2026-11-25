@@ -1,0 +1,237 @@
+{
+  "title": "Multi-stage builds",
+  "summary": "Build with the SDK, ship only the runtime: multi-stage Dockerfiles for .NET and Next.js.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Build tools do not belong in production",
+      "body": [
+        "Compiling needs the SDK, compilers, package caches and source code. Running needs only the output and a runtime. A **multi-stage** Dockerfile has several `FROM` lines; each starts a fresh stage, and only the **last** stage becomes the image. `COPY --from=<stage>` pulls files out of an earlier one.",
+        "",
+        "```dockerfile",
+        "# ---- stage 1: build with the full SDK (~800 MB) ----",
+        "FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build",
+        "WORKDIR /src",
+        "COPY Api.csproj .",
+        "RUN dotnet restore",
+        "COPY . .",
+        "RUN dotnet publish -c Release -o /app/publish --no-restore",
+        "",
+        "# ---- stage 2: run with only the ASP.NET runtime (~220 MB) ----",
+        "FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final",
+        "WORKDIR /app",
+        "COPY --from=build /app/publish .",
+        "ENTRYPOINT [\"dotnet\", \"Api.dll\"]",
+        "```",
+        "",
+        "The final image contains the aspnet base layers, `WORKDIR` and the published files, nothing from the build stage. Smaller to push and pull, and far less software for an attacker (or a CVE scanner) to find."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "In the Dockerfile above, which of these ends up in the final image?",
+      "options": [
+        "The published `Api.dll` and the ASP.NET Core runtime",
+        "The .NET SDK and the NuGet package cache",
+        "The source code in `/src`",
+        "All layers of both stages"
+      ],
+      "answer": 0,
+      "explain": "Only the last stage ships. The build stage is a scratch area whose results you pick from with `COPY --from`."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the multi-stage .NET Dockerfile.",
+      "code": [
+        "FROM mcr.microsoft.com/dotnet/sdk:9.0 __1__ build",
+        "WORKDIR /src",
+        "COPY . .",
+        "RUN dotnet publish -c Release -o /app/publish",
+        "",
+        "FROM mcr.microsoft.com/dotnet/__2__:9.0",
+        "WORKDIR /app",
+        "COPY __3__ /app/publish .",
+        "ENTRYPOINT [\"dotnet\", \"Api.dll\"]"
+      ],
+      "blanks": [
+        "AS",
+        "aspnet",
+        "--from=build"
+      ],
+      "bank": [
+        "FROM",
+        "sdk",
+        "--stage=build",
+        "runtime-deps"
+      ],
+      "explain": "`aspnet` has the ASP.NET Core runtime; `runtime` has only the base .NET runtime (fine for console apps); `runtime-deps` has neither (for self-contained apps)."
+    },
+    {
+      "type": "learn",
+      "title": "The same idea for Node and Next.js",
+      "body": [
+        "A Next.js app needs dev dependencies (TypeScript, the compiler) to build, but with `output: \"standalone\"` in `next.config.js`, the build emits a minimal server with only the modules it needs:",
+        "",
+        "```dockerfile",
+        "FROM node:22-alpine AS deps",
+        "WORKDIR /app",
+        "COPY package.json package-lock.json ./",
+        "RUN npm ci",
+        "",
+        "FROM node:22-alpine AS build",
+        "WORKDIR /app",
+        "COPY --from=deps /app/node_modules ./node_modules",
+        "COPY . .",
+        "RUN npm run build",
+        "",
+        "FROM node:22-alpine AS runner",
+        "WORKDIR /app",
+        "ENV NODE_ENV=production",
+        "COPY --from=build /app/.next/standalone ./",
+        "COPY --from=build /app/.next/static ./.next/static",
+        "COPY --from=build /app/public ./public",
+        "USER node",
+        "EXPOSE 3000",
+        "CMD [\"node\", \"server.js\"]",
+        "```",
+        "",
+        "Three stages: install once (cached until the lock file changes), build, then a runner that never sees the full `node_modules`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each stage of the Next.js Dockerfile to its job.",
+      "pairs": [
+        [
+          "`deps`",
+          "installs node_modules from the lock file, cached separately"
+        ],
+        [
+          "`build`",
+          "compiles the app with dev dependencies available"
+        ],
+        [
+          "`runner`",
+          "the shipped image: standalone server, static files, non-root user"
+        ],
+        [
+          "`COPY --from=build`",
+          "picks build outputs into the runner"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "After a multi-stage build of the Next.js app, where does each thing live?",
+      "buckets": [
+        "In the final image",
+        "Left behind in earlier stages"
+      ],
+      "items": [
+        [
+          "`.next/standalone/server.js`",
+          0
+        ],
+        [
+          "TypeScript compiler",
+          1
+        ],
+        [
+          "`.next/static` assets",
+          0
+        ],
+        [
+          "The full dev `node_modules`",
+          1
+        ],
+        [
+          "The `public/` folder",
+          0
+        ],
+        [
+          "Your `.ts` source files",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "How do you build only up to the `build` stage, for example to run the tests inside it in CI?",
+      "options": [
+        "`docker build --target build -t api-build .`",
+        "`docker build --stage build .`",
+        "`docker build -f build .`",
+        "`docker build --from=build .`"
+      ],
+      "answer": 0,
+      "explain": "`--target` stops at the named stage, which is a neat way to run `dotnet test` in the same environment the release is built in."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Map the stages",
+      "prompt": [
+        "Write `List<string> Stages(List<string> lines)` that describes a multi-stage Dockerfile:",
+        "",
+        "- each `FROM image [AS name]` adds `stage NAME from IMAGE`; an unnamed stage is named by its 0-based index (`0`, `1`, ...);",
+        "- each `COPY` with a `--from=X` token adds `  CURRENT copies from X` (two leading spaces; CURRENT is the stage it appears in);",
+        "- finally add `final image: NAME` for the last stage.",
+        "",
+        "Keywords may be in any case (`as`, `from`). Ignore every other instruction.",
+        "",
+        "```text",
+        "stage build from mcr.microsoft.com/dotnet/sdk:9.0",
+        "stage final from mcr.microsoft.com/dotnet/aspnet:9.0",
+        "  final copies from build",
+        "final image: final",
+        "```"
+      ],
+      "starter": [
+        "List<string> Stages(List<string> lines)",
+        "{",
+        "    var result = new List<string>();",
+        "    // your code here",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Stages(List<string> lines)",
+        "{",
+        "    var result = new List<string>();",
+        "    var names = new List<string>();",
+        "    foreach (string raw in lines)",
+        "    {",
+        "        string[] t = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        if (t.Length == 0) continue;",
+        "        string keyword = t[0].ToUpper();",
+        "        if (keyword == \"FROM\")",
+        "        {",
+        "            string name = t.Length >= 4 && t[2].ToUpper() == \"AS\" ? t[3] : names.Count.ToString();",
+        "            names.Add(name);",
+        "            result.Add($\"stage {name} from {t[1]}\");",
+        "        }",
+        "        else if (keyword == \"COPY\")",
+        "        {",
+        "            string? from = t.FirstOrDefault(x => x.StartsWith(\"--from=\"));",
+        "            if (from != null) result.Add($\"  {names[^1]} copies from {from[7..]}\");",
+        "        }",
+        "    }",
+        "    result.Add($\"final image: {names[^1]}\");",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\".NET two-stage\", new List<string> { \"stage build from mcr.microsoft.com/dotnet/sdk:9.0\", \"stage final from mcr.microsoft.com/dotnet/aspnet:9.0\", \"  final copies from build\", \"final image: final\" }, Stages(new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build\", \"WORKDIR /src\", \"COPY . .\", \"RUN dotnet publish -o /app/publish\", \"FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final\", \"COPY --from=build /app/publish .\" }));",
+        "Dojo.Eq(\"Next.js three-stage\", new List<string> { \"stage deps from node:22-alpine\", \"stage build from node:22-alpine\", \"  build copies from deps\", \"stage runner from node:22-alpine\", \"  runner copies from build\", \"  runner copies from build\", \"final image: runner\" }, Stages(new List<string> { \"FROM node:22-alpine AS deps\", \"RUN npm ci\", \"FROM node:22-alpine AS build\", \"COPY --from=deps /app/node_modules ./node_modules\", \"COPY . .\", \"from node:22-alpine as runner\", \"COPY --from=build /app/.next/standalone ./\", \"COPY --from=build /app/public ./public\" }));",
+        "Dojo.Eq(\"unnamed stages use indexes\", new List<string> { \"stage 0 from golang:1.23\", \"stage 1 from scratch\", \"  1 copies from 0\", \"final image: 1\" }, Stages(new List<string> { \"FROM golang:1.23\", \"RUN go build -o /app\", \"FROM scratch\", \"COPY --from=0 /app /app\" }));"
+      ],
+      "hints": [
+        "Keep a list of stage names; the current stage is the last one in it.",
+        "`--from=build`.Substring(7) is `build`."
+      ]
+    }
+  ]
+}

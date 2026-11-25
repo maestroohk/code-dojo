@@ -1,0 +1,180 @@
+{
+  "title": "Boss: on call",
+  "summary": "It is 3 a.m. and the dashboard is red. Build the tools that tell you what is wrong in seconds.",
+  "minutes": 15,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The pager goes off",
+      "body": "Three tools for the on-call runbook: a health simulator that understands start periods, a triage report across all containers, and a memory pressure check from `docker stats`."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Health with a start period",
+      "prompt": "Write `List<string> Health(List<bool> probes, int retries, int startProbes)`. Same rules as before (start `starting`; a pass → `healthy`, failures reset; `retries` consecutive failures → `unhealthy`), except that failures among the **first `startProbes` probes** do not count, **as long as no probe has passed yet** (once a probe passes, the start period is over).",
+      "starter": [
+        "List<string> Health(List<bool> probes, int retries, int startProbes)",
+        "{",
+        "    var states = new List<string>();",
+        "    // your code here",
+        "    return states;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Health(List<bool> probes, int retries, int startProbes)",
+        "{",
+        "    var states = new List<string>();",
+        "    string state = \"starting\";",
+        "    int failures = 0;",
+        "    bool passedOnce = false;",
+        "    for (int i = 0; i < probes.Count; i++)",
+        "    {",
+        "        if (probes[i]) { state = \"healthy\"; failures = 0; passedOnce = true; }",
+        "        else if (i < startProbes && !passedOnce) { }",
+        "        else if (++failures >= retries) state = \"unhealthy\";",
+        "        states.Add(state);",
+        "    }",
+        "    return states;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"slow start is forgiven\", new List<string> { \"starting\", \"starting\", \"starting\", \"healthy\" }, Health(new List<bool> { false, false, false, true }, 2, 3));",
+        "Dojo.Eq(\"start period ends, then failures count\", new List<string> { \"starting\", \"starting\", \"starting\", \"unhealthy\" }, Health(new List<bool> { false, false, false, false }, 2, 2));",
+        "Dojo.Eq(\"a pass ends the start period early\", new List<string> { \"healthy\", \"healthy\", \"unhealthy\" }, Health(new List<bool> { true, false, false }, 2, 5));",
+        "Dojo.Eq(\"no start period\", new List<string> { \"starting\", \"unhealthy\" }, Health(new List<bool> { false, false }, 2, 0));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Triage every container",
+      "prompt": [
+        "Write `List<string> Triage(List<string> rows)`. Each row is `NAME|RUNNING|EXITCODE|OOMKILLED|LASTLOG` (RUNNING and OOMKILLED are `true`/`false`; LASTLOG may contain anything except `|`).",
+        "",
+        "- Skip running containers.",
+        "- For each stopped one, add `NAME: ` + the diagnosis from the last lesson (OOM first, then `exec format error` in the log, then the exit-code table, else `app error (exit N): LASTLOG`).",
+        "- Sort the lines so the most urgent come first: OOM and architecture problems, then app errors and 125/126/127/139, then exit 0, 137 and 143. Within a group keep input order.",
+        "- If nothing is stopped, return `all running`."
+      ],
+      "starter": [
+        "List<string> Triage(List<string> rows)",
+        "{",
+        "    var result = new List<string>();",
+        "    // your code here",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "string Diagnose(int exitCode, bool oomKilled, string lastLog)",
+        "{",
+        "    if (oomKilled) return \"out of memory: raise --memory or reduce usage\";",
+        "    if (lastLog.Contains(\"exec format error\")) return \"wrong CPU architecture: rebuild for the host platform\";",
+        "    return exitCode switch",
+        "    {",
+        "        0 => \"main process finished: keep the server in the foreground\",",
+        "        125 => \"docker could not create the container: check the run flags\",",
+        "        126 => \"command not executable: check permissions\",",
+        "        127 => \"command not found: check CMD/ENTRYPOINT and file name case\",",
+        "        137 => \"killed by SIGKILL: docker kill or a stop timeout\",",
+        "        139 => \"segmentation fault: native crash, check libc (alpine/musl?)\",",
+        "        143 => \"stopped by SIGTERM\",",
+        "        _ => $\"app error (exit {exitCode}): {lastLog}\"",
+        "    };",
+        "}",
+        "",
+        "List<string> Triage(List<string> rows)",
+        "{",
+        "    var items = new List<(int Group, string Line)>();",
+        "    foreach (string row in rows)",
+        "    {",
+        "        string[] f = row.Split('|');",
+        "        if (f[1] == \"true\") continue;",
+        "        int code = int.Parse(f[2]);",
+        "        bool oom = f[3] == \"true\";",
+        "        string log = f[4];",
+        "        int group = oom || log.Contains(\"exec format error\") ? 0 : code is 0 or 137 or 143 ? 2 : 1;",
+        "        items.Add((group, $\"{f[0]}: {Diagnose(code, oom, log)}\"));",
+        "    }",
+        "    if (items.Count == 0) return new List<string> { \"all running\" };",
+        "    return items.OrderBy(x => x.Group).Select(x => x.Line).ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRows = new List<string> {",
+        "    \"web|true|0|false|\",",
+        "    \"migrate|false|0|false|Applied 3 migrations\",",
+        "    \"api|false|1|false|Unhandled exception. Npgsql.NpgsqlException: Failed to connect to db:5432\",",
+        "    \"worker|false|137|true|\",",
+        "    \"cron|false|143|false|\",",
+        "    \"tool|false|127|false|exec ./run.sh: no such file or directory\",",
+        "    \"arm|false|1|false|exec /app/server: exec format error\" };",
+        "Dojo.Eq(\"mixed fleet\", new List<string> {",
+        "    \"worker: out of memory: raise --memory or reduce usage\",",
+        "    \"arm: wrong CPU architecture: rebuild for the host platform\",",
+        "    \"api: app error (exit 1): Unhandled exception. Npgsql.NpgsqlException: Failed to connect to db:5432\",",
+        "    \"tool: command not found: check CMD/ENTRYPOINT and file name case\",",
+        "    \"migrate: main process finished: keep the server in the foreground\",",
+        "    \"cron: stopped by SIGTERM\" }, Triage(dojoRows));",
+        "Dojo.Eq(\"all running\", new List<string> { \"all running\" }, Triage(new List<string> { \"web|true|0|false|\", \"api|true|0|false|\" }));"
+      ],
+      "hints": [
+        "Give every line a group number (0, 1, 2) and sort by it; LINQ's `OrderBy` is stable, so input order is kept within a group."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Memory pressure from docker stats",
+      "prompt": "`docker stats --no-stream --format \"{{.Name}}|{{.MemUsage}}\"` prints lines like `api|481.5MiB / 512MiB`. Write `List<string> Pressure(List<string> lines, int percent)` that returns `NAME at P% of its memory limit` for each container whose usage is **at least** `percent`% of its limit, in input order (P is the whole-number percentage, rounded down). Units are `B`, `KiB`, `MiB`, `GiB` (powers of 1024); numbers may have decimals. Return `ok` alone if none qualify.",
+      "starter": [
+        "List<string> Pressure(List<string> lines, int percent)",
+        "{",
+        "    var result = new List<string>();",
+        "    // your code here",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "double Bytes(string value)",
+        "{",
+        "    value = value.Trim();",
+        "    string[] units = { \"GiB\", \"MiB\", \"KiB\", \"B\" };",
+        "    double[] sizes = { 1024.0 * 1024 * 1024, 1024.0 * 1024, 1024.0, 1.0 };",
+        "    for (int i = 0; i < units.Length; i++)",
+        "        if (value.EndsWith(units[i]))",
+        "            return double.Parse(value[..^units[i].Length]) * sizes[i];",
+        "    return double.Parse(value);",
+        "}",
+        "",
+        "List<string> Pressure(List<string> lines, int percent)",
+        "{",
+        "    var result = new List<string>();",
+        "    foreach (string line in lines)",
+        "    {",
+        "        string[] f = line.Split('|');",
+        "        string[] mem = f[1].Split('/');",
+        "        int p = (int)Math.Floor(Bytes(mem[0]) / Bytes(mem[1]) * 100);",
+        "        if (p >= percent) result.Add($\"{f[0]} at {p}% of its memory limit\");",
+        "    }",
+        "    return result.Count == 0 ? new List<string> { \"ok\" } : result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoStats = new List<string> { \"api|481.5MiB / 512MiB\", \"db|1.2GiB / 2GiB\", \"web|60MiB / 1GiB\", \"cache|1023.5MiB / 1GiB\" };",
+        "Dojo.Eq(\"90% threshold\", new List<string> { \"api at 94% of its memory limit\", \"cache at 99% of its memory limit\" }, Pressure(dojoStats, 90));",
+        "Dojo.Eq(\"50% threshold\", new List<string> { \"api at 94% of its memory limit\", \"db at 60% of its memory limit\", \"cache at 99% of its memory limit\" }, Pressure(dojoStats, 50));",
+        "Dojo.Eq(\"mixed units\", new List<string> { \"tiny at 50% of its memory limit\" }, Pressure(new List<string> { \"tiny|512KiB / 1MiB\" }, 50));",
+        "Dojo.Eq(\"nothing hot\", new List<string> { \"ok\" }, Pressure(new List<string> { \"web|60MiB / 1GiB\" }, 80));"
+      ],
+      "hints": [
+        "Check longer unit names before `B`, because `MiB` also ends in `B`.",
+        "Compute in `double`, then `Math.Floor` the percentage."
+      ]
+    }
+  ]
+}

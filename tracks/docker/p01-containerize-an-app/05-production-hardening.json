@@ -1,0 +1,214 @@
+{
+  "title": "Stage 5: Production hardening",
+  "summary": "Pinned, chiseled, non-root, limited and checked: turn the working image into one you can run in production.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The hardened version",
+      "body": [
+        "```dockerfile",
+        "# syntax=docker/dockerfile:1",
+        "FROM mcr.microsoft.com/dotnet/sdk:9.0.100 AS build",
+        "WORKDIR /src",
+        "COPY TodoApi.csproj packages.lock.json ./",
+        "RUN dotnet restore --locked-mode",
+        "COPY . .",
+        "RUN dotnet publish -c Release -o /app/publish --no-restore /p:UseAppHost=false",
+        "",
+        "FROM mcr.microsoft.com/dotnet/aspnet:9.0-noble-chiseled AS final",
+        "WORKDIR /app",
+        "COPY --from=build /app/publish .",
+        "USER $APP_UID",
+        "ENV ASPNETCORE_HTTP_PORTS=8080",
+        "EXPOSE 8080",
+        "ENTRYPOINT [\"dotnet\", \"TodoApi.dll\"]",
+        "```",
+        "",
+        "```yaml",
+        "  api:",
+        "    image: ghcr.io/acme/todoapi:1.0.0",
+        "    read_only: true",
+        "    restart: unless-stopped",
+        "    deploy:",
+        "      resources:",
+        "        limits: { memory: 256M, cpus: \"1.0\" }",
+        "    logging:",
+        "      options: { max-size: \"10m\", max-file: \"3\" }",
+        "```",
+        "",
+        "What changed, and why:",
+        "",
+        "- **pinned** SDK patch version and a lock file with `--locked-mode`: the same commit builds the same image;",
+        "- **chiseled** runtime: no shell, no package manager, far fewer CVEs; non-root by default, and `USER $APP_UID` makes it explicit;",
+        "- **read-only** root filesystem, **memory and CPU limits**, a **restart policy**, **rotated logs**;",
+        "- the image is deployed by an immutable version tag built in CI, never `latest`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "With the chiseled image, a Docker `HEALTHCHECK` using `curl` no longer works. What is a sound approach?",
+      "options": [
+        "Let the orchestrator probe `/health` over HTTP from outside (Kubernetes probes), or ship a tiny health-probe binary in the image",
+        "Install curl with apt-get in the final stage",
+        "Switch back to the SDK image",
+        "Remove the /health endpoint"
+      ],
+      "answer": 0,
+      "explain": "Chiseled images have no package manager by design. Kubernetes HTTP probes need nothing inside the container."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which change improves which property?",
+      "buckets": [
+        "Security",
+        "Reproducibility",
+        "Operability"
+      ],
+      "items": [
+        [
+          "Running as `$APP_UID` instead of root",
+          0
+        ],
+        [
+          "`dotnet restore --locked-mode` with a lock file",
+          1
+        ],
+        [
+          "Log rotation with max-size and max-file",
+          2
+        ],
+        [
+          "A chiseled base with no shell",
+          0
+        ],
+        [
+          "Pinning `sdk:9.0.100`",
+          1
+        ],
+        [
+          "A memory limit and restart policy",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Finish the hardened runtime stage.",
+      "code": [
+        "FROM mcr.microsoft.com/dotnet/aspnet:9.0-noble-__1__ AS final",
+        "WORKDIR /app",
+        "COPY --from=build /app/publish .",
+        "__2__ $APP_UID",
+        "ENTRYPOINT __3__"
+      ],
+      "blanks": [
+        "chiseled",
+        "USER",
+        "[\"dotnet\", \"TodoApi.dll\"]"
+      ],
+      "bank": [
+        "alpine",
+        "RUN",
+        "dotnet TodoApi.dll",
+        "sdk"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "With `read_only: true`, the app crashes writing to `/tmp`. What is the right fix?",
+      "options": [
+        "Mount a tmpfs at /tmp (`tmpfs: [/tmp]` in Compose) so only that path is writable, in memory",
+        "Remove read_only",
+        "Run as root",
+        "Add `VOLUME /` to the Dockerfile"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Production readiness score",
+      "prompt": [
+        "Write `List<string> Readiness(List<string> lines)` that grades a Dockerfile. Output one line per check, `[x] NAME` when it passes or `[ ] NAME` when it fails, in this order, then `score: P/6`:",
+        "",
+        "1. `base images pinned`: every `FROM` image has a tag that is not `latest`, or a digest (`@`). Skip `scratch` and names of earlier stages. (Look at the part after the last `/` for the tag.)",
+        "2. `multi-stage build`: at least two `FROM` lines.",
+        "3. `runtime is not the SDK`: the last `FROM` image does not contain `/sdk`.",
+        "4. `runs as non-root`: the final stage has a `USER` and the last one is not `root` or `0`.",
+        "5. `exec-form start command`: the last `ENTRYPOINT` or `CMD` in the final stage starts with `[`.",
+        "6. `no secrets in ENV or ARG`: no `ENV`/`ARG` line contains `PASSWORD`, `SECRET` or `TOKEN` (any case).",
+        "",
+        "Instructions may be in any case; skip blank and `#` lines."
+      ],
+      "starter": [
+        "List<string> Readiness(List<string> lines)",
+        "{",
+        "    var result = new List<string>();",
+        "    // your code here",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Readiness(List<string> lines)",
+        "{",
+        "    var stages = new List<string>();",
+        "    bool pinned = true, secrets = false, nonRoot = false;",
+        "    int froms = 0;",
+        "    string lastBase = \"\", start = \"\";",
+        "    foreach (string raw in lines)",
+        "    {",
+        "        string line = raw.Trim();",
+        "        if (line == \"\" || line.StartsWith(\"#\")) continue;",
+        "        string[] t = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        string keyword = t[0].ToUpper();",
+        "        string args = line[t[0].Length..].Trim();",
+        "        if (keyword == \"FROM\")",
+        "        {",
+        "            froms++;",
+        "            string image = t[1];",
+        "            lastBase = image;",
+        "            nonRoot = false;",
+        "            start = \"\";",
+        "            bool isStage = stages.Contains(image);",
+        "            if (t.Length >= 4 && t[2].ToUpper() == \"AS\") stages.Add(t[3]);",
+        "            if (image == \"scratch\" || isStage || image.Contains('@')) continue;",
+        "            string last = image[(image.LastIndexOf('/') + 1)..];",
+        "            if (!last.Contains(':') || last.EndsWith(\":latest\")) pinned = false;",
+        "        }",
+        "        else if (keyword == \"USER\") nonRoot = t.Length > 1 && t[1] != \"root\" && t[1] != \"0\";",
+        "        else if (keyword == \"ENTRYPOINT\" || keyword == \"CMD\") start = args;",
+        "        else if ((keyword == \"ENV\" || keyword == \"ARG\") && (line.ToUpper().Contains(\"PASSWORD\") || line.ToUpper().Contains(\"SECRET\") || line.ToUpper().Contains(\"TOKEN\"))) secrets = true;",
+        "    }",
+        "    var checks = new List<(string Name, bool Ok)>",
+        "    {",
+        "        (\"base images pinned\", pinned),",
+        "        (\"multi-stage build\", froms >= 2),",
+        "        (\"runtime is not the SDK\", !lastBase.Contains(\"/sdk\")),",
+        "        (\"runs as non-root\", nonRoot),",
+        "        (\"exec-form start command\", start.StartsWith(\"[\")),",
+        "        (\"no secrets in ENV or ARG\", !secrets)",
+        "    };",
+        "    var result = checks.Select(c => (c.Ok ? \"[x] \" : \"[ ] \") + c.Name).ToList();",
+        "    result.Add($\"score: {checks.Count(c => c.Ok)}/6\");",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoHard = new List<string> { \"# syntax=docker/dockerfile:1\", \"FROM mcr.microsoft.com/dotnet/sdk:9.0.100 AS build\", \"WORKDIR /src\", \"COPY TodoApi.csproj packages.lock.json ./\", \"RUN dotnet restore --locked-mode\", \"COPY . .\", \"RUN dotnet publish -c Release -o /app/publish --no-restore\", \"\", \"FROM mcr.microsoft.com/dotnet/aspnet:9.0-noble-chiseled AS final\", \"WORKDIR /app\", \"COPY --from=build /app/publish .\", \"USER $APP_UID\", \"ENV ASPNETCORE_HTTP_PORTS=8080\", \"ENTRYPOINT [\\\"dotnet\\\", \\\"TodoApi.dll\\\"]\" };",
+        "Dojo.Eq(\"hardened file\", new List<string> { \"[x] base images pinned\", \"[x] multi-stage build\", \"[x] runtime is not the SDK\", \"[x] runs as non-root\", \"[x] exec-form start command\", \"[x] no secrets in ENV or ARG\", \"score: 6/6\" }, Readiness(dojoHard));",
+        "var dojoNaive = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk\", \"WORKDIR /src\", \"COPY . .\", \"ENV DB_PASSWORD=dev\", \"RUN dotnet publish -c Release -o /app\", \"CMD dotnet /app/TodoApi.dll\" };",
+        "Dojo.Eq(\"naive file\", new List<string> { \"[ ] base images pinned\", \"[ ] multi-stage build\", \"[ ] runtime is not the SDK\", \"[ ] runs as non-root\", \"[ ] exec-form start command\", \"[ ] no secrets in ENV or ARG\", \"score: 0/6\" }, Readiness(dojoNaive));",
+        "var dojoMid = new List<string> { \"from mcr.microsoft.com/dotnet/sdk:9.0 as build\", \"RUN dotnet publish -o /out\", \"FROM build AS test\", \"RUN dotnet test\", \"FROM mcr.microsoft.com/dotnet/aspnet:latest\", \"USER app\", \"COPY --from=build /out .\", \"USER root\", \"ENTRYPOINT [\\\"dotnet\\\", \\\"TodoApi.dll\\\"]\" };",
+        "Dojo.Eq(\"stage 3 file with leftovers\", new List<string> { \"[ ] base images pinned\", \"[x] multi-stage build\", \"[x] runtime is not the SDK\", \"[ ] runs as non-root\", \"[x] exec-form start command\", \"[x] no secrets in ENV or ARG\", \"score: 4/6\" }, Readiness(dojoMid));"
+      ],
+      "hints": [
+        "Reset the non-root flag and the start command on every FROM: only the final stage counts.",
+        "Check whether a FROM image is an earlier stage name **before** adding this stage's own name.",
+        "Collect `(name, ok)` pairs, then format them and count the passes."
+      ]
+    }
+  ]
+}

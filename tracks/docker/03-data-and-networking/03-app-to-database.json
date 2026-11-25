@@ -1,0 +1,211 @@
+{
+  "title": "Connecting an app to a database",
+  "summary": "Network, volume and configuration together, plus the classic mistakes and how to read them.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The whole picture",
+      "body": [
+        "A working API plus database needs all three pieces from this module:",
+        "",
+        "```text",
+        "docker network create shop",
+        "docker run -d --name db --network shop \\",
+        "    -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=shop \\",
+        "    -v pgdata:/var/lib/postgresql/data postgres:17",
+        "docker run -d --name api --network shop -p 8080:8080 \\",
+        "    -e ConnectionStrings__Default=\"Host=db;Port=5432;Database=shop;Username=postgres;Password=dev\" \\",
+        "    acme/api:1.0",
+        "",
+        " host :8080 ─▶ api ── db:5432 ──▶ db ──▶ volume pgdata",
+        "```",
+        "",
+        "- **network** so `db` resolves;",
+        "- **volume** so the data survives the container;",
+        "- **configuration by environment**, so the same image works against any database.",
+        "",
+        "In .NET, a double underscore in an environment variable name becomes `:` in configuration, so `ConnectionStrings__Default` is what `builder.Configuration.GetConnectionString(\"Default\")` reads."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Which .NET configuration key does this environment variable set? Type the key.",
+      "code": "Logging__LogLevel__Default=Warning",
+      "answer": "Logging:LogLevel:Default",
+      "verify": false,
+      "explain": "Every `__` becomes `:`. Colons are not allowed in environment variable names on all platforms, which is why .NET uses the double underscore."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The API container starts at the same moment as Postgres and crashes with `Connection refused` to `db:5432`; a restart a few seconds later works. What is going on?",
+      "options": [
+        "Postgres was still initialising and not accepting connections yet; the app needs to wait or retry",
+        "The DNS name `db` only becomes valid after a restart",
+        "Port 5432 must be published for the API to connect",
+        "The volume was locked by the first container"
+      ],
+      "answer": 0,
+      "explain": "\"Container started\" is not \"service ready\". Retry with back-off in the app, and in Compose use a healthcheck with `depends_on: condition: service_healthy`."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each error to its most likely cause.",
+      "pairs": [
+        [
+          "`Name or service not known: db`",
+          "the API is not on the same user-defined network as db"
+        ],
+        [
+          "`Connection refused` to `127.0.0.1:5432` from the API",
+          "the connection string says localhost, which is the API container itself"
+        ],
+        [
+          "`password authentication failed`",
+          "the volume was initialised earlier with a different POSTGRES_PASSWORD"
+        ],
+        [
+          "`Connection refused` only during the first seconds",
+          "the database is still starting"
+        ]
+      ],
+      "explain": "The third one bites everyone: `POSTGRES_PASSWORD` is only applied when the data directory is **empty**. An existing volume keeps the old password."
+    },
+    {
+      "type": "learn",
+      "title": "localhost is not your laptop",
+      "body": [
+        "Inside a container, `localhost` / `127.0.0.1` is **the container itself**. Three common situations:",
+        "",
+        "| the app runs | the database runs | Host to use |",
+        "|---|---|---|",
+        "| in a container | in a container on the same network | the container or service name: `db` |",
+        "| in a container | on your host (installed locally) | `host.docker.internal` (Docker Desktop; on Linux add `--add-host=host.docker.internal:host-gateway`) |",
+        "| on your host (`dotnet run`) | in a container with `-p 5433:5432` | `localhost`, port `5433` |",
+        "",
+        "A connection string that works with `dotnet run` (localhost:5433) will **not** work once the app is containerised. Keep it in configuration, not in code, and set it per environment."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Will the data still be there after `docker rm -f db` and a fresh `docker run` with the same flags?",
+      "buckets": [
+        "Kept",
+        "Lost"
+      ],
+      "items": [
+        [
+          "Tables in a named volume `pgdata` mounted at the data directory",
+          0
+        ],
+        [
+          "Tables in the container's writable layer (no `-v`)",
+          1
+        ],
+        [
+          "Files in a bind-mounted host folder",
+          0
+        ],
+        [
+          "Files under a `--tmpfs` mount",
+          1
+        ],
+        [
+          "Data in an anonymous volume from `-v /var/lib/postgresql/data`",
+          1
+        ]
+      ],
+      "explain": "The anonymous volume survives `rm` (unless `-v`), but a new `docker run` creates a **new** anonymous volume, so the new container cannot see the old data. Name your volumes."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The API works with `dotnet run` but, containerised on network `shop`, fails to reach the database at `Host=localhost;Port=5433`. What is the right fix?",
+      "options": [
+        "Set the connection string by environment for the container: `Host=db;Port=5432`",
+        "Publish port 5433 on the API container too",
+        "Run the API container with `--network host` everywhere",
+        "Add `EXPOSE 5433` to the API's Dockerfile"
+      ],
+      "answer": 0,
+      "explain": "Configuration differs per environment; the image should not. `--network host` hides the problem on Linux and does not behave the same on Docker Desktop."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the command that runs the API against the `db` container.",
+      "code": [
+        "docker run -d --name api __1__ shop -p 8080:8080 \\",
+        "  -e ConnectionStrings__Default=\"Host=__2__;Port=__3__;Database=shop;Username=postgres;Password=dev\" \\",
+        "  acme/api:1.0"
+      ],
+      "blanks": [
+        "--network",
+        "db",
+        "5432"
+      ],
+      "bank": [
+        "--link",
+        "localhost",
+        "5433",
+        "-p"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Check a connection string",
+      "prompt": [
+        "Write `string Check(string connectionString, bool inContainer, List<string> services)`. The connection string is `Key=Value` pairs separated by `;` (keys are case-insensitive; the host is under `Host` or `Server`). `services` are the container names on the app's network.",
+        "",
+        "Return the first that applies:",
+        "",
+        "1. `inContainer` and the host is `localhost` or `127.0.0.1` → `localhost is this container: use the database service name`",
+        "2. `inContainer` and the host is neither in `services` nor `host.docker.internal` → `unknown host 'HOST': not a service on this network`",
+        "3. not `inContainer` and the host **is** in `services` → `'HOST' only resolves inside the Docker network: use localhost and the published port`",
+        "4. otherwise → `ok`"
+      ],
+      "starter": [
+        "string Check(string connectionString, bool inContainer, List<string> services)",
+        "{",
+        "    // your code here",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Check(string connectionString, bool inContainer, List<string> services)",
+        "{",
+        "    string host = \"\";",
+        "    foreach (string pair in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries))",
+        "    {",
+        "        int eq = pair.IndexOf('=');",
+        "        if (eq < 0) continue;",
+        "        string key = pair[..eq].Trim().ToLower();",
+        "        if (key == \"host\" || key == \"server\") host = pair[(eq + 1)..].Trim();",
+        "    }",
+        "    if (inContainer && (host == \"localhost\" || host == \"127.0.0.1\"))",
+        "        return \"localhost is this container: use the database service name\";",
+        "    if (inContainer && !services.Contains(host) && host != \"host.docker.internal\")",
+        "        return $\"unknown host '{host}': not a service on this network\";",
+        "    if (!inContainer && services.Contains(host))",
+        "        return $\"'{host}' only resolves inside the Docker network: use localhost and the published port\";",
+        "    return \"ok\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoServices = new List<string> { \"api\", \"db\", \"redis\" };",
+        "Dojo.Eq(\"container, service name\", \"ok\", Check(\"Host=db;Port=5432;Database=shop\", true, dojoServices));",
+        "Dojo.Eq(\"container, localhost\", \"localhost is this container: use the database service name\", Check(\"Host=localhost;Port=5433\", true, dojoServices));",
+        "Dojo.Eq(\"container, 127.0.0.1 via Server\", \"localhost is this container: use the database service name\", Check(\"server=127.0.0.1;port=5432\", true, dojoServices));",
+        "Dojo.Eq(\"container, typo\", \"unknown host 'postgres': not a service on this network\", Check(\"Host=postgres;Port=5432\", true, dojoServices));",
+        "Dojo.Eq(\"container, host database\", \"ok\", Check(\"Host=host.docker.internal;Port=5432\", true, dojoServices));",
+        "Dojo.Eq(\"host, service name\", \"'db' only resolves inside the Docker network: use localhost and the published port\", Check(\"Database=shop;HOST=db;Port=5432\", false, dojoServices));",
+        "Dojo.Eq(\"host, localhost\", \"ok\", Check(\"Host=localhost;Port=5433\", false, dojoServices));"
+      ],
+      "hints": [
+        "Split on `;`, then each pair at its first `=`.",
+        "Compare keys in lower case so `HOST`, `host` and `Server` all work."
+      ]
+    }
+  ]
+}

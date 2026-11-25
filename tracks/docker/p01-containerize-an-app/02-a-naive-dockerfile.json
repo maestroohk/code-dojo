@@ -1,0 +1,131 @@
+{
+  "title": "Stage 2: A naive Dockerfile",
+  "summary": "Get the API running in a container the simplest way, then measure what that costs.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The simplest thing that works",
+      "body": [
+        "```dockerfile",
+        "FROM mcr.microsoft.com/dotnet/sdk:9.0",
+        "WORKDIR /src",
+        "COPY . .",
+        "RUN dotnet publish -c Release -o /app",
+        "WORKDIR /app",
+        "ENTRYPOINT [\"dotnet\", \"TodoApi.dll\"]",
+        "```",
+        "",
+        "```text",
+        "docker build -t todoapi:naive .",
+        "docker run -d --name api -p 8080:8080 \\",
+        "  -e ConnectionStrings__Default=\"Host=host.docker.internal;Database=todos;Username=postgres;Password=dev\" \\",
+        "  todoapi:naive",
+        "curl http://localhost:8080/health        → ok",
+        "```",
+        "",
+        "It works. It also ships the **entire SDK** (compilers, MSBuild, NuGet caches, your source) and re-downloads every NuGet package whenever any file changes, because `COPY . .` comes before the restore that `publish` does."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does the `docker run` above publish `-p 8080:8080`, not `-p 8080:80`?",
+      "options": [
+        ".NET 8+ images listen on port 8080 by default (so they can run as non-root)",
+        "Port 80 is reserved by Docker",
+        "Kestrel can only listen on 8080",
+        "The SDK image blocks port 80"
+      ],
+      "answer": 0,
+      "explain": "`ASPNETCORE_HTTP_PORTS` defaults to 8080 in the official images."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The database runs on the developer's machine, not in a container. Why `Host=host.docker.internal` and not `localhost`?",
+      "options": [
+        "Inside the container, localhost is the container itself; host.docker.internal resolves to the host on Docker Desktop",
+        "Npgsql does not accept localhost",
+        "host.docker.internal is faster",
+        "localhost only works with Compose"
+      ],
+      "answer": 0,
+      "explain": "In stage 4 the database moves into Compose and the host becomes the service name `db`."
+    },
+    {
+      "type": "predict",
+      "prompt": "The container is running. What does this print?",
+      "code": "docker ps --format \"{{.Names}} {{.Ports}}\"",
+      "answer": "api 0.0.0.0:8080->8080/tcp",
+      "accept": [
+        "api 0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp"
+      ],
+      "verify": false,
+      "explain": "Name, then the published mapping: all host interfaces, port 8080, to container port 8080 over TCP."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each problem of the naive image to its consequence.",
+      "pairs": [
+        [
+          "SDK as the runtime base",
+          "an image of roughly 900 MB with compilers inside"
+        ],
+        [
+          "`COPY . .` before restore",
+          "every code edit re-downloads all NuGet packages"
+        ],
+        [
+          "no `.dockerignore`",
+          "bin/obj and .git are sent and copied into the image"
+        ],
+        [
+          "no `USER`",
+          "the API runs as root"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "How big is it?",
+      "prompt": [
+        "Each line is a Dockerfile instruction with the size in MB of the layer it adds: `\"RUN dotnet publish -c Release -o /app|95\"`. For a `FROM` line, the number is the size of that base image. Write `string Size(List<string> layers)` that returns the size of the **final image**: the base of the **last** `FROM` plus every layer after it.",
+        "",
+        "Format: `TOTAL MB (base BASE MB + ADDED MB added)`."
+      ],
+      "starter": [
+        "string Size(List<string> layers)",
+        "{",
+        "    // your code here",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Size(List<string> layers)",
+        "{",
+        "    int baseSize = 0, added = 0;",
+        "    foreach (string layer in layers)",
+        "    {",
+        "        int bar = layer.LastIndexOf('|');",
+        "        string ins = layer[..bar];",
+        "        int mb = int.Parse(layer[(bar + 1)..]);",
+        "        if (ins.Trim().ToUpper().StartsWith(\"FROM \")) { baseSize = mb; added = 0; }",
+        "        else added += mb;",
+        "    }",
+        "    return $\"{baseSize + added} MB (base {baseSize} MB + {added} MB added)\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoNaive = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0|840\", \"WORKDIR /src|0\", \"COPY . .|60\", \"RUN dotnet publish -c Release -o /app|95\", \"WORKDIR /app|0\", \"ENTRYPOINT [\\\"dotnet\\\", \\\"TodoApi.dll\\\"]|0\" };",
+        "Dojo.Eq(\"naive image\", \"995 MB (base 840 MB + 155 MB added)\", Size(dojoNaive));",
+        "var dojoMulti = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build|840\", \"COPY . .|1\", \"RUN dotnet publish -o /app|95\", \"FROM mcr.microsoft.com/dotnet/aspnet:9.0|220\", \"COPY --from=build /app .|12\", \"ENTRYPOINT [\\\"dotnet\\\", \\\"TodoApi.dll\\\"]|0\" };",
+        "Dojo.Eq(\"multi-stage counts only the last stage\", \"232 MB (base 220 MB + 12 MB added)\", Size(dojoMulti));"
+      ],
+      "hints": [
+        "Reset both totals whenever you meet a FROM."
+      ]
+    }
+  ]
+}

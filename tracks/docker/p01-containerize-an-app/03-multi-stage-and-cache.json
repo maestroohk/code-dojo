@@ -1,0 +1,143 @@
+{
+  "title": "Stage 3: Multi-stage and cache-friendly",
+  "summary": "Split build from runtime, and order the steps so a code edit rebuilds in seconds.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two fixes in one file",
+      "body": [
+        "```dockerfile",
+        "FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build",
+        "WORKDIR /src",
+        "COPY TodoApi.csproj .                 # 1. only the project file...",
+        "RUN dotnet restore                    #    ...so this layer survives code edits",
+        "COPY . .",
+        "RUN dotnet publish -c Release -o /app/publish --no-restore",
+        "",
+        "FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final     # 2. runtime only",
+        "WORKDIR /app",
+        "COPY --from=build /app/publish .",
+        "ENTRYPOINT [\"dotnet\", \"TodoApi.dll\"]",
+        "```",
+        "",
+        "```text",
+        "                      naive          multi-stage + cache",
+        "image size            ~995 MB        ~232 MB",
+        "rebuild after a       restore +      publish only",
+        "Program.cs edit       publish        (restore CACHED)",
+        "```"
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the build stage so that `dotnet restore` stays cached when only `.cs` files change.",
+      "lines": [
+        "FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build",
+        "WORKDIR /src",
+        "COPY TodoApi.csproj .",
+        "RUN dotnet restore",
+        "COPY . .",
+        "RUN dotnet publish -c Release -o /app/publish --no-restore"
+      ],
+      "explain": "Project file, restore, then the rest of the source, then publish with `--no-restore`."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the runtime stage.",
+      "code": [
+        "FROM mcr.microsoft.com/dotnet/__1__:9.0 AS final",
+        "WORKDIR /app",
+        "COPY __2__ /app/publish .",
+        "ENTRYPOINT [__3__, \"TodoApi.dll\"]"
+      ],
+      "blanks": [
+        "aspnet",
+        "--from=build",
+        "\"dotnet\""
+      ],
+      "bank": [
+        "sdk",
+        "--from=final",
+        "'dotnet'",
+        "runtime-deps"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You add a NuGet package (which edits `TodoApi.csproj`) and rebuild. What happens?",
+      "options": [
+        "`COPY TodoApi.csproj .` misses, so restore and everything after it run again",
+        "Only `dotnet publish` runs again",
+        "Nothing changes until you pass `--no-cache`",
+        "The final stage is rebuilt but the build stage is cached"
+      ],
+      "answer": 0,
+      "explain": "That is the right trade-off: restores happen only when dependencies change."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A solution has `src/TodoApi/TodoApi.csproj` and `src/Domain/Domain.csproj` (referenced by the API). What must you copy before `dotnet restore`?",
+      "options": [
+        "Both project files (and the .sln or Directory.Packages.props if used), at their relative paths",
+        "Only the API's .csproj",
+        "The whole `src` folder",
+        "Nothing: restore downloads project references from NuGet"
+      ],
+      "answer": 0,
+      "explain": "Restore follows project references, so every referenced .csproj must already be in place."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Review the Dockerfile",
+      "prompt": [
+        "Write `List<string> Review(List<string> lines)` returning three lines:",
+        "",
+        "1. `stages: N` (number of `FROM` lines)",
+        "2. `final base: IMAGE` (the image of the last `FROM`)",
+        "3. `restore cached on code edits: yes` if the first `RUN` containing `dotnet restore` comes **before** any `COPY` of the whole context (a `COPY` without `--from=` whose sources include `.` or `./`) **in the same stage**; otherwise (including when there is no restore step) `no`.",
+        "",
+        "Instructions may be in any case."
+      ],
+      "starter": [
+        "List<string> Review(List<string> lines)",
+        "{",
+        "    // your code here",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Review(List<string> lines)",
+        "{",
+        "    int stages = 0;",
+        "    string finalBase = \"\";",
+        "    bool copiedAll = false;",
+        "    bool? cached = null;",
+        "    foreach (string raw in lines)",
+        "    {",
+        "        string[] t = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        if (t.Length == 0) continue;",
+        "        string keyword = t[0].ToUpper();",
+        "        if (keyword == \"FROM\") { stages++; finalBase = t[1]; copiedAll = false; }",
+        "        else if (keyword == \"COPY\" && !raw.Contains(\"--from=\"))",
+        "        {",
+        "            var parts = t.Skip(1).Where(p => !p.StartsWith(\"--\")).ToList();",
+        "            if (parts.Take(parts.Count - 1).Any(s => s == \".\" || s == \"./\")) copiedAll = true;",
+        "        }",
+        "        else if (keyword == \"RUN\" && raw.Contains(\"dotnet restore\") && cached == null) cached = !copiedAll;",
+        "    }",
+        "    return new List<string> { $\"stages: {stages}\", $\"final base: {finalBase}\", $\"restore cached on code edits: {(cached == true ? \"yes\" : \"no\")}\" };",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the good file\", new List<string> { \"stages: 2\", \"final base: mcr.microsoft.com/dotnet/aspnet:9.0\", \"restore cached on code edits: yes\" }, Review(new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build\", \"WORKDIR /src\", \"COPY TodoApi.csproj .\", \"RUN dotnet restore\", \"COPY . .\", \"RUN dotnet publish -c Release -o /app/publish --no-restore\", \"FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final\", \"WORKDIR /app\", \"COPY --from=build /app/publish .\", \"ENTRYPOINT [\\\"dotnet\\\", \\\"TodoApi.dll\\\"]\" }));",
+        "Dojo.Eq(\"the naive file\", new List<string> { \"stages: 1\", \"final base: mcr.microsoft.com/dotnet/sdk:9.0\", \"restore cached on code edits: no\" }, Review(new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0\", \"WORKDIR /src\", \"COPY . .\", \"RUN dotnet publish -c Release -o /app\" }));",
+        "Dojo.Eq(\"restore after COPY . .\", new List<string> { \"stages: 2\", \"final base: mcr.microsoft.com/dotnet/aspnet:9.0\", \"restore cached on code edits: no\" }, Review(new List<string> { \"from mcr.microsoft.com/dotnet/sdk:9.0 as build\", \"copy ./ /src\", \"run dotnet restore\", \"FROM mcr.microsoft.com/dotnet/aspnet:9.0\" }));",
+        "Dojo.Eq(\"COPY --from does not count\", \"restore cached on code edits: yes\", Review(new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0\", \"COPY --from=tools . /tools\", \"COPY *.csproj .\", \"RUN dotnet restore\", \"COPY . .\" })[2]);"
+      ]
+    }
+  ]
+}

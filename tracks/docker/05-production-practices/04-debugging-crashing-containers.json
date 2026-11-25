@@ -1,0 +1,204 @@
+{
+  "title": "Debugging a crashing container",
+  "summary": "A repeatable playbook: status and exit code, logs, inspect, an entrypoint override, and the four classic failures.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The playbook",
+      "body": [
+        "```text",
+        "1. docker ps -a                       STATUS and exit code: Exited (127)? Restarting?",
+        "2. docker logs --tail 100 api         what PID 1 said before it died",
+        "3. docker inspect api                 State (ExitCode, OOMKilled, Error), Config.Cmd,",
+        "                                      Config.Entrypoint, Config.Env, Mounts, NetworkSettings",
+        "4. docker run --rm -it --entrypoint sh acme/api:1.4",
+        "                                      a shell in the SAME image: is the file there? right name?",
+        "                                      run the start command by hand and watch it fail",
+        "5. docker exec -it api sh             only while it is running (or restarting slowly)",
+        "6. docker events                      a live feed of create/start/die/oom events",
+        "```",
+        "",
+        "Exit codes worth knowing by heart:",
+        "",
+        "| code | meaning |",
+        "|---|---|",
+        "| 0 | the main process finished normally (was it meant to keep running?) |",
+        "| 1 | the app itself failed: read the logs |",
+        "| 125 | `docker run` itself failed (bad flag, name in use) |",
+        "| 126 | the command exists but cannot be executed (permissions) |",
+        "| 127 | command not found (wrong CMD, wrong path or file name) |",
+        "| 137 | SIGKILL: OOM, `docker kill`, or a stop that timed out |",
+        "| 139 | segmentation fault in native code |",
+        "| 143 | SIGTERM: a normal `docker stop` |"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each exit code to its usual meaning.",
+      "pairs": [
+        [
+          "`127`",
+          "the command in CMD/ENTRYPOINT was not found"
+        ],
+        [
+          "`126`",
+          "the command was found but is not executable"
+        ],
+        [
+          "`137`",
+          "killed with SIGKILL, often out of memory"
+        ],
+        [
+          "`143`",
+          "terminated by SIGTERM, a normal stop"
+        ],
+        [
+          "`125`",
+          "the docker run command itself was invalid"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "**\"The container exits immediately.\"** `docker ps -a` shows `Exited (0) 1 second ago`. The Dockerfile ends with `CMD service nginx start`. What is wrong?",
+      "options": [
+        "`service nginx start` launches nginx as a background daemon and returns; PID 1 ends, so the container ends. Run nginx in the foreground: `CMD [\"nginx\", \"-g\", \"daemon off;\"]`",
+        "nginx needs `-p 80:80` to stay alive",
+        "Exit code 0 means Docker killed it for using too much memory",
+        "The image needs a HEALTHCHECK"
+      ],
+      "answer": 0,
+      "explain": "A container lives as long as its main process. Servers must stay in the foreground."
+    },
+    {
+      "type": "mcq",
+      "prompt": "**\"Port not reachable.\"** `curl localhost:8080` from the host gives *connection reset*. The container runs with `-p 8080:8080`, and `docker exec api curl -s localhost:8080/health` returns `ok`. What is the most likely cause?",
+      "options": [
+        "The app listens on 127.0.0.1 inside the container, so traffic arriving on the container's network interface is refused; bind to 0.0.0.0 (for .NET, `ASPNETCORE_URLS=http://+:8080`)",
+        "The health endpoint is broken",
+        "Port 8080 needs EXPOSE",
+        "curl is not installed on the host"
+      ],
+      "answer": 0,
+      "explain": "It works from inside (loopback) and fails from outside: the classic sign of a loopback-only bind. Dev servers (Vite, `next dev`, Flask) often default to localhost."
+    },
+    {
+      "type": "mcq",
+      "prompt": "**\"Works locally, not in CI.\"** A developer on an Apple Silicon Mac builds and pushes an image. On the amd64 CI runner it fails at once with `exec format error`. Why?",
+      "options": [
+        "The image was built for linux/arm64; the runner needs linux/amd64. Build with `--platform linux/amd64` or a multi-platform `docker buildx build --platform linux/amd64,linux/arm64`",
+        "CI runners cannot run images built on macOS",
+        "The image is too large for the runner",
+        "`exec format error` means the Dockerfile has Windows line endings in CMD"
+      ],
+      "answer": 0,
+      "explain": "Images are built for a CPU architecture. Building releases in CI, not on laptops, avoids this whole class of problem."
+    },
+    {
+      "type": "mcq",
+      "prompt": "**\"The image is 1.8 GB.\"** It is a .NET API built `FROM mcr.microsoft.com/dotnet/sdk:9.0` with `COPY . .` and `RUN dotnet publish`, and there is no `.dockerignore`. What gives the biggest win?",
+      "options": [
+        "A multi-stage build that copies only the publish output into `aspnet:9.0` (or chiseled), plus a .dockerignore for bin/obj/.git",
+        "Running `docker image prune`",
+        "Compressing the DLLs with gzip in a RUN step",
+        "Switching the SDK image tag to `latest`"
+      ],
+      "answer": 0,
+      "explain": "The SDK alone is around 800 MB; the build context adds whatever is in the folder. The runtime image plus your DLLs is usually 100 to 250 MB."
+    },
+    {
+      "type": "order",
+      "prompt": "A container is in a restart loop. Arrange the playbook from cheapest look to deepest dig.",
+      "lines": [
+        "docker ps -a",
+        "docker logs --tail 100 api",
+        "docker inspect api",
+        "docker run --rm -it --entrypoint sh acme/api:1.4"
+      ],
+      "explain": "Status first, then what the app said, then the configuration Docker used, and finally a hands-on shell in the image."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Start a throwaway shell in the API image, bypassing its ENTRYPOINT, to check the files.",
+      "code": "docker run __1__ -it __2__ sh acme/api:1.4",
+      "blanks": [
+        "--rm",
+        "--entrypoint"
+      ],
+      "bank": [
+        "-d",
+        "--cmd",
+        "exec",
+        "--shell"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "The Dockerfile ends with `CMD [\"./start.sh\"]`, but `start.sh` was never copied into the image. The container exits at once. What number appears in `Exited (...)`?",
+      "code": "docker ps -a --format \"{{.Status}}\"",
+      "answer": "127",
+      "verify": false,
+      "explain": "127 is \"command not found\". Check the path and the file name's case with `--entrypoint sh` and `ls`."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Diagnose an exit",
+      "prompt": [
+        "Write `string Diagnose(int exitCode, bool oomKilled, string lastLog)`. Check in this order:",
+        "",
+        "1. `oomKilled` → `out of memory: raise --memory or reduce usage`",
+        "2. `lastLog` contains `exec format error` → `wrong CPU architecture: rebuild for the host platform`",
+        "3. by exit code:",
+        "",
+        "| code | result |",
+        "|---|---|",
+        "| 0 | `main process finished: keep the server in the foreground` |",
+        "| 125 | `docker could not create the container: check the run flags` |",
+        "| 126 | `command not executable: check permissions` |",
+        "| 127 | `command not found: check CMD/ENTRYPOINT and file name case` |",
+        "| 137 | `killed by SIGKILL: docker kill or a stop timeout` |",
+        "| 139 | `segmentation fault: native crash, check libc (alpine/musl?)` |",
+        "| 143 | `stopped by SIGTERM` |",
+        "| other | `app error (exit N): LASTLOG` |"
+      ],
+      "starter": [
+        "string Diagnose(int exitCode, bool oomKilled, string lastLog)",
+        "{",
+        "    // your code here",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Diagnose(int exitCode, bool oomKilled, string lastLog)",
+        "{",
+        "    if (oomKilled) return \"out of memory: raise --memory or reduce usage\";",
+        "    if (lastLog.Contains(\"exec format error\")) return \"wrong CPU architecture: rebuild for the host platform\";",
+        "    return exitCode switch",
+        "    {",
+        "        0 => \"main process finished: keep the server in the foreground\",",
+        "        125 => \"docker could not create the container: check the run flags\",",
+        "        126 => \"command not executable: check permissions\",",
+        "        127 => \"command not found: check CMD/ENTRYPOINT and file name case\",",
+        "        137 => \"killed by SIGKILL: docker kill or a stop timeout\",",
+        "        139 => \"segmentation fault: native crash, check libc (alpine/musl?)\",",
+        "        143 => \"stopped by SIGTERM\",",
+        "        _ => $\"app error (exit {exitCode}): {lastLog}\"",
+        "    };",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"OOM beats the exit code\", \"out of memory: raise --memory or reduce usage\", Diagnose(137, true, \"\"));",
+        "Dojo.Eq(\"plain 137\", \"killed by SIGKILL: docker kill or a stop timeout\", Diagnose(137, false, \"\"));",
+        "Dojo.Eq(\"architecture\", \"wrong CPU architecture: rebuild for the host platform\", Diagnose(1, false, \"exec /usr/bin/dotnet: exec format error\"));",
+        "Dojo.Eq(\"exit 0\", \"main process finished: keep the server in the foreground\", Diagnose(0, false, \"Starting nginx: nginx.\"));",
+        "Dojo.Eq(\"exit 127\", \"command not found: check CMD/ENTRYPOINT and file name case\", Diagnose(127, false, \"exec ./start.sh: no such file or directory\"));",
+        "Dojo.Eq(\"exit 139\", \"segmentation fault: native crash, check libc (alpine/musl?)\", Diagnose(139, false, \"\"));",
+        "Dojo.Eq(\"app error\", \"app error (exit 1): Unhandled exception. System.InvalidOperationException: No connection string\", Diagnose(1, false, \"Unhandled exception. System.InvalidOperationException: No connection string\"));"
+      ]
+    }
+  ]
+}

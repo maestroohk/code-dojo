@@ -1,0 +1,231 @@
+{
+  "title": "Layers and the build cache",
+  "summary": "Why instruction order decides whether a rebuild takes two seconds or two minutes, and what .dockerignore is for.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "An image is a stack of layers",
+      "body": [
+        "Each `RUN`, `COPY` and `ADD` produces a **layer**: the set of files it added or changed. An image is those layers stacked, and a container adds one writable layer on top.",
+        "",
+        "```text",
+        " ┌──────────────────────────────┐  container writable layer (per container)",
+        " ├──────────────────────────────┤",
+        " │ COPY . .            12 MB    │  ◀── your source",
+        " │ RUN npm ci          180 MB   │  ◀── node_modules",
+        " │ COPY package*.json  0.2 MB   │",
+        " │ FROM node:22-alpine 160 MB   │  ◀── shared by every image built on it",
+        " └──────────────────────────────┘",
+        "```",
+        "",
+        "When you rebuild, Docker reuses (**caches**) a layer if the instruction is identical, its parent layer is cached, and, for `COPY`/`ADD`, the copied files have identical contents. The moment one step misses, **every step after it runs again**.",
+        "",
+        "So: put what changes **rarely** (base, dependency install) near the top, and what changes **often** (your source) near the bottom."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "With this Dockerfile, you edit one line in `src/index.js` and rebuild. Which steps run again?",
+      "code": [
+        "FROM node:22-alpine",
+        "WORKDIR /app",
+        "COPY . .",
+        "RUN npm ci",
+        "CMD [\"node\", \"src/index.js\"]"
+      ],
+      "options": [
+        "`COPY . .` and every step after it, so `npm ci` reinstalls everything",
+        "Only `COPY . .`",
+        "Nothing; Docker detects that package.json did not change",
+        "Every step including `FROM`"
+      ],
+      "answer": 0,
+      "explain": "`COPY . .` copies the changed file, so it misses, and every following step (including the slow install) runs again. Copy `package*.json`, install, and only then copy the rest."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange a cache-friendly Dockerfile for a .NET API: restore packages from the project file alone, then copy the code and publish.",
+      "lines": [
+        "FROM mcr.microsoft.com/dotnet/sdk:9.0",
+        "WORKDIR /src",
+        "COPY Api.csproj .",
+        "RUN dotnet restore",
+        "COPY . .",
+        "RUN dotnet publish -c Release -o /out --no-restore"
+      ],
+      "explain": "Editing `Program.cs` now re-runs only the last two steps; the NuGet restore stays cached until `Api.csproj` changes."
+    },
+    {
+      "type": "learn",
+      "title": ".dockerignore",
+      "body": [
+        "`docker build .` first sends the **build context** (the whole folder) to the builder. A `.dockerignore` file next to the Dockerfile excludes paths, with the same idea as `.gitignore`:",
+        "",
+        "```text",
+        "# .dockerignore",
+        ".git",
+        "**/bin",
+        "**/obj",
+        "node_modules",
+        ".env",
+        "*.log",
+        "```",
+        "",
+        "It matters for three reasons:",
+        "",
+        "1. **Speed**: no shipping hundreds of MB of `node_modules` or `.git` to the builder.",
+        "2. **Cache**: without it, `COPY . .` sees changes in `bin/` or `.git` on every build and misses.",
+        "3. **Safety**: `.env` files, keys and local settings never end up inside an image someone can pull.",
+        "",
+        "Your own `node_modules` or `bin/obj` from the host would also clash with what the image installs or builds for Linux."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Should it be listed in `.dockerignore`?",
+      "buckets": [
+        "Ignore it",
+        "Keep it in the context"
+      ],
+      "items": [
+        [
+          "`node_modules/`",
+          0
+        ],
+        [
+          "`.git/`",
+          0
+        ],
+        [
+          "`.env` with local passwords",
+          0
+        ],
+        [
+          "`bin/` and `obj/`",
+          0
+        ],
+        [
+          "`package-lock.json`",
+          1
+        ],
+        [
+          "`Api.csproj`",
+          1
+        ],
+        [
+          "`src/`",
+          1
+        ]
+      ],
+      "explain": "The lock file must be in the context: `npm ci` needs it to install exactly the tested versions."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why do Dockerfiles write `RUN apt-get update && apt-get install -y curl` as **one** step, instead of two separate RUN lines?",
+      "options": [
+        "As two steps, the cached `apt-get update` layer can be months old when a later edit adds a package, so the install uses stale package lists",
+        "Docker only allows one apt-get per Dockerfile",
+        "Two RUN steps would run in parallel and conflict",
+        "`&&` makes the commands run as root"
+      ],
+      "answer": 0,
+      "explain": "Combining them means the index is always refreshed exactly when the package list changes. Adding `rm -rf /var/lib/apt/lists/*` in the same step also keeps the index out of the layer."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Install curl in a Debian-based image without leaving the package index in the layer.",
+      "code": "RUN apt-get update __1__ apt-get install -y __2__ curl __3__ rm -rf /var/lib/apt/lists/*",
+      "blanks": [
+        "&&",
+        "--no-install-recommends",
+        "&&"
+      ],
+      "bank": [
+        ";",
+        "|",
+        "--force"
+      ],
+      "explain": "Files deleted in a *later* step still occupy space in the earlier layer. Clean up in the same RUN."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You need a completely fresh build (for example to pick up a security fix behind an unchanged `apt-get` line). Which command ignores the cache?",
+      "options": [
+        "`docker build --no-cache -t api .`",
+        "`docker build --rm -t api .`",
+        "`docker build --squash -t api .`",
+        "`docker build -t api:latest .`"
+      ],
+      "answer": 0,
+      "explain": "`--pull` also helps: it checks the registry for a newer version of the base image instead of using the local copy."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Which steps rebuild?",
+      "prompt": [
+        "Write `List<string> Rebuilt(List<string> instructions, List<string> changed)`. `instructions` are Dockerfile instructions (already cleaned up), `changed` are paths of files that changed since the last build. Return each instruction prefixed with `cached: ` or `rebuilt: `.",
+        "",
+        "The first `COPY` whose sources match a changed file misses the cache, and it **and everything after it** are rebuilt. Everything before it is cached. Other instructions never miss on their own here.",
+        "",
+        "For `COPY a b c dest`, the sources are every token except the first (`COPY`) and the last (the destination), ignoring tokens that start with `--`. A `COPY` with `--from=` copies from another stage, not the context: never let it miss. A source matches a file when:",
+        "",
+        "- it is `.` or `./` (the whole context),",
+        "- it starts with `*` and the file ends with the rest (`*.csproj` matches `Api.csproj`),",
+        "- or the file equals it, or lives under it as a folder (`src` or `src/` match `src/Program.cs`)."
+      ],
+      "starter": [
+        "List<string> Rebuilt(List<string> instructions, List<string> changed)",
+        "{",
+        "    var result = new List<string>();",
+        "    // your code here",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "bool Matches(string source, string file)",
+        "{",
+        "    if (source == \".\" || source == \"./\") return true;",
+        "    if (source.StartsWith(\"*\")) return file.EndsWith(source[1..]);",
+        "    string dir = source.TrimEnd('/');",
+        "    return file == dir || file.StartsWith(dir + \"/\");",
+        "}",
+        "",
+        "List<string> Rebuilt(List<string> instructions, List<string> changed)",
+        "{",
+        "    var result = new List<string>();",
+        "    bool miss = false;",
+        "    foreach (string ins in instructions)",
+        "    {",
+        "        if (!miss && ins.StartsWith(\"COPY \") && !ins.Contains(\"--from=\"))",
+        "        {",
+        "            var parts = ins.Split(' ', StringSplitOptions.RemoveEmptyEntries).Skip(1).Where(p => !p.StartsWith(\"--\")).ToList();",
+        "            var sources = parts.Take(parts.Count - 1).ToList();",
+        "            if (changed.Any(f => sources.Any(s => Matches(s, f)))) miss = true;",
+        "        }",
+        "        result.Add((miss ? \"rebuilt: \" : \"cached: \") + ins);",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoNode = new List<string> { \"FROM node:22-alpine\", \"WORKDIR /app\", \"COPY package.json package-lock.json ./\", \"RUN npm ci\", \"COPY . .\", \"CMD [\\\"node\\\", \\\"server.js\\\"]\" };",
+        "Dojo.Eq(\"source edit keeps npm ci cached\", new List<string> { \"cached: FROM node:22-alpine\", \"cached: WORKDIR /app\", \"cached: COPY package.json package-lock.json ./\", \"cached: RUN npm ci\", \"rebuilt: COPY . .\", \"rebuilt: CMD [\\\"node\\\", \\\"server.js\\\"]\" }, Rebuilt(dojoNode, new List<string> { \"src/index.js\" }));",
+        "Dojo.Eq(\"lock file change reinstalls\", new List<string> { \"cached: FROM node:22-alpine\", \"cached: WORKDIR /app\", \"rebuilt: COPY package.json package-lock.json ./\", \"rebuilt: RUN npm ci\", \"rebuilt: COPY . .\", \"rebuilt: CMD [\\\"node\\\", \\\"server.js\\\"]\" }, Rebuilt(dojoNode, new List<string> { \"package-lock.json\" }));",
+        "Dojo.Eq(\"nothing changed\", 6, Rebuilt(dojoNode, new List<string>()).Count(l => l.StartsWith(\"cached: \")));",
+        "var dojoNet = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0\", \"COPY *.csproj ./\", \"RUN dotnet restore\", \"COPY src/ ./src/\", \"RUN dotnet publish -o /out\", \"COPY --from=tools /bin/x /x\" };",
+        "Dojo.Eq(\"wildcard matches the project file\", \"rebuilt: COPY *.csproj ./\", Rebuilt(dojoNet, new List<string> { \"Api.csproj\" })[1]);",
+        "Dojo.Eq(\"folder source matches files inside it\", new List<string> { \"cached: FROM mcr.microsoft.com/dotnet/sdk:9.0\", \"cached: COPY *.csproj ./\", \"cached: RUN dotnet restore\", \"rebuilt: COPY src/ ./src/\", \"rebuilt: RUN dotnet publish -o /out\", \"rebuilt: COPY --from=tools /bin/x /x\" }, Rebuilt(dojoNet, new List<string> { \"src/Program.cs\" }));",
+        "Dojo.Eq(\"a file outside every source changes nothing\", 6, Rebuilt(dojoNet, new List<string> { \"README.md\" }).Count(l => l.StartsWith(\"cached: \")));"
+      ],
+      "hints": [
+        "Write a helper `bool Matches(string source, string file)` for the three matching rules.",
+        "Keep a `bool miss`; once it is true, it stays true.",
+        "Sources: split, skip `COPY`, drop `--` tokens, then take all but the last."
+      ]
+    }
+  ]
+}

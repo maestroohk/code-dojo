@@ -1,0 +1,230 @@
+{
+  "title": "Small, secure images and registries",
+  "summary": "Pick a base image, run as non-root, then tag and push with versions you can trust.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Choosing a base image",
+      "body": [
+        "The base image is usually most of your image's size and almost all of its vulnerabilities.",
+        "",
+        "| base | approx. size | has a shell / package manager | notes |",
+        "|---|---|---|---|",
+        "| `debian:bookworm` | 120 MB | yes / apt | familiar, large |",
+        "| `debian:bookworm-slim` | 75 MB | yes / apt | the usual default |",
+        "| `alpine:3.20` | 8 MB | yes / apk | uses **musl** libc, not glibc |",
+        "| distroless (`gcr.io/distroless/...`) | 20 MB+ | no / no | only the runtime and its libs |",
+        "| .NET **chiseled** (`aspnet:9.0-noble-chiseled`) | ~110 MB | no / no | Ubuntu-based distroless for .NET, non-root by default |",
+        "| `scratch` | 0 | no / no | empty: for static binaries (Go, Rust) |",
+        "",
+        "Fewer packages means fewer CVEs and nothing for an attacker to use. The cost: no `sh` to `exec` into, so debugging needs other tools (a debug variant, or `docker cp` and logs). Alpine's musl occasionally breaks native libraries compiled for glibc."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An image moves from `node:22` to `node:22-alpine` and a native npm module now crashes on start with a symbol error. What is the most likely reason?",
+      "options": [
+        "Alpine uses musl libc, and the module's prebuilt binary was compiled against glibc",
+        "Alpine does not support Node 22",
+        "Alpine images cannot listen on ports",
+        "Alpine images run as non-root and cannot load modules"
+      ],
+      "answer": 0,
+      "explain": "Either rebuild the module for musl (install build tools in the build stage), or use a slim Debian base."
+    },
+    {
+      "type": "learn",
+      "title": "Do not run as root",
+      "body": [
+        "By default the process in a container runs as **root** (UID 0). If an attacker breaks out of your app, root in the container is a much better starting point than an unprivileged user, and some escapes need root.",
+        "",
+        "```dockerfile",
+        "# Debian/Ubuntu-based",
+        "RUN groupadd --system app && useradd --system --gid app app",
+        "USER app",
+        "",
+        "# Node official images ship a \"node\" user",
+        "USER node",
+        "",
+        "# .NET 8+ images ship an \"app\" user and set APP_UID",
+        "USER $APP_UID",
+        "```",
+        "",
+        "Consequences to plan for:",
+        "",
+        "- A non-root process cannot bind ports below 1024. That is why .NET 8+ images listen on **8080** by default (`ASPNETCORE_HTTP_PORTS=8080`), not 80.",
+        "- Files the app must write need the right owner: `COPY --chown=app:app ...`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "After upgrading to the .NET 8 base image, `docker run -p 8080:80 api` no longer works, although the app starts fine. Why?",
+      "options": [
+        "The .NET 8+ images run as a non-root user and listen on 8080 by default, so container port 80 has nothing behind it",
+        "The .NET 8 runtime removed HTTP support",
+        "Port 80 must now be published as `-p 80:80`",
+        "The image needs `EXPOSE 80` to start Kestrel"
+      ],
+      "answer": 0,
+      "explain": "Publish `-p 8080:8080`, or set `ASPNETCORE_HTTP_PORTS`. Prefer keeping 8080 so the app can stay non-root."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make the final stage of a Debian-based image run as an unprivileged user that owns `/app`.",
+      "code": [
+        "RUN groupadd --system app && useradd --system --gid app app",
+        "COPY __1__ --from=build /app/publish /app",
+        "__2__ app"
+      ],
+      "blanks": [
+        "--chown=app:app",
+        "USER"
+      ],
+      "bank": [
+        "--user=app",
+        "RUN su",
+        "--chmod=777",
+        "SU"
+      ],
+      "explain": "`--chown` sets the owner as the files are copied, without an extra layer. `chmod 777` would \"work\" and let anyone write anywhere."
+    },
+    {
+      "type": "learn",
+      "title": "Tags, digests and pushing",
+      "body": [
+        "```text",
+        "docker build -t api:1.4.2 .                              build and tag locally",
+        "docker tag api:1.4.2 ghcr.io/acme/api:1.4.2              add a name that points at the registry",
+        "docker login ghcr.io                                     authenticate once",
+        "docker push ghcr.io/acme/api:1.4.2                       upload the layers the registry does not have",
+        "```",
+        "",
+        "A **tag** is a movable label. Teams usually push several for one build: `1.4.2`, `1.4`, the git SHA `sha-3f2a9c1`, and maybe `latest`.",
+        "",
+        "A **digest** (`ghcr.io/acme/api@sha256:9b1c...`) is the hash of the image itself. It can never point at different content, so it is the safest thing to deploy or to pin a base image to.",
+        "",
+        "Only layers the registry lacks are uploaded, which is why a well-cached image pushes in seconds after a small change."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the steps to publish version 1.4.2 of the API to GitHub's registry.",
+      "lines": [
+        "docker build -t api:1.4.2 .",
+        "docker tag api:1.4.2 ghcr.io/acme/api:1.4.2",
+        "docker login ghcr.io",
+        "docker push ghcr.io/acme/api:1.4.2"
+      ],
+      "also": [
+        [
+          "docker login ghcr.io",
+          "docker build -t api:1.4.2 .",
+          "docker tag api:1.4.2 ghcr.io/acme/api:1.4.2",
+          "docker push ghcr.io/acme/api:1.4.2"
+        ],
+        [
+          "docker build -t api:1.4.2 .",
+          "docker login ghcr.io",
+          "docker tag api:1.4.2 ghcr.io/acme/api:1.4.2",
+          "docker push ghcr.io/acme/api:1.4.2"
+        ]
+      ],
+      "explain": "Login can happen any time before the push."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each base image to when you would pick it.",
+      "pairs": [
+        [
+          "`scratch`",
+          "a statically linked Go binary that needs nothing else"
+        ],
+        [
+          "`aspnet:9.0-noble-chiseled`",
+          "a .NET API where you want no shell and non-root by default"
+        ],
+        [
+          "`debian:bookworm-slim`",
+          "a general app that needs apt packages and glibc"
+        ],
+        [
+          "`alpine:3.20`",
+          "tiny utility images where musl is not a problem"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Lint a Dockerfile",
+      "prompt": [
+        "Write `List<string> Lint(List<string> lines)` that reports these problems in line order (lines are numbered from 1):",
+        "",
+        "1. `FROM` without a tag, or with `:latest` → `line N: pin the base image tag`. A digest (`@sha256:`) counts as pinned. Skip `scratch` and names of earlier stages (`FROM build AS x`).",
+        "2. `ADD` → `line N: prefer COPY over ADD`",
+        "3. `RUN` containing `apt-get install` but not `rm -rf /var/lib/apt/lists` → `line N: clean apt lists in the same RUN`",
+        "4. `ENV` or `ARG` whose line contains `PASSWORD`, `SECRET` or `TOKEN` (any case) → `line N: secret in ENV or ARG`",
+        "",
+        "Then, if the **final** stage (after the last `FROM`) has no `USER` line, or its last `USER` is `root` or `0`, add `final stage runs as root: add a USER` at the end. Instructions may be in any case."
+      ],
+      "starter": [
+        "List<string> Lint(List<string> lines)",
+        "{",
+        "    var warnings = new List<string>();",
+        "    // your code here",
+        "    return warnings;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Lint(List<string> lines)",
+        "{",
+        "    var warnings = new List<string>();",
+        "    var stages = new List<string>();",
+        "    bool nonRoot = false;",
+        "    for (int i = 0; i < lines.Count; i++)",
+        "    {",
+        "        string line = lines[i].Trim();",
+        "        string upper = line.ToUpper();",
+        "        int n = i + 1;",
+        "        string[] t = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        if (upper.StartsWith(\"FROM \"))",
+        "        {",
+        "            nonRoot = false;",
+        "            string image = t[1];",
+        "            if (t.Length >= 4 && t[2].ToUpper() == \"AS\") stages.Add(t[3]);",
+        "            if (image == \"scratch\" || stages.Take(stages.Count - (t.Length >= 4 ? 1 : 0)).Contains(image) || image.Contains('@')) continue;",
+        "            string last = image[(image.LastIndexOf('/') + 1)..];",
+        "            if (!last.Contains(':') || last.EndsWith(\":latest\")) warnings.Add($\"line {n}: pin the base image tag\");",
+        "        }",
+        "        else if (upper.StartsWith(\"USER \"))",
+        "            nonRoot = t[1] != \"root\" && t[1] != \"0\";",
+        "        else if (upper.StartsWith(\"ADD \"))",
+        "            warnings.Add($\"line {n}: prefer COPY over ADD\");",
+        "        else if (upper.StartsWith(\"RUN \") && line.Contains(\"apt-get install\") && !line.Contains(\"rm -rf /var/lib/apt/lists\"))",
+        "            warnings.Add($\"line {n}: clean apt lists in the same RUN\");",
+        "        else if ((upper.StartsWith(\"ENV \") || upper.StartsWith(\"ARG \")) && (upper.Contains(\"PASSWORD\") || upper.Contains(\"SECRET\") || upper.Contains(\"TOKEN\")))",
+        "            warnings.Add($\"line {n}: secret in ENV or ARG\");",
+        "    }",
+        "    if (!nonRoot) warnings.Add(\"final stage runs as root: add a USER\");",
+        "    return warnings;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a clean file\", new List<string>(), Lint(new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build\", \"RUN dotnet publish -o /out\", \"FROM mcr.microsoft.com/dotnet/aspnet:9.0\", \"COPY --from=build /out /app\", \"USER $APP_UID\" }));",
+        "Dojo.Eq(\"untagged and latest bases\", new List<string> { \"line 1: pin the base image tag\", \"line 2: pin the base image tag\", \"final stage runs as root: add a USER\" }, Lint(new List<string> { \"FROM node\", \"FROM ghcr.io/acme/base:latest\" }));",
+        "Dojo.Eq(\"digest, scratch and stage names are fine\", new List<string> { \"final stage runs as root: add a USER\" }, Lint(new List<string> { \"FROM golang@sha256:abc AS build\", \"FROM build AS test\", \"FROM scratch\" }));",
+        "Dojo.Eq(\"ADD, apt and secrets\", new List<string> { \"line 2: prefer COPY over ADD\", \"line 3: clean apt lists in the same RUN\", \"line 5: secret in ENV or ARG\", \"line 6: secret in ENV or ARG\" }, Lint(new List<string> { \"FROM debian:bookworm-slim\", \"ADD app.tar.gz /app\", \"RUN apt-get update && apt-get install -y curl\", \"RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*\", \"env DB_PASSWORD=hunter2\", \"ARG npm_token\", \"USER app\" }));",
+        "Dojo.Eq(\"USER only counts in the final stage\", new List<string> { \"final stage runs as root: add a USER\" }, Lint(new List<string> { \"FROM node:22-alpine AS build\", \"USER node\", \"FROM node:22-alpine\" }));",
+        "Dojo.Eq(\"USER root does not count\", new List<string> { \"final stage runs as root: add a USER\" }, Lint(new List<string> { \"FROM node:22-alpine\", \"USER node\", \"USER root\" }));"
+      ],
+      "hints": [
+        "Reset a `nonRoot` flag on every `FROM`; set it from each `USER` line.",
+        "Remember stage names from `FROM x AS name` so a later `FROM name` is not flagged.",
+        "For the tag check, look only at the part after the last `/`, so `localhost:5000/api` is not mistaken for tagged."
+      ]
+    }
+  ]
+}

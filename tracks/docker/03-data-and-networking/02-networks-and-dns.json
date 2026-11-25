@@ -1,0 +1,215 @@
+{
+  "title": "Networks and container DNS",
+  "summary": "How containers find each other by name, and why the default bridge is not enough.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Bridge networks",
+      "body": [
+        "Docker gives containers private networks. On a **user-defined bridge network**, Docker runs a small DNS server, so containers reach each other **by container name**:",
+        "",
+        "```text",
+        "docker network create shop",
+        "docker run -d --name db  --network shop postgres:17",
+        "docker run -d --name api --network shop -e DB_HOST=db acme/api",
+        "",
+        " ┌──────────────── network \"shop\" (172.20.0.0/16) ────────────────┐",
+        " │   api (172.20.0.3)  ── \"db\" resolves to ──▶  db (172.20.0.2)   │",
+        " │                         port 5432 directly                     │",
+        " └────────────────────────────────────────────────────────────────┘",
+        "```",
+        "",
+        "Containers that are not started with `--network` join the **default bridge** (named `bridge`). It has **no name resolution**: containers there can only reach each other by IP address, which changes on every restart. Always create your own network (Compose does this for you).",
+        "",
+        "Container IPs are disposable; **names are the stable address**."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Two containers were started without `--network`. From `api`, `ping db` fails with `bad address 'db'`, but pinging db's IP works. Why?",
+      "options": [
+        "Both are on the default bridge network, which has no DNS for container names",
+        "The db container has not exposed any port",
+        "Ping is disabled inside containers",
+        "Container names only resolve with `--link` in recent Docker"
+      ],
+      "answer": 0,
+      "explain": "Put both on a user-defined network: `docker network create app` and `--network app` on each (or `docker network connect app db`)."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the commands so the API can reach Postgres by the name `db` from its first start.",
+      "lines": [
+        "docker network create shop",
+        "docker volume create pgdata",
+        "docker run -d --name db --network shop -v pgdata:/var/lib/postgresql/data -e POSTGRES_PASSWORD=dev postgres:17",
+        "docker run -d --name api --network shop -e DB_HOST=db -p 8080:8080 acme/api:1.0"
+      ],
+      "also": [
+        [
+          "docker volume create pgdata",
+          "docker network create shop",
+          "docker run -d --name db --network shop -v pgdata:/var/lib/postgresql/data -e POSTGRES_PASSWORD=dev postgres:17",
+          "docker run -d --name api --network shop -e DB_HOST=db -p 8080:8080 acme/api:1.0"
+        ]
+      ],
+      "explain": "The network and volume must exist before containers use them (Docker would auto-create the volume, but never the network). Start the database before the app that needs it."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each network mode to what it means.",
+      "pairs": [
+        [
+          "user-defined `bridge`",
+          "private network with DNS by container name"
+        ],
+        [
+          "default `bridge`",
+          "used when you give no --network; IPs only"
+        ],
+        [
+          "`host`",
+          "shares the host's network stack; no port publishing needed (Linux)"
+        ],
+        [
+          "`none`",
+          "only a loopback interface: no network at all"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Published ports versus container ports",
+      "body": [
+        "Publishing (`-p`) is for traffic **from outside Docker**: your browser, another machine. Containers on the same network talk to each other's **container port directly**, without any publishing.",
+        "",
+        "```text",
+        "                        ┌──────────── network \"shop\" ─────────────┐",
+        " browser ─ localhost:5433 ─▶ (published) ─▶ db:5432                │",
+        "                        │   api ── db:5432 ──▶ db:5432             │",
+        "                        └──────────────────────────────────────────┘",
+        "```",
+        "",
+        "So the API's connection string says `Host=db;Port=5432` even though *you* connect from the host with `localhost:5433`. In production you often publish **nothing** for the database: only containers on its network can reach it.",
+        "",
+        "And `localhost` **inside** a container is that container itself, never the host and never another container."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Postgres runs as `db` with `-p 5433:5432` on network `shop`; the API is on `shop` too. What should the API's connection string use?",
+      "options": [
+        "`Host=db;Port=5432`",
+        "`Host=localhost;Port=5433`",
+        "`Host=db;Port=5433`",
+        "`Host=localhost;Port=5432`"
+      ],
+      "answer": 0,
+      "explain": "Inside the network: service name and container port. The 5433 mapping exists only on the host."
+    },
+    {
+      "type": "sort",
+      "prompt": "From where you are, which address reaches the database (container `db`, `-p 5433:5432`, network `shop`)?",
+      "buckets": [
+        "`localhost:5433`",
+        "`db:5432`",
+        "Neither works"
+      ],
+      "items": [
+        [
+          "Your laptop's database GUI",
+          0
+        ],
+        [
+          "The `api` container on network `shop`",
+          1
+        ],
+        [
+          "A container on the default bridge network",
+          2
+        ],
+        [
+          "A container on a different user-defined network",
+          2
+        ],
+        [
+          "A test runner on the host",
+          0
+        ],
+        [
+          "A migration job started with `--network shop`",
+          1
+        ]
+      ],
+      "explain": "Published ports are for the host; the name `db` and container port 5432 are for containers on `shop`. A container on another network can neither resolve `db` nor route to it."
+    },
+    {
+      "type": "predict",
+      "prompt": "You are on the host. Postgres runs with `-p 5433:5432`. What port number do you type into your local database GUI?",
+      "code": [
+        "Host: localhost",
+        "Port: ?"
+      ],
+      "answer": "5433",
+      "verify": false,
+      "explain": "The host side of the mapping is the port on your machine."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Can they talk?",
+      "prompt": [
+        "Write `string CanReach(Dictionary<string, List<string>> networks, string from, string to)`. `networks` maps each container name to the networks it is attached to. The default bridge is called `bridge`.",
+        "",
+        "Return the first of these that applies:",
+        "",
+        "1. `to` is not in the dictionary → `no: no container named 'TO'`",
+        "2. they share a network other than `bridge` → `yes: TO resolves on NET` (if several, the alphabetically first, ordinal)",
+        "3. both are on `bridge` → `no: the default bridge has no DNS by name; use a user-defined network`",
+        "4. otherwise → `no: no shared network`"
+      ],
+      "starter": [
+        "string CanReach(Dictionary<string, List<string>> networks, string from, string to)",
+        "{",
+        "    // your code here",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string CanReach(Dictionary<string, List<string>> networks, string from, string to)",
+        "{",
+        "    if (!networks.ContainsKey(to)) return $\"no: no container named '{to}'\";",
+        "    var shared = networks[from].Intersect(networks[to]).ToList();",
+        "    var named = shared.Where(n => n != \"bridge\").OrderBy(n => n, StringComparer.Ordinal).ToList();",
+        "    if (named.Count > 0) return $\"yes: {to} resolves on {named[0]}\";",
+        "    if (shared.Contains(\"bridge\")) return \"no: the default bridge has no DNS by name; use a user-defined network\";",
+        "    return \"no: no shared network\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoNets = new Dictionary<string, List<string>>",
+        "{",
+        "    [\"api\"] = new List<string> { \"shop\", \"monitoring\" },",
+        "    [\"db\"] = new List<string> { \"shop\" },",
+        "    [\"grafana\"] = new List<string> { \"monitoring\" },",
+        "    [\"old1\"] = new List<string> { \"bridge\" },",
+        "    [\"old2\"] = new List<string> { \"bridge\" },",
+        "    [\"both\"] = new List<string> { \"monitoring\", \"shop\" }",
+        "};",
+        "Dojo.Eq(\"api -> db\", \"yes: db resolves on shop\", CanReach(dojoNets, \"api\", \"db\"));",
+        "Dojo.Eq(\"grafana -> api\", \"yes: api resolves on monitoring\", CanReach(dojoNets, \"grafana\", \"api\"));",
+        "Dojo.Eq(\"several shared networks\", \"yes: both resolves on monitoring\", CanReach(dojoNets, \"api\", \"both\"));",
+        "Dojo.Eq(\"grafana -> db\", \"no: no shared network\", CanReach(dojoNets, \"grafana\", \"db\"));",
+        "Dojo.Eq(\"default bridge\", \"no: the default bridge has no DNS by name; use a user-defined network\", CanReach(dojoNets, \"old1\", \"old2\"));",
+        "Dojo.Eq(\"missing container\", \"no: no container named 'cache'\", CanReach(dojoNets, \"api\", \"cache\"));"
+      ],
+      "hints": [
+        "`Intersect` gives the networks both containers are on.",
+        "Filter out `bridge`, sort with `StringComparer.Ordinal`, and take the first."
+      ]
+    }
+  ]
+}

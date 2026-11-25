@@ -1,0 +1,214 @@
+{
+  "title": "Volumes, bind mounts and tmpfs",
+  "summary": "Containers are disposable, data is not. Three ways to put data outside the writable layer.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The writable layer is disposable",
+      "body": [
+        "Everything a container writes goes into its thin **writable layer** on top of the read-only image layers. That layer is deleted with the container.",
+        "",
+        "```text",
+        " docker rm db  ──▶  ┌───────────────────────────┐",
+        "                    │ writable layer            │  ✗ gone: your Postgres tables were here",
+        "                    ├───────────────────────────┤",
+        "                    │ postgres:17 image layers  │  ✓ unchanged (read-only)",
+        "                    └───────────────────────────┘",
+        "```",
+        "",
+        "That is a feature: you can throw containers away and recreate them from the image at any time (upgrades, crashes, scaling). But it means **anything worth keeping must live outside the container**, in a mount."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You run Postgres with `docker run -d --name db postgres:17`, create tables, then `docker rm -f db` and start it again with the same command. What do you find?",
+      "options": [
+        "An empty database: the data lived in the old container's writable layer",
+        "The same tables, because Docker keeps a container's data per image",
+        "The same tables, because the container name is the same",
+        "An error: the image is now corrupted"
+      ],
+      "answer": 0,
+      "explain": "Nothing ties the new container to the old one's writable layer. Mount a volume at Postgres's data directory to keep the data."
+    },
+    {
+      "type": "learn",
+      "title": "Three kinds of mount",
+      "body": [
+        "```text",
+        "                 host                                   container",
+        " named volume    /var/lib/docker/volumes/pgdata  ◀───▶  /var/lib/postgresql/data",
+        "                 (managed by Docker)",
+        " bind mount      C:\\code\\api\\src  or  ./src      ◀───▶  /app/src",
+        "                 (any host path you choose)",
+        " tmpfs           RAM only, never written to disk ◀───▶  /tmp",
+        "```",
+        "",
+        "| | syntax | use it for |",
+        "|---|---|---|",
+        "| **named volume** | `-v pgdata:/var/lib/postgresql/data` | databases and anything the app must keep; survives `docker rm`, easy to back up, fast on every OS |",
+        "| **bind mount** | `-v ./src:/app/src` (or an absolute path) | development: edit code on the host, see it live in the container; also mounting a single config file |",
+        "| **tmpfs** | `--tmpfs /tmp` | scratch or sensitive files that must never touch disk; gone when the container stops |",
+        "",
+        "The `-v` rule: if the part before `:` is a **path** (starts with `/`, `.` or `~`), it is a bind mount; otherwise it is a volume **name**. `-v /data` alone (no colon) creates an **anonymous** volume with a random name. Add `:ro` to make a mount read-only.",
+        "",
+        "The long form says the same thing explicitly: `--mount type=volume,source=pgdata,target=/var/lib/postgresql/data`."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which kind of mount fits best?",
+      "buckets": [
+        "Named volume",
+        "Bind mount",
+        "tmpfs"
+      ],
+      "items": [
+        [
+          "Postgres data in production",
+          0
+        ],
+        [
+          "Live-reloading your source code while developing",
+          1
+        ],
+        [
+          "A decrypted key that must never be written to disk",
+          2
+        ],
+        [
+          "Uploaded files the app must keep across upgrades",
+          0
+        ],
+        [
+          "Mounting one `nginx.conf` from your repo, read-only",
+          1
+        ],
+        [
+          "A cache that can be thrown away on every restart",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "What does each `-v` value create?",
+      "pairs": [
+        [
+          "`-v pgdata:/var/lib/postgresql/data`",
+          "a named volume called pgdata"
+        ],
+        [
+          "`-v ./web:/usr/share/nginx/html:ro`",
+          "a read-only bind mount of a host folder"
+        ],
+        [
+          "`-v /cache`",
+          "an anonymous volume at /cache"
+        ],
+        [
+          "`-v /home/me/logs:/logs`",
+          "a bind mount of an absolute host path"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Two containers, one after the other, share a named volume. What does the second command print?",
+      "code": [
+        "docker run --rm -v notes:/data alpine sh -c \"echo remember > /data/todo.txt\"",
+        "docker run --rm -v notes:/data alpine cat /data/todo.txt"
+      ],
+      "answer": "remember",
+      "verify": false,
+      "explain": "The first container is deleted (`--rm`), but the file lives in the `notes` volume, which the second container mounts."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Node app works when built, but when you add `-v .:/app` for development it fails with `Cannot find module 'express'`. Why?",
+      "options": [
+        "The bind mount hides the image's `/app`, including the `node_modules` that `npm ci` installed at build time",
+        "Bind mounts are read-only by default",
+        "Node cannot read files from a Windows host",
+        "Named volumes and bind mounts cannot be combined"
+      ],
+      "answer": 0,
+      "explain": "A mount replaces whatever the image had at that path. A common fix is an extra anonymous volume for `/app/node_modules`, so the image's copy shows through, or installing on the host too."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Keep Postgres data in a named volume and a read-only init script from the repo.",
+      "code": "docker run -d --name db -e POSTGRES_PASSWORD=dev -v __1__:/var/lib/postgresql/data -v __2__:/docker-entrypoint-initdb.d/init.sql__3__ postgres:17",
+      "blanks": [
+        "pgdata",
+        "./init.sql",
+        ":ro"
+      ],
+      "bank": [
+        "/pgdata",
+        "init.sql",
+        ":rw",
+        "--tmpfs"
+      ],
+      "explain": "`pgdata` (no slash) is a volume name. `./init.sql` starts with `.`, so it is a bind mount of a host file. `init.sql` without `./` would be treated as a volume *name*."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Classify a -v value",
+      "prompt": [
+        "Write `string ClassifyMount(string spec)` for a `-v` value (Linux-style paths only):",
+        "",
+        "1. Split on `:`. If there are at least two parts and the last is `ro` or `rw`, remove it; `ro` makes the mount read-only.",
+        "2. One part left → `anonymous volume -> TARGET`.",
+        "3. Otherwise SOURCE is the first part and TARGET the second. A SOURCE starting with `/`, `.` or `~` gives `bind mount SOURCE -> TARGET`; any other gives `named volume SOURCE -> TARGET`.",
+        "4. Append ` (read-only)` for `ro`.",
+        "",
+        "| spec | result |",
+        "|---|---|",
+        "| `pgdata:/var/lib/postgresql/data` | `named volume pgdata -> /var/lib/postgresql/data` |",
+        "| `./src:/app/src:ro` | `bind mount ./src -> /app/src (read-only)` |",
+        "| `/cache` | `anonymous volume -> /cache` |"
+      ],
+      "starter": [
+        "string ClassifyMount(string spec)",
+        "{",
+        "    // your code here",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string ClassifyMount(string spec)",
+        "{",
+        "    var parts = spec.Split(':').ToList();",
+        "    bool readOnly = false;",
+        "    if (parts.Count >= 2 && (parts[^1] == \"ro\" || parts[^1] == \"rw\"))",
+        "    {",
+        "        readOnly = parts[^1] == \"ro\";",
+        "        parts.RemoveAt(parts.Count - 1);",
+        "    }",
+        "    string suffix = readOnly ? \" (read-only)\" : \"\";",
+        "    if (parts.Count == 1) return $\"anonymous volume -> {parts[0]}{suffix}\";",
+        "    string source = parts[0], target = parts[1];",
+        "    bool isPath = source.StartsWith(\"/\") || source.StartsWith(\".\") || source.StartsWith(\"~\");",
+        "    return $\"{(isPath ? \"bind mount\" : \"named volume\")} {source} -> {target}{suffix}\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"named volume\", \"named volume pgdata -> /var/lib/postgresql/data\", ClassifyMount(\"pgdata:/var/lib/postgresql/data\"));",
+        "Dojo.Eq(\"relative bind, read-only\", \"bind mount ./src -> /app/src (read-only)\", ClassifyMount(\"./src:/app/src:ro\"));",
+        "Dojo.Eq(\"absolute bind\", \"bind mount /home/me/logs -> /logs\", ClassifyMount(\"/home/me/logs:/logs\"));",
+        "Dojo.Eq(\"home bind, rw\", \"bind mount ~/certs -> /certs\", ClassifyMount(\"~/certs:/certs:rw\"));",
+        "Dojo.Eq(\"anonymous\", \"anonymous volume -> /cache\", ClassifyMount(\"/cache\"));",
+        "Dojo.Eq(\"a file name without ./ is a volume name\", \"named volume init.sql -> /docker-entrypoint-initdb.d/init.sql\", ClassifyMount(\"init.sql:/docker-entrypoint-initdb.d/init.sql\"));"
+      ],
+      "hints": [
+        "Turn the split into a `List<string>` so you can remove the `ro`/`rw` suffix.",
+        "Decide bind versus named only by the first character of SOURCE."
+      ]
+    }
+  ]
+}

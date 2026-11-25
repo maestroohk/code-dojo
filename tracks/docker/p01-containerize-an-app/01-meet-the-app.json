@@ -1,0 +1,265 @@
+{
+  "title": "Stage 1: Meet the app",
+  "summary": "The API you will containerize, what goes into its build context, and a .dockerignore that keeps junk out.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What you are containerizing",
+      "body": [
+        "Over this project you take **TodoApi**, a small ASP.NET Core minimal API, from \"runs with `dotnet run` on my laptop\" to a production-ready image running next to Postgres in Compose:",
+        "",
+        "1. **this stage**: the app and its build context",
+        "2. a naive Dockerfile that works but is huge",
+        "3. multi-stage and cache-friendly",
+        "4. Compose with Postgres, a volume and a healthcheck",
+        "5. production hardening",
+        "",
+        "Here is the real app. It reads its connection string from configuration, so the image never needs to know where the database lives:",
+        "",
+        "```csharp",
+        "// Program.cs  (TodoApi.csproj, net9.0, package Npgsql)",
+        "using Npgsql;",
+        "",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "string cs = builder.Configuration.GetConnectionString(\"Default\")",
+        "    ?? throw new InvalidOperationException(\"ConnectionStrings:Default is not set\");",
+        "builder.Services.AddSingleton(NpgsqlDataSource.Create(cs));",
+        "var app = builder.Build();",
+        "",
+        "app.MapGet(\"/health\", () => \"ok\");",
+        "app.MapGet(\"/todos\", async (NpgsqlDataSource db) =>",
+        "{",
+        "    await using var cmd = db.CreateCommand(\"select id, title, done from todos order by id\");",
+        "    await using var r = await cmd.ExecuteReaderAsync();",
+        "    var list = new List<Todo>();",
+        "    while (await r.ReadAsync()) list.Add(new Todo(r.GetInt32(0), r.GetString(1), r.GetBoolean(2)));",
+        "    return list;",
+        "});",
+        "app.Run();",
+        "",
+        "record Todo(int Id, string Title, bool Done);",
+        "```",
+        "",
+        "The repository looks like this:",
+        "",
+        "```text",
+        "TodoApi/",
+        "├── Program.cs            ├── bin/  obj/       (local build output)",
+        "├── TodoApi.csproj        ├── .git/",
+        "├── appsettings.json      ├── .env             (local DB password!)",
+        "└── README.md             └── tests/TodoApi.Tests/...",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does the app read the connection string from configuration instead of hard-coding `Host=localhost`?",
+      "options": [
+        "So one image can run anywhere: the environment (Compose, staging, production) supplies the right connection string",
+        "Because Npgsql cannot parse literal strings",
+        "Because containers cannot use localhost at all",
+        "To make the image smaller"
+      ],
+      "answer": 0,
+      "explain": "Build once, configure per environment. In Compose it will be `ConnectionStrings__Default=Host=db;...`."
+    },
+    {
+      "type": "sort",
+      "prompt": "Should each path be sent to the builder (build context) for the production image?",
+      "buckets": [
+        "Send it",
+        "Ignore it"
+      ],
+      "items": [
+        [
+          "`Program.cs`",
+          0
+        ],
+        [
+          "`TodoApi.csproj`",
+          0
+        ],
+        [
+          "`appsettings.json`",
+          0
+        ],
+        [
+          "`bin/` and `obj/`",
+          1
+        ],
+        [
+          "`.git/`",
+          1
+        ],
+        [
+          "`.env`",
+          1
+        ]
+      ],
+      "explain": "`.env` holds a local password; it must never be baked into an image. `bin/obj` are Windows/macOS build outputs that would clash with the Linux build."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the `.dockerignore`.",
+      "code": [
+        "__1__/bin",
+        "**/__2__",
+        ".git",
+        "__3__",
+        "*.md"
+      ],
+      "blanks": [
+        "**",
+        "obj",
+        ".env"
+      ],
+      "bank": [
+        "*",
+        "src",
+        "Program.cs",
+        "*.csproj"
+      ],
+      "explain": "`**/bin` matches a `bin` folder at any depth, including inside `tests/`."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Which files reach the builder?",
+      "prompt": [
+        "Write `List<string> Context(List<string> files, List<string> patterns)` that applies `.dockerignore` patterns to repository-relative paths (forward slashes). Supported patterns (a trailing `/` is ignored):",
+        "",
+        "- `**/NAME` ignores any path with a segment equal to NAME (`**/bin` matches `bin/x.dll` and `tests/T/bin/y.dll`)",
+        "- `*.EXT` ignores top-level files ending in `.EXT` (`*.md` matches `README.md`, not `docs/a.md`)",
+        "- `NAME` ignores the path NAME and anything under `NAME/`",
+        "- `!PATTERN` re-includes what PATTERN matches",
+        "",
+        "Patterns apply in order and the **last matching pattern wins**. Return the kept files in input order, followed by `N files sent, M ignored`."
+      ],
+      "starter": [
+        "List<string> Context(List<string> files, List<string> patterns)",
+        "{",
+        "    var kept = new List<string>();",
+        "    // your code here",
+        "    return kept;",
+        "}"
+      ],
+      "solution": [
+        "bool Matches(string pattern, string file)",
+        "{",
+        "    pattern = pattern.TrimEnd('/');",
+        "    if (pattern.StartsWith(\"**/\")) return file.Split('/').Contains(pattern[3..]);",
+        "    if (pattern.StartsWith(\"*.\")) return !file.Contains('/') && file.EndsWith(pattern[1..]);",
+        "    return file == pattern || file.StartsWith(pattern + \"/\");",
+        "}",
+        "",
+        "List<string> Context(List<string> files, List<string> patterns)",
+        "{",
+        "    var kept = new List<string>();",
+        "    foreach (string file in files)",
+        "    {",
+        "        bool ignored = false;",
+        "        foreach (string p in patterns)",
+        "        {",
+        "            bool negate = p.StartsWith(\"!\");",
+        "            if (Matches(negate ? p[1..] : p, file)) ignored = !negate;",
+        "        }",
+        "        if (!ignored) kept.Add(file);",
+        "    }",
+        "    kept.Add($\"{kept.Count} files sent, {files.Count - kept.Count} ignored\");",
+        "    return kept;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoFiles = new List<string> { \"Program.cs\", \"TodoApi.csproj\", \"appsettings.json\", \"README.md\", \".env\", \".git/HEAD\", \"bin/Debug/TodoApi.dll\", \"obj/project.assets.json\", \"tests/TodoApi.Tests/bin/x.dll\", \"docs/setup.md\" };",
+        "Dojo.Eq(\"the project's .dockerignore\", new List<string> { \"Program.cs\", \"TodoApi.csproj\", \"appsettings.json\", \"docs/setup.md\", \"4 files sent, 6 ignored\" }, Context(dojoFiles, new List<string> { \"**/bin\", \"**/obj/\", \".git\", \".env\", \"*.md\" }));",
+        "Dojo.Eq(\"no .dockerignore\", 11, Context(dojoFiles, new List<string>()).Count);",
+        "Dojo.Eq(\"re-include wins when last\", new List<string> { \"README.md\", \"Program.cs\", \"2 files sent, 1 ignored\" }, Context(new List<string> { \"README.md\", \"CHANGELOG.md\", \"Program.cs\" }, new List<string> { \"*.md\", \"!README.md\" }));",
+        "Dojo.Eq(\"a later pattern can ignore again\", new List<string> { \"Program.cs\", \"1 files sent, 1 ignored\" }, Context(new List<string> { \"README.md\", \"Program.cs\" }, new List<string> { \"!README.md\", \"*.md\" }));"
+      ],
+      "hints": [
+        "Write `bool Matches(string pattern, string file)` for the three forms, then loop over patterns keeping the last verdict.",
+        "`file.Split('/').Contains(name)` checks every segment."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The same API, in the sandbox",
+      "body": "The sandbox has no Postgres or NuGet, so the next exercise is the same API with an in-memory list instead of Npgsql. Everything about how it is containerized stays the same."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Write the API",
+      "prompt": [
+        "Write the TodoApi `Program.cs` with an in-memory list. **Run checks** starts your server and calls it.",
+        "",
+        "- `GET /health` → `200`, body `ok`",
+        "- `GET /todos` → `200`, a JSON array that starts with two todos: `{ \"id\": 1, \"title\": \"Write a Dockerfile\", \"done\": false }` and `{ \"id\": 2, \"title\": \"Ship it\", \"done\": false }`",
+        "- `POST /todos` with `{ \"title\": \"...\" }` → `201 Created`, the new todo with the next id (`3` for the first one created)",
+        "",
+        "Put `record Todo(int Id, string Title, bool Done);` after `app.Run();`."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.MapGet(\"/health\", () => \"ok\");",
+        "",
+        "app.Run();"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "var todos = new List<Todo> { new(1, \"Write a Dockerfile\", false), new(2, \"Ship it\", false) };",
+        "",
+        "app.MapGet(\"/health\", () => \"ok\");",
+        "app.MapGet(\"/todos\", () => todos);",
+        "app.MapPost(\"/todos\", (Todo input) =>",
+        "{",
+        "    var created = new Todo(todos.Count + 1, input.Title, false);",
+        "    todos.Add(created);",
+        "    return Results.Created($\"/todos/{created.Id}\", created);",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "record Todo(int Id, string Title, bool Done);"
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        var h = await http.GetAsync(\"/health\");",
+        "        DojoWeb.Status(\"GET /health responds 200\", 200, h);",
+        "        Dojo.Eq(\"GET /health says ok\", \"ok\", await DojoWeb.Text(h));",
+        "        var list = await DojoWeb.Json(await http.GetAsync(\"/todos\"));",
+        "        Dojo.Check(\"GET /todos returns an array\", list.ValueKind == JsonValueKind.Array, \"expected a JSON array\");",
+        "        if (list.ValueKind == JsonValueKind.Array)",
+        "        {",
+        "            Dojo.Eq(\"GET /todos starts with two todos\", 2, list.GetArrayLength());",
+        "            if (list.GetArrayLength() > 0) Dojo.Eq(\"the first todo's title\", \"Write a Dockerfile\", DojoWeb.Prop(list[0], \"title\"));",
+        "        }",
+        "        var post = await http.PostAsJsonAsync(\"/todos\", new { title = \"Add compose\" });",
+        "        DojoWeb.Status(\"POST /todos responds 201\", 201, post);",
+        "        var created = await DojoWeb.Json(post);",
+        "        Dojo.Eq(\"the new todo gets id 3\", \"3\", DojoWeb.Prop(created, \"id\"));",
+        "        Dojo.Eq(\"the new todo is not done\", \"false\", DojoWeb.Prop(created, \"done\"));",
+        "        var after = await DojoWeb.Json(await http.GetAsync(\"/todos\"));",
+        "        Dojo.Eq(\"GET /todos now has three\", 3, after.ValueKind == JsonValueKind.Array ? after.GetArrayLength() : 0);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "`app.MapGet(\"/todos\", () => todos);` serialises the list as JSON.",
+        "`Results.Created(url, value)` returns 201 with the body."
+      ],
+      "framework": "web"
+    }
+  ]
+}

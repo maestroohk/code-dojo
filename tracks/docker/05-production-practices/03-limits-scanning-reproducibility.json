@@ -1,0 +1,227 @@
+{
+  "title": "Limits, scanning and reproducible builds",
+  "summary": "Cap memory and CPU, read exit code 137, scan images for CVEs, and make builds repeatable.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Resource limits",
+      "body": [
+        "Without limits, one leaking container can starve every other on the host. cgroups let you cap it:",
+        "",
+        "```text",
+        "docker run --memory 512m --cpus 1.5 --pids-limit 200 acme/api:1.4",
+        "```",
+        "",
+        "```yaml",
+        "# compose",
+        "    deploy:",
+        "      resources:",
+        "        limits:",
+        "          memory: 512M",
+        "          cpus: \"1.5\"",
+        "```",
+        "",
+        "- If the process exceeds `--memory`, the kernel's **OOM killer** kills it: the container exits with **137** (128 + SIGKILL 9) and `docker inspect` shows `\"OOMKilled\": true`.",
+        "- `--cpus` throttles; it never kills.",
+        "- .NET and modern Node respect container limits: the .NET GC sizes its heap from the cgroup memory limit, and `Environment.ProcessorCount` reflects `--cpus`.",
+        "",
+        "`docker stats` shows live usage against the limits."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The API keeps dying with `Exited (137)` under load. `docker inspect` shows `\"OOMKilled\": true` and `--memory 256m`. What is happening?",
+      "options": [
+        "The process used more than 256 MB and the kernel killed it; raise the limit or reduce memory use",
+        "The app called `Environment.Exit(137)`",
+        "Docker stopped it gracefully with SIGTERM",
+        "The image is corrupted"
+      ],
+      "answer": 0,
+      "explain": "137 without OOMKilled usually means someone ran `docker kill`, or a stop timed out."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each flag to its effect.",
+      "pairs": [
+        [
+          "`--memory 512m`",
+          "hard memory cap; exceeding it gets the process OOM-killed"
+        ],
+        [
+          "`--cpus 1.5`",
+          "at most one and a half CPU cores of time; throttles, never kills"
+        ],
+        [
+          "`--pids-limit 200`",
+          "caps the number of processes, stopping fork bombs"
+        ],
+        [
+          "`--read-only`",
+          "makes the container's root filesystem read-only"
+        ],
+        [
+          "`--restart unless-stopped`",
+          "restart the container when it exits, unless you stopped it"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Scanning and reproducible builds",
+      "body": [
+        "**Scanning.** Tools like `docker scout cves`, Trivy and Grype list known vulnerabilities (CVEs) in an image's OS packages and app dependencies. Most findings come from the **base image**, so the usual fix is *rebuild on an updated base*, not patch by hand. Scan in CI and fail the build only on serious findings that have a fix available, otherwise the noise teaches people to ignore it. Rebuild regularly even without code changes, to pick up base-image patches.",
+        "",
+        "**Reproducibility.** The same commit should produce the same image:",
+        "",
+        "- pin base images by tag, or better by digest (`FROM node:22.11-alpine@sha256:...`);",
+        "- install from lock files (`npm ci`, `dotnet restore --locked-mode`, `pip install -r` with pinned versions);",
+        "- never `curl | sh` a moving \"latest\" installer;",
+        "- keep `.dockerignore` tight so stray local files cannot change the build."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Does it make builds more **reproducible** or less?",
+      "buckets": [
+        "More reproducible",
+        "Less reproducible"
+      ],
+      "items": [
+        [
+          "`FROM node:22.11-alpine@sha256:...`",
+          0
+        ],
+        [
+          "`FROM node:latest`",
+          1
+        ],
+        [
+          "`npm ci` with a committed lock file",
+          0
+        ],
+        [
+          "`npm install` without a lock file",
+          1
+        ],
+        [
+          "`RUN curl -sL https://example.com/install.sh \\| sh`",
+          1
+        ],
+        [
+          "`dotnet restore --locked-mode`",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The scanner reports a CRITICAL CVE in `openssl` that comes from the base image `debian:bookworm-slim`, and a fixed version exists. What is the right response?",
+      "options": [
+        "Rebuild with `--pull` (or bump the pinned base digest) so the image picks up the patched base, then redeploy",
+        "Ignore it: base image findings are not your problem",
+        "Add `RUN rm -rf /usr/lib/ssl` to the Dockerfile",
+        "Switch the app to HTTP so OpenSSL is not used"
+      ],
+      "answer": 0,
+      "explain": "Base images are patched constantly; your job is to rebuild on them. A scheduled weekly rebuild keeps this from piling up."
+    },
+    {
+      "type": "predict",
+      "prompt": "The container was killed for using too much memory. What does this print?",
+      "code": "docker inspect -f '{{.State.OOMKilled}}' api",
+      "answer": "true",
+      "verify": false
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Parse a memory limit",
+      "prompt": [
+        "Write `long ParseMemory(string value)` that converts a Docker memory value to bytes. The number is a whole number, optionally followed by a unit (case-insensitive): `b` (bytes), `k`, `m`, `g` (powers of 1024). No unit means bytes.",
+        "",
+        "| input | bytes |",
+        "|---|---|",
+        "| `512m` | 536870912 |",
+        "| `1G` | 1073741824 |",
+        "| `256k` | 262144 |",
+        "| `1024` | 1024 |"
+      ],
+      "starter": [
+        "long ParseMemory(string value)",
+        "{",
+        "    // your code here",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "long ParseMemory(string value)",
+        "{",
+        "    string v = value.Trim().ToLower();",
+        "    long multiplier = 1;",
+        "    char last = v[^1];",
+        "    if (char.IsLetter(last))",
+        "    {",
+        "        multiplier = last switch { 'k' => 1024L, 'm' => 1024L * 1024, 'g' => 1024L * 1024 * 1024, _ => 1L };",
+        "        v = v[..^1];",
+        "    }",
+        "    return long.Parse(v) * multiplier;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"512m\", 536870912L, ParseMemory(\"512m\"));",
+        "Dojo.Eq(\"1G\", 1073741824L, ParseMemory(\"1G\"));",
+        "Dojo.Eq(\"4g\", 4294967296L, ParseMemory(\"4g\"));",
+        "Dojo.Eq(\"256k\", 262144L, ParseMemory(\"256k\"));",
+        "Dojo.Eq(\"1024\", 1024L, ParseMemory(\"1024\"));",
+        "Dojo.Eq(\"100b\", 100L, ParseMemory(\"100b\"));"
+      ],
+      "hints": [
+        "Look at the last character: a letter is the unit.",
+        "Use `long`: 4g does not fit in an `int`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Gate the build on scan results",
+      "prompt": [
+        "A scanner prints one finding per line: `ID|PACKAGE|SEVERITY|FIXED_VERSION` (FIXED_VERSION is empty when no fix exists). Write `List<string> Gate(List<string> findings, string threshold)`.",
+        "",
+        "Severities rank `LOW` < `MEDIUM` < `HIGH` < `CRITICAL`. A finding **blocks** when its severity is at least `threshold` **and** a fix exists. Return one line per blocking finding, in input order: `ID: upgrade PACKAGE to FIXED_VERSION`. If nothing blocks, return `pass` alone."
+      ],
+      "starter": [
+        "List<string> Gate(List<string> findings, string threshold)",
+        "{",
+        "    var result = new List<string>();",
+        "    // your code here",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Gate(List<string> findings, string threshold)",
+        "{",
+        "    var ranks = new List<string> { \"LOW\", \"MEDIUM\", \"HIGH\", \"CRITICAL\" };",
+        "    var result = new List<string>();",
+        "    foreach (string line in findings)",
+        "    {",
+        "        string[] f = line.Split('|');",
+        "        if (ranks.IndexOf(f[2]) >= ranks.IndexOf(threshold) && f[3] != \"\")",
+        "            result.Add($\"{f[0]}: upgrade {f[1]} to {f[3]}\");",
+        "    }",
+        "    return result.Count == 0 ? new List<string> { \"pass\" } : result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoFindings = new List<string> { \"CVE-2024-0001|openssl|CRITICAL|3.0.15-1\", \"CVE-2024-0002|zlib|HIGH|\", \"CVE-2024-0003|curl|MEDIUM|8.5.0\", \"CVE-2024-0004|libxml2|HIGH|2.9.14\" };",
+        "Dojo.Eq(\"threshold HIGH\", new List<string> { \"CVE-2024-0001: upgrade openssl to 3.0.15-1\", \"CVE-2024-0004: upgrade libxml2 to 2.9.14\" }, Gate(dojoFindings, \"HIGH\"));",
+        "Dojo.Eq(\"threshold MEDIUM\", new List<string> { \"CVE-2024-0001: upgrade openssl to 3.0.15-1\", \"CVE-2024-0003: upgrade curl to 8.5.0\", \"CVE-2024-0004: upgrade libxml2 to 2.9.14\" }, Gate(dojoFindings, \"MEDIUM\"));",
+        "Dojo.Eq(\"no fix, no block\", new List<string> { \"pass\" }, Gate(new List<string> { \"CVE-2024-0002|zlib|CRITICAL|\" }, \"LOW\"));"
+      ]
+    }
+  ]
+}

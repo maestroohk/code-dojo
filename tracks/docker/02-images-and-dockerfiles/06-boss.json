@@ -1,0 +1,196 @@
+{
+  "title": "Boss: the Dockerfile reviewer",
+  "summary": "Build the review bot your team runs on every Dockerfile: summary, stage checks and a cache-cost estimate.",
+  "minutes": 15,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The review bot",
+      "body": "Pull requests that touch a Dockerfile get an automatic review comment. You are writing the parts of the bot: a one-line summary, a check that `COPY --from` points at real stages, and an estimate of how long a rebuild costs after a change."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "One-line summary",
+      "prompt": [
+        "Write `string Summary(List<string> lines)` returning `\"I instructions, S stages, runs: COMMAND\"`.",
+        "",
+        "- I counts instructions: non-blank lines not starting with `#` (no line continuations in this task).",
+        "- S counts `FROM` lines.",
+        "- COMMAND is the final stage's ENTRYPOINT items followed by its CMD items (the **last** of each in the final stage wins; both reset at every `FROM`). Exec form `[\"a\", \"b\"]` gives `a b`; shell form `CMD npm start` gives `/bin/sh -c npm start`. If the final stage has neither, COMMAND is `(inherited from base image)`.",
+        "",
+        "Example: `12 instructions, 2 stages, runs: dotnet Api.dll`."
+      ],
+      "starter": [
+        "string Summary(List<string> lines)",
+        "{",
+        "    // your code here",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Part(string args)",
+        "{",
+        "    args = args.Trim();",
+        "    if (!args.StartsWith(\"[\")) return \"/bin/sh -c \" + args;",
+        "    return string.Join(\" \", args.Trim('[', ']').Split(',').Select(p => p.Trim().Trim('\"')).Where(p => p != \"\"));",
+        "}",
+        "",
+        "string Summary(List<string> lines)",
+        "{",
+        "    int count = 0, stages = 0;",
+        "    string? entrypoint = null, cmd = null;",
+        "    foreach (string raw in lines)",
+        "    {",
+        "        string line = raw.Trim();",
+        "        if (line == \"\" || line.StartsWith(\"#\")) continue;",
+        "        count++;",
+        "        int space = line.IndexOf(' ');",
+        "        string keyword = (space < 0 ? line : line[..space]).ToUpper();",
+        "        string args = space < 0 ? \"\" : line[(space + 1)..];",
+        "        if (keyword == \"FROM\") { stages++; entrypoint = null; cmd = null; }",
+        "        else if (keyword == \"ENTRYPOINT\") entrypoint = Part(args);",
+        "        else if (keyword == \"CMD\") cmd = Part(args);",
+        "    }",
+        "    string command = string.Join(\" \", new[] { entrypoint, cmd }.Where(x => x != null));",
+        "    if (command == \"\") command = \"(inherited from base image)\";",
+        "    return $\"{count} instructions, {stages} stages, runs: {command}\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\".NET multi-stage\", \"8 instructions, 2 stages, runs: dotnet Api.dll\", Summary(new List<string> { \"# build\", \"FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build\", \"WORKDIR /src\", \"COPY . .\", \"RUN dotnet publish -o /out\", \"\", \"FROM mcr.microsoft.com/dotnet/aspnet:9.0\", \"WORKDIR /app\", \"COPY --from=build /out .\", \"ENTRYPOINT [\\\"dotnet\\\", \\\"Api.dll\\\"]\" }));",
+        "Dojo.Eq(\"last CMD wins, entrypoint plus cmd\", \"5 instructions, 1 stages, runs: curl --help\", Summary(new List<string> { \"FROM alpine:3.20\", \"RUN apk add curl\", \"ENTRYPOINT [\\\"curl\\\"]\", \"CMD [\\\"-v\\\"]\", \"CMD [\\\"--help\\\"]\" }));",
+        "Dojo.Eq(\"shell form\", \"2 instructions, 1 stages, runs: /bin/sh -c npm start\", Summary(new List<string> { \"FROM node:22-alpine\", \"CMD npm start\" }));",
+        "Dojo.Eq(\"commands reset at FROM\", \"3 instructions, 2 stages, runs: (inherited from base image)\", Summary(new List<string> { \"FROM node:22 AS build\", \"CMD [\\\"node\\\"]\", \"FROM nginx:1.27\" }));"
+      ],
+      "hints": [
+        "Track `entrypoint` and `cmd` as nullable strings; set both to null on every FROM.",
+        "Write a helper that turns an argument string into its printable form for exec or shell form."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Check COPY --from",
+      "prompt": [
+        "Write `List<string> CheckStages(List<string> lines)` that validates stage references (lines numbered from 1):",
+        "",
+        "- `FROM x AS name` where `name` was already used → `line N: duplicate stage name 'name'`",
+        "- `COPY --from=X` where X is not the name **or index** of an **earlier** stage → `line N: unknown stage 'X'`, unless X contains `:` or `/` (then it is an image reference like `--from=nginx:1.27`, which is allowed). A `COPY --from` that names the current stage itself is also unknown (a stage cannot copy from itself).",
+        "",
+        "Return `ok` alone if there are no problems."
+      ],
+      "starter": [
+        "List<string> CheckStages(List<string> lines)",
+        "{",
+        "    var problems = new List<string>();",
+        "    // your code here",
+        "    return problems;",
+        "}"
+      ],
+      "solution": [
+        "List<string> CheckStages(List<string> lines)",
+        "{",
+        "    var problems = new List<string>();",
+        "    var names = new List<string>();",
+        "    for (int i = 0; i < lines.Count; i++)",
+        "    {",
+        "        string[] t = lines[i].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        if (t.Length == 0) continue;",
+        "        string keyword = t[0].ToUpper();",
+        "        if (keyword == \"FROM\")",
+        "        {",
+        "            string name = t.Length >= 4 && t[2].ToUpper() == \"AS\" ? t[3] : names.Count.ToString();",
+        "            if (names.Contains(name)) problems.Add($\"line {i + 1}: duplicate stage name '{name}'\");",
+        "            names.Add(name);",
+        "        }",
+        "        else if (keyword == \"COPY\")",
+        "        {",
+        "            string? from = t.FirstOrDefault(x => x.StartsWith(\"--from=\"));",
+        "            if (from == null) continue;",
+        "            string target = from[7..];",
+        "            if (target.Contains(':') || target.Contains('/')) continue;",
+        "            var earlier = names.Take(names.Count - 1).ToList();",
+        "            bool known = earlier.Contains(target) || (int.TryParse(target, out int index) && index >= 0 && index < earlier.Count);",
+        "            if (!known) problems.Add($\"line {i + 1}: unknown stage '{target}'\");",
+        "        }",
+        "    }",
+        "    return problems.Count == 0 ? new List<string> { \"ok\" } : problems;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"valid file\", new List<string> { \"ok\" }, CheckStages(new List<string> { \"FROM node:22 AS deps\", \"FROM node:22 AS build\", \"COPY --from=deps /app/node_modules ./node_modules\", \"FROM node:22-alpine\", \"COPY --from=build /app/dist ./dist\", \"COPY --from=nginx:1.27 /etc/nginx/nginx.conf /tmp/\" }));",
+        "Dojo.Eq(\"typo in a stage name\", new List<string> { \"line 3: unknown stage 'biuld'\" }, CheckStages(new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build\", \"FROM mcr.microsoft.com/dotnet/aspnet:9.0\", \"COPY --from=biuld /out .\" }));",
+        "Dojo.Eq(\"copy from a later stage or itself\", new List<string> { \"line 2: unknown stage 'final'\", \"line 4: unknown stage 'final'\" }, CheckStages(new List<string> { \"FROM alpine:3.20 AS build\", \"COPY --from=final /x /x\", \"FROM alpine:3.20 AS final\", \"COPY --from=final /y /y\" }));",
+        "Dojo.Eq(\"indexes and duplicates\", new List<string> { \"line 2: duplicate stage name 'build'\", \"line 4: unknown stage '3'\" }, CheckStages(new List<string> { \"FROM golang:1.23 AS build\", \"FROM golang:1.23 AS build\", \"COPY --from=0 /a /a\", \"COPY --from=3 /b /b\" }));"
+      ],
+      "hints": [
+        "The earlier stages are all names except the last (the current one).",
+        "An index is valid when it is less than the number of earlier stages."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "What will this rebuild cost?",
+      "prompt": [
+        "Each instruction now carries how many seconds it takes when it is **not** cached: `\"RUN dotnet restore|40\"`. Write `int RebuildSeconds(List<string> steps, List<string> changed)` that returns the total seconds of the steps that will rebuild, using the cache rules from the layers lesson (the first `COPY` without `--from=` whose sources match a changed file misses, and every step from there on rebuilds; sources are the tokens between `COPY` and the destination, ignoring `--` flags; `.`/`./` match anything, `*.ext` matches by suffix, a path matches itself or files under it).",
+        "",
+        "Then the reviewer can say: *\"This change costs 52 s to rebuild; move the restore above COPY . . and it costs 12 s.\"*"
+      ],
+      "starter": [
+        "int RebuildSeconds(List<string> steps, List<string> changed)",
+        "{",
+        "    // your code here",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "bool Matches(string source, string file)",
+        "{",
+        "    if (source == \".\" || source == \"./\") return true;",
+        "    if (source.StartsWith(\"*\")) return file.EndsWith(source[1..]);",
+        "    string dir = source.TrimEnd('/');",
+        "    return file == dir || file.StartsWith(dir + \"/\");",
+        "}",
+        "",
+        "int RebuildSeconds(List<string> steps, List<string> changed)",
+        "{",
+        "    int total = 0;",
+        "    bool miss = false;",
+        "    foreach (string step in steps)",
+        "    {",
+        "        int bar = step.LastIndexOf('|');",
+        "        string ins = step[..bar];",
+        "        int seconds = int.Parse(step[(bar + 1)..]);",
+        "        if (!miss && ins.StartsWith(\"COPY \") && !ins.Contains(\"--from=\"))",
+        "        {",
+        "            var parts = ins.Split(' ', StringSplitOptions.RemoveEmptyEntries).Skip(1).Where(p => !p.StartsWith(\"--\")).ToList();",
+        "            var sources = parts.Take(parts.Count - 1).ToList();",
+        "            if (changed.Any(f => sources.Any(s => Matches(s, f)))) miss = true;",
+        "        }",
+        "        if (miss) total += seconds;",
+        "    }",
+        "    return total;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoNaive = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0|0\", \"WORKDIR /src|0\", \"COPY . .|2\", \"RUN dotnet restore|40\", \"RUN dotnet publish -o /out --no-restore|10\" };",
+        "var dojoGood = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:9.0|0\", \"WORKDIR /src|0\", \"COPY Api.csproj .|1\", \"RUN dotnet restore|40\", \"COPY . .|2\", \"RUN dotnet publish -o /out --no-restore|10\" };",
+        "Dojo.Eq(\"naive file, code edit\", 52, RebuildSeconds(dojoNaive, new List<string> { \"Program.cs\" }));",
+        "Dojo.Eq(\"good file, code edit\", 12, RebuildSeconds(dojoGood, new List<string> { \"Program.cs\" }));",
+        "Dojo.Eq(\"good file, new package\", 53, RebuildSeconds(dojoGood, new List<string> { \"Api.csproj\" }));",
+        "Dojo.Eq(\"nothing changed\", 0, RebuildSeconds(dojoGood, new List<string>()));",
+        "Dojo.Eq(\"folder and flags\", 31, RebuildSeconds(new List<string> { \"FROM node:22|0\", \"COPY --chown=node:node package*.json ./|1\", \"RUN npm ci|60\", \"COPY --chown=node:node src ./src|1\", \"RUN npm run build|30\" }, new List<string> { \"src/app.ts\" }));"
+      ],
+      "hints": [
+        "Split each step at its last `|` into the instruction and its seconds.",
+        "This is your `Rebuilt` logic with a running total instead of labels."
+      ]
+    }
+  ]
+}
