@@ -1,0 +1,210 @@
+{
+  "title": "Real workflows: .NET and Docker",
+  "summary": "needs, artifacts, a .NET build-and-test workflow and a Docker build-and-push workflow.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "needs: jobs that wait",
+      "body": [
+        "Jobs run **in parallel** by default. `needs` makes a job wait for others and skip if any of them failed:",
+        "",
+        "```yaml",
+        "jobs:",
+        "  build:  { ... }",
+        "  lint:   { ... }",
+        "  test:   { needs: build, ... }",
+        "  docker: { needs: [build, test], ... }",
+        "  deploy: { needs: docker, if: github.ref == 'refs/heads/main', ... }",
+        "```",
+        "",
+        "```text",
+        "build ──► test ──┐",
+        "  │              ├──► docker ──► deploy",
+        "  └──────────────┘",
+        "lint (runs alone, in parallel with build)",
+        "```",
+        "",
+        "The jobs form a **DAG** (directed acyclic graph). A cycle (`a` needs `b`, `b` needs `a`) is rejected before anything runs."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "`build` and `lint` start together. `lint` fails; `build` succeeds. `test` needs `build`; `docker` needs `[test, lint]`. What is `docker`'s result?",
+      "code": "build ✔   lint ✘   test ✔   docker ?",
+      "answer": "skipped",
+      "explain": "A job is skipped when any job in its `needs` failed, unless it overrides that with `if: always()` or `if: failure()`.",
+      "verify": false
+    },
+    {
+      "type": "learn",
+      "title": "A .NET build-and-test workflow",
+      "body": [
+        "```yaml",
+        "name: dotnet",
+        "on: [push, pull_request]",
+        "permissions:",
+        "  contents: read",
+        "jobs:",
+        "  build:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-dotnet@v4",
+        "        with:",
+        "          dotnet-version: '8.0.x'",
+        "      - run: dotnet restore",
+        "      - run: dotnet build --no-restore -c Release",
+        "      - run: dotnet test --no-build -c Release --logger trx --results-directory TestResults",
+        "      - uses: actions/upload-artifact@v4",
+        "        if: always()                 # upload results even when tests fail",
+        "        with:",
+        "          name: test-results",
+        "          path: TestResults",
+        "      - run: dotnet publish src/Api -c Release -o out --no-build",
+        "      - uses: actions/upload-artifact@v4",
+        "        with:",
+        "          name: api",
+        "          path: out",
+        "```",
+        "",
+        "Restore once, build once, test the build you made, publish the build you tested."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is `if: always()` on the *test results* upload step?",
+      "options": [
+        "When `dotnet test` fails, later steps are skipped by default, and failing runs are exactly when you need the report",
+        "So the artifact is never deleted",
+        "Because artifacts cannot be uploaded from successful runs",
+        "It makes the upload faster"
+      ],
+      "answer": 0,
+      "explain": "Steps after a failed step are skipped unless their `if` says otherwise."
+    },
+    {
+      "type": "learn",
+      "title": "A Docker build-and-push workflow",
+      "body": [
+        "```yaml",
+        "jobs:",
+        "  image:",
+        "    needs: build",
+        "    runs-on: ubuntu-latest",
+        "    permissions:",
+        "      contents: read",
+        "      packages: write                 # allow pushing to ghcr.io",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: docker/login-action@v3",
+        "        with:",
+        "          registry: ghcr.io",
+        "          username: ${{ github.actor }}",
+        "          password: ${{ secrets.GITHUB_TOKEN }}",
+        "      - uses: docker/build-push-action@v6",
+        "        with:",
+        "          context: .",
+        "          push: ${{ github.ref == 'refs/heads/main' }}",
+        "          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}",
+        "```",
+        "",
+        "PRs build the image (proving the Dockerfile works) but only `main` pushes it. The tag is the commit SHA, so every image is traceable."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the Docker job's steps.",
+      "lines": [
+        "- uses: actions/checkout@v4",
+        "- uses: docker/login-action@v3",
+        "- uses: docker/build-push-action@v6"
+      ],
+      "explain": "You need the Dockerfile on disk and credentials for the registry before building and pushing."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each expression to its value on a push to `main` of `acme/shop`.",
+      "pairs": [
+        [
+          "`${{ github.ref }}`",
+          "`refs/heads/main`"
+        ],
+        [
+          "`${{ github.repository }}`",
+          "`acme/shop`"
+        ],
+        [
+          "`${{ github.event_name }}`",
+          "`push`"
+        ],
+        [
+          "`${{ runner.os }}`",
+          "`Linux`"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The workflow fails at `docker/login-action` with `denied: installation not allowed to Write organization package`. What is the most likely fix?",
+      "options": [
+        "Add `packages: write` to the job's `permissions`",
+        "Rename the image to lowercase",
+        "Use `actions/checkout@v3`",
+        "Add `needs: build`"
+      ],
+      "answer": 0,
+      "explain": "`GITHUB_TOKEN` only gets the permissions the workflow declares. Declaring `permissions:` at all sets every unlisted scope to none."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Job execution order",
+      "prompt": [
+        "Write `List<string> ExecutionOrder(Dictionary<string, List<string>> needs)` that returns one order in which the jobs could run one at a time.",
+        "`needs[job]` lists the jobs it waits for. Whenever several jobs are ready, run the one that comes first **alphabetically** (ordinal).",
+        "",
+        "`{ build: [], lint: [], test: [build], docker: [build, test] }` → `build, lint, test, docker`."
+      ],
+      "starter": [
+        "List<string> ExecutionOrder(Dictionary<string, List<string>> needs)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> ExecutionOrder(Dictionary<string, List<string>> needs)",
+        "{",
+        "    var waiting = needs.ToDictionary(p => p.Key, p => p.Value.Count);",
+        "    var ready = new SortedSet<string>(waiting.Where(p => p.Value == 0).Select(p => p.Key), StringComparer.Ordinal);",
+        "    var order = new List<string>();",
+        "    while (ready.Count > 0)",
+        "    {",
+        "        string job = ready.Min!;",
+        "        ready.Remove(job);",
+        "        order.Add(job);",
+        "        foreach (var (other, deps) in needs)",
+        "            if (deps.Contains(job) && --waiting[other] == 0) ready.Add(other);",
+        "    }",
+        "    return order;",
+        "}"
+      ],
+      "hints": [
+        "Count how many unfinished dependencies each job has; jobs with zero are ready.",
+        "Keep the ready jobs in a `SortedSet<string>`; take `.Min`, then decrement the count of every job that needed it."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the example\", new List<string> { \"build\", \"lint\", \"test\", \"docker\" }, ExecutionOrder(new() {",
+        "    [\"build\"] = new(), [\"lint\"] = new(), [\"test\"] = new() { \"build\" }, [\"docker\"] = new() { \"build\", \"test\" } }));",
+        "Dojo.Eq(\"a chain\", new List<string> { \"c\", \"b\", \"a\" }, ExecutionOrder(new() {",
+        "    [\"a\"] = new() { \"b\" }, [\"b\"] = new() { \"c\" }, [\"c\"] = new() }));",
+        "Dojo.Eq(\"independent jobs run alphabetically\", new List<string> { \"alpha\", \"beta\", \"gamma\" }, ExecutionOrder(new() {",
+        "    [\"gamma\"] = new(), [\"alpha\"] = new(), [\"beta\"] = new() }));",
+        "Dojo.Eq(\"deploy last\", new List<string> { \"build\", \"test\", \"image\", \"deploy\" }, ExecutionOrder(new() {",
+        "    [\"deploy\"] = new() { \"image\" }, [\"image\"] = new() { \"test\" }, [\"test\"] = new() { \"build\" }, [\"build\"] = new() }));"
+      ]
+    }
+  ]
+}

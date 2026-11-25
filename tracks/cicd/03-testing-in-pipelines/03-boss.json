@@ -1,0 +1,172 @@
+{
+  "title": "Boss: the merge gatekeeper",
+  "summary": "Build the checks that decide whether a pull request may merge.",
+  "minutes": 18,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The gatekeeper",
+      "body": "Your team wants one service that reads the CI results for a pull request and says yes or no, with reasons a developer can act on."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Gate with reasons",
+      "prompt": [
+        "Write `List<string> GateFailures(int failedTests, double coverage, double minCoverage, int criticalVulns)`. Return, in this order, only the rules that fail:",
+        "",
+        "- `\"tests failed: 3\"` when any test failed",
+        "- `\"coverage 72.5% below 80.0%\"` when coverage < minimum (both with one decimal, `F1`)",
+        "- `\"critical vulnerabilities: 2\"` when any exist",
+        "",
+        "An empty list means the gate passes."
+      ],
+      "starter": [
+        "List<string> GateFailures(int failedTests, double coverage, double minCoverage, int criticalVulns)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> GateFailures(int failedTests, double coverage, double minCoverage, int criticalVulns)",
+        "{",
+        "    var reasons = new List<string>();",
+        "    if (failedTests > 0) reasons.Add($\"tests failed: {failedTests}\");",
+        "    if (coverage < minCoverage) reasons.Add($\"coverage {coverage:F1}% below {minCoverage:F1}%\");",
+        "    if (criticalVulns > 0) reasons.Add($\"critical vulnerabilities: {criticalVulns}\");",
+        "    return reasons;",
+        "}"
+      ],
+      "hints": [
+        "Three independent `if`s, each adding a message.",
+        "`{coverage:F1}` formats with one decimal."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"all good\", new List<string>(), GateFailures(0, 85, 80, 0));",
+        "Dojo.Eq(\"everything wrong\", new List<string> { \"tests failed: 3\", \"coverage 72.5% below 80.0%\", \"critical vulnerabilities: 2\" }, GateFailures(3, 72.5, 80, 2));",
+        "Dojo.Eq(\"exactly at the floor passes\", new List<string>(), GateFailures(0, 80, 80, 0));",
+        "Dojo.Eq(\"only coverage\", new List<string> { \"coverage 79.9% below 80.0%\" }, GateFailures(0, 79.9, 80, 0));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Retries, visibly",
+      "prompt": [
+        "A test may be retried up to `maxRetries` times (so at most `1 + maxRetries` attempts count). `attempts` lists the results in order (`true` = pass);",
+        "ignore attempts beyond the limit. Write `string Outcome(List<bool> attempts, int maxRetries)`:",
+        "",
+        "- `\"pass\"` when the first attempt passed",
+        "- `\"flaky-pass\"` when a later counted attempt passed",
+        "- `\"fail\"` otherwise"
+      ],
+      "starter": [
+        "string Outcome(List<bool> attempts, int maxRetries)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Outcome(List<bool> attempts, int maxRetries)",
+        "{",
+        "    var counted = attempts.Take(1 + maxRetries).ToList();",
+        "    if (counted.Count > 0 && counted[0]) return \"pass\";",
+        "    return counted.Any(a => a) ? \"flaky-pass\" : \"fail\";",
+        "}"
+      ],
+      "hints": [
+        "`Take(1 + maxRetries)` keeps only the attempts that count.",
+        "Check the first attempt separately."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"green first time\", \"pass\", Outcome(new() { true }, 2));",
+        "Dojo.Eq(\"passed on retry\", \"flaky-pass\", Outcome(new() { false, false, true }, 2));",
+        "Dojo.Eq(\"pass came too late\", \"fail\", Outcome(new() { false, false, true }, 1));",
+        "Dojo.Eq(\"no retries allowed\", \"fail\", Outcome(new() { false, true }, 0));",
+        "Dojo.Eq(\"never ran\", \"fail\", Outcome(new(), 3));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Coverage ratchet",
+      "prompt": [
+        "A **ratchet** lets coverage go up but never fall by more than a tolerance. Write",
+        "`double? Ratchet(double baseline, double current, double tolerance)`:",
+        "",
+        "- if `current < baseline - tolerance`, return `null` (the gate fails)",
+        "- otherwise return the new baseline: the larger of `baseline` and `current`"
+      ],
+      "starter": [
+        "double? Ratchet(double baseline, double current, double tolerance)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "double? Ratchet(double baseline, double current, double tolerance)",
+        "{",
+        "    if (current < baseline - tolerance) return null;",
+        "    return Math.Max(baseline, current);",
+        "}"
+      ],
+      "hints": [
+        "`Math.Max` gives the new baseline.",
+        "Returning `null` from a `double?` method is allowed."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"coverage went up\", (double?)84.0, Ratchet(80, 84, 0.5));",
+        "Dojo.Eq(\"small dip is tolerated, baseline kept\", (double?)80.0, Ratchet(80, 79.6, 0.5));",
+        "Dojo.Check(\"big drop fails\", Ratchet(80, 78, 0.5) == null, \"expected null\");"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Shard the suite",
+      "prompt": [
+        "To finish faster, CI splits tests across `shards` parallel jobs. Write `List<string> Shard(List<(string Test, int Ms)> tests, int shards)`:",
+        "",
+        "1. Take tests from longest to shortest (ties: by name, ordinal).",
+        "2. Give each one to the shard with the **smallest total time so far** (ties: the lowest shard index).",
+        "3. Return one string per shard: its test names joined by `,` in the order they were assigned (empty string for an empty shard)."
+      ],
+      "starter": [
+        "List<string> Shard(List<(string Test, int Ms)> tests, int shards)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> Shard(List<(string Test, int Ms)> tests, int shards)",
+        "{",
+        "    var names = Enumerable.Range(0, shards).Select(_ => new List<string>()).ToList();",
+        "    var totals = new int[shards];",
+        "    foreach (var (test, ms) in tests.OrderByDescending(t => t.Ms).ThenBy(t => t.Test, StringComparer.Ordinal))",
+        "    {",
+        "        int best = 0;",
+        "        for (int i = 1; i < shards; i++) if (totals[i] < totals[best]) best = i;",
+        "        names[best].Add(test);",
+        "        totals[best] += ms;",
+        "    }",
+        "    return names.Select(n => string.Join(\",\", n)).ToList();",
+        "}"
+      ],
+      "hints": [
+        "`OrderByDescending(t => t.Ms).ThenBy(t => t.Test, StringComparer.Ordinal)`.",
+        "Find the shard with the lowest total using a strict `<`, so ties go to the lower index."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"balanced over two shards\", new List<string> { \"e2e,unitA\", \"api,db\" },",
+        "    Shard(new() { (\"unitA\", 10), (\"api\", 60), (\"e2e\", 100), (\"db\", 40) }, 2));",
+        "Dojo.Eq(\"more shards than tests\", new List<string> { \"a\", \"b\", \"\" }, Shard(new() { (\"a\", 5), (\"b\", 5) }, 3));",
+        "Dojo.Eq(\"one shard keeps everything\", new List<string> { \"slow,mid,fast\" }, Shard(new() { (\"fast\", 1), (\"slow\", 9), (\"mid\", 5) }, 1));"
+      ]
+    }
+  ]
+}

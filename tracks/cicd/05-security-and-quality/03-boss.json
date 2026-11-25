@@ -1,0 +1,197 @@
+{
+  "title": "Boss: audit the pipeline",
+  "summary": "Scan a repository and its workflows the way a security reviewer would.",
+  "minutes": 18,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The audit",
+      "body": "Security asked for an automated review of every repository: committed secrets, over-powered tokens, unpinned actions and a severity gate for dependencies. Build each check."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Committed secrets",
+      "prompt": [
+        "Write `List<int> FindSecretLines(string[] lines)` returning the **1-based** numbers of lines that look like secrets. A line matches when it contains:",
+        "",
+        "- an AWS access key id: `AKIA` followed by 16 uppercase letters or digits",
+        "- a GitHub token: `ghp_` followed by 36 letters or digits",
+        "- `password`, `secret` or `api_key`/`apikey` (any case), then optional spaces, `:` or `=`, optional spaces, then a **quoted** value",
+        "",
+        "A reference such as `password: ${{ secrets.DB }}` is not quoted, so it is fine. `System.Text.RegularExpressions` is imported."
+      ],
+      "starter": [
+        "List<int> FindSecretLines(string[] lines)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<int> FindSecretLines(string[] lines)",
+        "{",
+        "    var patterns = new[]",
+        "    {",
+        "        @\"AKIA[0-9A-Z]{16}\",",
+        "        @\"ghp_[A-Za-z0-9]{36}\",",
+        "        @\"(?i)(password|secret|api_?key)\\s*[:=]\\s*[\"\"'][^\"\"']+[\"\"']\"",
+        "    };",
+        "    var hits = new List<int>();",
+        "    for (int i = 0; i < lines.Length; i++)",
+        "        if (patterns.Any(p => Regex.IsMatch(lines[i], p))) hits.Add(i + 1);",
+        "    return hits;",
+        "}"
+      ],
+      "hints": [
+        "Keep the three regexes in an array and test each line against `Any` of them.",
+        "In a verbatim string, a double quote is written `\"\"`. The third pattern: `(?i)(password|secret|api_?key)\\s*[:=]\\s*[\"\"'][^\"\"']+[\"\"']`."
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "var dojoLines = new[] {",
+        "    \"aws_access_key_id = AKIAIOSFODNN7EXAMPLE\",",
+        "    \"password: ${{ secrets.DB_PASSWORD }}\",",
+        "    \"db_Password: \\\"Pa55word!\\\"\",",
+        "    \"token: ghp_\" + new string('x', 36),",
+        "    \"# rotate the api key monthly\",",
+        "    \"ApiKey = 'abc123'\" };",
+        "Dojo.Eq(\"finds the four real secrets\", new List<int> { 1, 3, 4, 6 }, FindSecretLines(dojoLines));",
+        "Dojo.Eq(\"short ghp_ strings are not tokens\", new List<int>(), FindSecretLines(new[] { \"ghp_short\" }));"
+      ],
+      "explain": "Real scanners (GitHub secret scanning, gitleaks) use hundreds of such patterns plus entropy checks, and can block the push itself."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Over-powered tokens",
+      "prompt": [
+        "Write `List<string> ExcessPermissions(Dictionary<string, string> granted, Dictionary<string, string> needed)`. Levels are `none` < `read` < `write`;",
+        "a scope missing from `needed` needs `none`. For every granted scope above what is needed, return `\"scope: granted (needs level)\"`,",
+        "sorted by scope name (ordinal).",
+        "",
+        "granted `{contents: write, packages: write}`, needed `{contents: read}` → `\"contents: write (needs read)\"`, `\"packages: write (needs none)\"`."
+      ],
+      "starter": [
+        "List<string> ExcessPermissions(Dictionary<string, string> granted, Dictionary<string, string> needed)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> ExcessPermissions(Dictionary<string, string> granted, Dictionary<string, string> needed)",
+        "{",
+        "    int Rank(string level) => level switch { \"write\" => 2, \"read\" => 1, _ => 0 };",
+        "    return granted",
+        "        .Where(g => Rank(g.Value) > Rank(needed.GetValueOrDefault(g.Key, \"none\")))",
+        "        .OrderBy(g => g.Key, StringComparer.Ordinal)",
+        "        .Select(g => $\"{g.Key}: {g.Value} (needs {needed.GetValueOrDefault(g.Key, \"none\")})\")",
+        "        .ToList();",
+        "}"
+      ],
+      "hints": [
+        "Turn levels into numbers: none 0, read 1, write 2.",
+        "`needed.GetValueOrDefault(scope, \"none\")` handles missing scopes."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the example\", new List<string> { \"contents: write (needs read)\", \"packages: write (needs none)\" },",
+        "    ExcessPermissions(new() { [\"packages\"] = \"write\", [\"contents\"] = \"write\" }, new() { [\"contents\"] = \"read\" }));",
+        "Dojo.Eq(\"exactly right\", new List<string>(), ExcessPermissions(new() { [\"contents\"] = \"read\", [\"id-token\"] = \"write\" }, new() { [\"contents\"] = \"read\", [\"id-token\"] = \"write\" }));",
+        "Dojo.Eq(\"less than needed is not excess\", new List<string>(), ExcessPermissions(new() { [\"contents\"] = \"read\" }, new() { [\"contents\"] = \"write\" }));",
+        "Dojo.Eq(\"read nobody needs\", new List<string> { \"issues: read (needs none)\" }, ExcessPermissions(new() { [\"issues\"] = \"read\" }, new()));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Unpinned actions",
+      "prompt": [
+        "Write `List<string> Unpinned(string[] workflowLines)`. For each line containing `uses:`, take the value after it (trimmed, and without any",
+        "trailing `# comment`). Ignore local actions starting with `./` and `docker://` references. Report every remaining `owner/repo@ref`",
+        "whose `ref` is not exactly **40 lowercase hex characters**, in file order. `System.Text.RegularExpressions` is imported."
+      ],
+      "starter": [
+        "List<string> Unpinned(string[] workflowLines)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> Unpinned(string[] workflowLines)",
+        "{",
+        "    var found = new List<string>();",
+        "    foreach (var line in workflowLines)",
+        "    {",
+        "        int at = line.IndexOf(\"uses:\");",
+        "        if (at < 0) continue;",
+        "        string value = line[(at + 5)..].Split('#')[0].Trim();",
+        "        if (value.StartsWith(\"./\") || value.StartsWith(\"docker://\")) continue;",
+        "        string reference = value.Contains('@') ? value[(value.LastIndexOf('@') + 1)..] : \"\";",
+        "        if (!Regex.IsMatch(reference, \"^[0-9a-f]{40}$\")) found.Add(value);",
+        "    }",
+        "    return found;",
+        "}"
+      ],
+      "hints": [
+        "`line[(at + 5)..]` is everything after `uses:`; split off the comment at `#` and trim.",
+        "The ref is after the last `@`; check it with `^[0-9a-f]{40}$`."
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "var dojoWf = new[] {",
+        "    \"    steps:\",",
+        "    \"      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\",",
+        "    \"      - uses: actions/setup-dotnet@v4\",",
+        "    \"      - uses: ./.github/actions/build\",",
+        "    \"      - uses: some-org/deploy@main\",",
+        "    \"      - uses: docker://alpine:3.20\",",
+        "    \"      - run: echo uses: is just text here\",",
+        "    \"      - uses: actions/cache@11bd719\" };",
+        "Dojo.Eq(\"finds unpinned references\", new List<string> { \"actions/setup-dotnet@v4\", \"some-org/deploy@main\", \"is just text here\", \"actions/cache@11bd719\" }, Unpinned(dojoWf));"
+      ],
+      "explain": "Notice the `run:` line: a text-based check flags it too. Real linters (zizmor, actionlint) parse the YAML instead of searching lines."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Severity gate",
+      "prompt": [
+        "Write `string SeverityGate(List<(string Package, string Severity)> findings, string failAt)`. Severities rank `low` < `moderate` < `high` < `critical`.",
+        "Findings at or above `failAt` block the build:",
+        "",
+        "- none blocking → `\"pass\"`",
+        "- otherwise → `\"fail: \"` followed by the blocking packages, sorted ordinally and de-duplicated, joined with `\", \"`"
+      ],
+      "starter": [
+        "string SeverityGate(List<(string Package, string Severity)> findings, string failAt)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string SeverityGate(List<(string Package, string Severity)> findings, string failAt)",
+        "{",
+        "    var order = new List<string> { \"low\", \"moderate\", \"high\", \"critical\" };",
+        "    var blocking = findings.Where(f => order.IndexOf(f.Severity) >= order.IndexOf(failAt))",
+        "        .Select(f => f.Package).Distinct().OrderBy(p => p, StringComparer.Ordinal).ToList();",
+        "    return blocking.Count == 0 ? \"pass\" : \"fail: \" + string.Join(\", \", blocking);",
+        "}"
+      ],
+      "hints": [
+        "The index in `[low, moderate, high, critical]` is the rank.",
+        "Filter, project to the package name, `Distinct`, sort, join."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoF = new List<(string Package, string Severity)> { (\"Serilog\", \"low\"), (\"System.Text.Json\", \"high\"), (\"Foo\", \"critical\"), (\"System.Text.Json\", \"moderate\") };",
+        "Dojo.Eq(\"high and above\", \"fail: Foo, System.Text.Json\", SeverityGate(dojoF, \"high\"));",
+        "Dojo.Eq(\"critical only\", \"fail: Foo\", SeverityGate(dojoF, \"critical\"));",
+        "Dojo.Eq(\"clean\", \"pass\", SeverityGate(new() { (\"Serilog\", \"low\") }, \"moderate\"));",
+        "Dojo.Eq(\"everything at low\", \"fail: Foo, Serilog, System.Text.Json\", SeverityGate(dojoF, \"low\"));"
+      ]
+    }
+  ]
+}

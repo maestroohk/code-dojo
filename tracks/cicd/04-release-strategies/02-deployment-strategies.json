@@ -1,0 +1,218 @@
+{
+  "title": "Blue-green, canary and feature flags",
+  "summary": "Ways to release that let you see trouble before every user does.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Recreate and rolling",
+      "body": [
+        "The simplest strategies:",
+        "",
+        "- **Recreate**: stop v1, start v2. Downtime in between. Fine for an internal tool at 3am, nothing else.",
+        "- **Rolling**: replace instances a few at a time behind the load balancer. No downtime, but for a while **v1 and v2 serve traffic together**,",
+        "  so they must be compatible (same database schema, same API).",
+        "",
+        "```text",
+        "rolling, 4 instances:   [v1 v1 v1 v1] → [v2 v1 v1 v1] → [v2 v2 v1 v1] → ... → [v2 v2 v2 v2]",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "During a rolling deploy, users report that refreshing the page randomly shows old and new layouts. What is happening?",
+      "options": [
+        "Requests are balanced across instances running v1 and v2 at the same time",
+        "The CDN is broken",
+        "The deploy failed and rolled back",
+        "Browsers cache CSS forever"
+      ],
+      "answer": 0,
+      "explain": "That mixed state is inherent to rolling deploys; design changes to tolerate it (or use sticky sessions for the transition)."
+    },
+    {
+      "type": "learn",
+      "title": "Blue-green",
+      "body": [
+        "Run **two complete environments**. Blue serves users; deploy v2 to green, test it privately, then switch the router.",
+        "",
+        "```text",
+        "              ┌──► blue  (v1)   ← live",
+        "router ───────┤",
+        "              └──► green (v2)   ← deployed, smoke-tested, idle",
+        "switch:  router → green.   rollback:  router → blue (seconds)",
+        "```",
+        "",
+        "Pros: instant switch and instant rollback. Cons: double the infrastructure, and the **database is shared**, so schema changes still need care."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "With blue-green, green (v2) is live and errors spike. What is the rollback?",
+      "options": [
+        "Point the router back at blue, which is still running v1",
+        "Rebuild v1 from source and deploy it to green",
+        "Restore last night's database backup",
+        "Scale green down to zero"
+      ],
+      "answer": 0,
+      "explain": "Blue was kept warm exactly for this: the switch back takes seconds and needs no build."
+    },
+    {
+      "type": "learn",
+      "title": "Canary",
+      "body": [
+        "Send a **small slice** of real traffic to v2, compare its error rate and latency with v1, and widen step by step:",
+        "",
+        "```text",
+        "1% ──► 5% ──► 25% ──► 50% ──► 100%",
+        " └ watch error rate, p95 latency at each step; any regression → back to 0%",
+        "```",
+        "",
+        "Users must be **sticky**: the same user should always land on the same version, or they see features flicker. That is done by hashing",
+        "a stable id (user id, session cookie) into a bucket 0–99 and sending buckets below the percentage to the canary. Raising the percentage",
+        "only adds users; nobody already on the canary is moved back."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each strategy to its main trade-off.",
+      "pairs": [
+        [
+          "Recreate",
+          "simple, but there is downtime"
+        ],
+        [
+          "Rolling",
+          "no extra servers, but two versions are live together"
+        ],
+        [
+          "Blue-green",
+          "instant rollback, but double the infrastructure"
+        ],
+        [
+          "Canary",
+          "real-traffic evidence, but needs good metrics and routing"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Feature flags",
+      "body": [
+        "A **feature flag** separates *deploying* code from *releasing* a feature:",
+        "",
+        "```csharp",
+        "if (flags.IsEnabled(\"new-checkout\", user))",
+        "    return NewCheckout(cart);",
+        "return OldCheckout(cart);",
+        "```",
+        "",
+        "The code ships dark, then the flag is turned on for staff, then 10% of users, then everyone, without a deploy. Turning it off is the fastest",
+        "rollback there is. The cost: every flag is a branch in your code; delete it once the rollout is done."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which tool fits each situation best?",
+      "buckets": [
+        "Feature flag",
+        "Canary deploy",
+        "Blue-green"
+      ],
+      "items": [
+        [
+          "let the sales team demo an unfinished feature to one customer",
+          0
+        ],
+        [
+          "a new .NET runtime version: check real error rates on a small share of traffic",
+          1
+        ],
+        [
+          "need to switch the whole site back in seconds after a big infrastructure change",
+          2
+        ],
+        [
+          "turn off a misbehaving recommendation widget without deploying",
+          0
+        ],
+        [
+          "gradually prove a new build under production load",
+          1
+        ],
+        [
+          "test the complete new environment privately before any user sees it",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A canary is at 10%. User `u42` hashes to bucket 7, user `u77` to bucket 34. The canary is raised to 25%, then 50%. Which version does each user get at 50%?",
+      "code": [
+        "u42 bucket 7",
+        "u77 bucket 34",
+        "canary when bucket < percent"
+      ],
+      "answer": [
+        "u42 canary",
+        "u77 canary"
+      ],
+      "explain": "7 < 50 and 34 < 50. `u42` has been on the canary since 10%; `u77` joined at 50%.",
+      "verify": false
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A sticky canary splitter",
+      "prompt": [
+        "Write `string Route(string userId, int canaryPercent)` returning `\"canary\"` or `\"stable\"`.",
+        "",
+        "Hash the user id with **32-bit FNV-1a** over its UTF-8 bytes:",
+        "",
+        "```text",
+        "h = 2166136261  (uint)",
+        "for each byte b:  h = h XOR b;  h = h * 16777619   (uint arithmetic wraps)",
+        "```",
+        "",
+        "The user's bucket is `h % 100`; buckets below `canaryPercent` go to the canary. Do not use `string.GetHashCode()`: it changes between",
+        "process runs, so users would not stay sticky."
+      ],
+      "starter": [
+        "string Route(string userId, int canaryPercent)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Route(string userId, int canaryPercent)",
+        "{",
+        "    uint h = 2166136261;",
+        "    foreach (byte b in Encoding.UTF8.GetBytes(userId))",
+        "    {",
+        "        h ^= b;",
+        "        h *= 16777619;",
+        "    }",
+        "    return h % 100 < canaryPercent ? \"canary\" : \"stable\";",
+        "}"
+      ],
+      "hints": [
+        "`uint h = 2166136261;` and `foreach (byte b in Encoding.UTF8.GetBytes(userId))`.",
+        "`h ^= b; h *= 16777619;` — uint multiplication wraps around automatically in an unchecked context."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"0% sends nobody\", \"stable\", Route(\"alice\", 0));",
+        "Dojo.Eq(\"100% sends everybody\", \"canary\", Route(\"alice\", 100));",
+        "Dojo.Eq(\"sticky: same answer twice\", Route(\"bob\", 30), Route(\"bob\", 30));",
+        "int dojoCount = Enumerable.Range(0, 1000).Count(i => Route(\"user\" + i, 25) == \"canary\");",
+        "Dojo.Check(\"about a quarter of 1000 users at 25%\", dojoCount > 200 && dojoCount < 300, $\"got {dojoCount}\");",
+        "bool dojoMonotone = Enumerable.Range(0, 500).All(i => Route(\"user\" + i, 10) == \"stable\" || Route(\"user\" + i, 50) == \"canary\");",
+        "Dojo.Check(\"raising the percentage never moves a canary user back\", dojoMonotone, \"someone left the canary when it grew\");",
+        "Dojo.Check(\"uses the FNV-1a hash\", Route(\"a\", 20) == \"stable\" && Route(\"a\", 21) == \"canary\", \"FNV-1a of \\\"a\\\" is 3826002220, so its bucket is 20; check your constants\");"
+      ]
+    }
+  ]
+}

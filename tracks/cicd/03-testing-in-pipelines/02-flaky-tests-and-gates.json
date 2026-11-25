@@ -1,0 +1,171 @@
+{
+  "title": "Flaky tests and quality gates",
+  "summary": "Find tests that lie, stop them blocking everyone, and decide what must be true before merging.",
+  "minutes": 11,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Flaky tests",
+      "body": [
+        "A **flaky** test passes and fails on the **same code**. Common causes:",
+        "",
+        "- timing: `Thread.Sleep(100)` hoping a background task finished; real clocks (`DateTime.Now`) near midnight",
+        "- shared state: tests that depend on run order or on data another test left in the database",
+        "- the outside world: real network calls, random ports already in use, unseeded `Random`",
+        "",
+        "Flakiness is corrosive: once people learn \"just re-run it\", they re-run real failures too.",
+        "",
+        "```text",
+        "test              commit   result",
+        "Checkout_works    a1b2c3   ✔",
+        "Checkout_works    a1b2c3   ✘    ← same commit, different result: flaky",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`OrderExpires_after_30_minutes` fails about once a week, always shortly after midnight UTC. What is the most likely cause?",
+      "options": [
+        "It reads the real clock and a date boundary changes the result; inject a clock (`TimeProvider`) instead",
+        "The CI runner is too slow",
+        "The test needs to be retried three times",
+        "The database is full"
+      ],
+      "answer": 0,
+      "explain": "Tests that read `DateTime.Now` behave differently at boundaries. .NET 8's `TimeProvider` lets tests use a fake, fixed clock."
+    },
+    {
+      "type": "learn",
+      "title": "Handling a flaky test",
+      "body": [
+        "```text",
+        "detect ──► quarantine ──► fix root cause ──► un-quarantine",
+        "(same commit,   (still runs, but     (remove sleep,    (back to blocking)",
+        " both results)   does not block)      isolate data)",
+        "```",
+        "",
+        "Automatic **retries** hide flakiness; if you use them, report \"passed on retry\" so the problem stays visible. Never quarantine forever:",
+        "give each quarantined test an owner and a ticket."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the flaky-test response in order.",
+      "lines": [
+        "Spot a test that both passed and failed on the same commit",
+        "Quarantine it so it no longer blocks merges",
+        "Open a ticket with an owner",
+        "Find and fix the root cause",
+        "Return it to the blocking suite"
+      ],
+      "explain": "Quarantine buys time; the ticket makes sure the time is used."
+    },
+    {
+      "type": "learn",
+      "title": "Quality gates",
+      "body": [
+        "A **quality gate** is a rule the pipeline enforces before a change may merge or deploy. In GitHub this is **branch protection**:",
+        "required status checks must be green, plus required reviews.",
+        "",
+        "Typical gate:",
+        "",
+        "- all tests pass",
+        "- coverage ≥ the agreed floor (e.g. 80%) and does not drop much from `main`",
+        "- no high/critical vulnerabilities in dependencies",
+        "- at least one approving review",
+        "",
+        "A gate must be **objective and fast**. If people regularly bypass it, it is measuring the wrong thing."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the step that fails the build when coverage is under 80% (Coverlet MSBuild properties).",
+      "code": "- run: dotnet test /p:CollectCoverage=__1__ /p:Threshold=__2__ /p:ThresholdType=__3__",
+      "blanks": [
+        "true",
+        "80",
+        "line"
+      ],
+      "bank": [
+        "yes",
+        "0.8",
+        "file"
+      ],
+      "explain": "Coverlet fails the test run when line coverage is below `Threshold` percent."
+    },
+    {
+      "type": "predict",
+      "prompt": "Test history for one commit is below. Which tests are flaky? One per line, alphabetical.",
+      "code": [
+        "Login_works      c9  pass",
+        "Search_paginates c9  fail",
+        "Login_works      c9  fail",
+        "Cart_totals      c9  pass",
+        "Search_paginates c9  fail",
+        "Cart_totals      c9  fail"
+      ],
+      "answer": [
+        "Cart_totals",
+        "Login_works"
+      ],
+      "explain": "`Search_paginates` fails consistently: that is a real bug, not flakiness.",
+      "verify": false
+    },
+    {
+      "type": "mcq",
+      "prompt": "Select **all** practices that make a test suite less flaky.",
+      "options": [
+        "Each test creates its own data with unique ids",
+        "Wait for a condition with a timeout instead of a fixed sleep",
+        "Inject the clock and random seed",
+        "Run tests in a fixed alphabetical order so state leaks are consistent",
+        "Retry every failed test five times silently"
+      ],
+      "answer": [
+        0,
+        1,
+        2
+      ],
+      "explain": "Forcing an order hides coupling instead of removing it, and silent retries hide flakiness."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Find the flaky tests",
+      "prompt": [
+        "Write `List<string> FindFlaky(List<(string Test, string Commit, bool Passed)> runs)`: return every test that has **both** a pass and a fail",
+        "on the **same** commit, alphabetically (ordinal), each name once."
+      ],
+      "starter": [
+        "List<string> FindFlaky(List<(string Test, string Commit, bool Passed)> runs)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> FindFlaky(List<(string Test, string Commit, bool Passed)> runs) =>",
+        "    runs.GroupBy(r => (r.Test, r.Commit))",
+        "        .Where(g => g.Any(r => r.Passed) && g.Any(r => !r.Passed))",
+        "        .Select(g => g.Key.Test)",
+        "        .Distinct()",
+        "        .OrderBy(t => t, StringComparer.Ordinal)",
+        "        .ToList();"
+      ],
+      "hints": [
+        "Group by `(r.Test, r.Commit)`.",
+        "A group is flaky when it has `Any` passed and `Any` failed."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRuns = new List<(string Test, string Commit, bool Passed)> {",
+        "    (\"Login_works\", \"c9\", true), (\"Search_paginates\", \"c9\", false), (\"Login_works\", \"c9\", false),",
+        "    (\"Cart_totals\", \"c9\", true), (\"Search_paginates\", \"c9\", false), (\"Cart_totals\", \"c9\", false) };",
+        "Dojo.Eq(\"the history above\", new List<string> { \"Cart_totals\", \"Login_works\" }, FindFlaky(dojoRuns));",
+        "Dojo.Eq(\"different commits are not flaky\", new List<string>(), FindFlaky(new() { (\"A\", \"c1\", true), (\"A\", \"c2\", false) }));",
+        "Dojo.Eq(\"listed once even if flaky on two commits\", new List<string> { \"A\" }, FindFlaky(new() {",
+        "    (\"A\", \"c1\", true), (\"A\", \"c1\", false), (\"A\", \"c2\", false), (\"A\", \"c2\", true) }));"
+      ]
+    }
+  ]
+}

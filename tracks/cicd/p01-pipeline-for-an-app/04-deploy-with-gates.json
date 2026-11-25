@@ -1,0 +1,287 @@
+{
+  "title": "Deploy with gates",
+  "summary": "Staging then production: environments, approvals, smoke tests and one deploy at a time.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Stage 4 briefing",
+      "body": [
+        "The last piece is continuous **delivery**: every green `main` commit goes to staging automatically, and to production once a person approves.",
+        "",
+        "```text",
+        "build ─► image ─► deploy-staging ─► [approval: production environment] ─► deploy-production",
+        "                   smoke test /health                                      smoke test /health",
+        "```",
+        "",
+        "- Approvals are configured on the `production` **environment** in repository settings; the workflow only names the environment.",
+        "- Both deploys use the **same image tag** (`github.sha`): build once, promote.",
+        "- `curl --fail` exits non-zero on HTTP 4xx/5xx, so a broken deploy turns the job red.",
+        "- A workflow-level `concurrency` group stops two runs deploying at the same time; `cancel-in-progress: false` lets the running deploy finish."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the release of one commit in order.",
+      "lines": [
+        "build job: restore, build, test, publish",
+        "image job: push ghcr.io/acme/orders:<sha>",
+        "deploy-staging: deploy <sha> and curl /health",
+        "a reviewer approves the production environment",
+        "deploy-production: deploy the same <sha> and curl /health"
+      ],
+      "explain": "Nothing is rebuilt after the image job; each environment receives the same tag."
+    },
+    {
+      "type": "predict",
+      "prompt": "The smoke test runs `curl --fail https://staging.example.com/health` and the server answers `503 Service Unavailable`. What happens to the job?",
+      "code": [
+        "curl --fail https://staging.example.com/health",
+        "< HTTP/2 503"
+      ],
+      "answer": "it fails",
+      "explain": "`--fail` turns HTTP errors into exit code 22, the step fails, and `deploy-production` (which needs staging) is skipped.",
+      "verify": false,
+      "accept": [
+        "fails",
+        "the job fails",
+        "failed",
+        "exit code 22"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Two commits land on `main` a minute apart. Without `concurrency`, what can go wrong?",
+      "options": [
+        "Both runs deploy at once and the older commit may finish last, leaving production on the older version",
+        "GitHub rejects the second push",
+        "The second run reuses the first run's image",
+        "Nothing, deploys are atomic"
+      ],
+      "answer": 0,
+      "explain": "A concurrency group queues the second deploy behind the first, so deploys happen one at a time and in order."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Add staging and production",
+      "prompt": [
+        "Finish the pipeline:",
+        "",
+        "1. Under the workflow `permissions`, add a workflow-level `concurrency` with `group: deploy-${{ github.ref }}` and `cancel-in-progress: false`.",
+        "2. Job `deploy-staging`: `needs: image`, `if: github.ref == 'refs/heads/main'`, `runs-on: ubuntu-latest`, `environment: staging`; steps",
+        "   `./deploy.sh staging ghcr.io/${{ github.repository }}:${{ github.sha }}` with `DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}` in the step's `env`, then",
+        "   `curl --fail --retry 5 --retry-delay 3 https://staging.example.com/health`.",
+        "3. Job `deploy-production`: `needs: deploy-staging`, `environment: production`, the same two steps for `production` and `https://www.example.com/health`.",
+        "",
+        "Everything from stages 1 to 3 must still be there.",
+        "",
+        "The program prints your workflow file. **Run checks** runs it and looks for the required lines in the output. Indentation is YAML structure, so keep it consistent (two spaces per level)."
+      ],
+      "starter": [
+        "Console.WriteLine(\"\"\"",
+        "name: api",
+        "on:",
+        "  push:",
+        "    branches: [main]",
+        "  pull_request:",
+        "    branches: [main]",
+        "permissions:",
+        "  contents: read",
+        "jobs:",
+        "  build:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-dotnet@v4",
+        "        with:",
+        "          dotnet-version: '8.0.x'",
+        "      - uses: actions/cache@v4",
+        "        with:",
+        "          path: ~/.nuget/packages",
+        "          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json') }}",
+        "          restore-keys: |",
+        "            ${{ runner.os }}-nuget-",
+        "      - run: dotnet restore",
+        "      - run: dotnet build --no-restore -c Release",
+        "      - run: dotnet test --no-build -c Release --logger trx --results-directory TestResults",
+        "      - uses: actions/upload-artifact@v4",
+        "        if: always()",
+        "        with:",
+        "          name: test-results",
+        "          path: TestResults",
+        "      - run: dotnet publish src/Api -c Release -o out --no-build",
+        "      - uses: actions/upload-artifact@v4",
+        "        with:",
+        "          name: api",
+        "          path: out",
+        "  image:",
+        "    needs: build",
+        "    runs-on: ubuntu-latest",
+        "    permissions:",
+        "      contents: read",
+        "      packages: write",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: docker/login-action@v3",
+        "        with:",
+        "          registry: ghcr.io",
+        "          username: ${{ github.actor }}",
+        "          password: ${{ secrets.GITHUB_TOKEN }}",
+        "      - uses: docker/build-push-action@v6",
+        "        with:",
+        "          context: .",
+        "          push: ${{ github.ref == 'refs/heads/main' }}",
+        "          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}",
+        "\"\"\");"
+      ],
+      "solution": [
+        "Console.WriteLine(\"\"\"",
+        "name: api",
+        "on:",
+        "  push:",
+        "    branches: [main]",
+        "  pull_request:",
+        "    branches: [main]",
+        "permissions:",
+        "  contents: read",
+        "concurrency:",
+        "  group: deploy-${{ github.ref }}",
+        "  cancel-in-progress: false",
+        "jobs:",
+        "  build:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-dotnet@v4",
+        "        with:",
+        "          dotnet-version: '8.0.x'",
+        "      - uses: actions/cache@v4",
+        "        with:",
+        "          path: ~/.nuget/packages",
+        "          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json') }}",
+        "          restore-keys: |",
+        "            ${{ runner.os }}-nuget-",
+        "      - run: dotnet restore",
+        "      - run: dotnet build --no-restore -c Release",
+        "      - run: dotnet test --no-build -c Release --logger trx --results-directory TestResults",
+        "      - uses: actions/upload-artifact@v4",
+        "        if: always()",
+        "        with:",
+        "          name: test-results",
+        "          path: TestResults",
+        "      - run: dotnet publish src/Api -c Release -o out --no-build",
+        "      - uses: actions/upload-artifact@v4",
+        "        with:",
+        "          name: api",
+        "          path: out",
+        "  image:",
+        "    needs: build",
+        "    runs-on: ubuntu-latest",
+        "    permissions:",
+        "      contents: read",
+        "      packages: write",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: docker/login-action@v3",
+        "        with:",
+        "          registry: ghcr.io",
+        "          username: ${{ github.actor }}",
+        "          password: ${{ secrets.GITHUB_TOKEN }}",
+        "      - uses: docker/build-push-action@v6",
+        "        with:",
+        "          context: .",
+        "          push: ${{ github.ref == 'refs/heads/main' }}",
+        "          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}",
+        "  deploy-staging:",
+        "    needs: image",
+        "    if: github.ref == 'refs/heads/main'",
+        "    runs-on: ubuntu-latest",
+        "    environment: staging",
+        "    steps:",
+        "      - run: ./deploy.sh staging ghcr.io/${{ github.repository }}:${{ github.sha }}",
+        "        env:",
+        "          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}",
+        "      - run: curl --fail --retry 5 --retry-delay 3 https://staging.example.com/health",
+        "  deploy-production:",
+        "    needs: deploy-staging",
+        "    runs-on: ubuntu-latest",
+        "    environment: production",
+        "    steps:",
+        "      - run: ./deploy.sh production ghcr.io/${{ github.repository }}:${{ github.sha }}",
+        "        env:",
+        "          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}",
+        "      - run: curl --fail --retry 5 --retry-delay 3 https://www.example.com/health",
+        "\"\"\");"
+      ],
+      "hints": [
+        "`concurrency:` is a top-level key like `permissions:`, with `group` and `cancel-in-progress` indented under it.",
+        "The step `env:` goes under the `- run:` line at the same indentation as `run` itself."
+      ],
+      "tests": [
+        {
+          "name": "concurrency:",
+          "expectContains": "concurrency:"
+        },
+        {
+          "name": "group: deploy-${{ github.ref }}",
+          "expectContains": "group: deploy-${{ github.ref }}"
+        },
+        {
+          "name": "cancel-in-progress: false",
+          "expectContains": "cancel-in-progress: false"
+        },
+        {
+          "name": "  deploy-staging:",
+          "expectContains": "  deploy-staging:"
+        },
+        {
+          "name": "needs: image",
+          "expectContains": "needs: image"
+        },
+        {
+          "name": "environment: staging",
+          "expectContains": "environment: staging"
+        },
+        {
+          "name": "DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}",
+          "expectContains": "DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}"
+        },
+        {
+          "name": "curl --fail --retry 5 --retry-delay 3 https://staging.example.com/health",
+          "expectContains": "curl --fail --retry 5 --retry-delay 3 https://staging.example.com/health"
+        },
+        {
+          "name": "  deploy-production:",
+          "expectContains": "  deploy-production:"
+        },
+        {
+          "name": "needs: deploy-staging",
+          "expectContains": "needs: deploy-staging"
+        },
+        {
+          "name": "environment: production",
+          "expectContains": "environment: production"
+        },
+        {
+          "name": "- run: ./deploy.sh production ghcr.io/${{ github.repository }}:${{ github.sha }}",
+          "expectContains": "- run: ./deploy.sh production ghcr.io/${{ github.repository }}:${{ github.sha }}"
+        },
+        {
+          "name": "curl --fail --retry 5 --retry-delay 3 https://www.example.com/health",
+          "expectContains": "curl --fail --retry 5 --retry-delay 3 https://www.example.com/health"
+        },
+        {
+          "name": "packages: write",
+          "expectContains": "packages: write"
+        },
+        {
+          "name": "- run: dotnet test --no-build -c Release --logger trx",
+          "expectContains": "- run: dotnet test --no-build -c Release --logger trx"
+        }
+      ],
+      "carry": true
+    }
+  ]
+}

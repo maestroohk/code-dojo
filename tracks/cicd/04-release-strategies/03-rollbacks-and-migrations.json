@@ -1,0 +1,189 @@
+{
+  "title": "Rollbacks and database migrations",
+  "summary": "Decide when to roll back, and change a schema without breaking the version still running.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Roll back or roll forward",
+      "body": [
+        "When a release goes bad you can:",
+        "",
+        "- **Roll back**: redeploy the previous artifact (or flip blue-green, or turn the flag off). Fast and boring, which is what you want at 2am.",
+        "- **Roll forward**: ship a fix. Fine for small issues when the fix is obvious and the pipeline is fast.",
+        "",
+        "Rollback only works if you **kept the previous artifact** and the old code still works with the **current database**. That second",
+        "condition is where most rollbacks fail."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "v2 added a migration that renamed column `total` to `amount` and dropped `total`. v2 has a bug; you redeploy v1. What happens?",
+      "options": [
+        "v1 crashes: it queries a `total` column that no longer exists",
+        "v1 works; the database is separate from the code",
+        "The migration automatically reverses",
+        "The deploy is rejected"
+      ],
+      "answer": 0,
+      "explain": "Destructive schema changes make rollback impossible. That is why migrations use expand and contract."
+    },
+    {
+      "type": "learn",
+      "title": "Expand and contract",
+      "body": [
+        "Make every schema change **backwards compatible** by splitting it across releases:",
+        "",
+        "```text",
+        "release 1  EXPAND    add column amount (nullable); code writes total AND amount",
+        "(backfill)           copy total → amount for old rows",
+        "release 2  MIGRATE   code reads amount, still writes both",
+        "release 3  CONTRACT  code stops using total; then drop column total",
+        "```",
+        "",
+        "At every step the previous release still works against the current schema, so every step can be rolled back.",
+        "Run migrations as their **own pipeline step before** the new code deploys, never on app start-up in each of 10 instances at once."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the safe rename of `total` to `amount`.",
+      "lines": [
+        "Add nullable column `amount`",
+        "Deploy code that writes both `total` and `amount`",
+        "Backfill `amount` from `total` for existing rows",
+        "Deploy code that reads `amount`",
+        "Deploy code that no longer touches `total`",
+        "Drop column `total`"
+      ],
+      "explain": "Each step is compatible with the code from the step before it."
+    },
+    {
+      "type": "sort",
+      "prompt": "Is the migration safe to run while the previous version is still live?",
+      "buckets": [
+        "Safe (expand)",
+        "Unsafe (needs contract later)"
+      ],
+      "items": [
+        [
+          "add a nullable column",
+          0
+        ],
+        [
+          "add a new table",
+          0
+        ],
+        [
+          "drop a column the old code reads",
+          1
+        ],
+        [
+          "rename a column",
+          1
+        ],
+        [
+          "add an index concurrently",
+          0
+        ],
+        [
+          "add a NOT NULL column with no default",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Automated rollback decisions",
+      "body": [
+        "Canary analysis compares the canary with the stable baseline over the same period:",
+        "",
+        "```text",
+        "metric        stable   canary",
+        "error rate    0.4%     2.1%    ← canary is 1.7 points worse → roll back",
+        "p95 latency   180ms    190ms",
+        "```",
+        "",
+        "Absolute thresholds (\"error rate under 1%\") misfire when the baseline itself is bad; compare with stable. And wait long enough",
+        "before promoting: ten seconds of traffic proves nothing."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Policy: roll back when canary error rate exceeds stable by more than 1 percentage point; otherwise wait until 30 minutes have passed, then promote. What is the decision?",
+      "code": "stable 0.5%   canary 1.2%   observed 12 min",
+      "answer": "wait",
+      "explain": "1.2 − 0.5 = 0.7 points, within tolerance, but 12 minutes is not enough evidence yet.",
+      "verify": false
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the step that applies EF Core migrations as an idempotent SQL script before deploying.",
+      "code": [
+        "- run: dotnet ef migrations __1__ --__2__ -o migrate.sql",
+        "- run: sqlcmd -S $DB_HOST -i __3__"
+      ],
+      "blanks": [
+        "script",
+        "idempotent",
+        "migrate.sql"
+      ],
+      "bank": [
+        "add",
+        "force",
+        "update"
+      ],
+      "explain": "An idempotent script checks `__EFMigrationsHistory` and applies only what is missing, so running it twice is harmless."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Where should migrations run in a pipeline deploying 10 instances?",
+      "options": [
+        "Once, as a dedicated step before the new code is rolled out",
+        "In `Program.cs` on start-up of every instance",
+        "After all instances are running the new code",
+        "Manually from a developer's laptop"
+      ],
+      "answer": 0,
+      "explain": "One controlled run avoids 10 instances racing to migrate, and expand-style migrations are safe for the old code still running."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Canary verdict",
+      "prompt": [
+        "Write `string CanaryVerdict(double stableErrorPct, double canaryErrorPct, int minutesObserved)` implementing the policy:",
+        "",
+        "- `\"rollback\"` when the canary's error percentage is more than **1.0** point above stable (check this first, a bad canary is pulled immediately)",
+        "- `\"wait\"` when fewer than **30** minutes have been observed",
+        "- `\"promote\"` otherwise"
+      ],
+      "starter": [
+        "string CanaryVerdict(double stableErrorPct, double canaryErrorPct, int minutesObserved)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string CanaryVerdict(double stableErrorPct, double canaryErrorPct, int minutesObserved)",
+        "{",
+        "    if (canaryErrorPct - stableErrorPct > 1.0) return \"rollback\";",
+        "    if (minutesObserved < 30) return \"wait\";",
+        "    return \"promote\";",
+        "}"
+      ],
+      "hints": [
+        "Rollback is checked before the time window."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"clearly worse\", \"rollback\", CanaryVerdict(0.4, 2.1, 5));",
+        "Dojo.Eq(\"fine but too early\", \"wait\", CanaryVerdict(0.5, 1.2, 12));",
+        "Dojo.Eq(\"fine and long enough\", \"promote\", CanaryVerdict(0.5, 1.2, 30));",
+        "Dojo.Eq(\"better than stable\", \"promote\", CanaryVerdict(2.0, 0.1, 45));",
+        "Dojo.Eq(\"exactly 1 point is tolerated\", \"promote\", CanaryVerdict(1.0, 2.0, 60));"
+      ]
+    }
+  ]
+}

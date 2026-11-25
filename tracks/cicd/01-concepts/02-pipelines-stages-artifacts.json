@@ -1,0 +1,171 @@
+{
+  "title": "Pipelines, stages and artifacts",
+  "summary": "How a pipeline is shaped, what it hands from step to step, and where it deploys.",
+  "minutes": 11,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Stages and fail-fast",
+      "body": [
+        "A pipeline is a sequence of **stages**; each stage holds one or more **jobs**, each job is a list of **steps** (commands).",
+        "",
+        "```text",
+        "┌── build ──┐   ┌──── test ────┐   ┌─ package ─┐   ┌─ deploy ─┐",
+        "│ restore   │ ► │ unit         │ ► │ docker    │ ► │ staging  │",
+        "│ compile   │   │ integration  │   │ image     │   │          │",
+        "└───────────┘   └──────────────┘   └───────────┘   └──────────┘",
+        "```",
+        "",
+        "Stages run **in order** and the pipeline **fails fast**: when a stage fails, later stages are *skipped*. There is no point",
+        "packaging code that does not compile. Put the quickest, most likely-to-fail checks first so feedback arrives fast."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "The `test` stage fails. What does the run summary show for `deploy`?",
+      "code": [
+        "build    ✔ ok",
+        "test     ✘ FAILED",
+        "package  ?",
+        "deploy   ?"
+      ],
+      "answer": "skipped",
+      "explain": "After the first failure every later stage is skipped, not failed: it never ran.",
+      "verify": false,
+      "accept": [
+        "deploy skipped",
+        "deploy   skipped"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Artifacts: build once, deploy many",
+      "body": [
+        "An **artifact** is the output of a job that later jobs (or people) need: a zipped publish folder, a NuGet package, a Docker image,",
+        "a test report.",
+        "",
+        "The golden rule: **build once, promote the same artifact**. If you rebuild for production you are shipping something that was never tested.",
+        "",
+        "```text",
+        "build ─► api-1.4.0-3f2a9c1.zip ─► staging ─► production",
+        "               (same bytes everywhere, named by version and commit)",
+        "```",
+        "",
+        "Name artifacts so you can trace them back: app, version, and the short commit SHA."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Staging passed, so the release job runs `dotnet publish` again and deploys the new output to production. What is the problem?",
+      "options": [
+        "Production gets bytes that were never tested; a dependency or tool may have changed between builds",
+        "Publishing twice is slower but otherwise identical",
+        "`dotnet publish` cannot run in a release job",
+        "Nothing; builds are deterministic"
+      ],
+      "answer": 0,
+      "explain": "Rebuilds can pick up a new package version, a different SDK or a changed environment variable. Promote the artifact you tested."
+    },
+    {
+      "type": "learn",
+      "title": "Environments",
+      "body": [
+        "An **environment** is a place the app runs: `dev`, `staging`, `production`. Each has its own configuration, secrets and,",
+        "usually, its own protection rules (who may deploy, required approvals, wait timers).",
+        "",
+        "```text",
+        "dev ──auto──► staging ──auto──► production (approval required)",
+        "```",
+        "",
+        "Changes are **promoted** through environments in a fixed order. Configuration differs per environment; the artifact does not."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each environment feature to the problem it solves.",
+      "pairs": [
+        [
+          "Required reviewers",
+          "nobody ships to production alone"
+        ],
+        [
+          "Environment secrets",
+          "staging cannot read the production database password"
+        ],
+        [
+          "Deployment branch rule",
+          "only `main` can deploy to production"
+        ],
+        [
+          "Wait timer",
+          "a pause to watch the previous environment before continuing"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the artifact name: app `api`, version `1.4.0`, commit `3f2a9c1e88...`.",
+      "code": "__1__-__2__-__3__.zip",
+      "blanks": [
+        "api",
+        "1.4.0",
+        "3f2a9c1"
+      ],
+      "bank": [
+        "latest",
+        "main",
+        "3f2a9c1e88d04b"
+      ],
+      "explain": "`latest` and branch names change meaning over time. A version plus a short SHA always points at exactly one build."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A fail-fast runner",
+      "prompt": [
+        "Write `List<string> RunPipeline(List<(string Stage, bool Passes)> stages)` that returns one log line per stage:",
+        "",
+        "- `\"build: ok\"` when it passes,",
+        "- `\"test: FAILED\"` when it fails,",
+        "- `\"deploy: skipped\"` for every stage after a failure.",
+        "",
+        "Example: `[(build, true), (test, false), (deploy, true)]` → `build: ok`, `test: FAILED`, `deploy: skipped`."
+      ],
+      "starter": [
+        "List<string> RunPipeline(List<(string Stage, bool Passes)> stages)",
+        "{",
+        "    var log = new List<string>();",
+        "    // your code",
+        "    return log;",
+        "}"
+      ],
+      "solution": [
+        "List<string> RunPipeline(List<(string Stage, bool Passes)> stages)",
+        "{",
+        "    var log = new List<string>();",
+        "    bool failed = false;",
+        "    foreach (var (stage, passes) in stages)",
+        "    {",
+        "        if (failed) { log.Add($\"{stage}: skipped\"); continue; }",
+        "        if (passes) log.Add($\"{stage}: ok\");",
+        "        else { log.Add($\"{stage}: FAILED\"); failed = true; }",
+        "    }",
+        "    return log;",
+        "}"
+      ],
+      "hints": [
+        "Keep a `bool failed` flag outside the loop.",
+        "Once `failed` is true, every later stage is logged as skipped, whether or not it would pass."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"all green\", new List<string> { \"build: ok\", \"test: ok\" }, RunPipeline(new() { (\"build\", true), (\"test\", true) }));",
+        "Dojo.Eq(\"failure skips the rest\", new List<string> { \"build: ok\", \"test: FAILED\", \"package: skipped\", \"deploy: skipped\" },",
+        "    RunPipeline(new() { (\"build\", true), (\"test\", false), (\"package\", true), (\"deploy\", true) }));",
+        "Dojo.Eq(\"first stage fails\", new List<string> { \"build: FAILED\", \"test: skipped\" }, RunPipeline(new() { (\"build\", false), (\"test\", false) }));",
+        "Dojo.Eq(\"empty pipeline\", new List<string>(), RunPipeline(new()));"
+      ]
+    }
+  ]
+}

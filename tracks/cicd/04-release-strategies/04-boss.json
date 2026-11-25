@@ -1,0 +1,182 @@
+{
+  "title": "Boss: the release manager",
+  "summary": "Compute versions from commits, find the latest release and drive a canary rollout to the end.",
+  "minutes": 20,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Release day",
+      "body": "You are automating the release manager's job: pick the version, find what is currently released, and run a progressive rollout with flags and canaries."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Version from Conventional Commits",
+      "prompt": [
+        "Commit messages follow **Conventional Commits**: `type(scope)!: description`. Write `string NextVersion(string current, List<string> commits)`:",
+        "",
+        "- the part before the first `:` ends with `!`, or the message contains `BREAKING CHANGE` → major",
+        "- otherwise it starts with `feat` → minor",
+        "- otherwise it starts with `fix` → patch",
+        "- anything else (`docs:`, `chore:`, `test:`) → no bump",
+        "",
+        "Apply only the **largest** bump once. No bump at all returns `current`. Versions are plain `MAJOR.MINOR.PATCH`."
+      ],
+      "starter": [
+        "string NextVersion(string current, List<string> commits)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string NextVersion(string current, List<string> commits)",
+        "{",
+        "    int level = 0;",
+        "    foreach (var c in commits)",
+        "    {",
+        "        string head = c.Split(':')[0];",
+        "        if (head.EndsWith(\"!\") || c.Contains(\"BREAKING CHANGE\")) level = Math.Max(level, 3);",
+        "        else if (head.StartsWith(\"feat\")) level = Math.Max(level, 2);",
+        "        else if (head.StartsWith(\"fix\")) level = Math.Max(level, 1);",
+        "    }",
+        "    var p = current.Split('.').Select(int.Parse).ToArray();",
+        "    return level switch",
+        "    {",
+        "        3 => $\"{p[0] + 1}.0.0\",",
+        "        2 => $\"{p[0]}.{p[1] + 1}.0\",",
+        "        1 => $\"{p[0]}.{p[1]}.{p[2] + 1}\",",
+        "        _ => current",
+        "    };",
+        "}"
+      ],
+      "hints": [
+        "Track the biggest bump seen as a number: 0 none, 1 patch, 2 minor, 3 major.",
+        "`c.Split(':')[0]` is the type-and-scope part."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"fixes only\", \"1.4.3\", NextVersion(\"1.4.2\", new() { \"fix: rounding\", \"fix(api): null check\" }));",
+        "Dojo.Eq(\"a feature wins over fixes\", \"1.5.0\", NextVersion(\"1.4.2\", new() { \"fix: a\", \"feat(orders): history endpoint\", \"docs: readme\" }));",
+        "Dojo.Eq(\"bang means breaking\", \"2.0.0\", NextVersion(\"1.4.2\", new() { \"feat(api)!: remove v1 routes\" }));",
+        "Dojo.Eq(\"BREAKING CHANGE footer\", \"2.0.0\", NextVersion(\"1.4.2\", new() { \"refactor: ids\\n\\nBREAKING CHANGE: ids are now strings\" }));",
+        "Dojo.Eq(\"nothing to release\", \"1.4.2\", NextVersion(\"1.4.2\", new() { \"chore: bump tooling\", \"test: more cases\" }));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Latest stable release",
+      "prompt": [
+        "Write `string? LatestRelease(List<string> tags)`. Tags look like `v1.4.2`. Consider only tags that match exactly `v` + `MAJOR.MINOR.PATCH`",
+        "(no pre-releases, no other tags) and return the highest **by numeric comparison**, including the `v`. Return `null` if there is none.",
+        "`System.Text.RegularExpressions` is imported."
+      ],
+      "starter": [
+        "string? LatestRelease(List<string> tags)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string? LatestRelease(List<string> tags)",
+        "{",
+        "    return tags.Where(t => Regex.IsMatch(t, @\"^v\\d+\\.\\d+\\.\\d+$\"))",
+        "        .Select(t => (Tag: t, Parts: t[1..].Split('.').Select(int.Parse).ToArray()))",
+        "        .OrderByDescending(x => x.Parts[0]).ThenByDescending(x => x.Parts[1]).ThenByDescending(x => x.Parts[2])",
+        "        .Select(x => x.Tag)",
+        "        .FirstOrDefault();",
+        "}"
+      ],
+      "hints": [
+        "Filter with `^v\\d+\\.\\d+\\.\\d+$`.",
+        "Order by each number descending; `FirstOrDefault` returns null on an empty sequence."
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"numeric, not text\", \"v1.10.0\", LatestRelease(new() { \"v1.2.0\", \"v1.10.0\", \"v1.9.3\" }));",
+        "Dojo.Eq(\"pre-releases ignored\", \"v2.0.0\", LatestRelease(new() { \"v2.0.0\", \"v2.1.0-rc.1\", \"nightly\", \"v1.99.0\" }));",
+        "Dojo.Check(\"no releases yet\", LatestRelease(new() { \"nightly\", \"v0.1\" }) == null, \"expected null\");"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Feature flag evaluation",
+      "prompt": [
+        "Write `bool IsEnabled(bool killSwitch, List<string> allowList, int percent, string userId)`:",
+        "",
+        "1. if `killSwitch` is true the feature is off for everyone",
+        "2. users in `allowList` always get it",
+        "3. otherwise use the same FNV-1a bucket as `Route` (`h % 100 < percent`)"
+      ],
+      "starter": [
+        "bool IsEnabled(bool killSwitch, List<string> allowList, int percent, string userId)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "bool IsEnabled(bool killSwitch, List<string> allowList, int percent, string userId)",
+        "{",
+        "    if (killSwitch) return false;",
+        "    if (allowList.Contains(userId)) return true;",
+        "    uint h = 2166136261;",
+        "    foreach (byte b in Encoding.UTF8.GetBytes(userId)) { h ^= b; h *= 16777619; }",
+        "    return h % 100 < percent;",
+        "}"
+      ],
+      "hints": [
+        "The order of the rules matters: the kill switch beats the allow list.",
+        "Copy the hashing loop from the canary splitter."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"kill switch beats the allow list\", false, IsEnabled(true, new() { \"staff1\" }, 100, \"staff1\"));",
+        "Dojo.Eq(\"allow list at 0%\", true, IsEnabled(false, new() { \"staff1\" }, 0, \"staff1\"));",
+        "Dojo.Eq(\"0% for normal users\", false, IsEnabled(false, new(), 0, \"alice\"));",
+        "Dojo.Eq(\"100% for normal users\", true, IsEnabled(false, new(), 100, \"alice\"));",
+        "Dojo.Eq(\"bucket of \\\"a\\\" is 20: off at 20%\", false, IsEnabled(false, new(), 20, \"a\"));",
+        "Dojo.Eq(\"bucket of \\\"a\\\" is 20: on at 21%\", true, IsEnabled(false, new(), 21, \"a\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Drive the rollout",
+      "prompt": [
+        "Write `string Rollout(List<int> steps, List<double> canaryErrorPct, double stableErrorPct)`. `steps` are the canary percentages in order",
+        "(e.g. `1, 5, 25, 100`) and `canaryErrorPct[i]` is what was measured at step `i`.",
+        "",
+        "Walk the steps; at the first step where the canary is more than **1.0** point worse than stable, return `\"rolled back at 25%\"`",
+        "(with that step's percent). If every step is healthy return `\"promoted to 100%\"` (with the last step's percent)."
+      ],
+      "starter": [
+        "string Rollout(List<int> steps, List<double> canaryErrorPct, double stableErrorPct)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Rollout(List<int> steps, List<double> canaryErrorPct, double stableErrorPct)",
+        "{",
+        "    for (int i = 0; i < steps.Count; i++)",
+        "        if (canaryErrorPct[i] - stableErrorPct > 1.0) return $\"rolled back at {steps[i]}%\";",
+        "    return $\"promoted to {steps[^1]}%\";",
+        "}"
+      ],
+      "hints": [
+        "A `for` loop gives you the index for both lists.",
+        "`steps[^1]` is the last element."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"healthy all the way\", \"promoted to 100%\", Rollout(new() { 1, 5, 25, 100 }, new() { 0.5, 0.4, 0.6, 0.5 }, 0.5));",
+        "Dojo.Eq(\"fails at 25%\", \"rolled back at 25%\", Rollout(new() { 1, 5, 25, 100 }, new() { 0.5, 0.9, 3.0, 0.5 }, 0.5));",
+        "Dojo.Eq(\"fails immediately\", \"rolled back at 1%\", Rollout(new() { 1, 50 }, new() { 9.0, 0.0 }, 0.2));",
+        "Dojo.Eq(\"stops at the plan's last step\", \"promoted to 50%\", Rollout(new() { 10, 50 }, new() { 0.1, 0.1 }, 0.1));"
+      ]
+    }
+  ]
+}
