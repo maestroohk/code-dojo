@@ -64,6 +64,26 @@ Every exercise step may carry `"explain"` (shown after answering) and `"hints": 
 ```
 Keep cards short: one idea, one code sample. Follow each card with exercises that use it.
 
+A learn card can carry a visualizer that runs for real under the text. `dojo validate` runs each one
+and fails the lesson if it does not compile or run.
+
+**`"trace"` — Code in motion.** Steps through a program line by line: the current line, every
+variable (arrays and lists drawn as boxes), the call stack (recursion shows as frames) and the output.
+The learner can play it, step it with ← →, and scrub backwards.
+```json
+{ "type": "learn", "title": "Accumulating", "body": ["..."],
+  "trace": { "code": ["var sum = 0;", "for (var i = 1; i <= 4; i++)", "    sum += i;", "Console.WriteLine(sum);"], "stdin": "optional" } }
+```
+Top-level statements; local functions and types after them are fine. Keep it small: tracing stops after
+800 steps. Deterministic, like all code.
+
+**`"linq"` — LINQ in motion.** Runs a query with every operator tapped and replays items flowing
+through each stage, showing streaming (`Where`, `Select`) against buffering (`OrderBy`, `GroupBy`).
+```json
+"linq": { "source": "new[] { 5, 3, 8, 1 }", "query": ".Where(n => n > 2).OrderBy(n => n)", "setup": "record Order(string Name);" }
+```
+`setup` is optional C# type declarations. At most 8 operators; keep sources to about a dozen items.
+
 ### mcq — multiple choice
 ```json
 { "type": "mcq", "prompt": "Which ...?", "code": "optional code shown under the prompt",
