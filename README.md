@@ -10,6 +10,12 @@ Alongside the courses:
 - **Labs**: sandboxes with real machinery. The certificate chain lab lets you build roots, intermediates and
   server certificates like building blocks, wire up who signs whom, and watch real `X509Chain` validation
   pass or fail, with fix-it challenges. Every lab has a visual board and a plain form view of the same model.
+- **Live network labs** (Labs → Live network labs): ten hands-on networking and security labs (addressing,
+  routing, packet capture, DNS, NAT, port scanning, firewalls, TLS, log analysis, SSH hardening). Each lab is
+  a small network of Linux containers; open a terminal on any host right in the page, then let the lab check
+  your work. Needs [Docker Desktop](https://www.docker.com/products/docker-desktop/) running; the first visit
+  offers a one-time build of the tools image. Labs live in `netlabs/labs/<id>/` (`lab.json`, `lesson.md`,
+  `docker-compose.yml`, `files/`); progress is saved to `.state/netlabs.json`.
 - **Workbench**: run your own ASP.NET Core apps live inside the dojo. Send them requests (JSON, forms,
   multipart file uploads, custom headers), see the response, the curl command and the C# test for it, and
   watch each request travel through *your* code: the map is drawn from your `Program.cs` (middleware, then
@@ -57,7 +63,9 @@ broken one) and the Workbench (two live apps calling each other, multipart uploa
 
 ```
 server/   ASP.NET Core app: compiles learner code with Roslyn, runs it in a separate process, grades it;
-          PkiLab.cs (certificate lab), AppHost.cs + CodeOutline.cs (Workbench)
+          PkiLab.cs (certificate lab), AppHost.cs + CodeOutline.cs (Workbench),
+          NetLabs.cs (live network labs: Docker lifecycle, task checks, WebSocket terminal)
+netlabs/  the live network labs (labs/) and the shared lab tools image (images/toolbox)
 tests/    xUnit tests for the server
 ui/       the web app (plain ES modules, no build step, works offline)
 tracks/   the lessons, one JSON file each

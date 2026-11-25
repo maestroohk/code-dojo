@@ -162,6 +162,8 @@ app.MapPost("/api/apps/start", async (AppHost.StartRequest req) => Results.Json(
 app.MapPost("/api/apps/{id}/stop", (string id) => Results.Json(new { stopped = apps.Stop(id) }, json));
 app.MapPost("/api/apps/{id}/send", async (string id, AppHost.SendRequest req) => Results.Json(await apps.Send(id, req), json));
 app.MapPost("/api/outline", (RunRequest req) => Results.Json(CodeOutline.Read(req.Code ?? ""), json));
+// Live network labs: Docker-based networking and security labs with an in-page terminal (NetLabs.cs).
+NetLabs.Map(app, root, stateDir);
 app.Lifetime.ApplicationStopping.Register(apps.Dispose);
 
 app.Lifetime.ApplicationStarted.Register(() =>

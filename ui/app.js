@@ -9,6 +9,7 @@ import { pkiLab } from './lab-pki.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
 import { workbench } from './workbench.js';
+import { netLabs } from './netlabs.js';
 
 const app = document.getElementById('app');
 let tracks = [];
@@ -93,6 +94,8 @@ const LABS = [
     text: 'Step through any program line by line, forwards and backwards: watch loops count, variables change, arrays get sorted and recursive calls stack up.' },
   { id: 'linq', icon: '⇶', title: 'LINQ in motion', category: 'C#',
     text: 'Type a query and watch every item travel through Where, Select, OrderBy and GroupBy in the order it really happens. See deferred execution and buffering with your own eyes.' },
+  { id: 'net', icon: '🌐', title: 'Live network labs', category: 'Networking & security',
+    text: 'Ten hands-on labs on real Docker networks: addressing, routing, packet capture, DNS, NAT, scanning, firewalls, TLS, logs and SSH. Terminals right in the page. Needs Docker Desktop.' },
 ];
 
 const CODE_PRESETS = [
@@ -911,7 +914,7 @@ function route() {
   switch (parts[0]) {
     case undefined: return home();
     case 'track': return trackView(parts[1]);
-    case 'labs': return labsView(parts[1]);
+    case 'labs': if (parts[1] === 'net') { leave = netLabs(page, parts[2]); return; } return labsView(parts[1]);
     case 'workbench': leave = workbench(page); return;
     case 'lesson': return lessonView(parts[1], parts[2], parts[3]);
     case 'practice': return practiceView();
