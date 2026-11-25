@@ -1,5 +1,5 @@
 // Views and the lesson player.
-// Routes: #/ (topics)  #/track/t  #/lesson/t/m/l  #/labs  #/labs/pki  #/projects  #/workbench  #/practice  #/playground  #/profile
+// Routes: #/ (topics)  #/track/t  #/lesson/t/m/l  #/labs  #/labs/pki  #/projects  #/workbench  #/db  #/practice  #/playground  #/profile
 import { h, md, inline, api, shuffle, ask, loader } from './util.js';
 import * as game from './game.js';
 import { renderStep, renderRunOutput, DRAG_TYPES, TYPE_LABEL } from './steps.js';
@@ -13,6 +13,8 @@ import { vimLab } from './lab-vim.js';
 import { workbench } from './workbench.js';
 import { netLabs } from './netlabs.js';
 import { codeSpaces } from './codespaces.js';
+import { playgroundDebugger } from './debugger.js';
+import { dbStudio } from './dbstudio.js';
 import * as gamify from './gamify.js';
 
 const app = document.getElementById('app');
@@ -71,6 +73,7 @@ function header(active) {
       link('#/projects', 'Projects', 'projects'),
       link('#/workbench', 'Workbench', 'workbench'),
       link('#/spaces', 'Code spaces', 'spaces'),
+      link('#/db', 'Databases', 'db'),
       link('#/playground', 'Playground', 'playground'),
       link('#/profile', 'Profile', 'profile')),
     h('div.stats',
@@ -954,18 +957,23 @@ async function playground() {
     value: s.drafts[KEY] ?? sample,
     onChange: v => { s.drafts[KEY] = v; game.save(); },
     onRun: run, minLines: 14,
+    onGutterClick: lang.id === 'csharp' ? line => pgDebug?.toggle(line) : undefined,
   });
   const runBtn = h('button.btn.primary', { type: 'button', onclick: run }, '▶ Run');
+  // C#: the time-travel debugger (ui/debugger.js): breakpoints in the gutter, F5 debug, Ctrl+F5 run.
+  const pgDebug = lang.id === 'csharp' ? playgroundDebugger(editor, { stdin: () => stdin.value, run }) : null;
+  if (pgDebug) leave = pgDebug.dispose;
 
   page('playground',
     h('div.track-head', h('div', h('h2.track-title', 'Playground'), h('p.muted', 'Try an idea in any language you have installed. Break something on purpose, see what happens. Nothing here is graded.'))),
     tabs,
     h('div.playground',
       editor.el,
-      h('div.code-tools', runBtn,
+      h('div.code-tools', runBtn, pgDebug?.button,
         h('button.btn.ghost', { type: 'button', onclick: async () => { if (await ask('Reset to the example?', { ok: 'Reset' })) { editor.value = sample; delete s.drafts[KEY]; game.save(); } } }, 'Reset'),
         status, h('span.spacer'), acToggle(), h('span.muted.small', 'Ctrl+Space suggest · Ctrl+/ comment · Ctrl+Enter run')),
       h('details.stdin', h('summary', 'Program input'), stdin),
+      pgDebug?.panel,
       panel));
 }
 
@@ -1048,6 +1056,7 @@ function route() {
     case 'labs': if (parts[1] === 'net' || parts[1] === 'linux') { leave = netLabs(page, parts[2], parts[1]); return; } return labsView(parts[1]);
     case 'workbench': leave = workbench(page); return;
     case 'spaces': leave = codeSpaces(page, parts[1]); return;
+    case 'db': leave = dbStudio(page); return;
     case 'lesson': return lessonView(parts[1], parts[2], parts[3]);
     case 'practice': return practiceView();
     case 'quick': return quickView();

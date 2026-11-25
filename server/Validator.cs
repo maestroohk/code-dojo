@@ -72,6 +72,14 @@ public static class Validator
                             var snippet = Need(step, "code");
                             var answer = Need(step, "answer");
                             if ((bool?)step["verify"] == false) break;       // snippet is a fragment, not a program
+                            if (language == "sql")
+                            {
+                                var (sqlText, sqlError) = SqlChecker.PredictText(SqlChecker.Text(step["setup"]), snippet);
+                                if (sqlError is not null) Error(where, "predict SQL fails: " + sqlError);
+                                else if (Checker.Tidy(sqlText!) != Checker.Tidy(answer))
+                                    Error(where, $"predict answer is wrong: says [{answer.Replace("\n", "\\n")}] but the query returns [{Checker.Tidy(sqlText!).Replace("\n", "\\n")}]");
+                                break;
+                            }
                             if (language != "csharp")
                             {
                                 if (langs.Find(language) is not { } plang) { Warn(where, $"{language} is not installed, so the answer is unchecked"); break; }
@@ -82,7 +90,7 @@ public static class Validator
                                     Error(where, $"predict answer is wrong: says [{answer.Replace("\n", "\\n")}] but the code prints [{pprinted.Replace("\n", "\\n")}]");
                                 break;
                             }
-                            var (prog, pdiags) = runner.Compile(snippet);
+                            var (prog, pdiags) = runner.Compile(snippet, efCore: CSharpRunner.Frameworks((string?)step["framework"]).EfCore);
                             if (prog is null)
                             {
                                 Warn(where, "predict code does not compile, so the answer is unchecked (add \"verify\": false if that is intended): "
@@ -136,7 +144,8 @@ public static class Validator
                             code++;
                             Need(step, "prompt");
                             var solution = Need(step, "solution");
-                            async Task<CheckResult> Grade(string c) => language == "csharp" ? await checker.Check(step, c) : await PolyChecker.Check(langs, step, c, language);
+                            async Task<CheckResult> Grade(string c) => language == "csharp" ? await checker.Check(step, c)
+                                : language == "sql" ? SqlChecker.Check(step, c) : await PolyChecker.Check(langs, step, c, language);
                             var good = await Grade(solution);
                             if (!good.Passed)
                             {

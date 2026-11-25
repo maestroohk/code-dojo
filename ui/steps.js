@@ -6,6 +6,7 @@ import { createEditor } from './editor.js';
 import { state, save } from './game.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
+import { sqlGrid } from './sqlgrid.js';
 
 export const DRAG_TYPES = new Set(['order', 'blanks', 'match', 'sort']);
 
@@ -194,7 +195,7 @@ function predict(step, ctx) {
 
   const shown = h('div.revealed');
   return {
-    el: h('div.predict', prompt(step), h('div', { html: codeBlock(step.code) }),
+    el: h('div.predict', prompt(step), h('div', { html: codeBlock(step.code, document.documentElement.dataset.codeLang || 'csharp') }),
       h('label.field', h('span.field-label', 'Output'), input), shown),
     ready: () => input.value.trim().length > 0,
     async check() {
@@ -473,6 +474,7 @@ export function renderRunOutput(panel, r, { stdin } = {}) {
       ? h('span', { html: `<strong>The tests could not use your code.</strong> ${esc(d.message)} <span class="muted">Check the names and signatures the task asks for.</span>` })
       : [h('span.diag-where', `Line ${d.line}`), h('span', `${d.message} `), h('span.muted', d.id)]);
 
+  if (r.sql) return renderSqlOutput(panel, r, errors, diagRow);
   if (errors.length) {
     panel.append(h('div.out-section',
       h('div.out-title.bad', `Does not compile: ${errors.length} error${errors.length > 1 ? 's' : ''}`),
@@ -501,6 +503,31 @@ export function renderRunOutput(panel, r, { stdin } = {}) {
   if (r.ms != null) panel.append(h('div.muted.small.out-time', `${r.ms} ms`));
 }
 
+/** SQL steps: the error, the checks, the result as a grid, and a peek at every table. */
+function renderSqlOutput(panel, r, errors, diagRow) {
+  if (errors.length) {
+    panel.append(h('div.out-section', h('div.out-title.bad', 'Your SQL has an error'), errors.slice(0, 4).map(diagRow),
+      r.timedOut ? null : h('p.muted.small', 'Check the spelling of table and column names, commas between columns, and quotes around text.')));
+  }
+  if (r.tests?.length) {
+    const failed = r.tests.filter(t => !t.pass).length;
+    panel.append(h('div.out-section',
+      h(`div.out-title.${failed ? 'bad' : 'good'}`, failed ? `${r.tests.length - failed} of ${r.tests.length} checks pass` : r.tests.length === 1 ? 'The check passes' : `All ${r.tests.length} checks pass`),
+      r.tests.map(t => h(`div.test.${t.pass ? 'pass' : 'fail'}`,
+        h('span.test-mark', t.pass ? '✓' : '✗'),
+        h('div', h('div.test-name', t.name), !t.pass && t.detail && h('pre.test-detail', t.detail))))));
+  }
+  if (r.table) panel.append(h('div.out-section', h('div.out-title', r.table.title || 'Result'), sqlGrid(r.table)));
+  else if (!errors.length && !r.tests?.length && !r.tables?.length) panel.append(h('div.out-section', h('div.out-title', 'Result'), h('p.muted.small', 'No statement returned rows.')));
+  if (r.stdout) panel.append(h('div.out-section', h('div.out-title', 'Messages'), h('pre.out', r.stdout)));
+  if (r.tables?.length) {
+    panel.append(h('details.out-section.sql-tables', { open: !r.table && !errors.length },
+      h('summary.out-title', `Tables in the database (${r.tables.length})`),
+      r.tables.map(t => h('div.sql-table-peek', h('div.sql-table-name', t.title), sqlGrid(t, { cap: 50 })))));
+  }
+  if (r.ms != null) panel.append(h('div.muted.small.out-time', `${r.ms} ms`));
+}
+
 function code(step, ctx) {
   const draftKey = ctx.draftKey;
   // In a project, a stage opens with the learner's own program from the stage before.
@@ -523,7 +550,7 @@ function code(step, ctx) {
     if (busy) return;
     setBusy(true, 'Compiling and running…');
     try {
-      const r = await api('run', { track: ctx.track, code: editor.value, stdin: firstInput || step.stdin || '', template: step.template, framework: step.framework });
+      const r = await api('run', { track: ctx.track, code: editor.value, stdin: firstInput || step.stdin || '', template: step.template, framework: step.framework, setup: step.setup });
       editor.mark(r.diagnostics);
       renderRunOutput(panel, r, { stdin: firstInput });
     } catch (e) {
@@ -534,6 +561,14 @@ function code(step, ctx) {
   };
 
   const runBtn = h('button.btn.ghost', { type: 'button', onclick: run, title: 'Run without grading' }, '▶ Run');
+  // SQL steps: look at the tables the exercise starts with, before writing anything.
+  const dataBtn = h('button.btn.ghost', { type: 'button', title: 'Show every table the exercise starts with', onclick: async () => {
+    if (busy) return;
+    setBusy(true, 'Loading the tables…');
+    try { renderRunOutput(panel, await api('run', { track: ctx.track, code: '', setup: step.setup })); }
+    catch { panel.hidden = false; panel.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
+    setBusy(false);
+  } }, '▦ Show the data');
   const resetBtn = h('button.btn.ghost', {
     type: 'button', title: 'Back to the starting code',
     onclick: async () => {
@@ -545,11 +580,12 @@ function code(step, ctx) {
 
   const el = h('div.code-step',
     h('div.code-head', step.title && h('h2', step.title), step.mode === 'fix' && h('span.tag.fix', '🐞 Fix the bug'),
-      step.framework === 'web' && h('span.tag.web', '🌐 Live web server'),
+      (step.framework || '').split('+').includes('web') && h('span.tag.web', '🌐 Live web server'),
+      (step.framework || '').split('+').includes('efcore') && h('span.tag.web', '🗄 EF Core + SQLite'),
       step.carry && ctx.carried && h('span.tag', 'Your code so far')),
     prompt(step),
     editor.el,
-    h('div.code-tools', !step.template && runBtn, resetBtn, status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to check')),
+    h('div.code-tools', !step.template && runBtn, step.setup && dataBtn, resetBtn, status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to check')),
     panel);
 
   return {
@@ -566,7 +602,7 @@ function code(step, ctx) {
         const failed = r.tests.filter(t => !t.pass).length;
         return {
           correct: r.passed,
-          detail: r.passed ? '' : !r.compiled ? 'It does not compile yet. Read the first error below.' : `${failed} check${failed === 1 ? '' : 's'} failed. The details are below.`,
+          detail: r.passed ? '' : !r.compiled ? (r.sql ? 'Your SQL has an error. Read it below.' : 'It does not compile yet. Read the first error below.') : `${failed} check${failed === 1 ? '' : 's'} failed. The details are below.`,
         };
       } catch (e) {
         return { correct: false, detail: 'Could not reach the dojo server. Is it still running?', noPenalty: true };

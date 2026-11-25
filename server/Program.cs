@@ -116,6 +116,7 @@ app.MapGet("/api/languages", () => Results.Json(
 app.MapPost("/api/run", async (RunRequest req) =>
 {
     var runLanguage = req.Language is { Length: > 0 } l ? l : content.Language(req.Track ?? "csharp");
+    if (runLanguage == "sql") return Results.Json(SqlChecker.Run(SqlChecker.Text(req.Setup), req.Code ?? ""), json);
     if (runLanguage is { Length: > 0 } other && other != "csharp")
     {
         if (langs.Find(other) is not { } lang) return Results.BadRequest($"{other} is not installed on this machine");
@@ -125,7 +126,8 @@ app.MapPost("/api/run", async (RunRequest req) =>
         return Results.Json(new { compiled = true, diagnostics = Array.Empty<Diag>(), r.Stdout, r.Stderr, r.ExitCode, r.TimedOut, r.Truncated, r.Ms, r.Images }, json);
     }
     if (content.Language(req.Track ?? "csharp") != "csharp") return Results.BadRequest("unsupported language");
-    var (program, diags) = runner.Compile(req.Code ?? "", req.Template, req.Framework == "web");
+    var (runWeb, runEf) = CSharpRunner.Frameworks(req.Framework ?? content.Framework(req.Track ?? "csharp"));
+    var (program, diags) = runner.Compile(req.Code ?? "", req.Template, runWeb, efCore: runEf);
     if (program is null) return Results.Json(new { compiled = false, diagnostics = diags }, json);
     using (program)
     {
@@ -141,10 +143,11 @@ app.MapPost("/api/run", async (RunRequest req) =>
 app.MapPost("/api/check", async (CheckRequest req) =>
 {
     var language = content.Language(req.Track);
-    if (language != "csharp" && !PolyChecker.Handles(language)) return Results.BadRequest("unsupported language");
+    if (language != "csharp" && !PolyChecker.Handles(language) && !SqlChecker.Handles(language)) return Results.BadRequest("unsupported language");
     var lesson = content.Lesson(req.Track, req.Module, req.Lesson);
     if ((lesson?["steps"] as JsonArray)?.ElementAtOrDefault(req.Step) is not JsonObject step || (string?)step["type"] != "code")
         return Results.NotFound();
+    if (language == "sql") return Results.Json<object>(SqlChecker.Check(step, req.Code ?? ""), json);
     return Results.Json(language == "csharp"
         ? await checker.Check(step, req.Code ?? "")
         : await PolyChecker.Check(langs, step, req.Code ?? "", language), json);
@@ -173,7 +176,8 @@ app.MapPost("/api/outline", (RunRequest req) => Results.Json(CodeOutline.Read(re
 NetLabs.Map(app, root, stateDir);
 // Code spaces: real multi-file .NET projects with NuGet packages, built and run with the dotnet CLI (CodeSpaces.cs).
 CodeSpaces.Map(app, runner);
-
+// Database studio: SQLite files plus PostgreSQL / SQL Server / MySQL in Docker, one query UI (DbStudio.cs).
+DbStudio.Map(app, stateDir);
 app.Lifetime.ApplicationStopping.Register(apps.Dispose);
 
 app.Lifetime.ApplicationStarted.Register(() =>
@@ -198,5 +202,5 @@ static string FindRoot()
     throw new DirectoryNotFoundException("Cannot find the code-dojo folder (the one holding tracks/ and ui/).");
 }
 
-record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework, string? Language = null);
+record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework, string? Language = null, System.Text.Json.Nodes.JsonNode? Setup = null);
 record CheckRequest(string Track, string Module, string Lesson, int Step, string? Code);

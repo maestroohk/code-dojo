@@ -13,22 +13,44 @@ export const setAutocomplete = on => localStorage.setItem('dojo-autocomplete', o
  * @param path      this editor's file path within those files
  * @param onNavigate (path, line, column) when a definition or reference is in another file
  */
-export function createEditor({ value = '', onChange, onRun, minLines = 6, language, assist = true, files, path = 'Program.cs', onNavigate, references } = {}) {
+export function createEditor({ value = '', onChange, onRun, minLines = 6, language, assist = true, files, path = 'Program.cs', onNavigate, references, vocab, onGutterClick } = {}) {
   const gutter = h('div.ed-gutter', { 'aria-hidden': 'true' });
   const pre = h('pre.ed-pre', { 'aria-hidden': 'true' });
   const area = h('textarea.ed-area', {
     spellcheck: false, autocapitalize: 'off', autocomplete: 'off', wrap: 'off', 'aria-label': 'Code editor',
   });
-  const root = h('div.editor', h('div.ed-inner', gutter, h('div.ed-code', pre, area)));
-  let errorLines = new Set(), warnLines = new Set();
+  // Debugger: breakpoints (red dots in the gutter) and the line the debugger is stopped on.
+  const curBar = h('div.ed-curline', { hidden: true, 'aria-hidden': 'true' });
+  const root = h('div.editor', h('div.ed-inner', gutter, h('div.ed-code', curBar, pre, area)));
+  let errorLines = new Set(), warnLines = new Set(), bpLines = new Set(), curLine = 0, curKind = '';
+  if (onGutterClick) {
+    gutter.classList.add('clickable');
+    gutter.title = 'Click a line number to set or clear a breakpoint (F9)';
+    gutter.addEventListener('mousedown', e => {
+      const span = e.target.closest('span');
+      if (!span || !gutter.contains(span)) return;
+      e.preventDefault();
+      onGutterClick(Number(span.dataset.line));
+    });
+  }
 
   const paint = () => {
     const text = area.value;
     pre.innerHTML = highlight(text, lang()) + '\n';
     const count = Math.max(text.split('\n').length, minLines);
     gutter.innerHTML = Array.from({ length: count }, (_, i) =>
-      `<span class="${errorLines.has(i + 1) ? 'err' : warnLines.has(i + 1) ? 'warn' : ''}">${i + 1}</span>`).join('');
+      `<span data-line="${i + 1}" class="${errorLines.has(i + 1) ? 'err' : warnLines.has(i + 1) ? 'warn' : ''}${bpLines.has(i + 1) ? ' bp' : ''}${curLine === i + 1 ? ' cur' : ''}">${i + 1}</span>`).join('');
+    placeCur();
   };
+  function placeCur() {
+    curBar.hidden = !curLine;
+    if (!curLine) return;
+    const cs = getComputedStyle(area);
+    const lh = parseFloat(cs.lineHeight) || 22;
+    curBar.style.top = `${(parseFloat(cs.paddingTop) || 12) + (curLine - 1) * lh}px`;
+    curBar.style.height = `${lh}px`;
+    curBar.className = `ed-curline${curKind ? ' ' + curKind : ''}`;
+  }
 
   const insert = (text, selectFrom, selectTo) => {
     area.focus();
@@ -51,6 +73,7 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
     language: lang, enabled: autocompleteOn, insert: text => insert(text),
     onPopupHost: p => root.querySelector('.ed-code').append(p),
     remote: async pos => (await intel('complete', pos)).items,
+    vocab,
   });
 
   const tip = h('div.ed-tip', { hidden: true });
@@ -196,6 +219,20 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
       const lh = parseFloat(getComputedStyle(area).lineHeight) || 22;
       root.querySelector('.ed-inner')?.scrollTo?.({ top: Math.max(0, (line - 4) * lh) });
     },
+    /** Debugger: the lines with a breakpoint (a Set of 1-based numbers). */
+    setBreakpoints(lines) { bpLines = new Set(lines); paint(); },
+    /** Debugger: highlight the line it is stopped on (0 clears); kind 'exception' paints it as a crash. Scrolls it into view. */
+    setCurrent(line, kind = '') {
+      curLine = line || 0; curKind = kind; paint();
+      if (!curLine) return;
+      requestAnimationFrame(() => {
+        const lh = parseFloat(getComputedStyle(area).lineHeight) || 22;
+        const y = (curLine - 1) * lh;
+        if (y < root.scrollTop + lh || y > root.scrollTop + root.clientHeight - 3 * lh) root.scrollTo({ top: Math.max(0, y - root.clientHeight / 3) });
+      });
+    },
+    /** The 1-based line the caret is on. */
+    caretLine() { return area.value.slice(0, area.selectionStart).split('\n').length; },
     mark(diagnostics = []) {
       errorLines = new Set(diagnostics.filter(d => d.severity === 'error').map(d => d.line));
       warnLines = new Set(diagnostics.filter(d => d.severity !== 'error').map(d => d.line));

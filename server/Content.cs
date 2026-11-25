@@ -78,6 +78,10 @@ public sealed partial class Content(string root)
         if (!File.Exists(file)) return null;
         var obj = ReadObject(file);
         Normalize(obj);
+        // A track may set a default "framework" (e.g. "efcore") for every code and predict step that names none.
+        if (Framework(track) is { Length: > 0 } framework)
+            foreach (var step in (obj["steps"] as JsonArray ?? []).OfType<JsonObject>())
+                if ((string?)step["type"] is "code" or "predict" && step["framework"] is null) step["framework"] = framework;
         obj["id"] = lesson;
         obj["key"] = $"{track}/{module}/{lesson}";
         return obj;
@@ -88,6 +92,14 @@ public sealed partial class Content(string root)
         if (!SafeSegment(track)) return "";
         var file = Path.Combine(TracksDir, track, "track.json");
         return File.Exists(file) ? (string?)ReadObject(file)["language"] ?? "" : "";
+    }
+
+    /// <summary>The track's default "framework" for C# steps ("efcore", "web"), or "" for plain C#.</summary>
+    public string Framework(string track)
+    {
+        if (!SafeSegment(track)) return "";
+        var file = Path.Combine(TracksDir, track, "track.json");
+        return File.Exists(file) ? (string?)ReadObject(file)["framework"] ?? "" : "";
     }
 
     /// <summary>Join line arrays into strings everywhere a text field is expected.</summary>

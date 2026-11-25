@@ -30,7 +30,11 @@ public static class CodeIntel
         var refs = runner.IntelReferences.ToList();
         foreach (var path in req.References ?? [])
             if (File.Exists(path)) refs.Add(ExtraRefs.GetOrAdd(path, p => MetadataReference.CreateFromFile(p)));
-        var comp = CSharpCompilation.Create("Intel", [.. trees, .. runner.SupportTrees], refs,
+        // EF Core lessons: the same implicit usings their programs compile with (DbContext, DbSet, [Key] ...).
+        var support = runner.SupportTrees.ToList();
+        if (files.Any(f => (f.Code ?? "").Contains("DbContext") || (f.Code ?? "").Contains("EntityFrameworkCore")) && runner.EfSupportTree is { } ef)
+            support.Add(ef);
+        var comp = CSharpCompilation.Create("Intel", [.. trees, .. support], refs,
             new CSharpCompilationOptions(OutputKind.ConsoleApplication, nullableContextOptions: NullableContextOptions.Enable));
         var model = comp.GetSemanticModel(tree);
         var pos = Math.Clamp(req.Position, 0, tree.Length);

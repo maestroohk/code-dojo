@@ -25,8 +25,8 @@ public sealed class Checker(CSharpRunner runner)
         foreach (var rule in Rules(step, "forbid"))
             results.Add(new(rule.Message, !Regex.IsMatch(bare, rule.Pattern, RegexOptions.Singleline), "This exercise asks you to solve it another way."));
 
-        var web = (string?)step["framework"] == "web";
-        var (program, diags) = runner.Compile(code, (string?)step["template"], web);
+        var (web, efCore) = CSharpRunner.Frameworks((string?)step["framework"]);
+        var (program, diags) = runner.Compile(code, (string?)step["template"], web, efCore: efCore);
         if (program is null)
             return new(false, false, diags, results, "", "", false, 0);
 

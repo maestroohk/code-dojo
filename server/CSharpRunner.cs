@@ -11,12 +11,14 @@ public record Mark(string Name, bool Pass, string Detail);
 public record RunOutput(string Stdout, string Stderr, int ExitCode, bool TimedOut, bool Truncated, long Ms, List<Mark> Marks);
 
 /// <summary>A compiled learner program sitting in its own temp folder. Dispose deletes it.</summary>
-public sealed class Compiled(string dir, string dll, bool web = false) : IDisposable
+public sealed class Compiled(string dir, string dll, bool web = false, bool efCore = false) : IDisposable
 {
     public string Dir => dir;
     public string Dll => dll;
     /// <summary>An ASP.NET Core program: runs with a private port and is tested over HTTP.</summary>
     public bool Web => web;
+    /// <summary>Uses EF Core + SQLite (framework "efcore"): loads the EF assemblies from the shared cache and gets a larger CPU budget.</summary>
+    public bool EfCore => efCore;
     public void Dispose()
     {
         try { Directory.Delete(dir, true); } catch { /* a locked temp folder is not worth failing over */ }
@@ -47,6 +49,8 @@ public sealed class CSharpRunner
     readonly string _webRuntimeConfig;
     readonly SyntaxTree _webSupport;
     readonly SyntaxTree _liveSupport;
+    readonly Lazy<EfLib> _ef;
+    readonly Lazy<List<MetadataReference>> _intelRefs;
     public string DotnetPath => _dotnet;
 
     public CSharpRunner()
@@ -91,7 +95,124 @@ public sealed class CSharpRunner
         });
         _webSupport = CSharpSyntaxTree.ParseText(WebSupportSource, Parse, path: "DojoWeb.cs", encoding: Encoding.UTF8);
         _liveSupport = CSharpSyntaxTree.ParseText(LiveSupportSource, Parse, path: "DojoLive.cs", encoding: Encoding.UTF8);
+        _ef = new(() => EfLib.Prepare(webDir), LazyThreadSafetyMode.ExecutionAndPublication);
+        _intelRefs = new(() =>
+        {
+            try { return [.. _webRefs, .. _ef.Value.Refs]; }
+            catch { return _webRefs; }   // no EF assemblies next to the server: intelligence still works for everything else
+        });
     }
+
+    /// <summary>
+    /// EF Core for learner programs ("framework": "efcore"). The server references
+    /// Microsoft.EntityFrameworkCore.Sqlite, so its output folder holds the managed assemblies
+    /// (EF Core, Microsoft.Data.Sqlite, SQLitePCLRaw) and runtimes/&lt;rid&gt;/native/e_sqlite3.
+    /// Those are copied once into a cache folder keyed by their versions; every run then points
+    /// at that folder through a runtimeconfig property ("Dojo.LibDir") and a resolver compiled
+    /// into the program (DojoEf), so a run copies nothing. Microsoft.Extensions.* come from the
+    /// ASP.NET Core shared framework, which EF runs list next to Microsoft.NETCore.App.
+    /// </summary>
+    sealed class EfLib
+    {
+        public required List<MetadataReference> Refs { get; init; }
+        public required string Dir { get; init; }
+        public required string RuntimeConfig { get; init; }
+        public required SyntaxTree Support { get; init; }
+        public required SyntaxTree ConsoleSupport { get; init; }
+
+        static readonly string[] Managed = ["Microsoft.EntityFrameworkCore*.dll", "Microsoft.Data.Sqlite.dll", "SQLitePCLRaw.*.dll", "Microsoft.Extensions.DependencyModel.dll"];
+
+        public static EfLib Prepare(string webDir)
+        {
+            var src = Path.GetDirectoryName(typeof(Microsoft.EntityFrameworkCore.DbContext).Assembly.Location)!;
+            var managed = Managed.SelectMany(p => Directory.GetFiles(src, p)).Distinct().Order().ToList();
+            var rid = System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier;
+            var nativeDir = Path.Combine(src, "runtimes", rid, "native");
+            var native = Directory.Exists(nativeDir) ? Directory.GetFiles(nativeDir, "*e_sqlite3*").ToList() : [];
+            if (native.Count == 0 && Directory.GetFiles(src, "*e_sqlite3*") is { Length: > 0 } flat) native = [.. flat];   // a RID-specific publish puts it flat
+
+            // Key the cache by every file's name, size and timestamp, so a package upgrade gets a fresh folder.
+            var key = string.Join("|", managed.Concat(native).Select(f => { var i = new FileInfo(f); return $"{i.Name}:{i.Length}:{i.LastWriteTimeUtc.Ticks}"; }));
+            var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..12].ToLowerInvariant();
+            var dir = Path.Combine(Path.GetTempPath(), "code-dojo", "efcore-" + hash);
+            var ready = Path.Combine(dir, ".ready");
+            if (!File.Exists(ready))
+            {
+                // Build beside the final folder and move it into place, so two processes (the server and the tests) never see half a cache.
+                var staging = dir + "-" + Guid.NewGuid().ToString("N")[..8];
+                Directory.CreateDirectory(staging);
+                foreach (var f in managed.Concat(native)) File.Copy(f, Path.Combine(staging, Path.GetFileName(f)), true);
+                File.WriteAllText(Path.Combine(staging, ".ready"), key);
+                try { Directory.Move(staging, dir); }
+                catch (IOException) { try { Directory.Delete(staging, true); } catch { } }   // someone else won the race
+                if (!File.Exists(ready)) throw new InvalidOperationException("could not prepare the EF Core library folder " + dir);
+            }
+
+            return new EfLib
+            {
+                Dir = dir,
+                Refs = managed.Select(f => (MetadataReference)MetadataReference.CreateFromFile(Path.Combine(dir, Path.GetFileName(f)))).ToList(),
+                RuntimeConfig = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    runtimeOptions = new
+                    {
+                        tfm = $"net{Environment.Version.Major}.0",
+                        frameworks = new[]
+                        {
+                            new { name = "Microsoft.NETCore.App", version = Environment.Version.ToString() },
+                            new { name = "Microsoft.AspNetCore.App", version = Path.GetFileName(webDir) },
+                        },
+                        configProperties = new Dictionary<string, object> { ["Dojo.LibDir"] = dir },
+                    },
+                }),
+                Support = CSharpSyntaxTree.ParseText(EfSupportSource, Parse, path: "DojoEf.cs", encoding: Encoding.UTF8),
+                ConsoleSupport = CSharpSyntaxTree.ParseText("global using Microsoft.Extensions.Logging;\nglobal using Microsoft.Extensions.DependencyInjection;\n", Parse, path: "DojoEfConsole.cs", encoding: Encoding.UTF8),
+            };
+        }
+    }
+
+    /// <summary>
+    /// Compiled into EF Core programs: the usings an EF lesson needs, and a resolver that loads the
+    /// EF assemblies and the native SQLite library from the cache folder named in the runtimeconfig.
+    /// </summary>
+    const string EfSupportSource = """
+        global using Microsoft.EntityFrameworkCore;
+        global using Microsoft.EntityFrameworkCore.ChangeTracking;
+        global using Microsoft.EntityFrameworkCore.Diagnostics;
+        global using Microsoft.EntityFrameworkCore.Infrastructure;
+        global using Microsoft.EntityFrameworkCore.Metadata.Builders;
+        global using Microsoft.EntityFrameworkCore.Migrations;
+        global using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+        global using Microsoft.Data.Sqlite;
+        global using System.ComponentModel.DataAnnotations;
+        global using System.ComponentModel.DataAnnotations.Schema;
+
+        #nullable enable
+        internal static class DojoEf
+        {
+            [System.Runtime.CompilerServices.ModuleInitializer]
+            internal static void Init()
+            {
+                var dir = System.AppContext.GetData("Dojo.LibDir") as string;
+                if (string.IsNullOrEmpty(dir)) return;
+                var alc = System.Runtime.Loader.AssemblyLoadContext.Default;
+                alc.Resolving += (ctx, name) =>
+                {
+                    var path = System.IO.Path.Combine(dir, name.Name + ".dll");
+                    return System.IO.File.Exists(path) ? ctx.LoadFromAssemblyPath(path) : null;
+                };
+                alc.ResolvingUnmanagedDll += (assembly, name) =>
+                {
+                    foreach (var file in new[] { name, name + ".dll", "lib" + name + ".so", "lib" + name + ".dylib" })
+                    {
+                        var path = System.IO.Path.Combine(dir, file);
+                        if (System.IO.File.Exists(path)) return System.Runtime.InteropServices.NativeLibrary.Load(path);
+                    }
+                    return System.IntPtr.Zero;
+                };
+            }
+        }
+        """;
 
     /// <summary>Wrap learner code so compiler line numbers point at what they typed.</summary>
     static string BuildSource(string code, string? template)
@@ -105,13 +226,36 @@ public sealed class CSharpRunner
         return $"#line 1 \"{TestFile}\"\n{before}\n#line 1 \"{UserFile}\"\n{code}\n#line 1 \"{TestFile}\"\n{after}\n";
     }
 
+    /// <summary>
+    /// A step's "framework" value: "web", "efcore", or both ("web+efcore"). Anything else is plain C#.
+    /// </summary>
+    public static (bool Web, bool EfCore) Frameworks(string? framework)
+    {
+        var parts = (framework ?? "").Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        return (parts.Contains("web", StringComparer.OrdinalIgnoreCase), parts.Contains("efcore", StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Workbench apps carry no step metadata, so EF Core is switched on when the code plainly uses it.</summary>
+    static bool LooksLikeEfCore(string code) =>
+        code.Contains("DbContext", StringComparison.Ordinal) || code.Contains("EntityFrameworkCore", StringComparison.Ordinal);
+
     /// <param name="live">A web app for the Workbench: no tests, plus a tracer that reports every request it handles.</param>
-    public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false, bool live = false)
+    /// <param name="efCore">Reference EF Core + SQLite (the packages this server ships with) and make them loadable at run time.</param>
+    public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false, bool live = false, bool efCore = false)
     {
         var tree = CSharpSyntaxTree.ParseText(BuildSource(code, template), Parse, path: "Source.cs", encoding: Encoding.UTF8);
         web |= live;
+        efCore |= live && LooksLikeEfCore(code);
         SyntaxTree[] trees = live ? [tree, _support, _webSupport, _liveSupport] : web ? [tree, _support, _webSupport] : [tree, _support];
-        var comp = CSharpCompilation.Create("Exercise", trees, web ? _webRefs : _refs,
+        IEnumerable<MetadataReference> refs = web ? _webRefs : _refs;
+        if (efCore)
+        {
+            var ef = _ef.Value;
+            // EF Core's own dependencies (DI, logging, caching) live in the ASP.NET Core shared framework.
+            refs = _webRefs.Concat(ef.Refs);
+            trees = web ? [.. trees, ef.Support] : [.. trees, ef.Support, ef.ConsoleSupport];
+        }
+        var comp = CSharpCompilation.Create("Exercise", trees, refs,
             new CSharpCompilationOptions(OutputKind.ConsoleApplication,
                 nullableContextOptions: NullableContextOptions.Enable,
                 optimizationLevel: OptimizationLevel.Debug,
@@ -137,8 +281,8 @@ public sealed class CSharpRunner
             try { Directory.Delete(dir, true); } catch { }
             return (null, diags);
         }
-        File.WriteAllText(Path.Combine(dir, "Exercise.runtimeconfig.json"), web ? _webRuntimeConfig : _runtimeConfig);
-        return (new Compiled(dir, dll, web), diags);
+        File.WriteAllText(Path.Combine(dir, "Exercise.runtimeconfig.json"), efCore ? _ef.Value.RuntimeConfig : web ? _webRuntimeConfig : _runtimeConfig);
+        return (new Compiled(dir, dll, web, efCore), diags);
     }
 
     /// <summary>A compilation of plain learner code (no #line mapping), for semantic analysis only.</summary>
@@ -149,8 +293,10 @@ public sealed class CSharpRunner
     public static CSharpParseOptions ParseOptions => Parse;
 
     /// <summary>Everything learner code can see (BCL + ASP.NET Core + the Dojo helpers), for the code-intelligence service.</summary>
-    public IReadOnlyList<MetadataReference> IntelReferences => _webRefs;
+    public IReadOnlyList<MetadataReference> IntelReferences => _intelRefs.Value;
     public SyntaxTree[] SupportTrees => [_support, _webSupport];
+    /// <summary>EF Core's implicit usings, for code intelligence over code that uses EF Core (null when EF is unavailable).</summary>
+    public SyntaxTree? EfSupportTree { get { try { return _ef.Value.Support; } catch { return null; } } }
 
     /// <summary>Cheap check used by the puzzle validator: does this compile, without emitting anything?</summary>
     public bool CompilesClean(string code)
@@ -172,9 +318,16 @@ public sealed class CSharpRunner
 
     public const int CpuLimitMs = 4000;
     public const int WallLimitMs = 15000;
+    /// <summary>
+    /// EF Core programs JIT a large library and build a model before the first query: about a second of CPU on
+    /// its own, more with ASP.NET Core on top. They get a larger CPU budget so a busy machine does not fail
+    /// a correct answer; a runaway loop is still stopped well inside the wall-clock limit.
+    /// </summary>
+    public const int EfCpuLimitMs = 8000;
 
     public async Task<RunOutput> Run(Compiled program, string? stdin, int wallMs = WallLimitMs, int cpuMs = CpuLimitMs)
     {
+        if (program.EfCore && cpuMs == CpuLimitMs) cpuMs = EfCpuLimitMs;
         await Gate.WaitAsync();
         try
         {

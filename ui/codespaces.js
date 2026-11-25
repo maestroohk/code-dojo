@@ -6,6 +6,7 @@
 //   #/spaces/<name>   the IDE: explorer, editor tabs, problems, output, NuGet, request panel for web apps
 import { h, ask } from './util.js';
 import { createEditor } from './editor.js';
+import { createDebugger, breakpointStore, DEBUG_KEYS } from './debugger.js';
 
 const enc = encodeURIComponent;
 async function call(path, body, method) {
@@ -138,6 +139,10 @@ function ide(page, space) {
   let autosave = localStorage.getItem('dojo-space-autosave') === 'on';
   let bottomTab = 'output';
   let nugetTouched = false;     // the learner picked the NuGet project by hand: stop following the open file
+  // Debugger: breakpoints per file (saved per space), and a recorded run to move through (ui/debugger.js).
+  const bps = breakpointStore(`dojo-space-bps:${space}`);
+  let debugging = false, dbgBusy = false, dbgLoc = null;
+  const pendingOpen = new Map();
 
   // ------------------------------------------------------------ project helpers
 
@@ -195,6 +200,7 @@ function ide(page, space) {
   // ------------------------------------------------------------ tabs + editors
 
   const tabBar = h('div.cs-tabs');
+  const dbgHost = h('div.cs-dbghost', { hidden: true });
   const edHost = h('div.cs-edhost');
   const emptyEd = h('div.cs-noeditor.muted', 'Open a file from the explorer.');
 
@@ -222,8 +228,11 @@ function ide(page, space) {
             if (autosave) { clearTimeout(tab.timer); tab.timer = setTimeout(() => save(tab), 900); }
           },
           onRun: () => run(),
+          onGutterClick: line => toggleBreakpoint(tab, line),
         });
         tab.el = tab.editor.el;
+        tab.editor.setBreakpoints(bps.lines(path));
+        if (dbgLoc?.file === path) tab.editor.setCurrent(dbgLoc.line, dbgLoc.kind);
         markTab(tab);
       }
       tabs.push(tab);
@@ -375,6 +384,7 @@ function ide(page, space) {
       if (t.path === node.path || t.path.startsWith(node.path + '/')) {
         const np = r.path + t.path.slice(node.path.length);
         if (sources.has(t.path)) { sources.set(np, sources.get(t.path)); sources.delete(t.path); }
+        bps.rename(t.path, np);
         t.path = np;
       }
     }
@@ -392,7 +402,8 @@ function ide(page, space) {
 
   const targetSel = h('select.cs-target', { title: 'What Build, Run and Test act on', onchange: e => { target = e.target.value; localStorage.setItem(`dojo-space-target:${space}`, target); paintToolbar(); } });
   const buildBtn = h('button.btn.ghost', { type: 'button', title: 'Build (Ctrl+Shift+B)', onclick: () => runJob('build') }, '⚒ Build');
-  const runBtn = h('button.btn.primary', { type: 'button', title: 'Run (F5 or Ctrl+Enter)', onclick: () => run() }, '▶ Run');
+  const runBtn = h('button.btn.primary', { type: 'button', title: `Run without debugging (${DEBUG_KEYS.run} or Ctrl+Enter)`, onclick: () => run() }, '▶ Run');
+  const debugBtn = h('button.btn.ghost.cs-debug-btn', { type: 'button', title: `Debug: record the run, then step through it, backwards too (${DEBUG_KEYS.start}). Click a line number to set a breakpoint (${DEBUG_KEYS.toggle}).`, onclick: () => startDebug() }, '● Debug');
   const stopBtn = h('button.btn.ghost', { type: 'button', title: 'Stop', onclick: stop }, '■ Stop');
   const testBtn = h('button.btn.ghost', { type: 'button', title: 'Run the tests', onclick: () => runJob('test') }, '✓ Test');
   const statusEl = h('span.cs-status.small');
@@ -415,6 +426,8 @@ function ide(page, space) {
     const busy = job?.status === 'running';
     buildBtn.disabled = testBtn.disabled = busy && job.kind !== 'run';
     runBtn.disabled = (busy && job.kind !== 'run') || !runnable();
+    debugBtn.disabled = dbgBusy || !debuggable();
+    debugBtn.textContent = dbgBusy ? '● Recording…' : debugging ? '● Debugging' : '● Debug';
     testBtn.hidden = !projects().some(p => p.kind === 'test');
     stopBtn.disabled = !busy;
     runBtn.textContent = busy && job.kind === 'run' ? '↻ Restart' : '▶ Run';
@@ -474,12 +487,14 @@ function ide(page, space) {
       h(`button.tab.small${bottomTab === 'problems' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('problems') }, `Problems${problems.length ? ` (${errs} error${errs === 1 ? '' : 's'}, ${warns} warning${warns === 1 ? '' : 's'})` : ''}`),
       h(`button.tab.small${bottomTab === 'output' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('output') }, 'Output'),
       web && h(`button.tab.small${bottomTab === 'request' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('request') }, 'Request'),
+      debugging && h(`button.tab.small${bottomTab === 'debug' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('debug') }, 'Debug output'),
       h('span.spacer'),
       bottomTab === 'output' && h('button.btn.ghost.small', { type: 'button', onclick: () => { outLines = []; outEl.textContent = ''; } }, 'Clear'));
     put(bottomBody,
       bottomTab === 'problems' && problemsEl,
       bottomTab === 'output' && [outEl, job?.status === 'running' && job.kind === 'run' && stdin],
-      bottomTab === 'request' && requestEl);
+      bottomTab === 'request' && requestEl,
+      bottomTab === 'debug' && debugging && dbg.output);
     if (bottomTab === 'output') outEl.scrollTop = outEl.scrollHeight;
   }
 
@@ -594,6 +609,89 @@ function ide(page, space) {
     searchInput, resultsEl,
     h('div.cs-panel-sub', 'Installed'), installedEl);
 
+  // ------------------------------------------------------------ debugger (record the run, then move through it)
+
+  /** The console project the debugger records: the selected one if it is a console app, else the first. */
+  function debuggable() {
+    const t = target && byPath(target);
+    if (t && t.kind === 'console') return t;
+    return projects().find(p => p.kind === 'console');
+  }
+  const sideEl = h('aside.cs-side', nugetEl);     // NuGet normally; the debugger's panels while debugging
+  const dbgStdin = h('textarea.dbg-stdin.mono', { rows: 3, spellcheck: false, placeholder: 'Input for Console.ReadLine, one line per read. Restart to use it.',
+    value: localStorage.getItem(`dojo-space-dbg-stdin:${space}`) || '',
+    oninput: e => { try { localStorage.setItem(`dojo-space-dbg-stdin:${space}`, e.target.value); } catch { } } });
+  const dbg = createDebugger({
+    show: (file, line, kind) => showDebugLoc(file, line, kind),
+    breakpoints: bps,
+    onRestart: () => startDebug(),
+    onStop: () => stopDebug(),
+    watchKey: `dojo-space-watch:${space}`,
+  });
+
+  function toggleBreakpoint(tab, line) {
+    if (!tab?.editor || !line) return;
+    bps.toggle(tab.path, line);
+    tab.editor.setBreakpoints(bps.lines(tab.path));
+    dbg.breakpointsChanged();
+  }
+
+  async function showDebugLoc(file, line, kind) {
+    dbgLoc = file ? { file, line, kind } : null;
+    for (const t of tabs) if (t.editor && t.path !== file) t.editor.setCurrent(0);
+    if (!file) return;
+    let tab = tabs.find(t => t.path === file);
+    if (!tab) {
+      if (!pendingOpen.has(file)) pendingOpen.set(file, openFile(file).finally(() => pendingOpen.delete(file)));
+      await pendingOpen.get(file);
+      if (dbgLoc?.file !== file) return;     // stepped on meanwhile
+      tab = tabs.find(t => t.path === file);
+    } else if (active !== tab) activate(tab);
+    tab?.editor?.setCurrent(dbgLoc.line, dbgLoc.kind);
+  }
+
+  function paintDebugLayout() {
+    dbgHost.hidden = !debugging;
+    put(dbgHost, debugging && dbg.bar);
+    put(sideEl, debugging
+      ? [dbg.side, h('section.dbg-panel.dbg-input', h('div.dbg-head', h('b', 'Program input'), h('span.small.muted', 'stdin for the recorded run')), dbgStdin)]
+      : nugetEl);
+    if (!debugging && bottomTab === 'debug') bottomTab = 'output';
+    paintBottom(); paintToolbar();
+  }
+
+  async function startDebug() {
+    const proj = debuggable();
+    if (dbgBusy || !proj) return;
+    if (!await saveAll()) return;
+    dbgBusy = true; statusNote = ''; setStatus(`Recording ${proj.name} for the debugger…`); paintToolbar();
+    const r = await call(`${base}/debug`, { project: proj.path, stdin: dbgStdin.value, breakpoints: bps.list() })
+      .catch(() => ({ error: 'Could not reach the dojo server.' }));
+    dbgBusy = false;
+    if (r.error && !r.events?.length) {
+      setStatus(r.error);
+      if (r.diagnostics?.length) {
+        problems = r.diagnostics.map(d => ({ severity: d.severity, code: d.id, message: d.message, file: d.file, line: d.line, column: d.col }));
+        paintProblems(); tabs.forEach(markTab); paintTree(); showBottom('problems');
+      }
+      paintToolbar();
+      return;
+    }
+    const steps = (r.events || []).filter(e => !e.k).length;
+    setStatus(`debug: ${steps.toLocaleString()} steps recorded in ${((r.ms || 0) / 1000).toFixed(1)}s${r.exception ? ' · it threw' : ''}`);
+    debugging = true;
+    paintDebugLayout();
+    showBottom('debug');
+    dbg.load(r);
+  }
+
+  function stopDebug() {
+    debugging = false;
+    dbg.close();
+    setStatus('');
+    paintDebugLayout();
+  }
+
   // ------------------------------------------------------------ polling
 
   function pollSoon(ms) { clearTimeout(pollTimer); pollTimer = setTimeout(poll, ms); }
@@ -631,21 +729,25 @@ function ide(page, space) {
     h('div.cs-toolbar',
       h('a.back-link.cs-back', { href: '#/spaces' }, '← Spaces'),
       h('b.cs-title', space),
-      targetSel, buildBtn, runBtn, stopBtn, testBtn, statusEl, h('span.spacer'), urlEl),
+      targetSel, buildBtn, runBtn, debugBtn, stopBtn, testBtn, statusEl, h('span.spacer'), urlEl),
     h('aside.cs-explorer',
       h('div.cs-panel-head', h('b', 'Explorer'), h('span.spacer'),
         h('button.icon-btn.small', { type: 'button', title: 'New file', onclick: () => newEntry('newfile', '') }, '+'),
         h('button.icon-btn.small', { type: 'button', title: 'New folder', onclick: () => newEntry('mkdir', '') }, '▱'),
         h('button.icon-btn.small', { type: 'button', title: 'Refresh', onclick: () => Promise.all([loadDetail(), loadSources()]) }, '↻')),
       treeEl),
-    h('section.cs-center', tabBar, h('div.cs-edwrap', edHost)),
+    h('section.cs-center', tabBar, dbgHost, h('div.cs-edwrap', edHost)),
     h('section.cs-bottom', bottomTabs, bottomBody),
-    h('aside.cs-side', nugetEl),
+    sideEl,
     menu);
   edHost.append(emptyEd);
 
   // Keyboard: Ctrl+S save, Ctrl+Shift+B build, F5 run.
   const onKey = e => {
+    if (debugging && dbg.key(e)) return;
+    if (e.key === 'F9') { e.preventDefault(); if (active?.editor) toggleBreakpoint(active, active.editor.caretLine()); return; }
+    if (e.key === 'F5' && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); if (!runBtn.disabled) run(); return; }
+    if (e.key === 'F5' && !e.shiftKey && !e.altKey && debuggable()) { e.preventDefault(); startDebug(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); e.shiftKey ? saveAll() : save(); }
     else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); runJob('build'); }
     else if (e.key === 'F5') { e.preventDefault(); if (!runBtn.disabled) run(); }

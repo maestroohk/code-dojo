@@ -1079,6 +1079,7 @@ public sealed partial class CodeSpaces : IDisposable
         app.MapGet("/api/spaces/{name}/events", (string name, long? since) => J(spaces.Events(name, since ?? 0)));
         app.MapGet("/api/nuget/search", async (string? q, int? take) => J(await spaces.Search(q, take)));
         app.MapGet("/api/nuget/versions", async (string? id) => J(await spaces.Versions(id)));
+        MapDebug(app, spaces, runner, json);   // the time-travel debugger (CodeSpaces.Debug.cs, CodeDebugger.cs)
         app.Lifetime.ApplicationStopping.Register(spaces.Dispose);
         return spaces;
     }

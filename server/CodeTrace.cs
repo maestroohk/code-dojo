@@ -127,12 +127,18 @@ public static class CodeTrace
     }
 
     /// <summary>Inserts __DojoTrace.T(line, "name", value, ...) before statements and into loop conditions.</summary>
-    sealed class Tracer(SemanticModel model) : CSharpSyntaxRewriter
+    /// <param name="sink">The class the calls go to (the debugger uses its own).</param>
+    /// <param name="file">When set, every call starts with this file index (multi-file debugging).</param>
+    internal class Tracer(SemanticModel model, string sink = "__DojoTrace", int? file = null) : CSharpSyntaxRewriter
     {
-        static int Line(SyntaxNode n) => n.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+        protected SemanticModel Model => model;
+        protected static int Line(SyntaxNode n) => n.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+
+        /// <summary>Extra name/value arguments after the locals (the debugger adds "this").</summary>
+        protected virtual IEnumerable<ArgumentSyntax> Extra(SyntaxNode at) => [];
 
         /// <summary>Locals and parameters that can be read at this point without a compiler error.</summary>
-        IEnumerable<ISymbol> Visible(SyntaxNode at)
+        protected virtual IEnumerable<ISymbol> Visible(SyntaxNode at)
         {
             DataFlowAnalysis? flow = null;
             try { flow = at is ExpressionSyntax e ? model.AnalyzeDataFlow(e) : at is StatementSyntax s ? model.AnalyzeDataFlow(s) : null; } catch { }
@@ -148,21 +154,24 @@ public static class CodeTrace
                 .OrderBy(s => s.Locations[0].SourceSpan.Start);
         }
 
-        ArgumentListSyntax Args(SyntaxNode at)
+        protected ArgumentListSyntax Args(SyntaxNode at)
         {
-            var args = new List<ArgumentSyntax> { Argument(LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(Line(at)))) };
+            var args = new List<ArgumentSyntax>();
+            if (file is { } f) args.Add(Argument(LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(f))));
+            args.Add(Argument(LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(Line(at)))));
             foreach (var s in Visible(at))
             {
                 args.Add(Argument(LiteralExpression(SyntaxKind.StringLiteralExpression, Literal(s.Name))));
                 args.Add(Argument(CastExpression(PredefinedType(Token(SyntaxKind.ObjectKeyword)).WithTrailingTrivia(), IdentifierName(s.Name))));
             }
+            args.AddRange(Extra(at));
             return ArgumentList(SeparatedList(args));
         }
 
-        StatementSyntax Trace(SyntaxNode at) => ExpressionStatement(InvocationExpression(
-            ParseExpression("__DojoTrace.T"), Args(at)));
+        protected StatementSyntax Trace(SyntaxNode at) => ExpressionStatement(InvocationExpression(
+            ParseExpression(sink + ".T"), Args(at)));
 
-        static bool Skip(StatementSyntax s) => s is LocalFunctionStatementSyntax or BlockSyntax or EmptyStatementSyntax;
+        protected static bool Skip(StatementSyntax s) => s is LocalFunctionStatementSyntax or BlockSyntax or EmptyStatementSyntax;
 
         public override SyntaxNode? VisitCompilationUnit(CompilationUnitSyntax node)
         {
@@ -211,7 +220,7 @@ public static class CodeTrace
 
         ExpressionSyntax Probe(ExpressionSyntax original, ExpressionSyntax visited) =>
             BinaryExpression(SyntaxKind.LogicalAndExpression,
-                InvocationExpression(ParseExpression("__DojoTrace.C"), Args(original)),
+                InvocationExpression(ParseExpression(sink + ".C"), Args(original)),
                 ParenthesizedExpression(visited));
     }
 }

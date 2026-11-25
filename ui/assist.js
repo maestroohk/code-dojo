@@ -1,3 +1,4 @@
+import { SQL_KEYWORD_LIST } from './util.js';
 // Editor assistance, no dependencies: auto-closing brackets, quotes and HTML tags; a completion popup
 // (keywords, words in the file, common library members, HTML tags/attributes, CSS properties and
 // Tailwind classes inside class="..."); Ctrl+Space to complete and Ctrl+/ to toggle comments.
@@ -16,6 +17,7 @@ const KW = {
   java: 'abstract boolean break byte case catch char class continue default do double else enum extends final finally float for if implements import instanceof int interface long new null package private protected public return short static String super switch this throw throws try void while System',
 };
 KW.typescript = KW.javascript + ' interface type enum implements readonly keyof never unknown any number string boolean as satisfies';
+KW.sql = SQL_KEYWORD_LIST.join(' ');
 
 // "After a dot": the members people reach for most.
 const MEMBERS = {
@@ -65,7 +67,8 @@ function tailwindClasses() {
 
 // ---------------------------------------------------------------- the assist
 
-export function attachAssist(area, { language = () => 'csharp', enabled = () => true, insert, onPopupHost, remote } = {}) {
+// vocab: optional () => ({ words: [...], members(name) => [...] }), e.g. table and column names from a database schema.
+export function attachAssist(area, { language = () => 'csharp', enabled = () => true, insert, onPopupHost, remote, vocab } = {}) {
   const popup = document.createElement('div');
   popup.className = 'ac-pop';
   popup.hidden = true;
@@ -98,12 +101,14 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
     const dot = before.match(/([A-Za-z_]\w*)\.(\w*)$/);
     const base = L === 'html' ? 'javascript' : L;
     if (dot) {
+      const own = vocab?.()?.members?.(dot[1], v);
+      if (own?.length) return { word: dot[2], list: own, min: 0 };
       const m = MEMBERS[base] || {};
       return { word: dot[2], list: (m[dot[1]] || m._ || '').split(' ').filter(Boolean), min: 0 };
     }
     const w = before.match(/([A-Za-z_]\w*)$/);
     if (!w) return null;
-    const words = new Set((KW[base] || '').split(' '));
+    const words = new Set([...(vocab?.()?.words || []), ...(KW[base] || '').split(' ')]);
     for (const m of v.matchAll(/[A-Za-z_]\w{2,}/g)) if (m[0] !== w[1]) words.add(m[0]);
     return { word: w[1], list: [...words], min: 2 };
   }
@@ -227,7 +232,7 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
 
   function toggleComment() {
     const L = lang();
-    const prefix = L === 'python' ? '# ' : '// ';
+    const prefix = L === 'python' ? '# ' : L === 'sql' ? '-- ' : '// ';
     const v = area.value;
     const start = v.lastIndexOf('\n', area.selectionStart - 1) + 1;
     let end = v.indexOf('\n', area.selectionEnd); if (end < 0) end = v.length;
