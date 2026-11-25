@@ -287,6 +287,27 @@ Rules for web steps:
 - The Run button is hidden on steps with a template, so the prompt should tell the learner that
   **Run checks** starts the server and calls it.
 
+## Tracks in Python, JavaScript or TypeScript
+
+Set `"language"` in `track.json` to `"python"`, `"javascript"` or `"typescript"`. Code steps then run
+in that language with the machine's own toolchain (Python 3, Node.js; TypeScript runs through Node,
+which strips the types without checking them). The step format is the same as C#:
+
+- `tests` with `stdin` / `expect` / `expectContains`, compared the same way.
+- `require` / `forbid` regexes, tested with comments removed (string contents are NOT removed here).
+- `template` with `{{CODE}}`, calling the same helpers, spelled for the language:
+
+| | Python | JavaScript / TypeScript |
+|---|---|---|
+| equal | `Dojo.eq("name", expected, actual)` | `Dojo.eq('name', expected, actual)` (compared as JSON, so arrays and objects work) |
+| condition | `Dojo.check("name", ok, "detail")` | `Dojo.check('name', ok, 'detail')` |
+| raises | `Dojo.throws("name", ValueError, lambda: f())` | `Dojo.throws('name', () => f())`, `await Dojo.throwsAsync(...)` |
+| printed text | `Dojo.capture(lambda: f())` | `Dojo.capture(() => f())` |
+
+Put `{{CODE}}` first and the checks after it. `predict` steps run in the track's language too.
+The `--puzzles` alternative-answer search only runs for C#. The learner's line numbers in error
+messages are correct; the one-line helper prelude is accounted for.
+
 ## The runtime
 
 - Learner code is compiled as C# (latest) with nullable enabled, as a top-level-statements program.

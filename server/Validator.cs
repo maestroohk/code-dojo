@@ -9,7 +9,7 @@ namespace CodeDojo;
 /// </summary>
 public static class Validator
 {
-    public static async Task<int> Run(Content content, Checker checker, CSharpRunner runner, string? filter, bool puzzles = false)
+    public static async Task<int> Run(Content content, Checker checker, CSharpRunner runner, LangRunner langs, string? filter, bool puzzles = false)
     {
         int lessons = 0, steps = 0, code = 0, errors = 0, warnings = 0, puzzlesChecked = 0, unverifiable = 0;
 
@@ -21,6 +21,7 @@ public static class Validator
         foreach (var meta in (module["lessons"] as JsonArray ?? []).OfType<JsonObject>())
         {
             var key = $"{track["id"]}/{module["id"]}/{meta["id"]}";
+            var language = (string?)track["language"] ?? "csharp";
             if (filter is not null && !key.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
             lessons++;
             Console.WriteLine(key);
@@ -71,6 +72,16 @@ public static class Validator
                             var snippet = Need(step, "code");
                             var answer = Need(step, "answer");
                             if ((bool?)step["verify"] == false) break;       // snippet is a fragment, not a program
+                            if (language != "csharp")
+                            {
+                                if (langs.Find(language) is not { } plang) { Warn(where, $"{language} is not installed, so the answer is unchecked"); break; }
+                                var pr = await langs.Run(plang, snippet, (string?)step["stdin"]);
+                                var pprinted = Checker.Tidy(pr.Stdout);
+                                if (!pr.Compiled || pr.ExitCode != 0) Error(where, "predict code fails: " + (pr.CompileOutput + pr.Stderr).Trim().Split('\n').LastOrDefault());
+                                else if (pprinted != Checker.Tidy(answer))
+                                    Error(where, $"predict answer is wrong: says [{answer.Replace("\n", "\\n")}] but the code prints [{pprinted.Replace("\n", "\\n")}]");
+                                break;
+                            }
                             var (prog, pdiags) = runner.Compile(snippet);
                             if (prog is null)
                             {
@@ -89,7 +100,8 @@ public static class Validator
                             break;
                         case "order":
                             if (Arr(step, "lines").Count < 3) throw new("needs at least 3 lines");
-                            if (puzzles)
+                            if (puzzles && language != "csharp") unverifiable++;
+                            else if (puzzles)
                             {
                                 var alts = await AltOrders(runner, step);
                                 if (alts is null) unverifiable++;
@@ -102,7 +114,8 @@ public static class Validator
                             var slots = Regex.Matches(src, @"__(\d+)__").Select(m => int.Parse(m.Groups[1].Value)).Distinct().Order().ToList();
                             if (!slots.SequenceEqual(Enumerable.Range(1, blanks.Count)))
                                 throw new($"code has slots [{string.Join(",", slots)}] but there are {blanks.Count} blanks");
-                            if (puzzles)
+                            if (puzzles && language != "csharp") unverifiable++;
+                            else if (puzzles)
                             {
                                 var fills = await AltBlanks(runner, step);
                                 if (fills is null) unverifiable++;
@@ -123,7 +136,8 @@ public static class Validator
                             code++;
                             Need(step, "prompt");
                             var solution = Need(step, "solution");
-                            var good = await checker.Check(step, solution);
+                            async Task<CheckResult> Grade(string c) => language == "csharp" ? await checker.Check(step, c) : await PolyChecker.Check(langs, step, c, language);
+                            var good = await Grade(solution);
                             if (!good.Passed)
                             {
                                 var why = !good.Compiled
@@ -132,7 +146,7 @@ public static class Validator
                                 Error(where, "reference solution does not pass -> " + why.Replace("\n", " | "));
                             }
                             var starter = (string?)step["starter"] ?? "";
-                            if ((await checker.Check(step, starter)).Passed) Warn(where, "the starter code already passes");
+                            if ((await Grade(starter)).Passed) Warn(where, "the starter code already passes");
                             break;
                         default:
                             throw new($"unknown step type '{type}'");

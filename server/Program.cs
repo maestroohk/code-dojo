@@ -25,7 +25,7 @@ var progressFile = Path.Combine(stateDir, "progress.json");
 var progressLock = new object();
 
 if (args.Length > 0 && args[0] == "validate")
-    return await Validator.Run(content, checker, runner,
+    return await Validator.Run(content, checker, runner, langs,
         args.Skip(1).FirstOrDefault(a => !a.StartsWith("--")), args.Contains("--puzzles"));
 
 if (args.Length > 0 && args[0] == "stress")
@@ -115,7 +115,8 @@ app.MapGet("/api/languages", () => Results.Json(
 
 app.MapPost("/api/run", async (RunRequest req) =>
 {
-    if (req.Language is { Length: > 0 } other && other != "csharp")
+    var runLanguage = req.Language is { Length: > 0 } l ? l : content.Language(req.Track ?? "csharp");
+    if (runLanguage is { Length: > 0 } other && other != "csharp")
     {
         if (langs.Find(other) is not { } lang) return Results.BadRequest($"{other} is not installed on this machine");
         var r = await langs.Run(lang, req.Code ?? "", req.Stdin);
@@ -139,11 +140,14 @@ app.MapPost("/api/run", async (RunRequest req) =>
 // Graded run of one code step. The step is looked up server-side so tests cannot be bypassed by accident.
 app.MapPost("/api/check", async (CheckRequest req) =>
 {
-    if (content.Language(req.Track) != "csharp") return Results.BadRequest("unsupported language");
+    var language = content.Language(req.Track);
+    if (language != "csharp" && !PolyChecker.Handles(language)) return Results.BadRequest("unsupported language");
     var lesson = content.Lesson(req.Track, req.Module, req.Lesson);
     if ((lesson?["steps"] as JsonArray)?.ElementAtOrDefault(req.Step) is not JsonObject step || (string?)step["type"] != "code")
         return Results.NotFound();
-    return Results.Json(await checker.Check(step, req.Code ?? ""), json);
+    return Results.Json(language == "csharp"
+        ? await checker.Check(step, req.Code ?? "")
+        : await PolyChecker.Check(langs, step, req.Code ?? "", language), json);
 });
 
 // Certificate lab: build a small PKI from a description and validate a chain with the real X509Chain.
