@@ -1,0 +1,253 @@
+{
+  "title": "VPNs and tunnels",
+  "summary": "Packets inside packets: IPsec, WireGuard, SSH tunnels, split tunnelling and their MTU cost.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A packet inside a packet",
+      "body": [
+        "A **tunnel** wraps a whole packet inside another, usually encrypted, so private networks can talk across the internet:",
+        "",
+        "```text",
+        "[ outer IP 198.51.100.7 -> 203.0.113.9 | UDP 51820 | WireGuard | [ inner IP 10.1.0.5 -> 10.2.0.9 | TCP | data ] ]",
+        "```",
+        "",
+        "- **Site-to-site**: two offices' routers keep a tunnel up; users don't notice.",
+        "- **Remote access**: a laptop connects into the company network.",
+        "- **IPsec** (IKE to negotiate keys, ESP to carry data) is the traditional standard; **WireGuard** is small and fast, UDP-only, configured with public keys; **OpenVPN** runs over TLS."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each technology to its description.",
+      "pairs": [
+        [
+          "IPsec",
+          "IKE negotiates keys, ESP carries traffic"
+        ],
+        [
+          "WireGuard",
+          "Public-key peers over UDP, routes by AllowedIPs"
+        ],
+        [
+          "OpenVPN",
+          "VPN built on TLS"
+        ],
+        [
+          "`ssh -L`",
+          "Forward one local port through an SSH server"
+        ],
+        [
+          "`ssh -D`",
+          "SOCKS proxy through an SSH server"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "WireGuard over IPv4 adds 60 bytes of headers. What inner MTU and TCP MSS fit a 1500-byte path?",
+      "code": [
+        "int path = 1500, overhead = 60;",
+        "int inner = path - overhead;",
+        "Console.WriteLine($\"tunnel MTU {inner}, MSS {inner - 40}\");"
+      ],
+      "answer": [
+        "tunnel MTU 1440, MSS 1400"
+      ],
+      "explain": "WireGuard's default of 1420 also leaves room for IPv6 outer headers."
+    },
+    {
+      "type": "learn",
+      "title": "Split tunnel, full tunnel",
+      "body": [
+        "- **Full tunnel**: *all* traffic goes through the VPN (`AllowedIPs = 0.0.0.0/0`). The company sees and filters everything; slower for video calls.",
+        "- **Split tunnel**: only company ranges go through it (`AllowedIPs = 10.0.0.0/8`); the rest uses the local internet.",
+        "",
+        "WireGuard does **crypto-key routing**: each peer has a list of AllowedIPs, and an outgoing packet goes to the peer whose AllowedIPs match its destination most specifically. Incoming packets are accepted only if their inner source is in the sending peer's AllowedIPs.",
+        "",
+        "SSH tunnels are the pocket-knife version:",
+        "",
+        "```text",
+        "ssh -L 5432:db.internal:5432 bastion   # localhost:5432 -> db.internal:5432 via bastion",
+        "ssh -R 8080:localhost:3000 server      # server:8080 -> your laptop's :3000",
+        "ssh -D 1080 bastion                    # SOCKS proxy on localhost:1080",
+        "```"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "With a split tunnel for `10.0.0.0/8`, where does each go?",
+      "buckets": [
+        "Through the VPN",
+        "Straight to the internet"
+      ],
+      "items": [
+        [
+          "`10.20.4.5` (internal wiki)",
+          0
+        ],
+        [
+          "`10.255.0.1`",
+          0
+        ],
+        [
+          "`142.250.0.1` (a search engine)",
+          1
+        ],
+        [
+          "`192.168.1.1` (home router)",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the command: make the internal database `db.internal:5432` reachable on your laptop's port 15432 via `bastion`.",
+      "code": [
+        "ssh __1__ __2__:db.internal:5432 bastion"
+      ],
+      "blanks": [
+        "-L",
+        "15432"
+      ],
+      "bank": [
+        "-R",
+        "-D",
+        "5432",
+        "-p"
+      ],
+      "explain": "`-L local_port:remote_host:remote_port`: the remote host is resolved and reached from the bastion."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A developer runs `ssh -R 0.0.0.0:8080:localhost:3000 vps` to show a demo. What's the security concern?",
+      "options": [
+        "Anyone on the internet who can reach vps:8080 now reaches the developer's local app (and through it, possibly the office network)",
+        "None, SSH is encrypted",
+        "It disables the firewall on the laptop",
+        "It leaks DNS"
+      ],
+      "answer": 0,
+      "explain": "Tunnels bypass perimeter controls. Remote forwards to 0.0.0.0 are exactly what `GatewayPorts no` exists to stop."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Users on the VPN can reach internal IPs but `wiki.corp.example` doesn't resolve. Most likely?",
+      "options": [
+        "The VPN doesn't push the internal DNS server (or split DNS for corp.example)",
+        "The MTU is wrong",
+        "IPsec is blocking port 53",
+        "The wiki is down"
+      ],
+      "answer": 0,
+      "explain": "Routing and name resolution are separate: a VPN must provide both."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Crypto-key routing",
+      "prompt": [
+        "Write `string Peer(List<(string Name, List<string> AllowedIps)> peers, string dst)` returning the peer whose AllowedIPs contain `dst` with the **longest** prefix,",
+        "or `\"dropped (no peer)\"`. Helpers are given."
+      ],
+      "starter": [
+        "// helpers you can use",
+        "uint ToUInt(string ip) => ip.Split('.').Aggregate(0u, (acc, o) => (acc << 8) | uint.Parse(o));",
+        "string FromUInt(uint v) => $\"{v >> 24}.{(v >> 16) & 255}.{(v >> 8) & 255}.{v & 255}\";",
+        "uint MaskOf(int prefix) => prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "",
+        "string Peer(List<(string Name, List<string> AllowedIps)> peers, string dst)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "uint ToUInt(string ip) => ip.Split('.').Aggregate(0u, (acc, o) => (acc << 8) | uint.Parse(o));",
+        "string FromUInt(uint v) => $\"{v >> 24}.{(v >> 16) & 255}.{(v >> 8) & 255}.{v & 255}\";",
+        "uint MaskOf(int prefix) => prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "",
+        "string Peer(List<(string Name, List<string> AllowedIps)> peers, string dst)",
+        "{",
+        "    string best = \"dropped (no peer)\";",
+        "    int bestLen = -1;",
+        "    foreach (var (name, allowed) in peers)",
+        "        foreach (var cidr in allowed)",
+        "        {",
+        "            var p = cidr.Split('/');",
+        "            int len = int.Parse(p[1]);",
+        "            if ((ToUInt(dst) & MaskOf(len)) == (ToUInt(p[0]) & MaskOf(len)) && len > bestLen) { best = name; bestLen = len; }",
+        "        }",
+        "    return best;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoP = new List<(string Name, List<string> AllowedIps)> {",
+        "    (\"office\", new List<string> { \"10.0.0.0/8\" }),",
+        "    (\"lab\", new List<string> { \"10.50.0.0/16\", \"192.168.77.0/24\" }) };",
+        "Dojo.Eq(\"office range\", \"office\", Peer(dojoP, \"10.1.2.3\"));",
+        "Dojo.Eq(\"more specific wins\", \"lab\", Peer(dojoP, \"10.50.0.9\"));",
+        "Dojo.Eq(\"second range of a peer\", \"lab\", Peer(dojoP, \"192.168.77.20\"));",
+        "Dojo.Eq(\"not tunnelled\", \"dropped (no peer)\", Peer(dojoP, \"8.8.8.8\"));",
+        "Dojo.Eq(\"full tunnel peer\", \"exit\", Peer(new List<(string Name, List<string> AllowedIps)> { (\"exit\", new List<string> { \"0.0.0.0/0\" }) }, \"8.8.8.8\"));"
+      ],
+      "hints": [
+        "Loop over every peer and every CIDR.",
+        "Keep the match with the biggest prefix."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Parse an SSH forward",
+      "prompt": [
+        "Write `(string Kind, int Listen, string Host, int Port) ParseForward(string arg)`:",
+        "",
+        "- `\"-L 8080:web.internal:80\"` -> `(\"local\", 8080, \"web.internal\", 80)`",
+        "- `\"-R 9000:localhost:3000\"` -> `(\"remote\", 9000, \"localhost\", 3000)`",
+        "- `\"-D 1080\"` -> `(\"dynamic\", 1080, \"\", 0)`",
+        "",
+        "An optional bind address may come first: `\"-L 127.0.0.1:8080:web:80\"` has listen port 8080. Anything else throws `FormatException`."
+      ],
+      "starter": [
+        "(string Kind, int Listen, string Host, int Port) ParseForward(string arg)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "(string Kind, int Listen, string Host, int Port) ParseForward(string arg)",
+        "{",
+        "    var parts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "    if (parts.Length != 2) throw new FormatException(\"expected a flag and a spec\");",
+        "    var f = parts[1].Split(':');",
+        "    switch (parts[0])",
+        "    {",
+        "        case \"-D\":",
+        "            return (\"dynamic\", int.Parse(f[^1]), \"\", 0);",
+        "        case \"-L\":",
+        "        case \"-R\":",
+        "            if (f.Length < 3) throw new FormatException(\"expected port:host:port\");",
+        "            return (parts[0] == \"-L\" ? \"local\" : \"remote\", int.Parse(f[^3]), f[^2], int.Parse(f[^1]));",
+        "        default:",
+        "            throw new FormatException(\"unknown flag \" + parts[0]);",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"local\", (\"local\", 8080, \"web.internal\", 80), ParseForward(\"-L 8080:web.internal:80\"));",
+        "Dojo.Eq(\"remote\", (\"remote\", 9000, \"localhost\", 3000), ParseForward(\"-R 9000:localhost:3000\"));",
+        "Dojo.Eq(\"dynamic\", (\"dynamic\", 1080, \"\", 0), ParseForward(\"-D 1080\"));",
+        "Dojo.Eq(\"bind address\", (\"local\", 8080, \"web\", 80), ParseForward(\"-L 127.0.0.1:8080:web:80\"));",
+        "Dojo.Throws<FormatException>(\"unknown flag\", () => ParseForward(\"-X 1:2:3\"));"
+      ],
+      "hints": [
+        "Split the flag from the spec, then split the spec on `:`.",
+        "Count from the end (`f[^1]`, `f[^2]`, `f[^3]`) so an optional bind address doesn't matter."
+      ]
+    }
+  ]
+}

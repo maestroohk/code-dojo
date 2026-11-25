@@ -1,0 +1,198 @@
+{
+  "title": "NAT and port forwarding",
+  "summary": "Build source NAT and port forwards the way a home router does, and know when they become a hole.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The home network",
+      "body": [
+        "```text",
+        " laptop 10.18.1.10 -+",
+        "                    +-- router ------------- website 203.0.113.80",
+        " nas    10.18.1.20 -+  10.18.1.254 | 203.0.113.1     (\"the internet\")",
+        "        home 10.18.1.0/24              internet 203.0.113.0/24",
+        "```",
+        "",
+        "Millions of homes use `192.168.1.x` at once. That only works because private addresses **never leave the house unchanged**.",
+        "",
+        "**Source NAT (masquerading):** when the laptop sends a packet out, the router rewrites the **source** from `10.18.1.10` to its own `203.0.113.1` and notes the connection in its **conntrack** table.",
+        "When the reply comes back to `203.0.113.1`, it looks the connection up and rewrites the **destination** back to `10.18.1.10`.",
+        "",
+        "```text",
+        "iptables -t nat -A POSTROUTING -s 10.18.1.0/24 ! -d 10.18.1.0/24 -j MASQUERADE",
+        "```",
+        "",
+        "`MASQUERADE` = \"use whatever address the outgoing interface has\". It's in `POSTROUTING` because the router must first decide which way the packet goes."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Order the life of the laptop's request to the website through source NAT.",
+      "lines": [
+        "Laptop sends 10.18.1.10:51000 -> 203.0.113.80:80",
+        "Router routes it towards the internet interface",
+        "POSTROUTING rewrites the source to 203.0.113.1 and records the mapping",
+        "Website replies to 203.0.113.1",
+        "Router finds the mapping and rewrites the destination to 10.18.1.10:51000"
+      ],
+      "explain": "Routing decides first, then the source is rewritten on the way out."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The website's logs show every request from your office coming from `203.0.113.1`. Why, and what does an investigator need to go further?",
+      "options": [
+        "All office devices share the router's public address via NAT; they need the router's NAT/conntrack logs",
+        "The website logs are broken",
+        "Everyone uses the same laptop",
+        "IPv4 hides client addresses by design"
+      ],
+      "answer": 0,
+      "explain": "Behind one NATed address could be one person or a whole company."
+    },
+    {
+      "type": "learn",
+      "title": "Destination NAT: port forwarding",
+      "body": [
+        "The internet can't start a connection to the laptop: `10.18.1.10` means nothing out there. To expose one service you tell the router",
+        "\"anything arriving at my public address on port 8080, send to the NAS\":",
+        "",
+        "```text",
+        "iptables -t nat -A PREROUTING -d 203.0.113.1 -p tcp --dport 8080 \\",
+        "         -j DNAT --to-destination 10.18.1.20:8080",
+        "iptables -t nat -S            # list NAT rules",
+        "```",
+        "",
+        "This happens in `PREROUTING`, **before** routing, so the router then routes the rewritten packet inside.",
+        "",
+        "> **Try it for real:** Live lab 5."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the rules: masquerade the home network on the way out, and forward public port 2222 to the NAS's SSH.",
+      "code": [
+        "iptables -t nat -A __1__ -s 10.18.1.0/24 ! -d 10.18.1.0/24 -j __2__",
+        "iptables -t nat -A __3__ -d 203.0.113.1 -p tcp --dport 2222 -j DNAT --to-destination 10.18.1.20:22"
+      ],
+      "blanks": [
+        "POSTROUTING",
+        "MASQUERADE",
+        "PREROUTING"
+      ],
+      "bank": [
+        "INPUT",
+        "FORWARD",
+        "SNAT-ALL",
+        "ACCEPT"
+      ],
+      "explain": "Source rewriting after routing, destination rewriting before it."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which nat chain does each belong in?",
+      "buckets": [
+        "PREROUTING",
+        "POSTROUTING"
+      ],
+      "items": [
+        [
+          "DNAT / port forward",
+          0
+        ],
+        [
+          "Rewriting the destination of inbound packets",
+          0
+        ],
+        [
+          "MASQUERADE",
+          1
+        ],
+        [
+          "SNAT --to-source",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A home camera shows up on internet-wide scan results, although nobody configured anything. Most likely?",
+      "options": [
+        "UPnP let the camera add its own port forward on the router",
+        "NAT is a firewall, so this can't happen",
+        "The ISP gave the camera a public IP",
+        "DNS leaked the camera's name"
+      ],
+      "answer": 0,
+      "explain": "NAT is not a firewall. A forgotten or automatic (UPnP) forward is the classic way devices end up exposed."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A NAT router",
+      "prompt": [
+        "Write a class `NatRouter` constructed with `string publicIp`:",
+        "",
+        "- `void Forward(int publicPort, string inside)` adds a port forward (`inside` like `\"10.18.1.20:8080\"`).",
+        "- `int Outbound(string insideIpPort)` returns the public port used for an outgoing connection: the same port again for the same `insideIpPort`,",
+        "  otherwise the next free port starting at `40000` (never one used by a forward).",
+        "- `string? Inbound(int publicPort)` returns where a packet arriving on that port goes: a forward's target, a NAT mapping's inside address, or `null` (dropped)."
+      ],
+      "starter": [
+        "class NatRouter",
+        "{",
+        "    public NatRouter(string publicIp)",
+        "    {",
+        "    }",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "class NatRouter",
+        "{",
+        "    private readonly string publicIp;",
+        "    private readonly Dictionary<int, string> forwards = new();",
+        "    private readonly Dictionary<string, int> outMap = new();",
+        "    private readonly Dictionary<int, string> inMap = new();",
+        "    private int nextPort = 40000;",
+        "",
+        "    public NatRouter(string publicIp) => this.publicIp = publicIp;",
+        "",
+        "    public void Forward(int publicPort, string inside) => forwards[publicPort] = inside;",
+        "",
+        "    public int Outbound(string insideIpPort)",
+        "    {",
+        "        if (outMap.TryGetValue(insideIpPort, out int p)) return p;",
+        "        while (forwards.ContainsKey(nextPort) || inMap.ContainsKey(nextPort)) nextPort++;",
+        "        p = nextPort++;",
+        "        outMap[insideIpPort] = p;",
+        "        inMap[p] = insideIpPort;",
+        "        return p;",
+        "    }",
+        "",
+        "    public string? Inbound(int publicPort)",
+        "    {",
+        "        if (forwards.TryGetValue(publicPort, out var f)) return f;",
+        "        return inMap.TryGetValue(publicPort, out var m) ? m : null;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoR = new NatRouter(\"203.0.113.1\");",
+        "dojoR.Forward(40001, \"10.18.1.20:8080\");",
+        "Dojo.Eq(\"first outbound\", 40000, dojoR.Outbound(\"10.18.1.10:51000\"));",
+        "Dojo.Eq(\"same flow reuses port\", 40000, dojoR.Outbound(\"10.18.1.10:51000\"));",
+        "Dojo.Eq(\"skips the forwarded port\", 40002, dojoR.Outbound(\"10.18.1.10:51001\"));",
+        "Dojo.Eq(\"reply finds the laptop\", \"10.18.1.10:51000\", dojoR.Inbound(40000));",
+        "Dojo.Eq(\"forward reaches the NAS\", \"10.18.1.20:8080\", dojoR.Inbound(40001));",
+        "Dojo.Eq(\"unsolicited is dropped\", null, dojoR.Inbound(55555));",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Keep two dictionaries for mappings: inside -> port and port -> inside.",
+        "Skip ports already used by forwards when allocating."
+      ]
+    }
+  ]
+}

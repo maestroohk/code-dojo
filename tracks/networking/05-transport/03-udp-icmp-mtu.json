@@ -1,0 +1,223 @@
+{
+  "title": "UDP, ICMP and MTU",
+  "summary": "Fire-and-forget datagrams, the network's error messages, and why big packets sometimes vanish.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "UDP in practice",
+      "body": [
+        "UDP adds just 8 bytes: source port, destination port, length, checksum. No connection, no ordering, no retransmission.",
+        "Applications that use it add what they need themselves: DNS retries, QUIC builds full reliability, video codecs tolerate loss.",
+        "",
+        "Because there's no handshake, the source address isn't verified. Attackers send small spoofed queries to DNS, NTP or memcached servers that reply with large answers to the victim: **amplification** DDoS."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Is this a property of TCP or UDP?",
+      "buckets": [
+        "TCP",
+        "UDP"
+      ],
+      "items": [
+        [
+          "8-byte header",
+          1
+        ],
+        [
+          "Three-way handshake",
+          0
+        ],
+        [
+          "Retransmits lost data",
+          0
+        ],
+        [
+          "Usable for amplification attacks with spoofed sources",
+          1
+        ],
+        [
+          "Delivers bytes in order",
+          0
+        ],
+        [
+          "Each send is one datagram",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "ICMP: the network talking back",
+      "body": [
+        "ICMP carries control messages, inside IP:",
+        "",
+        "| Type | Meaning | You see it in |",
+        "|---|---|---|",
+        "| 0 / 8 | echo reply / request | `ping` |",
+        "| 3 | destination unreachable (code 3 = port unreachable, 4 = fragmentation needed) | closed UDP ports, PMTUD |",
+        "| 11 | time exceeded: TTL hit 0 | `traceroute` |",
+        "",
+        "**traceroute** sends probes with TTL 1, 2, 3, ... Each router that decrements TTL to 0 drops the probe and replies \"time exceeded\", revealing itself. Routers that don't reply show as `* * *`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the ICMP message to what caused it.",
+      "pairs": [
+        [
+          "Echo reply",
+          "Someone pinged you"
+        ],
+        [
+          "Time exceeded",
+          "A packet's TTL reached zero"
+        ],
+        [
+          "Port unreachable",
+          "UDP to a port with no listener"
+        ],
+        [
+          "Fragmentation needed",
+          "Packet too big and Don't Fragment set"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "MTU and fragmentation",
+      "body": [
+        "Each link has an **MTU**: the largest IP packet it carries (1500 bytes on Ethernet). With 20 bytes of IP and 20 of TCP headers, the largest TCP payload, the **MSS**, is 1460.",
+        "",
+        "Tunnels add headers and shrink the MTU (WireGuard ~1420, PPPoE 1492). Bigger packets must be **fragmented**, or, if the **Don't Fragment** bit is set (as TCP does), dropped with ICMP \"fragmentation needed\" so the sender can shrink: **path MTU discovery**.",
+        "",
+        "If a firewall blocks that ICMP, you get a **PMTUD black hole**: the handshake and small requests work, large transfers hang. Fix with **MSS clamping** on the tunnel router or by allowing ICMP type 3."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What MSS does each link MTU allow (IPv4 and TCP headers are 20 bytes each)?",
+      "code": [
+        "foreach (int mtu in new[] { 1500, 1420, 1280 })",
+        "    Console.WriteLine($\"MTU {mtu}: MSS {mtu - 40}\");"
+      ],
+      "answer": [
+        "MTU 1500: MSS 1460",
+        "MTU 1420: MSS 1380",
+        "MTU 1280: MSS 1240"
+      ],
+      "explain": "1280 is also the minimum MTU every IPv6 link must support."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Over the new site-to-site VPN, SSH logins work but `scp` of a large file stalls at 0%, and web pages half-load. What's the likely cause?",
+      "options": [
+        "MTU: big packets with DF set are dropped and the ICMP 'fragmentation needed' is blocked; clamp the MSS or allow that ICMP",
+        "The VPN is too slow",
+        "SSH keys are wrong",
+        "DNS is broken"
+      ],
+      "answer": 0,
+      "explain": "Small packets fit, full-size ones vanish: the signature of a PMTUD black hole."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the command to test whether a full 1500-byte packet passes without fragmentation (ICMP + IP headers are 28 bytes).",
+      "code": [
+        "ping -M __1__ -s __2__ 10.20.0.1"
+      ],
+      "blanks": [
+        "do",
+        "1472"
+      ],
+      "bank": [
+        "dont",
+        "1500",
+        "1460",
+        "want"
+      ],
+      "explain": "`-M do` sets Don't Fragment; 1472 + 28 = 1500."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Fragment a datagram",
+      "prompt": [
+        "Write `List<(int Offset, int Length, bool More)> Fragment(int payload, int mtu)` splitting an IP payload of `payload` bytes for a link MTU (20-byte IP header per fragment).",
+        "Each fragment carries at most `(mtu - 20)` rounded **down to a multiple of 8** bytes; `Offset` is in 8-byte units; `More` is true on all but the last."
+      ],
+      "starter": [
+        "List<(int Offset, int Length, bool More)> Fragment(int payload, int mtu)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<(int Offset, int Length, bool More)> Fragment(int payload, int mtu)",
+        "{",
+        "    int max = (mtu - 20) / 8 * 8;",
+        "    var result = new List<(int Offset, int Length, bool More)>();",
+        "    int done = 0;",
+        "    while (done < payload)",
+        "    {",
+        "        int len = Math.Min(max, payload - done);",
+        "        result.Add((done / 8, len, done + len < payload));",
+        "        done += len;",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"4000 over 1500\", new List<(int Offset, int Length, bool More)> { (0, 1480, true), (185, 1480, true), (370, 1040, false) }, Fragment(4000, 1500));",
+        "Dojo.Eq(\"fits\", new List<(int Offset, int Length, bool More)> { (0, 1000, false) }, Fragment(1000, 1500));",
+        "Dojo.Eq(\"rounded to 8\", new List<(int Offset, int Length, bool More)> { (0, 984, true), (123, 984, true), (246, 984, true), (369, 984, true), (492, 64, false) }, Fragment(4000, 1006));"
+      ],
+      "hints": [
+        "`(mtu - 20) / 8 * 8` is the data per fragment.",
+        "Offset is `done / 8`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Simulate traceroute",
+      "prompt": [
+        "Write `List<string> Traceroute(List<(string Ip, bool Replies)> path, string dst, int maxHops)`. `path` lists the routers before the destination.",
+        "For TTL 1, 2, ...: if TTL is within `path`, output `\"{ttl}  {ip}\"` (or `\"{ttl}  * * *\"` if that router doesn't reply); at TTL `path.Count + 1` output `\"{ttl}  {dst}\"` and stop.",
+        "Never go past `maxHops`."
+      ],
+      "starter": [
+        "List<string> Traceroute(List<(string Ip, bool Replies)> path, string dst, int maxHops)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> Traceroute(List<(string Ip, bool Replies)> path, string dst, int maxHops)",
+        "{",
+        "    var lines = new List<string>();",
+        "    for (int ttl = 1; ttl <= maxHops; ttl++)",
+        "    {",
+        "        if (ttl <= path.Count)",
+        "            lines.Add(path[ttl - 1].Replies ? $\"{ttl}  {path[ttl - 1].Ip}\" : $\"{ttl}  * * *\");",
+        "        else { lines.Add($\"{ttl}  {dst}\"); break; }",
+        "    }",
+        "    return lines;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoP = new List<(string Ip, bool Replies)> { (\"192.168.1.1\", true), (\"100.64.0.1\", false), (\"203.0.113.1\", true) };",
+        "Dojo.Eq(\"full trace\", new List<string> { \"1  192.168.1.1\", \"2  * * *\", \"3  203.0.113.1\", \"4  93.184.216.34\" }, Traceroute(dojoP, \"93.184.216.34\", 30));",
+        "Dojo.Eq(\"max hops\", new List<string> { \"1  192.168.1.1\", \"2  * * *\" }, Traceroute(dojoP, \"93.184.216.34\", 2));"
+      ],
+      "hints": [
+        "Loop TTL from 1 to `maxHops`.",
+        "Index `path[ttl - 1]`; the destination answers at `path.Count + 1`."
+      ]
+    }
+  ]
+}

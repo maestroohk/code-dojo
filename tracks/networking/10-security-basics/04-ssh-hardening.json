@@ -1,0 +1,213 @@
+{
+  "title": "Hardening SSH",
+  "summary": "Host keys, key-based login, sshd_config, and changing it without locking yourself out.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "SSH proves identity both ways",
+      "body": [
+        "**The server proves itself** with its *host key*. On first connection:",
+        "",
+        "```text",
+        "The authenticity of host '10.20.1.10' can't be established.",
+        "ED25519 key fingerprint is SHA256:Xb3k...",
+        "Are you sure you want to continue connecting (yes/no)?",
+        "```",
+        "",
+        "\"yes\" stores the key in `~/.ssh/known_hosts`. If it ever changes, SSH refuses loudly, because that's what a man-in-the-middle looks like.",
+        "The right \"yes\" compares the fingerprint with one obtained another way (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the console).",
+        "",
+        "**You prove yourself** with a password (guessable, reusable, phishable) or a **key pair**: the private key never leaves your machine, the public key goes in the server's `~/.ssh/authorized_keys`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "After a server rebuild, `ssh admin@10.20.1.10` prints `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!` What's correct?",
+      "options": [
+        "Confirm the new fingerprint out of band (console/admin); only then remove the old line with `ssh-keygen -R 10.20.1.10`",
+        "Delete ~/.ssh/known_hosts and reconnect",
+        "Add `StrictHostKeyChecking no` to your config",
+        "Ignore it; rebuilds always do that"
+      ],
+      "answer": 0,
+      "explain": "A rebuild explains it, but so would an attacker. Verify, then replace only that entry."
+    },
+    {
+      "type": "learn",
+      "title": "Keys only, no root",
+      "body": [
+        "```text",
+        "ssh-keygen -t ed25519            # make your key pair (protect it with a passphrase)",
+        "ssh-copy-id user@host            # install the public key on the server",
+        "```",
+        "",
+        "Then in `/etc/ssh/sshd_config`:",
+        "",
+        "```text",
+        "PasswordAuthentication no    # keys only",
+        "PermitRootLogin no           # log in as yourself, then sudo",
+        "AllowUsers alice bob         # only these accounts may log in",
+        "```",
+        "",
+        "Validate and reload without dropping sessions: `sshd -t` (silent = OK), `systemctl reload ssh`, `sshd -T` prints the effective settings.",
+        "Note: for most keywords **the first value found wins**, so a later duplicate line is silently ignored.",
+        "",
+        "> **Try it for real:** Live lab 10."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the sshd_config lines: keys only, and no direct root login.",
+      "code": [
+        "__1__ no",
+        "__2__ no"
+      ],
+      "blanks": [
+        "PasswordAuthentication",
+        "PermitRootLogin"
+      ],
+      "bank": [
+        "PubkeyAuthentication",
+        "UsePAM",
+        "RootLogin",
+        "AllowPasswords"
+      ],
+      "explain": "With password login off, guessing attacks can't succeed no matter how many tries."
+    },
+    {
+      "type": "order",
+      "prompt": "Order a safe change to a remote server's SSH config.",
+      "lines": [
+        "Install your public key and test a key login",
+        "Keep the current session open",
+        "Edit sshd_config",
+        "Run `sshd -t` to check syntax",
+        "Reload sshd",
+        "Open a **new** session to confirm you can still log in"
+      ],
+      "explain": "Never close your last working session until a new login works."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which hardening step addresses which risk?",
+      "buckets": [
+        "Password guessing",
+        "Untraceable admin actions",
+        "Exposure to the whole internet"
+      ],
+      "items": [
+        [
+          "`PasswordAuthentication no`",
+          0
+        ],
+        [
+          "fail2ban rate limiting",
+          0
+        ],
+        [
+          "`PermitRootLogin no`",
+          1
+        ],
+        [
+          "Personal accounts + sudo",
+          1
+        ],
+        [
+          "Firewall SSH to the admin network only",
+          2
+        ],
+        [
+          "`AllowUsers` / VPN-only access",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Audit sshd_config",
+      "prompt": [
+        "Write `List<string> Audit(string config)` (lines separated by `\\n`). Each line is `Keyword value`; skip blanks and `#` comments; keywords are case-insensitive;",
+        "**the first occurrence of a keyword wins**. Return findings in this order:",
+        "",
+        "- `\"password login enabled\"` unless PasswordAuthentication is `no` (default is yes)",
+        "- `\"root login allowed\"` if PermitRootLogin is `yes`",
+        "- `\"no AllowUsers\"` if there's no AllowUsers line"
+      ],
+      "starter": [
+        "List<string> Audit(string config)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> Audit(string config)",
+        "{",
+        "    var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);",
+        "    foreach (var raw in config.Split('\\n'))",
+        "    {",
+        "        var line = raw.Trim();",
+        "        if (line.Length == 0 || line.StartsWith(\"#\")) continue;",
+        "        var parts = line.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries);",
+        "        if (parts.Length < 2) continue;",
+        "        settings.TryAdd(parts[0], parts[1].Trim());",
+        "    }",
+        "    var findings = new List<string>();",
+        "    if (!string.Equals(settings.GetValueOrDefault(\"PasswordAuthentication\", \"yes\"), \"no\", StringComparison.OrdinalIgnoreCase))",
+        "        findings.Add(\"password login enabled\");",
+        "    if (string.Equals(settings.GetValueOrDefault(\"PermitRootLogin\", \"prohibit-password\"), \"yes\", StringComparison.OrdinalIgnoreCase))",
+        "        findings.Add(\"root login allowed\");",
+        "    if (!settings.ContainsKey(\"AllowUsers\"))",
+        "        findings.Add(\"no AllowUsers\");",
+        "    return findings;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"defaults\", new List<string> { \"password login enabled\", \"no AllowUsers\" }, Audit(\"# empty\\n\"));",
+        "Dojo.Eq(\"hardened\", new List<string>(), Audit(\"PasswordAuthentication no\\nPermitRootLogin no\\nAllowUsers alice bob\\n\"));",
+        "Dojo.Eq(\"first value wins\", new List<string> { \"password login enabled\", \"root login allowed\" }, Audit(\"PasswordAuthentication yes\\npasswordauthentication no\\nPermitRootLogin yes\\nAllowUsers alice\"));",
+        "Dojo.Eq(\"comments ignored\", new List<string> { \"no AllowUsers\" }, Audit(\"#AllowUsers alice\\n  PasswordAuthentication   no\\n\"));"
+      ],
+      "hints": [
+        "Use `TryAdd` so the first occurrence is kept.",
+        "`GetValueOrDefault(\"PasswordAuthentication\", \"yes\")` models the default."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "known_hosts check",
+      "prompt": [
+        "Write `string CheckHost(Dictionary<string, string> knownHosts, string host, string fingerprint)` returning `\"new host: verify fingerprint\"` if the host isn't known,",
+        "`\"ok\"` if the fingerprint matches, and `\"HOST KEY CHANGED: possible man-in-the-middle\"` otherwise."
+      ],
+      "starter": [
+        "string CheckHost(Dictionary<string, string> knownHosts, string host, string fingerprint)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string CheckHost(Dictionary<string, string> knownHosts, string host, string fingerprint)",
+        "{",
+        "    if (!knownHosts.TryGetValue(host, out var known)) return \"new host: verify fingerprint\";",
+        "    return known == fingerprint ? \"ok\" : \"HOST KEY CHANGED: possible man-in-the-middle\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoK = new Dictionary<string, string> { [\"10.20.1.10\"] = \"SHA256:Xb3k\" };",
+        "Dojo.Eq(\"match\", \"ok\", CheckHost(dojoK, \"10.20.1.10\", \"SHA256:Xb3k\"));",
+        "Dojo.Eq(\"changed\", \"HOST KEY CHANGED: possible man-in-the-middle\", CheckHost(dojoK, \"10.20.1.10\", \"SHA256:Q9zz\"));",
+        "Dojo.Eq(\"new\", \"new host: verify fingerprint\", CheckHost(dojoK, \"10.20.1.11\", \"SHA256:Xb3k\"));"
+      ],
+      "hints": [
+        "`TryGetValue` then compare.",
+        "Three outcomes, three returns."
+      ]
+    }
+  ]
+}

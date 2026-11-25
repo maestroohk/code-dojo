@@ -1,0 +1,221 @@
+{
+  "title": "Caching, cookies, CORS and versions",
+  "summary": "The headers that make the web fast, stateful and (mostly) safe, and how HTTP/2 and /3 differ.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Cache-Control",
+      "body": [
+        "Responses tell caches (browser, CDN, proxy) what they may do:",
+        "",
+        "```text",
+        "Cache-Control: public, max-age=3600     anyone may cache it for 1 hour",
+        "Cache-Control: private, max-age=60      only the user's browser, 1 minute",
+        "Cache-Control: no-cache                 may store, but must revalidate every time",
+        "Cache-Control: no-store                 never store (bank statements)",
+        "ETag: \"v42\"                             a version tag for revalidation",
+        "```",
+        "",
+        "**Revalidation**: the client sends `If-None-Match: \"v42\"`; if unchanged, the server answers `304 Not Modified` with no body.",
+        "The *age* of a cached response is how long ago it was received; it is **fresh** while `age < max-age`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You deploy new `app.js` but users keep running the old version for hours. Its response has `Cache-Control: public, max-age=86400`. The standard fix?",
+      "options": [
+        "Put a content hash in the file name (`app.3f9a2c.js`) and keep the long max-age",
+        "Set `no-store` on every file",
+        "Ask users to clear their cache",
+        "Lower the DNS TTL"
+      ],
+      "answer": 0,
+      "explain": "Fingerprinted names make each version a new URL: cache forever, and the HTML (served with `no-cache`) points at the new name."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A cache-control evaluator",
+      "prompt": [
+        "Write `string Decide(string cacheControl, int ageSeconds)` returning:",
+        "",
+        "- `\"no-store\"` if the directives contain `no-store`",
+        "- `\"revalidate\"` if they contain `no-cache`, or if there's no `max-age`, or if `ageSeconds >= max-age`",
+        "- `\"fresh\"` otherwise",
+        "",
+        "Directives are comma-separated, case-insensitive, with optional spaces: `\"Public, MAX-AGE=600\"`."
+      ],
+      "starter": [
+        "string Decide(string cacheControl, int ageSeconds)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Decide(string cacheControl, int ageSeconds)",
+        "{",
+        "    var directives = cacheControl.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)",
+        "                                 .Select(d => d.ToLowerInvariant()).ToList();",
+        "    if (directives.Contains(\"no-store\")) return \"no-store\";",
+        "    if (directives.Contains(\"no-cache\")) return \"revalidate\";",
+        "    var maxAge = directives.FirstOrDefault(d => d.StartsWith(\"max-age=\"));",
+        "    if (maxAge == null) return \"revalidate\";",
+        "    return ageSeconds < int.Parse(maxAge[\"max-age=\".Length..]) ? \"fresh\" : \"revalidate\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"fresh\", \"fresh\", Decide(\"public, max-age=600\", 30));",
+        "Dojo.Eq(\"stale\", \"revalidate\", Decide(\"public, max-age=600\", 600));",
+        "Dojo.Eq(\"case and spaces\", \"fresh\", Decide(\"Public,  MAX-AGE=600\", 599));",
+        "Dojo.Eq(\"no-cache\", \"revalidate\", Decide(\"no-cache, max-age=600\", 1));",
+        "Dojo.Eq(\"no-store wins\", \"no-store\", Decide(\"no-store\", 0));",
+        "Dojo.Eq(\"no max-age\", \"revalidate\", Decide(\"private\", 0));"
+      ],
+      "hints": [
+        "Split with `RemoveEmptyEntries | TrimEntries` and lowercase.",
+        "Find the directive starting `max-age=` and parse the rest."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Cookies",
+      "body": [
+        "HTTP is stateless. **Cookies** add state: the server sets one, the browser sends it back on later requests to that site.",
+        "",
+        "```text",
+        "Set-Cookie: session=abc123; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=3600",
+        "Cookie: session=abc123",
+        "```",
+        "",
+        "- `HttpOnly`: JavaScript can't read it (limits XSS damage).",
+        "- `Secure`: only sent over HTTPS.",
+        "- `SameSite=Lax/Strict/None`: whether it's sent on cross-site requests (CSRF defence). `None` requires `Secure`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each cookie attribute to what it protects against.",
+      "pairs": [
+        [
+          "`HttpOnly`",
+          "Scripts stealing the session"
+        ],
+        [
+          "`Secure`",
+          "Sniffing over plain HTTP"
+        ],
+        [
+          "`SameSite=Strict`",
+          "Cross-site request forgery"
+        ],
+        [
+          "`Max-Age`",
+          "Sessions living forever"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "CORS",
+      "body": [
+        "Browsers enforce the **same-origin policy**: a page from `https://app.shop.example` may not read responses from `https://api.shop.example`",
+        "(a different *origin* = scheme + host + port) unless the API opts in with **CORS** headers.",
+        "",
+        "For \"non-simple\" requests (e.g. JSON `POST`, custom headers) the browser first sends a **preflight**:",
+        "",
+        "```text",
+        "OPTIONS /orders",
+        "Origin: https://app.shop.example",
+        "Access-Control-Request-Method: POST",
+        "",
+        "204 No Content",
+        "Access-Control-Allow-Origin: https://app.shop.example",
+        "Access-Control-Allow-Methods: GET, POST",
+        "```",
+        "",
+        "CORS is enforced **by the browser only**. `curl` and server-to-server calls ignore it, which is why \"it works in Postman\" proves nothing."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Order a cross-origin JSON POST from a browser.",
+      "lines": [
+        "Page calls fetch() with a JSON body",
+        "Browser sends OPTIONS preflight with Origin",
+        "API replies with Access-Control-Allow-* headers",
+        "Browser sends the real POST",
+        "Browser lets the page read the response"
+      ],
+      "explain": "If the preflight answer doesn't allow the origin/method, the real request is never sent."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each HTTP version to its key property.",
+      "pairs": [
+        [
+          "HTTP/1.1",
+          "Text, one request at a time per connection"
+        ],
+        [
+          "HTTP/2",
+          "Binary frames, many streams over one TCP connection"
+        ],
+        [
+          "HTTP/3",
+          "Runs over QUIC on UDP; no TCP head-of-line blocking"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "CORS check",
+      "prompt": [
+        "Write `bool AllowCors(string origin, string method, List<string> allowedOrigins, List<string> allowedMethods)`.",
+        "Origins match exactly (case-insensitive), except an allowed entry `*` matches any origin. Methods match case-insensitively.",
+        "Also write `string OriginOf(string url)` that returns scheme + host + port only (`https://app.shop.example:8443/x` gives `https://app.shop.example:8443`)."
+      ],
+      "starter": [
+        "bool AllowCors(string origin, string method, List<string> allowedOrigins, List<string> allowedMethods)",
+        "{",
+        "    // your code",
+        "}",
+        "",
+        "string OriginOf(string url)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "bool AllowCors(string origin, string method, List<string> allowedOrigins, List<string> allowedMethods)",
+        "    => allowedOrigins.Any(o => o == \"*\" || string.Equals(o, origin, StringComparison.OrdinalIgnoreCase))",
+        "       && allowedMethods.Any(m => string.Equals(m, method, StringComparison.OrdinalIgnoreCase));",
+        "",
+        "string OriginOf(string url)",
+        "{",
+        "    int start = url.IndexOf(\"://\") + 3;",
+        "    int slash = url.IndexOf('/', start);",
+        "    return slash < 0 ? url : url[..slash];",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoO = new List<string> { \"https://app.shop.example\" };",
+        "var dojoM = new List<string> { \"GET\", \"POST\" };",
+        "Dojo.Eq(\"allowed\", true, AllowCors(\"https://app.shop.example\", \"post\", dojoO, dojoM));",
+        "Dojo.Eq(\"wrong origin\", false, AllowCors(\"https://evil.example\", \"GET\", dojoO, dojoM));",
+        "Dojo.Eq(\"wrong method\", false, AllowCors(\"https://app.shop.example\", \"DELETE\", dojoO, dojoM));",
+        "Dojo.Eq(\"wildcard\", true, AllowCors(\"https://x.example\", \"GET\", new List<string> { \"*\" }, dojoM));",
+        "Dojo.Eq(\"origin keeps port\", \"https://app.shop.example:8443\", OriginOf(\"https://app.shop.example:8443/x?y=1\"));",
+        "Dojo.Eq(\"origin no path\", \"http://a.example\", OriginOf(\"http://a.example\"));"
+      ],
+      "hints": [
+        "`Any` with `string.Equals(..., OrdinalIgnoreCase)`.",
+        "For the origin, find the first `/` after `://`."
+      ]
+    }
+  ]
+}

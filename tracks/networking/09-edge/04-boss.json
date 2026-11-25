@@ -1,0 +1,194 @@
+{
+  "title": "Boss: the network on-call",
+  "summary": "Diagnose a production request end to end: URL, firewall, balancer and curl output.",
+  "minutes": 15,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "On call",
+      "body": [
+        "Tonight's pager has three problems. Each step builds on helpers from this track; paste what you need."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Where does this request go?",
+      "prompt": [
+        "Write `string Route(string url, Dictionary<string, string> dns, List<(string Prefix, string Pool)> routes)` for a layer 7 balancer:",
+        "",
+        "1. Parse the host and path from `url` (scheme `http`/`https`, optional port, optional query).",
+        "2. If `dns` (host -> IP, case-insensitive keys are not guaranteed: lowercase the host) has no entry, return `\"NXDOMAIN\"`.",
+        "3. Otherwise return the pool of the **longest** route prefix the path starts with, or `\"default\"`.",
+        "",
+        "The result for a hit is `\"{ip} {pool}\"`, e.g. `\"203.0.113.10 api\"`."
+      ],
+      "starter": [
+        "string Route(string url, Dictionary<string, string> dns, List<(string Prefix, string Pool)> routes)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Route(string url, Dictionary<string, string> dns, List<(string Prefix, string Pool)> routes)",
+        "{",
+        "    string rest = url[(url.IndexOf(\"://\") + 3)..];",
+        "    int q = rest.IndexOf('?');",
+        "    if (q >= 0) rest = rest[..q];",
+        "    int slash = rest.IndexOf('/');",
+        "    string authority = slash >= 0 ? rest[..slash] : rest;",
+        "    string path = slash >= 0 ? rest[slash..] : \"/\";",
+        "    int colon = authority.IndexOf(':');",
+        "    string host = (colon >= 0 ? authority[..colon] : authority).ToLowerInvariant();",
+        "    if (!dns.TryGetValue(host, out var ip)) return \"NXDOMAIN\";",
+        "    var best = routes.Where(r => path.StartsWith(r.Prefix)).OrderByDescending(r => r.Prefix.Length).Select(r => r.Pool).FirstOrDefault();",
+        "    return $\"{ip} {best ?? \"default\"}\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoDns = new Dictionary<string, string> { [\"shop.example\"] = \"203.0.113.10\" };",
+        "var dojoRoutes = new List<(string Prefix, string Pool)> { (\"/api\", \"api\"), (\"/api/admin\", \"admin\"), (\"/static\", \"cdn\") };",
+        "Dojo.Eq(\"api\", \"203.0.113.10 api\", Route(\"https://shop.example/api/orders?x=1\", dojoDns, dojoRoutes));",
+        "Dojo.Eq(\"longest prefix\", \"203.0.113.10 admin\", Route(\"https://SHOP.example:8443/api/admin/users\", dojoDns, dojoRoutes));",
+        "Dojo.Eq(\"default\", \"203.0.113.10 default\", Route(\"http://shop.example\", dojoDns, dojoRoutes));",
+        "Dojo.Eq(\"unknown host\", \"NXDOMAIN\", Route(\"https://nope.example/api\", dojoDns, dojoRoutes));"
+      ],
+      "hints": [
+        "Reuse your URL parsing from the HTTP module.",
+        "`OrderByDescending(r => r.Prefix.Length)` picks the most specific route."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Read curl -v",
+      "prompt": [
+        "Write `string Diagnose(string curlOutput)` that reads the lines of a `curl -v` transcript and returns the **first** problem:",
+        "",
+        "- a line containing `Could not resolve host` -> `\"dns\"`",
+        "- a line containing `Connection refused` -> `\"nothing listening\"`",
+        "- a line containing `timed out` -> `\"firewall or routing\"`",
+        "- a line containing `SSL certificate problem` -> `\"tls\"`",
+        "- the response status line (starts with `< HTTP/`) with a status >= 500 -> `\"server error {code}\"`, 400-499 -> `\"client error {code}\"`",
+        "- otherwise `\"ok\"`"
+      ],
+      "starter": [
+        "string Diagnose(string curlOutput)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Diagnose(string curlOutput)",
+        "{",
+        "    foreach (var line in curlOutput.Split('\\n'))",
+        "    {",
+        "        if (line.Contains(\"Could not resolve host\")) return \"dns\";",
+        "        if (line.Contains(\"Connection refused\")) return \"nothing listening\";",
+        "        if (line.Contains(\"timed out\")) return \"firewall or routing\";",
+        "        if (line.Contains(\"SSL certificate problem\")) return \"tls\";",
+        "        if (line.StartsWith(\"< HTTP/\"))",
+        "        {",
+        "            int code = int.Parse(line.Split(' ')[2]);",
+        "            if (code >= 500) return $\"server error {code}\";",
+        "            if (code >= 400) return $\"client error {code}\";",
+        "        }",
+        "    }",
+        "    return \"ok\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"dns\", \"dns\", Diagnose(\"* Could not resolve host: shpo.example\\ncurl: (6) Could not resolve host\"));",
+        "Dojo.Eq(\"refused\", \"nothing listening\", Diagnose(\"*   Trying 10.0.0.5:8080...\\n* connect to 10.0.0.5 port 8080 failed: Connection refused\"));",
+        "Dojo.Eq(\"timeout\", \"firewall or routing\", Diagnose(\"*   Trying 10.0.0.5:22...\\n* Connection timed out after 30000 milliseconds\"));",
+        "Dojo.Eq(\"tls\", \"tls\", Diagnose(\"* Connected\\ncurl: (60) SSL certificate problem: unable to get local issuer certificate\"));",
+        "Dojo.Eq(\"502\", \"server error 502\", Diagnose(\"* Connected\\n> GET / HTTP/1.1\\n< HTTP/1.1 502 Bad Gateway\\n< server: nginx\"));",
+        "Dojo.Eq(\"404 over h2\", \"client error 404\", Diagnose(\"> GET /x HTTP/2\\n< HTTP/2 404\\n< content-length: 0\"));",
+        "Dojo.Eq(\"ok\", \"ok\", Diagnose(\"> GET / HTTP/2\\n< HTTP/2 200\\n< x-cache: HIT\"));"
+      ],
+      "hints": [
+        "Check each line in order and return at the first match.",
+        "On `< HTTP/...` the status is the second space-separated word after `<`, i.e. index 2."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Can this packet get in?",
+      "prompt": [
+        "Put it together. Write `string Trace(string sourceIp, int port, List<string> firewallRules, Dictionary<int, string> listeners)`:",
+        "",
+        "- evaluate the firewall (rules as in the lesson: `action proto port cidr`, protocol is always `tcp` here; no match = deny). If denied, return `\"timeout\"` (dropped silently).",
+        "- if allowed but no listener on `port`, return `\"refused\"`.",
+        "- otherwise return `\"connected to {listeners[port]}\"`.",
+        "",
+        "Include `ToUInt`, `InCidr` and your rule evaluator."
+      ],
+      "starter": [
+        "// paste ToUInt, InCidr and Evaluate here",
+        "",
+        "string Trace(string sourceIp, int port, List<string> firewallRules, Dictionary<int, string> listeners)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "uint ToUInt(string ip)",
+        "{",
+        "    var parts = ip.Split('.');",
+        "    if (parts.Length != 4) throw new FormatException(\"need 4 octets\");",
+        "    uint result = 0;",
+        "    foreach (var p in parts)",
+        "    {",
+        "        if (!int.TryParse(p, out int n) || n < 0 || n > 255) throw new FormatException(\"bad octet \" + p);",
+        "        result = (result << 8) | (uint)n;",
+        "    }",
+        "    return result;",
+        "}",
+        "",
+        "bool InCidr(string ip, string cidr)",
+        "{",
+        "    var parts = cidr.Split('/');",
+        "    int prefix = int.Parse(parts[1]);",
+        "    uint mask = prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "    return (ToUInt(ip) & mask) == (ToUInt(parts[0]) & mask);",
+        "}",
+        "",
+        "string Evaluate(List<string> rules, string proto, int port, string sourceIp)",
+        "{",
+        "    foreach (var rule in rules)",
+        "    {",
+        "        var p = rule.Split(' ');",
+        "        bool protoOk = p[1] == \"any\" || p[1] == proto;",
+        "        bool portOk = p[2] == \"any\" || int.Parse(p[2]) == port;",
+        "        if (protoOk && portOk && InCidr(sourceIp, p[3])) return p[0];",
+        "    }",
+        "    return \"deny\";",
+        "}",
+        "",
+        "string Trace(string sourceIp, int port, List<string> firewallRules, Dictionary<int, string> listeners)",
+        "{",
+        "    if (Evaluate(firewallRules, \"tcp\", port, sourceIp) != \"allow\") return \"timeout\";",
+        "    return listeners.TryGetValue(port, out var name) ? $\"connected to {name}\" : \"refused\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoFw = new List<string> { \"allow tcp 443 0.0.0.0/0\", \"allow tcp 22 10.0.0.0/8\", \"allow tcp 8080 10.0.0.0/8\" };",
+        "var dojoLs = new Dictionary<int, string> { [443] = \"nginx\", [22] = \"sshd\" };",
+        "Dojo.Eq(\"public https\", \"connected to nginx\", Trace(\"8.8.8.8\", 443, dojoFw, dojoLs));",
+        "Dojo.Eq(\"internal ssh\", \"connected to sshd\", Trace(\"10.1.2.3\", 22, dojoFw, dojoLs));",
+        "Dojo.Eq(\"external ssh\", \"timeout\", Trace(\"8.8.8.8\", 22, dojoFw, dojoLs));",
+        "Dojo.Eq(\"allowed, nothing listening\", \"refused\", Trace(\"10.1.2.3\", 8080, dojoFw, dojoLs));",
+        "Dojo.Eq(\"not in rules\", \"timeout\", Trace(\"10.1.2.3\", 5432, dojoFw, dojoLs));"
+      ],
+      "hints": [
+        "Firewall first: a deny means the client hears nothing.",
+        "Then look the port up in `listeners`."
+      ]
+    }
+  ]
+}

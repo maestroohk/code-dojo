@@ -1,0 +1,170 @@
+{
+  "title": "Boss: the edge router",
+  "summary": "Build the brain of an edge router: forwarding, NAT decisions and shortest paths.",
+  "minutes": 20,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The edge router",
+      "body": [
+        "Your company's edge router forwards packets, translates addresses and learns paths. Build each part."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Forwarding with TTL",
+      "prompt": [
+        "Write a class `Router` with `void Add(string cidr, string via)` and `string Forward(string dst, int ttl)`:",
+        "",
+        "- `ttl <= 1` -> `\"drop: ttl exceeded\"` (the router would send ICMP time exceeded; that's how traceroute works)",
+        "- no matching route -> `\"drop: no route\"`",
+        "- otherwise the longest prefix match: `\"via {via} ttl {ttl - 1}\"`"
+      ],
+      "starter": [
+        "class Router",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "class Router",
+        "{",
+        "    private readonly List<(uint Net, int Prefix, string Via)> routes = new();",
+        "",
+        "    static uint ToU(string ip) => ip.Split('.').Aggregate(0u, (acc, o) => (acc << 8) | uint.Parse(o));",
+        "    static uint Mask(int p) => p == 0 ? 0u : uint.MaxValue << (32 - p);",
+        "",
+        "    public void Add(string cidr, string via)",
+        "    {",
+        "        var parts = cidr.Split('/');",
+        "        int p = int.Parse(parts[1]);",
+        "        routes.Add((ToU(parts[0]) & Mask(p), p, via));",
+        "    }",
+        "",
+        "    public string Forward(string dst, int ttl)",
+        "    {",
+        "        if (ttl <= 1) return \"drop: ttl exceeded\";",
+        "        uint d = ToU(dst);",
+        "        var best = routes.Where(r => (d & Mask(r.Prefix)) == r.Net).OrderByDescending(r => r.Prefix).ToList();",
+        "        if (best.Count == 0) return \"drop: no route\";",
+        "        return $\"via {best[0].Via} ttl {ttl - 1}\";",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoR = new Router();",
+        "dojoR.Add(\"0.0.0.0/0\", \"isp\");",
+        "dojoR.Add(\"10.0.0.0/8\", \"core\");",
+        "dojoR.Add(\"10.20.0.0/16\", \"branch\");",
+        "Dojo.Eq(\"branch\", \"via branch ttl 63\", dojoR.Forward(\"10.20.5.5\", 64));",
+        "Dojo.Eq(\"core\", \"via core ttl 9\", dojoR.Forward(\"10.1.1.1\", 10));",
+        "Dojo.Eq(\"default\", \"via isp ttl 1\", dojoR.Forward(\"8.8.8.8\", 2));",
+        "Dojo.Eq(\"ttl exceeded\", \"drop: ttl exceeded\", dojoR.Forward(\"8.8.8.8\", 1));",
+        "var dojoR2 = new Router();",
+        "dojoR2.Add(\"10.0.0.0/8\", \"core\");",
+        "Dojo.Eq(\"no route\", \"drop: no route\", dojoR2.Forward(\"8.8.8.8\", 64));",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Store routes as `(uint Net, int Prefix, string Via)`.",
+        "Check TTL first, then the longest matching prefix."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Port forward or hairpin?",
+      "prompt": [
+        "Write `string Reach(bool fromInside, string dstIp, int dstPort, string publicIp, Dictionary<int, string> forwards, bool hairpinNat)`:",
+        "",
+        "- `dstIp` isn't the router's public IP -> `\"routed normally\"`",
+        "- no forward for `dstPort` -> `\"dropped\"`",
+        "- from outside -> `\"forwarded to {target}\"`",
+        "- from inside with hairpin NAT -> `\"hairpinned to {target}\"`",
+        "- from inside without it -> `\"fails: no NAT loopback\"`"
+      ],
+      "starter": [
+        "string Reach(bool fromInside, string dstIp, int dstPort, string publicIp, Dictionary<int, string> forwards, bool hairpinNat)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Reach(bool fromInside, string dstIp, int dstPort, string publicIp, Dictionary<int, string> forwards, bool hairpinNat)",
+        "{",
+        "    if (dstIp != publicIp) return \"routed normally\";",
+        "    if (!forwards.TryGetValue(dstPort, out var target)) return \"dropped\";",
+        "    if (!fromInside) return $\"forwarded to {target}\";",
+        "    return hairpinNat ? $\"hairpinned to {target}\" : \"fails: no NAT loopback\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoF = new Dictionary<int, string> { [443] = \"10.0.0.20:443\" };",
+        "Dojo.Eq(\"internet to NAS\", \"forwarded to 10.0.0.20:443\", Reach(false, \"203.0.113.1\", 443, \"203.0.113.1\", dojoF, false));",
+        "Dojo.Eq(\"laptop without hairpin\", \"fails: no NAT loopback\", Reach(true, \"203.0.113.1\", 443, \"203.0.113.1\", dojoF, false));",
+        "Dojo.Eq(\"laptop with hairpin\", \"hairpinned to 10.0.0.20:443\", Reach(true, \"203.0.113.1\", 443, \"203.0.113.1\", dojoF, true));",
+        "Dojo.Eq(\"unforwarded port\", \"dropped\", Reach(false, \"203.0.113.1\", 22, \"203.0.113.1\", dojoF, true));",
+        "Dojo.Eq(\"other destination\", \"routed normally\", Reach(true, \"8.8.8.8\", 443, \"203.0.113.1\", dojoF, false));"
+      ],
+      "hints": [
+        "Check the destination, then the forward, then the direction.",
+        "Each rule is one `if` and a `return`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Shortest path",
+      "prompt": [
+        "Write `List<string> ShortestPath(List<(string A, string B, int Cost)> links, string from, string to)` returning the routers on the cheapest path,",
+        "`from` first and `to` last, over undirected links, or an empty list if unreachable. Test graphs have no ties."
+      ],
+      "starter": [
+        "List<string> ShortestPath(List<(string A, string B, int Cost)> links, string from, string to)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> ShortestPath(List<(string A, string B, int Cost)> links, string from, string to)",
+        "{",
+        "    var dist = new Dictionary<string, int> { [from] = 0 };",
+        "    var prev = new Dictionary<string, string>();",
+        "    var done = new HashSet<string>();",
+        "    while (true)",
+        "    {",
+        "        var next = dist.Where(kv => !done.Contains(kv.Key)).OrderBy(kv => kv.Value).Select(kv => kv.Key).FirstOrDefault();",
+        "        if (next == null) break;",
+        "        done.Add(next);",
+        "        foreach (var (a, b, c) in links)",
+        "        {",
+        "            string? other = a == next ? b : b == next ? a : null;",
+        "            if (other == null || done.Contains(other)) continue;",
+        "            int d = dist[next] + c;",
+        "            if (!dist.TryGetValue(other, out int cur) || d < cur) { dist[other] = d; prev[other] = next; }",
+        "        }",
+        "    }",
+        "    if (!dist.ContainsKey(to)) return new List<string>();",
+        "    var path = new List<string> { to };",
+        "    while (path[0] != from) path.Insert(0, prev[path[0]]);",
+        "    return path;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoL = new List<(string A, string B, int Cost)> { (\"R1\", \"R2\", 10), (\"R2\", \"R3\", 10), (\"R1\", \"R3\", 30), (\"R3\", \"R4\", 1), (\"R2\", \"R4\", 25), (\"R8\", \"R9\", 1) };",
+        "Dojo.Eq(\"R1 to R4\", new List<string> { \"R1\", \"R2\", \"R3\", \"R4\" }, ShortestPath(dojoL, \"R1\", \"R4\"));",
+        "Dojo.Eq(\"R4 to R1\", new List<string> { \"R4\", \"R3\", \"R2\", \"R1\" }, ShortestPath(dojoL, \"R4\", \"R1\"));",
+        "Dojo.Eq(\"self\", new List<string> { \"R1\" }, ShortestPath(dojoL, \"R1\", \"R1\"));",
+        "Dojo.Eq(\"unreachable\", new List<string>(), ShortestPath(dojoL, \"R1\", \"R9\"));"
+      ],
+      "hints": [
+        "Dijkstra again, plus a `prev` dictionary recording where each best cost came from.",
+        "Walk `prev` back from `to` to build the path."
+      ]
+    }
+  ]
+}

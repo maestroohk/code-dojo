@@ -1,0 +1,224 @@
+{
+  "title": "Boss: incident on the web server",
+  "summary": "Investigate a break-in from the logs, block it at the firewall, and harden SSH so it can't happen again.",
+  "minutes": 20,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The incident",
+      "body": [
+        "Monitoring flagged the web server. You have its `auth.log` lines, the router's FORWARD rules and the server's `sshd_config`. Work the incident loop: scope, contain, fix."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Who got in?",
+      "prompt": [
+        "Write `List<string> Compromised(List<string> authLines, int minFailures)` returning `\"{user} from {ip}\"` for each `Accepted password for USER from IP` line",
+        "where that IP had **at least** `minFailures` `Failed password` lines **earlier** in the log. Keep log order; report each user/IP pair once.",
+        "Failure lines look like `... Failed password for [invalid user ]NAME from IP port ...`."
+      ],
+      "starter": [
+        "List<string> Compromised(List<string> authLines, int minFailures)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> Compromised(List<string> authLines, int minFailures)",
+        "{",
+        "    var failures = new Dictionary<string, int>();",
+        "    var result = new List<string>();",
+        "    foreach (var line in authLines)",
+        "    {",
+        "        var w = line.Split(' ');",
+        "        int from = Array.IndexOf(w, \"from\");",
+        "        if (from < 0) continue;",
+        "        string ip = w[from + 1];",
+        "        if (line.Contains(\"Failed password\")) failures[ip] = failures.GetValueOrDefault(ip) + 1;",
+        "        else if (line.Contains(\"Accepted password\"))",
+        "        {",
+        "            string user = w[from - 1];",
+        "            string entry = $\"{user} from {ip}\";",
+        "            if (failures.GetValueOrDefault(ip) >= minFailures && !result.Contains(entry)) result.Add(entry);",
+        "        }",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoA = new List<string>();",
+        "for (int i = 0; i < 5; i++) dojoA.Add($\"Nov 20 15:02:1{i} web sshd[1]: Failed password for invalid user admin{i} from 185.12.3.4 port 5123{i} ssh2\");",
+        "dojoA.Add(\"Nov 20 15:03:00 web sshd[2]: Failed password for backup from 185.12.3.4 port 50000 ssh2\");",
+        "dojoA.Add(\"Nov 20 15:04:40 web sshd[3]: Accepted password for backup from 185.12.3.4 port 50001 ssh2\");",
+        "dojoA.Add(\"Nov 20 15:05:00 web sshd[4]: Accepted publickey for alice from 10.20.1.5 port 40000 ssh2\");",
+        "dojoA.Add(\"Nov 20 15:06:00 web sshd[5]: Failed password for bob from 10.20.1.7 port 40001 ssh2\");",
+        "dojoA.Add(\"Nov 20 15:06:10 web sshd[6]: Accepted password for bob from 10.20.1.7 port 40002 ssh2\");",
+        "Dojo.Eq(\"brute force success\", new List<string> { \"backup from 185.12.3.4\" }, Compromised(dojoA, 5));",
+        "Dojo.Eq(\"lower threshold also finds a typo\", new List<string> { \"backup from 185.12.3.4\", \"bob from 10.20.1.7\" }, Compromised(dojoA, 1));"
+      ],
+      "hints": [
+        "Find the word `from`; the IP follows it and the user precedes it.",
+        "Count failures per IP as you go, so only *earlier* failures count."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Contain at the firewall",
+      "prompt": [
+        "Write `List<string> BlockRules(List<string> ips)` returning, for each distinct IP in order, the iptables command that inserts a drop at the **top** of FORWARD:",
+        "`iptables -I FORWARD 1 -s {ip} -j DROP`. Then, using the `Decide` evaluator from the firewall lesson (paste it with `ToUInt`), write",
+        "`bool Blocked(List<string> rules, string ip)` that is true when a new tcp connection from `ip` to `10.16.2.10:22` is dropped by `rules` with policy ACCEPT.",
+        "Note an inserted rule at position 1 goes **before** existing rules."
+      ],
+      "starter": [
+        "// paste ToUInt and Decide here",
+        "",
+        "List<string> BlockRules(List<string> ips)",
+        "{",
+        "    // your code",
+        "}",
+        "",
+        "bool Blocked(List<string> rules, string ip)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "uint ToUInt(string ip)",
+        "{",
+        "    var parts = ip.Split('.');",
+        "    if (parts.Length != 4) throw new FormatException(\"need 4 octets\");",
+        "    uint result = 0;",
+        "    foreach (var p in parts)",
+        "    {",
+        "        if (!int.TryParse(p, out int n) || n < 0 || n > 255) throw new FormatException(\"bad octet \" + p);",
+        "        result = (result << 8) | (uint)n;",
+        "    }",
+        "    return result;",
+        "}",
+        "",
+        "bool InNet(string ip, string spec)",
+        "{",
+        "    var parts = spec.Split('/');",
+        "    int prefix = parts.Length > 1 ? int.Parse(parts[1]) : 32;",
+        "    uint mask = prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "    return (ToUInt(ip) & mask) == (ToUInt(parts[0]) & mask);",
+        "}",
+        "",
+        "string Decide(List<string> rules, string policy, string src, string dst, string proto, int dport, bool established)",
+        "{",
+        "    foreach (var rule in rules)",
+        "    {",
+        "        var t = rule.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        bool ok = true;",
+        "        string target = \"\";",
+        "        for (int i = 0; i < t.Length; i++)",
+        "        {",
+        "            switch (t[i])",
+        "            {",
+        "                case \"-s\": ok &= InNet(src, t[++i]); break;",
+        "                case \"-d\": ok &= InNet(dst, t[++i]); break;",
+        "                case \"-p\": ok &= t[++i] == proto; break;",
+        "                case \"--dport\": ok &= int.Parse(t[++i]) == dport; break;",
+        "                case \"--ctstate\": ok &= established && t[++i].Contains(\"ESTABLISHED\"); break;",
+        "                case \"-j\": target = t[++i]; break;",
+        "            }",
+        "        }",
+        "        if (ok) return target;",
+        "    }",
+        "    return policy;",
+        "}",
+        "",
+        "List<string> BlockRules(List<string> ips) => ips.Distinct().Select(ip => $\"iptables -I FORWARD 1 -s {ip} -j DROP\").ToList();",
+        "",
+        "bool Blocked(List<string> rules, string ip) => Decide(rules, \"ACCEPT\", ip, \"10.16.2.10\", \"tcp\", 22, false) == \"DROP\";"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"commands\", new List<string> { \"iptables -I FORWARD 1 -s 185.12.3.4 -j DROP\", \"iptables -I FORWARD 1 -s 6.6.6.6 -j DROP\" }, BlockRules(new List<string> { \"185.12.3.4\", \"6.6.6.6\", \"185.12.3.4\" }));",
+        "var dojoRules = new List<string> { \"-s 185.12.3.4 -j DROP\", \"-p tcp --dport 22 -j ACCEPT\" };",
+        "Dojo.Eq(\"attacker blocked\", true, Blocked(dojoRules, \"185.12.3.4\"));",
+        "Dojo.Eq(\"others still allowed\", false, Blocked(dojoRules, \"10.20.1.5\"));",
+        "Dojo.Eq(\"drop after accept is too late\", false, Blocked(new List<string> { \"-p tcp --dport 22 -j ACCEPT\", \"-s 185.12.3.4 -j DROP\" }, \"185.12.3.4\"));"
+      ],
+      "hints": [
+        "`Distinct()` keeps the first occurrence order.",
+        "`Blocked` is one call to `Decide` with policy ACCEPT."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Fix the root cause",
+      "prompt": [
+        "Write `string Harden(string config, List<string> admins)` that returns a new sshd_config: every existing line for `PasswordAuthentication`, `PermitRootLogin` or `AllowUsers`",
+        "(case-insensitive keyword, comments untouched) is removed, all other lines kept in order, and these three lines are **prepended** (first value wins, so they must come first):",
+        "",
+        "```text",
+        "PasswordAuthentication no",
+        "PermitRootLogin no",
+        "AllowUsers {admins joined by spaces}",
+        "```",
+        "",
+        "Join lines with `\\n`. Your `Audit` from the SSH lesson should report nothing for the result (the tests check that)."
+      ],
+      "starter": [
+        "string Harden(string config, List<string> admins)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Harden(string config, List<string> admins)",
+        "{",
+        "    var managed = new[] { \"passwordauthentication\", \"permitrootlogin\", \"allowusers\" };",
+        "    var kept = config.Split('\\n').Where(raw =>",
+        "    {",
+        "        var line = raw.Trim();",
+        "        if (line.StartsWith(\"#\") || line.Length == 0) return true;",
+        "        var key = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)[0].ToLowerInvariant();",
+        "        return !managed.Contains(key);",
+        "    });",
+        "    var head = new List<string> { \"PasswordAuthentication no\", \"PermitRootLogin no\", \"AllowUsers \" + string.Join(\" \", admins) };",
+        "    return string.Join(\"\\n\", head.Concat(kept));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "List<string> Audit(string config)",
+        "{",
+        "    var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);",
+        "    foreach (var raw in config.Split('\\n'))",
+        "    {",
+        "        var line = raw.Trim();",
+        "        if (line.Length == 0 || line.StartsWith(\"#\")) continue;",
+        "        var parts = line.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries);",
+        "        if (parts.Length < 2) continue;",
+        "        settings.TryAdd(parts[0], parts[1].Trim());",
+        "    }",
+        "    var findings = new List<string>();",
+        "    if (!string.Equals(settings.GetValueOrDefault(\"PasswordAuthentication\", \"yes\"), \"no\", StringComparison.OrdinalIgnoreCase))",
+        "        findings.Add(\"password login enabled\");",
+        "    if (string.Equals(settings.GetValueOrDefault(\"PermitRootLogin\", \"prohibit-password\"), \"yes\", StringComparison.OrdinalIgnoreCase))",
+        "        findings.Add(\"root login allowed\");",
+        "    if (!settings.ContainsKey(\"AllowUsers\"))",
+        "        findings.Add(\"no AllowUsers\");",
+        "    return findings;",
+        "}",
+        "",
+        "var dojoH = Harden(\"Port 22\\nPermitRootLogin yes\\n# PasswordAuthentication yes\\npasswordauthentication yes\\nX11Forwarding no\", new List<string> { \"alice\", \"bob\" });",
+        "Dojo.Eq(\"result\", \"PasswordAuthentication no\\nPermitRootLogin no\\nAllowUsers alice bob\\nPort 22\\n# PasswordAuthentication yes\\nX11Forwarding no\", dojoH);",
+        "Dojo.Eq(\"audit is clean\", new List<string>(), Audit(dojoH));"
+      ],
+      "hints": [
+        "Filter lines whose first word (lowercased) is one of the three keywords; keep comments.",
+        "Prepend the three hardened lines and join with `\\n`."
+      ]
+    }
+  ]
+}

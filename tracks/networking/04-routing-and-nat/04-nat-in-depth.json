@@ -1,0 +1,262 @@
+{
+  "title": "NAT in depth",
+  "summary": "SNAT, DNAT, PAT and 1:1 NAT, the NAT table, hairpinning, and carrier-grade NAT.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The NAT vocabulary",
+      "body": [
+        "| Term | Rewrites | Example |",
+        "|---|---|---|",
+        "| **SNAT** | source address of outgoing packets | office -> internet |",
+        "| **PAT / NAPT / masquerade** | source address **and port**, many inside hosts share one IP | every home router |",
+        "| **DNAT / port forwarding** | destination of incoming packets | public :443 -> 10.0.0.5:443 |",
+        "| **1:1 static NAT** | one public IP maps to one inside host, all ports | cloud \"elastic IP\" |",
+        "",
+        "The router keeps a **NAT table** (conntrack) keyed by the connection:",
+        "",
+        "```text",
+        "inside 10.0.0.5:51000 -> 93.184.216.34:443   ==   public 203.0.113.1:40000 -> 93.184.216.34:443",
+        "inside 10.0.0.6:51000 -> 93.184.216.34:443   ==   public 203.0.113.1:40001 -> 93.184.216.34:443",
+        "```",
+        "",
+        "Two inside hosts can use the same source port; PAT gives them different public ports."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each scenario to the kind of NAT.",
+      "pairs": [
+        [
+          "30 laptops browse through one public IP",
+          "PAT (masquerade)"
+        ],
+        [
+          "Public port 8443 reaches an internal web server",
+          "DNAT (port forward)"
+        ],
+        [
+          "A cloud VM has its own public IP mapped to its private one",
+          "1:1 static NAT"
+        ],
+        [
+          "Office traffic leaves with a fixed public address",
+          "SNAT"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "How many simultaneous connections can share one public IP to the **same** remote endpoint, using ports 1024-65535? Per user with 64 users?",
+      "code": [
+        "int ports = 65535 - 1024;",
+        "Console.WriteLine($\"ports per IP: {ports}\");",
+        "Console.WriteLine($\"per user (64 users): {ports / 64}\");"
+      ],
+      "answer": [
+        "ports per IP: 64511",
+        "per user (64 users): 1007"
+      ],
+      "explain": "Port exhaustion is real behind busy NATs, which is why CGNAT assigns port blocks and cloud NAT gateways add IPs."
+    },
+    {
+      "type": "learn",
+      "title": "Why NAT breaks inbound",
+      "body": [
+        "A NAT entry is created only by an **outgoing** packet. An unsolicited packet arriving at the public IP matches nothing and is dropped.",
+        "That's why peer-to-peer apps, game hosts and VoIP need port forwards, UPnP, or tricks like **hole punching** (both sides send out first, via a rendezvous server) and relays (TURN).",
+        "",
+        "**Hairpinning (NAT loopback):** an inside client connects to the router's **public** IP to reach a port-forwarded server that's also inside.",
+        "Without hairpin NAT, the server replies directly to the client's private address, the client doesn't recognise the reply, and it fails. Fix with hairpin NAT or **split DNS** (inside clients resolve the name to the private IP).",
+        "",
+        "**CGNAT:** ISPs short of IPv4 put customers behind *their own* NAT, using `100.64.0.0/10`. Your router's WAN address is then not public: port forwards on your router can't work, and many customers share one public IP (so one abuser can get it blocked for all)."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Will an unsolicited inbound connection reach the inside host?",
+      "buckets": [
+        "Yes",
+        "No"
+      ],
+      "items": [
+        [
+          "Port forward configured on a router with a public WAN IP",
+          0
+        ],
+        [
+          "1:1 NAT with a firewall rule allowing it",
+          0
+        ],
+        [
+          "Plain PAT, no forward",
+          1
+        ],
+        [
+          "Port forward on a router whose WAN IP is 100.64.12.7",
+          1
+        ],
+        [
+          "Reply to a connection the inside host opened",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`nas.home.example` resolves to your public IP and works from your phone on 4G, but not from your laptop at home. Most likely?",
+      "options": [
+        "No hairpin NAT on the router; use NAT loopback or make the name resolve to the NAS's private IP inside",
+        "The NAS blocks laptops",
+        "Your ISP blocks it",
+        "DNS TTL is too high"
+      ],
+      "answer": 0,
+      "explain": "From outside, DNAT works. From inside, the reply takes a shortcut and breaks."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You set up a port forward but nothing from the internet arrives. The router's WAN shows `100.72.4.19`. Why?",
+      "options": [
+        "You're behind carrier-grade NAT; the ISP's NAT drops it before your router. Ask for a public IP, use IPv6, or a tunnel",
+        "The forward needs a reboot",
+        "100.72.x is your public IP, check the firewall",
+        "Use UDP instead"
+      ],
+      "answer": 0,
+      "explain": "100.64.0.0/10 is shared address space for CGNAT."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the commands to inspect NAT state on Linux.",
+      "code": [
+        "iptables -t __1__ -L -n -v",
+        "conntrack __2__"
+      ],
+      "blanks": [
+        "nat",
+        "-L"
+      ],
+      "bank": [
+        "filter",
+        "-F",
+        "mangle",
+        "-D"
+      ],
+      "explain": "`conntrack -L` lists the live translation table."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Classify a WAN address",
+      "prompt": [
+        "Write `string Wan(string ip)` describing a router's WAN address: `\"CGNAT\"` for 100.64.0.0/10, `\"private (double NAT)\"` for the RFC 1918 ranges,",
+        "`\"public\"` otherwise. Helpers are given."
+      ],
+      "starter": [
+        "// helpers you can use",
+        "uint ToUInt(string ip) => ip.Split('.').Aggregate(0u, (acc, o) => (acc << 8) | uint.Parse(o));",
+        "string FromUInt(uint v) => $\"{v >> 24}.{(v >> 16) & 255}.{(v >> 8) & 255}.{v & 255}\";",
+        "uint MaskOf(int prefix) => prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "",
+        "string Wan(string ip)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "uint ToUInt(string ip) => ip.Split('.').Aggregate(0u, (acc, o) => (acc << 8) | uint.Parse(o));",
+        "string FromUInt(uint v) => $\"{v >> 24}.{(v >> 16) & 255}.{(v >> 8) & 255}.{v & 255}\";",
+        "uint MaskOf(int prefix) => prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "",
+        "string Wan(string ip)",
+        "{",
+        "    uint a = ToUInt(ip);",
+        "    bool In(string net, int p) => (a & MaskOf(p)) == ToUInt(net);",
+        "    if (In(\"100.64.0.0\", 10)) return \"CGNAT\";",
+        "    if (In(\"10.0.0.0\", 8) || In(\"172.16.0.0\", 12) || In(\"192.168.0.0\", 16)) return \"private (double NAT)\";",
+        "    return \"public\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"100.72.4.19\", \"CGNAT\", Wan(\"100.72.4.19\"));",
+        "Dojo.Eq(\"100.127.255.1 (end of /10)\", \"CGNAT\", Wan(\"100.127.255.1\"));",
+        "Dojo.Eq(\"100.128.0.1 is public\", \"public\", Wan(\"100.128.0.1\"));",
+        "Dojo.Eq(\"192.168.1.2\", \"private (double NAT)\", Wan(\"192.168.1.2\"));",
+        "Dojo.Eq(\"203.0.113.9\", \"public\", Wan(\"203.0.113.9\"));"
+      ],
+      "hints": [
+        "100.64.0.0/10 means the first 10 bits match.",
+        "A local function `In(net, prefix)` keeps it short."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A PAT table",
+      "prompt": [
+        "Write a class `PatTable(string publicIp)`:",
+        "",
+        "- `string Outbound(string inside, string remote)` returns `\"{publicIp}:{port}\"` for this inside endpoint talking to this remote endpoint.",
+        "  The same pair reuses its port; a new pair gets the next port from 40000 upward.",
+        "- `string? Inbound(string remote, int port)` returns the inside endpoint only if a mapping exists on that port **and** the packet comes from the remote it was created for, else `null`.",
+        "- `int Count` is the number of mappings."
+      ],
+      "starter": [
+        "class PatTable",
+        "{",
+        "    public PatTable(string publicIp)",
+        "    {",
+        "    }",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "class PatTable",
+        "{",
+        "    private readonly string publicIp;",
+        "    private int nextPort = 40000;",
+        "    private readonly Dictionary<string, int> outMap = new();",
+        "    private readonly Dictionary<int, (string Inside, string Remote)> inMap = new();",
+        "",
+        "    public PatTable(string publicIp) => this.publicIp = publicIp;",
+        "",
+        "    public string Outbound(string inside, string remote)",
+        "    {",
+        "        string key = inside + \">\" + remote;",
+        "        if (!outMap.TryGetValue(key, out int port))",
+        "        {",
+        "            port = nextPort++;",
+        "            outMap[key] = port;",
+        "            inMap[port] = (inside, remote);",
+        "        }",
+        "        return $\"{publicIp}:{port}\";",
+        "    }",
+        "",
+        "    public string? Inbound(string remote, int port)",
+        "        => inMap.TryGetValue(port, out var e) && e.Remote == remote ? e.Inside : null;",
+        "",
+        "    public int Count => inMap.Count;",
+        "}"
+      ],
+      "template": [
+        "var dojoT = new PatTable(\"203.0.113.1\");",
+        "Dojo.Eq(\"first\", \"203.0.113.1:40000\", dojoT.Outbound(\"10.0.0.5:51000\", \"93.184.216.34:443\"));",
+        "Dojo.Eq(\"same pair reused\", \"203.0.113.1:40000\", dojoT.Outbound(\"10.0.0.5:51000\", \"93.184.216.34:443\"));",
+        "Dojo.Eq(\"other host, same source port\", \"203.0.113.1:40001\", dojoT.Outbound(\"10.0.0.6:51000\", \"93.184.216.34:443\"));",
+        "Dojo.Eq(\"reply reaches inside\", \"10.0.0.5:51000\", dojoT.Inbound(\"93.184.216.34:443\", 40000));",
+        "Dojo.Eq(\"stranger on a mapped port\", null, dojoT.Inbound(\"6.6.6.6:443\", 40000));",
+        "Dojo.Eq(\"unmapped port\", null, dojoT.Inbound(\"93.184.216.34:443\", 40500));",
+        "Dojo.Eq(\"count\", 2, dojoT.Count);",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Key outbound mappings by `inside + \">\" + remote`.",
+        "Inbound needs both the port and the remote to match."
+      ]
+    }
+  ]
+}

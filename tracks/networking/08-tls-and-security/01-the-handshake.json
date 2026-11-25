@@ -1,0 +1,204 @@
+{
+  "title": "The TLS handshake",
+  "summary": "How a browser gets an encrypted, authenticated channel before sending a single byte of HTTP.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What TLS gives you",
+      "body": [
+        "HTTPS is HTTP inside **TLS**. TLS gives three things:",
+        "",
+        "- **Confidentiality**: nobody on the path can read the traffic.",
+        "- **Integrity**: nobody can change it unnoticed.",
+        "- **Authentication**: you're really talking to `shop.example`, proven by its **certificate** chaining to a root you trust.",
+        "",
+        "The certificate part is deep enough to have its own topic: see **Certificates & PKI** for chains, trust stores and what breaks them."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An attacker on cafe Wi-Fi watches your HTTPS traffic to `shop.example`. What can they still learn?",
+      "options": [
+        "The server's IP and (via SNI) the hostname, plus traffic sizes and timing",
+        "The URL path and cookies",
+        "The request body",
+        "Nothing at all"
+      ],
+      "answer": 0,
+      "explain": "TLS hides everything inside the connection, but IPs, the SNI hostname (unless Encrypted Client Hello is used) and packet sizes stay visible."
+    },
+    {
+      "type": "learn",
+      "title": "TLS 1.3 in one round trip",
+      "body": [
+        "```text",
+        "client                                        server",
+        "  | -- ClientHello: versions, ciphers,  -----> |",
+        "  |    key share, SNI = shop.example           |",
+        "  | <-- ServerHello: chosen cipher, key share  |",
+        "  |     {Certificate, CertificateVerify,       |   { } = already encrypted",
+        "  |      Finished}                             |",
+        "  | -- {Finished} ---------------------------> |",
+        "  | == {HTTP request / response} ============= |",
+        "```",
+        "",
+        "- Both sides combine **key shares** (ephemeral Diffie-Hellman) into the same secret without ever sending it: *forward secrecy*.",
+        "- **SNI** tells the server which site's certificate to present (many sites, one IP).",
+        "- **ALPN** in the hello negotiates `h2` or `http/1.1`."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Order a TLS 1.3 connection to `https://shop.example`.",
+      "lines": [
+        "DNS lookup for shop.example",
+        "TCP handshake to port 443",
+        "ClientHello with SNI and key share",
+        "ServerHello plus certificate",
+        "Client verifies the certificate chain and name",
+        "Encrypted HTTP request"
+      ],
+      "explain": "DNS, then TCP, then TLS, then HTTP. HTTP/3 merges the transport and TLS steps inside QUIC."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each TLS term to its job.",
+      "pairs": [
+        [
+          "SNI",
+          "Which hostname the client wants"
+        ],
+        [
+          "ALPN",
+          "Which application protocol (h2, http/1.1)"
+        ],
+        [
+          "Certificate",
+          "Proves the server owns the name"
+        ],
+        [
+          "Key share",
+          "Ingredient of the shared secret"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`curl https://10.0.0.5/` fails with *certificate subject name does not match*, but `curl https://shop.example/` (same IP) works. Why?",
+      "options": [
+        "The certificate is for `shop.example`; connecting by IP checks the name `10.0.0.5`, and no SNI is sent",
+        "The server's TLS version is too old",
+        "The root CA is untrusted",
+        "Port 443 is blocked"
+      ],
+      "answer": 0,
+      "explain": "Name checks compare the name you *asked for* with the certificate. Use the name (or `curl --resolve shop.example:443:10.0.0.5 https://shop.example/` to pin the IP)."
+    },
+    {
+      "type": "learn",
+      "title": "HSTS",
+      "body": [
+        "Typing `shop.example` starts with plain `http://`. That first request can be intercepted and never redirected (SSL stripping).",
+        "",
+        "**HSTS** closes the gap. Over HTTPS the server sends:",
+        "",
+        "```text",
+        "Strict-Transport-Security: max-age=31536000; includeSubDomains; preload",
+        "```",
+        "",
+        "For `max-age` seconds the browser **rewrites every http:// URL for that host to https://** itself, before any packet leaves, and refuses to let users click through certificate errors.",
+        "`includeSubDomains` extends it to `*.shop.example`. `preload` asks to be built into browsers so even the very first visit is protected.",
+        "",
+        "> **Tip:** start with a small max-age. If any subdomain can't do HTTPS, `includeSubDomains` breaks it for a year."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the header: enforce HTTPS for one year on this host and all subdomains.",
+      "code": [
+        "Strict-Transport-Security: __1__=31536000; __2__"
+      ],
+      "blanks": [
+        "max-age",
+        "includeSubDomains"
+      ],
+      "bank": [
+        "expires",
+        "ttl",
+        "subdomains",
+        "secure"
+      ],
+      "explain": "Directives are separated by semicolons."
+    },
+    {
+      "type": "sort",
+      "prompt": "Does HSTS protect this?",
+      "buckets": [
+        "Protected",
+        "Not protected"
+      ],
+      "items": [
+        [
+          "Second visit typed as `http://shop.example`",
+          0
+        ],
+        [
+          "`http://api.shop.example` with includeSubDomains",
+          0
+        ],
+        [
+          "Very first visit, not preloaded",
+          1
+        ],
+        [
+          "A different domain `shop-example.com`",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Parse HSTS",
+      "prompt": [
+        "Write `(int MaxAge, bool IncludeSubDomains, bool Preload)` `ParseHsts(string header)`.",
+        "Directives are `;`-separated, case-insensitive, with optional spaces; `max-age` may be quoted (`max-age=\"600\"`). A missing `max-age` throws `FormatException`."
+      ],
+      "starter": [
+        "(int MaxAge, bool IncludeSubDomains, bool Preload) ParseHsts(string header)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "(int MaxAge, bool IncludeSubDomains, bool Preload) ParseHsts(string header)",
+        "{",
+        "    int? maxAge = null;",
+        "    bool sub = false, pre = false;",
+        "    foreach (var raw in header.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))",
+        "    {",
+        "        var d = raw.ToLowerInvariant();",
+        "        if (d.StartsWith(\"max-age=\")) maxAge = int.Parse(d[8..].Trim('\"'));",
+        "        else if (d == \"includesubdomains\") sub = true;",
+        "        else if (d == \"preload\") pre = true;",
+        "    }",
+        "    if (maxAge == null) throw new FormatException(\"max-age is required\");",
+        "    return (maxAge.Value, sub, pre);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"full\", (31536000, true, true), ParseHsts(\"max-age=31536000; includeSubDomains; preload\"));",
+        "Dojo.Eq(\"only max-age\", (600, false, false), ParseHsts(\"max-age=600\"));",
+        "Dojo.Eq(\"quoted, odd case\", (300, true, false), ParseHsts(\"MAX-AGE=\\\"300\\\" ;includesubdomains\"));",
+        "Dojo.Throws<FormatException>(\"no max-age\", () => ParseHsts(\"includeSubDomains\"));"
+      ],
+      "hints": [
+        "Split on `;` with `TrimEntries`, lowercase each.",
+        "`Trim('\"')` removes optional quotes."
+      ]
+    }
+  ]
+}

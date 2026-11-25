@@ -1,0 +1,244 @@
+{
+  "title": "HTTP/1.1, HTTP/2 and HTTP/3",
+  "summary": "Why each version exists, what problem it solved, and how to see which one you're using.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "HTTP/1.1 and head-of-line blocking",
+      "body": [
+        "HTTP/1.1 sends text requests over TCP. **Keep-alive** reuses a connection for several requests, but **one at a time**: response 2 can't start until response 1 is done.",
+        "A slow response blocks everything behind it: **head-of-line blocking**.",
+        "",
+        "Browsers work around it by opening **about 6 connections per host**, and sites used to *shard* assets across `img1.`, `img2.` hostnames and bundle files into sprites. Each extra connection costs its own TCP and TLS handshakes."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A page loads 30 small images from one host over HTTP/1.1. Why is it slow even on a fast link?",
+      "options": [
+        "At most ~6 requests are in flight at once, so it takes several round trips",
+        "HTTP/1.1 can't send images",
+        "TCP limits files to 6 per second",
+        "DNS is asked 30 times"
+      ],
+      "answer": 0,
+      "explain": "Latency, not bandwidth: 30 requests over 6 connections is 5 sequential rounds."
+    },
+    {
+      "type": "learn",
+      "title": "HTTP/2: one connection, many streams",
+      "body": [
+        "HTTP/2 keeps the same methods, headers and status codes, but changes the wire format:",
+        "",
+        "- **binary frames** instead of text lines;",
+        "- **multiplexing**: many requests (*streams*) interleaved over **one** TCP connection, so nothing waits for a slow response;",
+        "- **HPACK** header compression (cookies aren't re-sent in full each time);",
+        "- negotiated during TLS with **ALPN** `h2`. Browsers only do HTTP/2 over TLS.",
+        "",
+        "What it couldn't fix: TCP itself delivers bytes in order, so **one lost packet stalls every stream** until it's retransmitted."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "This models a page with 12 resources on a 100 ms round trip, ignoring setup. What does it print?",
+      "code": [
+        "int resources = 12, rtt = 100;",
+        "int h1Rounds = (resources + 5) / 6;   // 6 connections, one request each at a time",
+        "int h2Rounds = 1;                     // all multiplexed at once",
+        "Console.WriteLine($\"HTTP/1.1: {h1Rounds * rtt} ms\");",
+        "Console.WriteLine($\"HTTP/2: {h2Rounds * rtt} ms\");"
+      ],
+      "answer": [
+        "HTTP/1.1: 200 ms",
+        "HTTP/2: 100 ms"
+      ],
+      "explain": "`(12 + 5) / 6` is integer ceiling division: 2 rounds."
+    },
+    {
+      "type": "learn",
+      "title": "HTTP/3: QUIC over UDP",
+      "body": [
+        "HTTP/3 replaces TCP with **QUIC**, a transport built on **UDP**:",
+        "",
+        "- each stream is delivered independently, so a lost packet only stalls **its own** stream;",
+        "- the transport and TLS 1.3 handshakes are **combined**: one round trip to a new server, zero (**0-RTT**) when resuming;",
+        "- connections survive **network changes** (Wi-Fi to mobile) because they're identified by a connection ID, not the IP/port pair.",
+        "",
+        "A server advertises it with a header on an HTTP/2 response; the browser tries QUIC next time:",
+        "",
+        "```text",
+        "alt-svc: h3=\":443\"; ma=86400",
+        "```",
+        "",
+        "If UDP 443 is blocked by a firewall, browsers silently fall back to HTTP/2."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which version introduced it?",
+      "buckets": [
+        "HTTP/1.1",
+        "HTTP/2",
+        "HTTP/3"
+      ],
+      "items": [
+        [
+          "Persistent (keep-alive) connections",
+          0
+        ],
+        [
+          "Mandatory `Host` header",
+          0
+        ],
+        [
+          "Binary framing and multiplexing",
+          1
+        ],
+        [
+          "HPACK header compression",
+          1
+        ],
+        [
+          "Runs over UDP",
+          2
+        ],
+        [
+          "Connection migration between networks",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the commands: ask curl for HTTP/2 and show only headers, then show which protocol was used.",
+      "code": [
+        "curl __1__ -I https://shop.example/",
+        "curl -s -o /dev/null -w '%{__2__}\\n' https://shop.example/"
+      ],
+      "blanks": [
+        "--http2",
+        "http_version"
+      ],
+      "bank": [
+        "--h2c",
+        "status",
+        "-L",
+        "protocol"
+      ],
+      "explain": "`-w '%{http_version}'` prints `1.1`, `2` or `3`."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each symptom to the version detail behind it.",
+      "pairs": [
+        [
+          "Works in browser over h2, fails from an old client with a text protocol error",
+          "Server sends HTTP/2 frames only after ALPN"
+        ],
+        [
+          "HTTP/3 never used inside the office",
+          "Firewall blocks UDP 443"
+        ],
+        [
+          "Mobile call drops less when switching Wi-Fi to 4G",
+          "QUIC connection migration"
+        ],
+        [
+          "One lost packet stalls all images",
+          "TCP head-of-line blocking under HTTP/2"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Model page load time",
+      "prompt": [
+        "Write `int LoadTimeMs(string version, int resources, int rttMs)` with this simple model:",
+        "",
+        "- **setup**: `\"1.1\"` and `\"2\"` pay 2 round trips (TCP + TLS 1.3); `\"3\"` pays 1 (combined QUIC handshake).",
+        "- **requests**: `\"1.1\"` needs `ceil(resources / 6)` rounds; `\"2\"` and `\"3\"` need 1 round (if `resources > 0`, else 0).",
+        "- total = (setup + request rounds) x `rttMs`. Any other version throws `ArgumentException`."
+      ],
+      "starter": [
+        "int LoadTimeMs(string version, int resources, int rttMs)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "int LoadTimeMs(string version, int resources, int rttMs)",
+        "{",
+        "    int setup, rounds;",
+        "    switch (version)",
+        "    {",
+        "        case \"1.1\": setup = 2; rounds = (resources + 5) / 6; break;",
+        "        case \"2\": setup = 2; rounds = resources > 0 ? 1 : 0; break;",
+        "        case \"3\": setup = 1; rounds = resources > 0 ? 1 : 0; break;",
+        "        default: throw new ArgumentException(\"unknown version \" + version);",
+        "    }",
+        "    return (setup + rounds) * rttMs;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"1.1, 30 resources\", 700, LoadTimeMs(\"1.1\", 30, 100));",
+        "Dojo.Eq(\"2, 30 resources\", 300, LoadTimeMs(\"2\", 30, 100));",
+        "Dojo.Eq(\"3, 30 resources\", 200, LoadTimeMs(\"3\", 30, 100));",
+        "Dojo.Eq(\"1.1, 7 resources\", 400, LoadTimeMs(\"1.1\", 7, 100));",
+        "Dojo.Eq(\"no resources\", 100, LoadTimeMs(\"3\", 0, 100));",
+        "Dojo.Throws<ArgumentException>(\"unknown\", () => LoadTimeMs(\"4\", 1, 100));"
+      ],
+      "hints": [
+        "Ceiling division: `(resources + 5) / 6`.",
+        "A `switch` on the version sets setup and rounds."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Parse Alt-Svc",
+      "prompt": [
+        "Write `List<(string Protocol, int Port)> ParseAltSvc(string header)`. Entries are comma-separated; each starts with `proto=\"host:port\"` (host usually empty)",
+        "and may be followed by `; ma=...` parameters to ignore. `clear` alone means no alternatives (return an empty list).",
+        "",
+        "`h3=\":443\"; ma=86400, h3-29=\":8443\"` gives `[(\"h3\", 443), (\"h3-29\", 8443)]`."
+      ],
+      "starter": [
+        "List<(string Protocol, int Port)> ParseAltSvc(string header)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<(string Protocol, int Port)> ParseAltSvc(string header)",
+        "{",
+        "    var result = new List<(string Protocol, int Port)>();",
+        "    if (header.Trim() == \"clear\") return result;",
+        "    foreach (var entry in header.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))",
+        "    {",
+        "        string first = entry.Split(';')[0].Trim();",
+        "        int eq = first.IndexOf('=');",
+        "        string proto = first[..eq];",
+        "        string value = first[(eq + 1)..].Trim('\"');",
+        "        int port = int.Parse(value[(value.LastIndexOf(':') + 1)..]);",
+        "        result.Add((proto, port));",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"two entries\", new List<(string Protocol, int Port)> { (\"h3\", 443), (\"h3-29\", 8443) }, ParseAltSvc(\"h3=\\\":443\\\"; ma=86400, h3-29=\\\":8443\\\"\"));",
+        "Dojo.Eq(\"with host\", new List<(string Protocol, int Port)> { (\"h2\", 443) }, ParseAltSvc(\"h2=\\\"alt.example:443\\\"\"));",
+        "Dojo.Eq(\"clear\", new List<(string Protocol, int Port)>(), ParseAltSvc(\"clear\"));"
+      ],
+      "hints": [
+        "Split on `,`, then keep the part before the first `;`.",
+        "Split that at `=`, strip quotes, take the digits after the last `:`."
+      ]
+    }
+  ]
+}

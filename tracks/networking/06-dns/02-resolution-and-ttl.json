@@ -1,0 +1,174 @@
+{
+  "title": "Resolution and TTL",
+  "summary": "How a name is found, and why a change you made an hour ago still isn't visible.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The resolution chain",
+      "body": [
+        "Your laptop doesn't know the whole internet. It asks a **recursive resolver** (your ISP's, your company's, or `1.1.1.1`), which does the legwork:",
+        "",
+        "```text",
+        "app -> OS stub resolver (checks hosts file + its cache)",
+        "    -> recursive resolver (checks its cache)",
+        "        -> root server:        \"ask the .example servers\"",
+        "        -> .example TLD server: \"ask ns1.dnshost.example\"",
+        "        -> authoritative server: \"shop.example A 203.0.113.10, TTL 300\"",
+        "    <- answer cached everywhere for up to 300 s",
+        "```",
+        "",
+        "Only the **authoritative** server truly knows. Everyone else repeats a cached copy."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Order the steps a recursive resolver takes on a cold cache for `shop.example`.",
+      "lines": [
+        "Receive the query from the client",
+        "Ask a root server",
+        "Ask the .example TLD server",
+        "Ask shop.example's authoritative server",
+        "Cache the answer for its TTL",
+        "Return the answer to the client"
+      ],
+      "explain": "Root, then TLD, then authoritative; caching happens before the reply so the next client is fast."
+    },
+    {
+      "type": "learn",
+      "title": "TTL and caching",
+      "body": [
+        "Every record carries a **TTL** (time to live, seconds). Resolvers may serve it from cache until it expires.",
+        "",
+        "That's great for speed and terrible during a migration: if the A record had TTL `86400`, some clients keep the old IP **for a day** after you change it.",
+        "",
+        "The playbook for moving a service:",
+        "",
+        "1. Days before, lower the TTL (say to 60) and wait for the *old* TTL to pass.",
+        "2. Change the record. Clients pick it up within a minute.",
+        "3. Once stable, raise the TTL again.",
+        "",
+        "Other caches hide in the way: the OS cache (`ipconfig /flushdns`, `resolvectl flush-caches`), browsers, and long-running apps that resolve once at startup."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You changed `api.shop.example` to a new IP 10 minutes ago. `dig @ns1.dnshost.example api.shop.example` shows the new IP, but `dig api.shop.example` shows the old one with TTL `3100`. What's happening?",
+      "options": [
+        "Your recursive resolver cached the old answer and will keep serving it for about 52 more minutes",
+        "The authoritative server is wrong",
+        "The change failed to save",
+        "DNSSEC is blocking the update"
+      ],
+      "answer": 0,
+      "explain": "Asking the authoritative server directly bypasses caches. The counting-down TTL from your resolver shows how long its cached copy has left."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the symptom to the most likely DNS cause.",
+      "pairs": [
+        [
+          "Works on mobile data, fails on office Wi-Fi",
+          "Different resolvers with different cached answers"
+        ],
+        [
+          "Only one developer's machine resolves the old IP",
+          "An entry in their hosts file"
+        ],
+        [
+          "`NXDOMAIN` for a brand-new subdomain",
+          "Negative answer cached before the record existed"
+        ],
+        [
+          "App still calls the old IP after a restart of DNS, but not after an app restart",
+          "The app resolved once and cached it in-process"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the commands: follow the chain from the root, then flush the cache on a systemd Linux box.",
+      "code": [
+        "dig shop.example __1__",
+        "resolvectl __2__"
+      ],
+      "blanks": [
+        "+trace",
+        "flush-caches"
+      ],
+      "bank": [
+        "+short",
+        "restart",
+        "-x"
+      ],
+      "explain": "`+trace` performs the iterative walk itself; `resolvectl flush-caches` clears systemd-resolved."
+    },
+    {
+      "type": "predict",
+      "prompt": "A resolver cached a record at t=0 with TTL 300. Which requests are answered from cache?",
+      "code": [
+        "int ttl = 300;",
+        "int[] times = { 10, 299, 300, 450 };",
+        "foreach (var t in times)",
+        "    Console.WriteLine($\"t={t}: {(t < ttl ? \"cache\" : \"ask again\")}\");"
+      ],
+      "answer": [
+        "t=10: cache",
+        "t=299: cache",
+        "t=300: ask again",
+        "t=450: ask again"
+      ],
+      "explain": "At exactly TTL seconds the entry is expired; the resolver must go back to the authoritative server."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A TTL cache",
+      "prompt": [
+        "Write a class `DnsCache` with:",
+        "",
+        "- `void Put(string name, string value, int ttl, int now)` stores an answer received at time `now` (seconds).",
+        "- `string? Get(string name, int now)` returns the value if `now < storedAt + ttl`, otherwise removes it and returns `null`.",
+        "",
+        "Names are case-insensitive. A new `Put` replaces the old entry."
+      ],
+      "starter": [
+        "class DnsCache",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "class DnsCache",
+        "{",
+        "    private readonly Dictionary<string, (string Value, int Expires)> entries = new(StringComparer.OrdinalIgnoreCase);",
+        "",
+        "    public void Put(string name, string value, int ttl, int now) => entries[name] = (value, now + ttl);",
+        "",
+        "    public string? Get(string name, int now)",
+        "    {",
+        "        if (!entries.TryGetValue(name, out var e)) return null;",
+        "        if (now >= e.Expires) { entries.Remove(name); return null; }",
+        "        return e.Value;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoC = new DnsCache();",
+        "dojoC.Put(\"shop.example\", \"1.1.1.1\", 300, 0);",
+        "Dojo.Eq(\"fresh at t=10\", \"1.1.1.1\", dojoC.Get(\"shop.example\", 10));",
+        "Dojo.Eq(\"case-insensitive\", \"1.1.1.1\", dojoC.Get(\"SHOP.EXAMPLE\", 10));",
+        "Dojo.Eq(\"expired at t=300\", null, dojoC.Get(\"shop.example\", 300));",
+        "dojoC.Put(\"shop.example\", \"2.2.2.2\", 60, 400);",
+        "Dojo.Eq(\"replaced value\", \"2.2.2.2\", dojoC.Get(\"shop.example\", 420));",
+        "Dojo.Eq(\"unknown name\", null, dojoC.Get(\"nope.example\", 0));",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Store the expiry time (`now + ttl`) rather than the TTL.",
+        "Use `StringComparer.OrdinalIgnoreCase` for the dictionary."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,289 @@
+{
+  "title": "NAT, firewalls, CDNs and curl -v",
+  "summary": "Why your laptop can't be reached, what a firewall rule matches, and how to see every step of a request.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "CIDR and subnets",
+      "body": [
+        "`10.0.4.0/24` means \"the first 24 bits are the network\": the mask is `255.255.255.0`, so the block is `10.0.4.0` to `10.0.4.255` (256 addresses).",
+        "",
+        "| Prefix | Mask | Addresses |",
+        "|---|---|---|",
+        "| /32 | 255.255.255.255 | 1 |",
+        "| /24 | 255.255.255.0 | 256 |",
+        "| /16 | 255.255.0.0 | 65,536 |",
+        "| /8 | 255.0.0.0 | 16,777,216 |",
+        "",
+        "An address is **in** a block when `(ip & mask) == (network & mask)`. Cloud VPCs, firewall rules and Kubernetes all speak CIDR."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "How many addresses does each block hold? This program computes `2^(32 - prefix)`.",
+      "code": [
+        "foreach (int prefix in new[] { 32, 28, 24, 20 })",
+        "    Console.WriteLine($\"/{prefix}: {1L << (32 - prefix)}\");"
+      ],
+      "answer": [
+        "/32: 1",
+        "/28: 16",
+        "/24: 256",
+        "/20: 4096"
+      ],
+      "explain": "Each bit you remove from the prefix doubles the block."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "CIDR math",
+      "prompt": [
+        "Write `uint ToUInt(string ip)`, `bool InCidr(string ip, string cidr)` and `(string First, string Last) Range(string cidr)`",
+        "(paste `FromUInt` too, or write it). `/0` must work (it matches everything; careful: shifting a `uint` by 32 does nothing in C#).",
+        "",
+        "`Range(\"10.0.4.17/24\")` is `(\"10.0.4.0\", \"10.0.4.255\")`."
+      ],
+      "starter": [
+        "uint ToUInt(string ip)",
+        "{",
+        "    // your code",
+        "}",
+        "",
+        "string FromUInt(uint v) => $\"{v >> 24}.{(v >> 16) & 255}.{(v >> 8) & 255}.{v & 255}\";",
+        "",
+        "bool InCidr(string ip, string cidr)",
+        "{",
+        "    // your code",
+        "}",
+        "",
+        "(string First, string Last) Range(string cidr)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "uint ToUInt(string ip)",
+        "{",
+        "    var parts = ip.Split('.');",
+        "    if (parts.Length != 4) throw new FormatException(\"need 4 octets\");",
+        "    uint result = 0;",
+        "    foreach (var p in parts)",
+        "    {",
+        "        if (!int.TryParse(p, out int n) || n < 0 || n > 255) throw new FormatException(\"bad octet \" + p);",
+        "        result = (result << 8) | (uint)n;",
+        "    }",
+        "    return result;",
+        "}",
+        "",
+        "string FromUInt(uint v) => $\"{v >> 24}.{(v >> 16) & 255}.{(v >> 8) & 255}.{v & 255}\";",
+        "",
+        "bool InCidr(string ip, string cidr)",
+        "{",
+        "    var parts = cidr.Split('/');",
+        "    int prefix = int.Parse(parts[1]);",
+        "    uint mask = prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "    return (ToUInt(ip) & mask) == (ToUInt(parts[0]) & mask);",
+        "}",
+        "",
+        "(string First, string Last) Range(string cidr)",
+        "{",
+        "    var parts = cidr.Split('/');",
+        "    int prefix = int.Parse(parts[1]);",
+        "    uint mask = prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "    uint first = ToUInt(parts[0]) & mask;",
+        "    return (FromUInt(first), FromUInt(first | ~mask));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"in /24\", true, InCidr(\"10.0.4.200\", \"10.0.4.0/24\"));",
+        "Dojo.Eq(\"out of /24\", false, InCidr(\"10.0.5.1\", \"10.0.4.0/24\"));",
+        "Dojo.Eq(\"/12 edge\", true, InCidr(\"172.31.0.1\", \"172.16.0.0/12\"));",
+        "Dojo.Eq(\"/32 exact\", true, InCidr(\"1.2.3.4\", \"1.2.3.4/32\"));",
+        "Dojo.Eq(\"/0 everything\", true, InCidr(\"8.8.8.8\", \"0.0.0.0/0\"));",
+        "Dojo.Eq(\"range /24\", (\"10.0.4.0\", \"10.0.4.255\"), Range(\"10.0.4.17/24\"));",
+        "Dojo.Eq(\"range /20\", (\"10.0.16.0\", \"10.0.31.255\"), Range(\"10.0.20.9/20\"));"
+      ],
+      "hints": [
+        "Mask: `prefix == 0 ? 0u : uint.MaxValue << (32 - prefix)`.",
+        "Last address is `first | ~mask`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "NAT",
+      "body": [
+        "Your home has one public IPv4 address; every device inside has a private one. The router does **NAT** (network address translation):",
+        "",
+        "```text",
+        "laptop 192.168.1.20:52114  --->  router rewrites source  --->  203.0.113.9:40001 -> 93.184.216.34:443",
+        "                                 remembers 40001 = laptop:52114",
+        "reply to 203.0.113.9:40001 --->  router rewrites back     --->  192.168.1.20:52114",
+        "```",
+        "",
+        "Consequence: outbound connections just work, but **nobody outside can start a connection to your laptop** unless you add a port-forward.",
+        "Cloud \"NAT gateways\" do the same for private subnets."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A webhook provider must call `http://192.168.1.20:5000/hook` on your home laptop and can't connect. Why?",
+      "options": [
+        "It's a private address behind NAT; nothing outside can start a connection to it without a port-forward or tunnel",
+        "Webhooks need HTTPS",
+        "Port 5000 is reserved",
+        "The provider's DNS is stale"
+      ],
+      "answer": 0,
+      "explain": "Use a tunnel (or a port-forward to a public IP) for local webhook testing."
+    },
+    {
+      "type": "learn",
+      "title": "Firewalls",
+      "body": [
+        "A firewall (security group, NSG, `iptables`/`nftables`) checks each new connection against **ordered rules**; the first match wins, and there's a default at the end:",
+        "",
+        "```text",
+        "1  allow  tcp  443   from 0.0.0.0/0",
+        "2  allow  tcp  22    from 10.0.0.0/8",
+        "3  deny   any  any   from any          (default)",
+        "```",
+        "",
+        "**Stateful** firewalls automatically allow replies to connections that were allowed out, so you write rules only for who may *start* connections."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "SSH to a cloud VM works from the office but times out from home. The security group allows tcp 22 from `10.0.0.0/8` and `198.51.100.0/24` (the office). Cause?",
+      "options": [
+        "Your home public IP isn't in any allowed range; the firewall silently drops the SYN",
+        "SSH keys are wrong",
+        "The VM is down",
+        "DNS is cached"
+      ],
+      "answer": 0,
+      "explain": "A timeout (no reply) is the firewall signature. A wrong key would connect and then say *Permission denied (publickey)*."
+    },
+    {
+      "type": "learn",
+      "title": "CDNs and curl -v",
+      "body": [
+        "A **CDN** runs edge servers near users. DNS (often a CNAME to the CDN) sends users to the nearest edge, which serves cached copies and fetches misses from your **origin**.",
+        "Response headers like `Age: 120` and `X-Cache: HIT` tell you it came from the edge.",
+        "",
+        "`curl -v` shows every layer of a request, which makes it the first debugging tool to reach for:",
+        "",
+        "```text",
+        "*   Trying 203.0.113.10:443...                       DNS answer + TCP",
+        "* Connected to shop.example (203.0.113.10) port 443",
+        "* SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256   TLS",
+        "* Server certificate: subject: CN=shop.example",
+        "> GET /logo.png HTTP/2                               request (>)",
+        "> Host: shop.example",
+        "< HTTP/2 200                                         response (<)",
+        "< cache-control: public, max-age=86400",
+        "< age: 3500",
+        "< x-cache: HIT",
+        "```"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each `curl` flag to what it does.",
+      "pairs": [
+        [
+          "`-v`",
+          "Show connection, TLS and headers"
+        ],
+        [
+          "`-I`",
+          "Send HEAD, show only headers"
+        ],
+        [
+          "`-L`",
+          "Follow redirects"
+        ],
+        [
+          "`--resolve host:443:IP`",
+          "Skip DNS and use this IP"
+        ],
+        [
+          "`-k`",
+          "Ignore certificate errors (never in prod)"
+        ],
+        [
+          "`-H 'X: y'`",
+          "Add a request header"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Evaluate firewall rules",
+      "prompt": [
+        "Rules are strings `\"allow tcp 443 0.0.0.0/0\"`: action, protocol (`tcp`, `udp` or `any`), port (number or `any`), source CIDR.",
+        "Write `string Evaluate(List<string> rules, string proto, int port, string sourceIp)` returning the action of the **first** matching rule, or `\"deny\"` if none match.",
+        "Include your `ToUInt` and `InCidr`."
+      ],
+      "starter": [
+        "// paste ToUInt and InCidr here",
+        "",
+        "string Evaluate(List<string> rules, string proto, int port, string sourceIp)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "uint ToUInt(string ip)",
+        "{",
+        "    var parts = ip.Split('.');",
+        "    if (parts.Length != 4) throw new FormatException(\"need 4 octets\");",
+        "    uint result = 0;",
+        "    foreach (var p in parts)",
+        "    {",
+        "        if (!int.TryParse(p, out int n) || n < 0 || n > 255) throw new FormatException(\"bad octet \" + p);",
+        "        result = (result << 8) | (uint)n;",
+        "    }",
+        "    return result;",
+        "}",
+        "",
+        "bool InCidr(string ip, string cidr)",
+        "{",
+        "    var parts = cidr.Split('/');",
+        "    int prefix = int.Parse(parts[1]);",
+        "    uint mask = prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);",
+        "    return (ToUInt(ip) & mask) == (ToUInt(parts[0]) & mask);",
+        "}",
+        "",
+        "string Evaluate(List<string> rules, string proto, int port, string sourceIp)",
+        "{",
+        "    foreach (var rule in rules)",
+        "    {",
+        "        var p = rule.Split(' ');",
+        "        bool protoOk = p[1] == \"any\" || p[1] == proto;",
+        "        bool portOk = p[2] == \"any\" || int.Parse(p[2]) == port;",
+        "        if (protoOk && portOk && InCidr(sourceIp, p[3])) return p[0];",
+        "    }",
+        "    return \"deny\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoR = new List<string> { \"deny tcp 22 203.0.113.66/32\", \"allow tcp 22 203.0.113.0/24\", \"allow tcp 443 0.0.0.0/0\", \"allow udp any 10.0.0.0/8\" };",
+        "Dojo.Eq(\"https from anywhere\", \"allow\", Evaluate(dojoR, \"tcp\", 443, \"8.8.8.8\"));",
+        "Dojo.Eq(\"ssh from office\", \"allow\", Evaluate(dojoR, \"tcp\", 22, \"203.0.113.5\"));",
+        "Dojo.Eq(\"blocked host first\", \"deny\", Evaluate(dojoR, \"tcp\", 22, \"203.0.113.66\"));",
+        "Dojo.Eq(\"ssh from home\", \"deny\", Evaluate(dojoR, \"tcp\", 22, \"198.51.100.4\"));",
+        "Dojo.Eq(\"udp internal any port\", \"allow\", Evaluate(dojoR, \"udp\", 5353, \"10.9.9.9\"));",
+        "Dojo.Eq(\"udp from outside\", \"deny\", Evaluate(dojoR, \"udp\", 53, \"8.8.8.8\"));"
+      ],
+      "hints": [
+        "Split each rule into 4 words.",
+        "`any` matches everything; first full match returns."
+      ]
+    }
+  ]
+}

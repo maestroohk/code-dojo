@@ -1,0 +1,258 @@
+{
+  "title": "TCP connection states",
+  "summary": "The state machine behind every socket, and what TIME_WAIT and CLOSE_WAIT piles are telling you.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The state machine",
+      "body": [
+        "```text",
+        " opening                               closing (the side that closes first is \"active\")",
+        " CLOSED --listen--> LISTEN             ESTABLISHED --close--> FIN_WAIT_1 --rcv ACK--> FIN_WAIT_2",
+        " LISTEN --rcv SYN--> SYN_RECEIVED      FIN_WAIT_2 --rcv FIN--> TIME_WAIT --2*MSL--> CLOSED",
+        " CLOSED --connect--> SYN_SENT",
+        " SYN_SENT --rcv SYN-ACK--> ESTABLISHED ESTABLISHED --rcv FIN--> CLOSE_WAIT --close--> LAST_ACK",
+        " SYN_RECEIVED --rcv ACK--> ESTABLISHED LAST_ACK --rcv ACK--> CLOSED",
+        "```",
+        "",
+        "Closing takes four segments, because each direction is shut separately: FIN, ACK, FIN, ACK."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Order a normal close where the client closes first.",
+      "lines": [
+        "Client sends FIN (client: FIN_WAIT_1)",
+        "Server ACKs (server: CLOSE_WAIT, client: FIN_WAIT_2)",
+        "Server app closes and sends FIN (server: LAST_ACK)",
+        "Client ACKs (client: TIME_WAIT, server: CLOSED)",
+        "Client waits 2 x MSL, then CLOSED"
+      ],
+      "explain": "The active closer ends up in TIME_WAIT."
+    },
+    {
+      "type": "learn",
+      "title": "TIME_WAIT and CLOSE_WAIT",
+      "body": [
+        "**TIME_WAIT** lasts 2 × the maximum segment lifetime (60 s on Linux). It makes sure the last ACK can be resent and that stray old segments die before the same port pair is reused.",
+        "Thousands of TIME_WAIT sockets on a busy client are normal, but they can exhaust ephemeral ports when one host opens many short connections to the same server: reuse connections (keep-alive, pooling, one `HttpClient`).",
+        "",
+        "**CLOSE_WAIT** means the peer closed, and **your application hasn't called close yet**. A growing pile of CLOSE_WAIT is almost always a bug: a leaked socket.",
+        "",
+        "```text",
+        "ss -tan state time-wait | wc -l",
+        "ss -tanp state close-wait          # -p shows the owning process",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A .NET service shows 4,000 sockets in `CLOSE_WAIT` to the database, growing all day. What's going on?",
+      "options": [
+        "The app isn't disposing connections after the database closes them: a resource leak in the code",
+        "The database is overloaded",
+        "TIME_WAIT is too long",
+        "The firewall drops FINs"
+      ],
+      "answer": 0,
+      "explain": "CLOSE_WAIT is waiting on *your* close(). Look for missing `using`/`Dispose`."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which side passes through which state?",
+      "buckets": [
+        "Active closer (sends FIN first)",
+        "Passive closer"
+      ],
+      "items": [
+        [
+          "FIN_WAIT_1",
+          0
+        ],
+        [
+          "FIN_WAIT_2",
+          0
+        ],
+        [
+          "TIME_WAIT",
+          0
+        ],
+        [
+          "CLOSE_WAIT",
+          1
+        ],
+        [
+          "LAST_ACK",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the commands: count TIME_WAIT sockets, then list listening TCP sockets with their processes.",
+      "code": [
+        "ss -tan state __1__ | wc -l",
+        "ss __2__ state close-wait"
+      ],
+      "blanks": [
+        "time-wait",
+        "-tanp"
+      ],
+      "bank": [
+        "timewait",
+        "-u",
+        "established"
+      ],
+      "explain": "`-p` shows which process owns each socket: the one leaking connections."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the symptom to the state.",
+      "pairs": [
+        [
+          "Thousands, on a client making many short HTTP calls",
+          "TIME_WAIT"
+        ],
+        [
+          "Growing forever on a server process",
+          "CLOSE_WAIT"
+        ],
+        [
+          "Many from random IPs, never completing",
+          "SYN_RECEIVED (SYN flood)"
+        ],
+        [
+          "A server waiting for clients",
+          "LISTEN"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "The TCP state machine",
+      "prompt": [
+        "Write a class `TcpConnection` with `string State` (starts `\"CLOSED\"`) and `string Handle(string evt)` that applies a transition and returns the new state.",
+        "Events: `listen`, `connect`, `rcv SYN`, `rcv SYN-ACK`, `rcv ACK`, `close`, `rcv FIN`, `timeout`. Implement exactly the transitions in the diagram,",
+        "plus `FIN_WAIT_1 --rcv FIN--> CLOSING` and `CLOSING --rcv ACK--> TIME_WAIT` (simultaneous close). Anything else throws `InvalidOperationException`."
+      ],
+      "starter": [
+        "class TcpConnection",
+        "{",
+        "    public string State { get; private set; } = \"CLOSED\";",
+        "",
+        "    public string Handle(string evt)",
+        "    {",
+        "        // your code",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class TcpConnection",
+        "{",
+        "    public string State { get; private set; } = \"CLOSED\";",
+        "",
+        "    private static readonly Dictionary<(string, string), string> Transitions = new()",
+        "    {",
+        "        [(\"CLOSED\", \"listen\")] = \"LISTEN\",",
+        "        [(\"CLOSED\", \"connect\")] = \"SYN_SENT\",",
+        "        [(\"LISTEN\", \"rcv SYN\")] = \"SYN_RECEIVED\",",
+        "        [(\"SYN_SENT\", \"rcv SYN-ACK\")] = \"ESTABLISHED\",",
+        "        [(\"SYN_RECEIVED\", \"rcv ACK\")] = \"ESTABLISHED\",",
+        "        [(\"ESTABLISHED\", \"close\")] = \"FIN_WAIT_1\",",
+        "        [(\"ESTABLISHED\", \"rcv FIN\")] = \"CLOSE_WAIT\",",
+        "        [(\"FIN_WAIT_1\", \"rcv ACK\")] = \"FIN_WAIT_2\",",
+        "        [(\"FIN_WAIT_1\", \"rcv FIN\")] = \"CLOSING\",",
+        "        [(\"FIN_WAIT_2\", \"rcv FIN\")] = \"TIME_WAIT\",",
+        "        [(\"CLOSING\", \"rcv ACK\")] = \"TIME_WAIT\",",
+        "        [(\"CLOSE_WAIT\", \"close\")] = \"LAST_ACK\",",
+        "        [(\"LAST_ACK\", \"rcv ACK\")] = \"CLOSED\",",
+        "        [(\"TIME_WAIT\", \"timeout\")] = \"CLOSED\",",
+        "    };",
+        "",
+        "    public string Handle(string evt)",
+        "    {",
+        "        if (!Transitions.TryGetValue((State, evt), out var next))",
+        "            throw new InvalidOperationException($\"{evt} not valid in {State}\");",
+        "        State = next;",
+        "        return State;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoS = new TcpConnection();",
+        "Dojo.Eq(\"starts closed\", \"CLOSED\", dojoS.State);",
+        "Dojo.Eq(\"server listens\", \"LISTEN\", dojoS.Handle(\"listen\"));",
+        "Dojo.Eq(\"gets SYN\", \"SYN_RECEIVED\", dojoS.Handle(\"rcv SYN\"));",
+        "Dojo.Eq(\"handshake done\", \"ESTABLISHED\", dojoS.Handle(\"rcv ACK\"));",
+        "Dojo.Eq(\"peer closes\", \"CLOSE_WAIT\", dojoS.Handle(\"rcv FIN\"));",
+        "Dojo.Eq(\"app closes\", \"LAST_ACK\", dojoS.Handle(\"close\"));",
+        "Dojo.Eq(\"final ACK\", \"CLOSED\", dojoS.Handle(\"rcv ACK\"));",
+        "var dojoC = new TcpConnection();",
+        "dojoC.Handle(\"connect\"); dojoC.Handle(\"rcv SYN-ACK\"); dojoC.Handle(\"close\"); dojoC.Handle(\"rcv ACK\");",
+        "Dojo.Eq(\"client in FIN_WAIT_2\", \"FIN_WAIT_2\", dojoC.State);",
+        "Dojo.Eq(\"client TIME_WAIT\", \"TIME_WAIT\", dojoC.Handle(\"rcv FIN\"));",
+        "Dojo.Eq(\"timer expires\", \"CLOSED\", dojoC.Handle(\"timeout\"));",
+        "var dojoX = new TcpConnection();",
+        "dojoX.Handle(\"connect\"); dojoX.Handle(\"rcv SYN-ACK\"); dojoX.Handle(\"close\");",
+        "Dojo.Eq(\"simultaneous close\", \"CLOSING\", dojoX.Handle(\"rcv FIN\"));",
+        "Dojo.Eq(\"then TIME_WAIT\", \"TIME_WAIT\", dojoX.Handle(\"rcv ACK\"));",
+        "Dojo.Throws<InvalidOperationException>(\"can't close a closed socket\", () => new TcpConnection().Handle(\"close\"));",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "A dictionary keyed by `(state, event)` tuples keeps it readable.",
+        "Throw when the pair isn't in the table."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Summarise ss output",
+      "prompt": [
+        "Write `Dictionary<string, int> Count(List<string> ssLines)` counting sockets per state from `ss -tan` output (first word of each line).",
+        "Skip the header line (it starts with `State`) and blank lines."
+      ],
+      "starter": [
+        "Dictionary<string, int> Count(List<string> ssLines)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, int> Count(List<string> ssLines)",
+        "{",
+        "    var counts = new Dictionary<string, int>();",
+        "    foreach (var line in ssLines)",
+        "    {",
+        "        if (string.IsNullOrWhiteSpace(line) || line.StartsWith(\"State\")) continue;",
+        "        var state = line.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];",
+        "        counts[state] = counts.GetValueOrDefault(state) + 1;",
+        "    }",
+        "    return counts;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSs = new List<string> {",
+        "    \"State      Recv-Q Send-Q Local Address:Port  Peer Address:Port\",",
+        "    \"LISTEN     0      128    0.0.0.0:443         0.0.0.0:*\",",
+        "    \"ESTAB      0      0      10.0.0.5:443        10.0.0.9:51000\",",
+        "    \"CLOSE-WAIT 1      0      10.0.0.5:51544      10.0.0.30:5432\",",
+        "    \"CLOSE-WAIT 1      0      10.0.0.5:51545      10.0.0.30:5432\",",
+        "    \"\", \"TIME-WAIT  0      0      10.0.0.5:51000      93.184.216.34:443\" };",
+        "var dojoN = Count(dojoSs);",
+        "Dojo.Eq(\"CLOSE-WAIT\", 2, dojoN.GetValueOrDefault(\"CLOSE-WAIT\"));",
+        "Dojo.Eq(\"LISTEN\", 1, dojoN.GetValueOrDefault(\"LISTEN\"));",
+        "Dojo.Eq(\"no header counted\", false, dojoN.ContainsKey(\"State\"));",
+        "Dojo.Eq(\"states\", 4, dojoN.Count);"
+      ],
+      "hints": [
+        "Split with `RemoveEmptyEntries`: columns are padded with many spaces.",
+        "`GetValueOrDefault(state) + 1`."
+      ]
+    }
+  ]
+}

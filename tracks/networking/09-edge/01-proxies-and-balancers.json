@@ -1,0 +1,228 @@
+{
+  "title": "Proxies and load balancers",
+  "summary": "What sits between the user and your app, and what it does to requests.",
+  "minutes": 10,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The path of a real request",
+      "body": [
+        "```text",
+        "browser -> CDN edge -> load balancer -> reverse proxy -> app instance 1",
+        "                                         (nginx/YARP)  -> app instance 2",
+        "```",
+        "",
+        "- A **reverse proxy** accepts requests on behalf of servers: terminates TLS, routes by host/path, compresses, adds headers.",
+        "- A **load balancer** spreads traffic across healthy instances. **Layer 4** balancers forward TCP/UDP without reading it; **layer 7** balancers read HTTP and can route by path, header or cookie.",
+        "- **Health checks** (`GET /health` every few seconds) take broken instances out of rotation."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Can a layer 4 balancer do it, or does it need layer 7?",
+      "buckets": [
+        "Layer 4 is enough",
+        "Needs layer 7"
+      ],
+      "items": [
+        [
+          "Spread TCP connections across 3 servers",
+          0
+        ],
+        [
+          "Balance a PostgreSQL read pool",
+          0
+        ],
+        [
+          "Send `/api/*` to one pool and `/` to another",
+          1
+        ],
+        [
+          "Route by `Host` header",
+          1
+        ],
+        [
+          "Sticky sessions by cookie",
+          1
+        ],
+        [
+          "Forward UDP game traffic",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "What the app sees",
+      "body": [
+        "Behind a proxy, the TCP connection your app sees comes **from the proxy**, not the user. The proxy passes the original details in headers:",
+        "",
+        "```text",
+        "X-Forwarded-For: 198.51.100.23, 10.0.0.7",
+        "X-Forwarded-Proto: https",
+        "X-Forwarded-Host: shop.example",
+        "```",
+        "",
+        "Each proxy **appends** the address it received the connection from. So the left-most entry is the original client *if* you trust every hop:",
+        "anyone can send a fake `X-Forwarded-For` header. The safe way is to walk from the **right**, skipping your own known proxies.",
+        "",
+        "In ASP.NET Core this is `UseForwardedHeaders` with `KnownProxies`/`KnownNetworks`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your app behind a load balancer generates redirect URLs starting `http://` although users use HTTPS, and every log line shows the client IP `10.0.0.7`. Fix?",
+      "options": [
+        "Enable forwarded-headers handling so the app reads `X-Forwarded-Proto` and `X-Forwarded-For` from the trusted balancer",
+        "Turn off HTTPS on the balancer",
+        "Hardcode `https` in every redirect",
+        "Give the app a public IP"
+      ],
+      "answer": 0,
+      "explain": "TLS ends at the balancer, so the app sees plain HTTP from `10.0.0.7`. The forwarded headers restore the original scheme and client."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "The real client IP",
+      "prompt": [
+        "Write `string ClientIp(string remoteAddress, string? xForwardedFor, HashSet<string> trustedProxies)`.",
+        "",
+        "Build the chain: the addresses in `X-Forwarded-For` (comma-separated, trimmed) followed by `remoteAddress`.",
+        "Walk it from the **right**: skip addresses that are trusted proxies; the first untrusted one is the client.",
+        "If every address is trusted, return the left-most."
+      ],
+      "starter": [
+        "string ClientIp(string remoteAddress, string? xForwardedFor, HashSet<string> trustedProxies)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string ClientIp(string remoteAddress, string? xForwardedFor, HashSet<string> trustedProxies)",
+        "{",
+        "    var chain = new List<string>();",
+        "    if (!string.IsNullOrWhiteSpace(xForwardedFor))",
+        "        chain.AddRange(xForwardedFor.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));",
+        "    chain.Add(remoteAddress);",
+        "    for (int i = chain.Count - 1; i >= 0; i--)",
+        "        if (!trustedProxies.Contains(chain[i])) return chain[i];",
+        "    return chain[0];",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoT = new HashSet<string> { \"10.0.0.7\", \"10.0.0.8\" };",
+        "Dojo.Eq(\"no header\", \"203.0.113.5\", ClientIp(\"203.0.113.5\", null, dojoT));",
+        "Dojo.Eq(\"one proxy\", \"198.51.100.23\", ClientIp(\"10.0.0.7\", \"198.51.100.23\", dojoT));",
+        "Dojo.Eq(\"two proxies\", \"198.51.100.23\", ClientIp(\"10.0.0.7\", \"198.51.100.23, 10.0.0.8\", dojoT));",
+        "Dojo.Eq(\"spoofed left entry ignored\", \"198.51.100.23\", ClientIp(\"10.0.0.7\", \"6.6.6.6, 198.51.100.23\", dojoT));",
+        "Dojo.Eq(\"untrusted remote\", \"192.0.2.9\", ClientIp(\"192.0.2.9\", \"1.2.3.4\", dojoT));"
+      ],
+      "hints": [
+        "Make one list: forwarded entries then the remote address.",
+        "Loop from the end; return the first address not in the trusted set."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the nginx reverse-proxy block so the app sees the original host and scheme.",
+      "code": [
+        "location / {",
+        "    __1__ http://127.0.0.1:5000;",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header __2__ $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-Proto __3__;",
+        "}"
+      ],
+      "blanks": [
+        "proxy_pass",
+        "X-Forwarded-For",
+        "$scheme"
+      ],
+      "bank": [
+        "redirect",
+        "X-Real-Host",
+        "https_only",
+        "upstream"
+      ],
+      "explain": "`proxy_pass` names the upstream; `$proxy_add_x_forwarded_for` appends the client to any existing header."
+    },
+    {
+      "type": "mcq",
+      "prompt": "One of three instances hangs on every request, yet the load balancer keeps sending it a third of the traffic. Its health check is `TCP connect to port 80`. Best fix?",
+      "options": [
+        "Use an HTTP health check on `/health` that exercises the app, with a timeout",
+        "Add a fourth instance",
+        "Switch to round robin",
+        "Lower the DNS TTL"
+      ],
+      "answer": 0,
+      "explain": "A hung process still accepts TCP connections. A layer 7 check with a short timeout notices the app isn't answering."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Round robin with health",
+      "prompt": [
+        "Write a class `Balancer` constructed with `List<string> backends`:",
+        "",
+        "- `void MarkDown(string b)` / `void MarkUp(string b)` change health.",
+        "- `string? Next()` returns backends in rotation, skipping unhealthy ones; `null` if none is healthy.",
+        "",
+        "The rotation remembers its position: with A, B, C all healthy, `Next()` gives A, B, C, A, ...",
+        "If B is down, it gives A, C, A, C."
+      ],
+      "starter": [
+        "class Balancer",
+        "{",
+        "    public Balancer(List<string> backends)",
+        "    {",
+        "    }",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "class Balancer",
+        "{",
+        "    private readonly List<string> backends;",
+        "    private readonly HashSet<string> down = new();",
+        "    private int next;",
+        "",
+        "    public Balancer(List<string> backends) => this.backends = backends;",
+        "",
+        "    public void MarkDown(string b) => down.Add(b);",
+        "    public void MarkUp(string b) => down.Remove(b);",
+        "",
+        "    public string? Next()",
+        "    {",
+        "        for (int tries = 0; tries < backends.Count; tries++)",
+        "        {",
+        "            var b = backends[next];",
+        "            next = (next + 1) % backends.Count;",
+        "            if (!down.Contains(b)) return b;",
+        "        }",
+        "        return null;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoB = new Balancer(new List<string> { \"A\", \"B\", \"C\" });",
+        "Dojo.Eq(\"rotation\", new List<string?> { \"A\", \"B\", \"C\", \"A\" }, new List<string?> { dojoB.Next(), dojoB.Next(), dojoB.Next(), dojoB.Next() });",
+        "var dojoB2 = new Balancer(new List<string> { \"A\", \"B\", \"C\" });",
+        "dojoB2.MarkDown(\"B\");",
+        "Dojo.Eq(\"skips B\", new List<string?> { \"A\", \"C\", \"A\", \"C\" }, new List<string?> { dojoB2.Next(), dojoB2.Next(), dojoB2.Next(), dojoB2.Next() });",
+        "dojoB2.MarkDown(\"A\"); dojoB2.MarkDown(\"C\");",
+        "Dojo.Eq(\"all down\", null, dojoB2.Next());",
+        "dojoB2.MarkUp(\"B\");",
+        "Dojo.Eq(\"B back\", \"B\", dojoB2.Next());",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Keep an index that wraps with `% backends.Count`.",
+        "Try at most `backends.Count` times before giving up."
+      ]
+    }
+  ]
+}
