@@ -15,6 +15,8 @@ import { netLabs } from './netlabs.js';
 import { codeSpaces } from './codespaces.js';
 import { pyenvBanner } from './pyenv.js';
 import { featuresView } from './features.js';
+import { netBuildLab } from './lab-netbuild.js';
+import { archBuildLab } from './lab-archbuild.js';
 import { playgroundDebugger } from './debugger.js';
 import { dbStudio } from './dbstudio.js';
 import * as gamify from './gamify.js';
@@ -105,6 +107,10 @@ const LABS = [
     text: 'Build roots, intermediates and server certificates like blocks, wire up who signs whom, and watch real chain validation succeed or fail. Eight fix-it challenges.' },
   { id: 'subnet', icon: '⧖', title: 'Subnetting trainer', category: 'Networking',
     text: 'Endless subnetting questions (network, broadcast, host ranges, masks, splitting blocks) with a bit-by-bit breakdown after every answer, until it is automatic.' },
+  { id: 'netbuild', icon: '🔌', title: 'Network builder', category: 'Networking',
+    text: 'Snap PCs, switches, routers and the Internet together like bricks, set addresses, gateways, static routes and NAT, then ping and watch the packet hop by hop with every decision explained. Twelve challenges.' },
+  { id: 'archbuild', icon: '🏗', title: 'Architecture builder', category: 'Architecture',
+    text: 'Wire a client through an API gateway and integration routes to services, queues, caches and databases. Send bursts, inject failures and read the dashboard: 401, 429, 502, 504 and the 204 trap. Ten challenges.' },
   { id: 'vim', icon: '⌨', title: 'Vim & nano trainer', category: 'Linux',
     text: 'A real Vim emulator with 36 keystroke-golf challenges, from "how do I quit?" to text objects, dot-repeat and :%s. Plus nano basics, a cheat sheet and free practice.' },
   { id: 'code', icon: '▶', title: 'Code in motion', category: 'Foundations',
@@ -311,6 +317,18 @@ function labsView(id) {
         h('p.muted', 'Click the editor and type real Vim keys. Every challenge has a par: match the goal in as few keystrokes as you can.'))),
       host);
     return vimLab(host, (xp, title) => toast(h('div', h('b', `+${xp} XP`), ` · solved "${title}"`), 'gold'));
+  }
+  if (id === 'netbuild' || id === 'archbuild') {
+    const host = h('div');
+    page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'),
+      h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`),
+        h('p.muted', id === 'netbuild'
+          ? 'Build a network from bricks and ping across it. Every hop is explained: same subnet or gateway, which route wins, ARP, NAT and TTL, and exactly why a ping fails.'
+          : 'Build a request path from bricks and send traffic through it. Every response code is explained, and the dashboard shows what is (and is not) being counted.'))),
+      host);
+    const solved = (xp, title) => toast(h('div', h('b', `+${xp} XP`), ` · solved "${title}"`), 'gold');
+    leave = id === 'netbuild' ? netBuildLab(host, solved) : archBuildLab(host, solved);
+    return;
   }
   if (id === 'subnet') {
     const host = h('div');
