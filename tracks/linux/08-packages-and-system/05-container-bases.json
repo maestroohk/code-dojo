@@ -1,0 +1,204 @@
+{
+  "title": "Container base images",
+  "summary": "Alpine with musl, Debian slim with glibc, distroless and scratch: pick the right base.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The options",
+      "body": [
+        "| Base | Size (approx.) | libc | Shell / package manager | Good for |",
+        "|---|---|---|---|---|",
+        "| `alpine:3.20` | ~4 MB compressed | **musl** | `sh` (BusyBox), `apk` | small images, Go/static binaries, tools |",
+        "| `debian:bookworm-slim` | ~28 MB | **glibc** | `bash`, `apt` | anything built for \"normal Linux\": Python wheels, Node native modules, .NET, JVM |",
+        "| `ubuntu:24.04` | ~29 MB | glibc | `bash`, `apt` | matching Ubuntu servers |",
+        "| Red Hat UBI (`ubi9-minimal`) | ~35 MB | glibc | `microdnf` | RHEL-supported workloads |",
+        "| distroless (`gcr.io/distroless/static`, `/base`, `/cc`, `/java`...) | 2-20 MB | none / glibc | **none** | production: only your app and its runtime |",
+        "| `scratch` | 0 | none | none | fully static binaries |",
+        "",
+        "**musl vs glibc** matters: prebuilt binaries and many Python wheels target glibc (`manylinux`). On Alpine they fail (`not found`, missing symbols) or have to be compiled from source, which can make the \"small\" image slower to build and bigger. musl's DNS resolver and memory allocator also behave differently from glibc's."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Python image on `alpine` takes 15 minutes to build because `pip install pandas` compiles from source. What is the usual fix?",
+      "options": [
+        "Use `python:3.12-slim` (Debian, glibc) so prebuilt manylinux wheels install",
+        "Add more CPU to the build",
+        "Use `scratch`",
+        "Disable pip's cache"
+      ],
+      "answer": 0,
+      "explain": "Most prebuilt wheels are built for glibc. (Some projects publish musllinux wheels too, but glibc support is wider.)"
+    },
+    {
+      "type": "sort",
+      "prompt": "Has a shell inside the image?",
+      "buckets": [
+        "Has a shell",
+        "No shell"
+      ],
+      "items": [
+        [
+          "`alpine`",
+          0
+        ],
+        [
+          "`debian:bookworm-slim`",
+          0
+        ],
+        [
+          "`gcr.io/distroless/static`",
+          1
+        ],
+        [
+          "`scratch`",
+          1
+        ],
+        [
+          "`ubuntu:24.04`",
+          0
+        ],
+        [
+          "`gcr.io/distroless/java21`",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Distroless in practice",
+      "body": [
+        "Distroless images contain your app, its runtime (if any), CA certificates, timezone data and `/etc/passwd`, and nothing else. No shell means far fewer CVEs and nothing for an attacker to use, but also no `docker exec -it ... sh` for debugging. Use a `:debug` tag (which adds BusyBox) or `kubectl debug` with an ephemeral container when you need to look inside.",
+        "",
+        "Typical multi-stage pattern:",
+        "",
+        "```text",
+        "FROM golang:1.23 AS build",
+        "RUN CGO_ENABLED=0 go build -o /app ./cmd/server",
+        "FROM gcr.io/distroless/static:nonroot",
+        "COPY --from=build /app /app",
+        "ENTRYPOINT [\"/app\"]",
+        "```"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the workload to a sensible base image.",
+      "pairs": [
+        [
+          "static Go binary built with `CGO_ENABLED=0`",
+          "`gcr.io/distroless/static` or `scratch`"
+        ],
+        [
+          "Python app with many native wheels",
+          "`python:3.12-slim` (Debian)"
+        ],
+        [
+          "a small image with a shell for CI tooling",
+          "`alpine`"
+        ],
+        [
+          "support contract requires RHEL",
+          "`ubi9-minimal`"
+        ],
+        [
+          "Java service in production",
+          "`gcr.io/distroless/java21`"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var images = new Dictionary<string, (string Libc, bool Shell)>",
+        "{",
+        "    [\"alpine\"] = (\"musl\", true),",
+        "    [\"debian-slim\"] = (\"glibc\", true),",
+        "    [\"distroless-static\"] = (\"none\", false),",
+        "};",
+        "foreach (var (name, info) in images)",
+        "    if (info.Libc == \"glibc\" || !info.Shell) Console.Write(name + \" \");",
+        "Console.WriteLine();"
+      ],
+      "answer": "debian-slim distroless-static"
+    },
+    {
+      "type": "blanks",
+      "prompt": "Finish the multi-stage Dockerfile so the final image has no shell and does not run as root.",
+      "code": [
+        "FROM golang:1.23 AS build",
+        "RUN CGO_ENABLED=0 go build -o /app .",
+        "FROM __1__",
+        "COPY __2__ /app /app",
+        "ENTRYPOINT [\"/app\"]"
+      ],
+      "blanks": [
+        "gcr.io/distroless/static:nonroot",
+        "--from=build"
+      ],
+      "bank": [
+        "alpine:3.20",
+        "ubuntu:24.04",
+        "--chown=root"
+      ],
+      "explain": "The `:nonroot` tag sets a non-root default user."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Choose a base image",
+      "prompt": [
+        "Write `string ChooseBase(bool staticBinary, bool needsGlibc, bool needsShell, bool needsRhelSupport, string runtime)` returning:",
+        "",
+        "1. `\"ubi9-minimal\"` if `needsRhelSupport`,",
+        "2. otherwise, if `staticBinary`: `\"alpine\"` when `needsShell`, else `\"distroless/static\"`,",
+        "3. otherwise, by `runtime` (`\"java\"`, `\"python\"`, `\"node\"`, `\"dotnet\"`, or `\"other\"`):",
+        "   - `needsShell` → `\"debian-slim\"` if `needsGlibc` or runtime is `python`, `java` or `dotnet`; else `\"alpine\"`,",
+        "   - no shell needed → `\"distroless/java\"` for java, `\"distroless/python\"` for python, `\"distroless/nodejs\"` for node, `\"distroless/cc\"` for dotnet or when `needsGlibc`, else `\"distroless/base\"`."
+      ],
+      "starter": [
+        "string ChooseBase(bool staticBinary, bool needsGlibc, bool needsShell, bool needsRhelSupport, string runtime)",
+        "{",
+        "    return \"debian-slim\";",
+        "}"
+      ],
+      "solution": [
+        "string ChooseBase(bool staticBinary, bool needsGlibc, bool needsShell, bool needsRhelSupport, string runtime)",
+        "{",
+        "    if (needsRhelSupport) return \"ubi9-minimal\";",
+        "    if (staticBinary) return needsShell ? \"alpine\" : \"distroless/static\";",
+        "    if (needsShell)",
+        "        return needsGlibc || runtime is \"python\" or \"java\" or \"dotnet\" ? \"debian-slim\" : \"alpine\";",
+        "    return runtime switch",
+        "    {",
+        "        \"java\" => \"distroless/java\",",
+        "        \"python\" => \"distroless/python\",",
+        "        \"node\" => \"distroless/nodejs\",",
+        "        \"dotnet\" => \"distroless/cc\",",
+        "        _ => needsGlibc ? \"distroless/cc\" : \"distroless/base\",",
+        "    };",
+        "}"
+      ],
+      "hints": [
+        "Follow the numbered rules top to bottom with early returns.",
+        "A `switch` expression handles the no-shell runtimes."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"rhel support wins\", \"ubi9-minimal\", ChooseBase(true, true, true, true, \"java\"));",
+        "Dojo.Eq(\"static, no shell\", \"distroless/static\", ChooseBase(true, false, false, false, \"other\"));",
+        "Dojo.Eq(\"static with shell\", \"alpine\", ChooseBase(true, false, true, false, \"other\"));",
+        "Dojo.Eq(\"python with shell\", \"debian-slim\", ChooseBase(false, false, true, false, \"python\"));",
+        "Dojo.Eq(\"node with shell\", \"alpine\", ChooseBase(false, false, true, false, \"node\"));",
+        "Dojo.Eq(\"node with shell needing glibc\", \"debian-slim\", ChooseBase(false, true, true, false, \"node\"));",
+        "Dojo.Eq(\"java no shell\", \"distroless/java\", ChooseBase(false, true, false, false, \"java\"));",
+        "Dojo.Eq(\"dotnet no shell\", \"distroless/cc\", ChooseBase(false, false, false, false, \"dotnet\"));",
+        "Dojo.Eq(\"other glibc no shell\", \"distroless/cc\", ChooseBase(false, true, false, false, \"other\"));",
+        "Dojo.Eq(\"other no shell\", \"distroless/base\", ChooseBase(false, false, false, false, \"other\"));"
+      ]
+    }
+  ]
+}
