@@ -6,6 +6,7 @@ import { renderStep, renderRunOutput, DRAG_TYPES, TYPE_LABEL } from './steps.js'
 import { createEditor } from './editor.js';
 import { blueprint } from './blueprint.js';
 import { pkiLab } from './lab-pki.js';
+import { linqViz } from './linqviz.js';
 import { workbench } from './workbench.js';
 
 const app = document.getElementById('app');
@@ -87,6 +88,27 @@ function stars(n, max = 3) {
 const LABS = [
   { id: 'pki', icon: '🔐', title: 'Certificate chain lab', category: 'Security',
     text: 'Build roots, intermediates and server certificates like blocks, wire up who signs whom, and watch real chain validation succeed or fail. Eight fix-it challenges.' },
+  { id: 'linq', icon: '⇶', title: 'LINQ in motion', category: 'C#',
+    text: 'Type a query and watch every item travel through Where, Select, OrderBy and GroupBy in the order it really happens. See deferred execution and buffering with your own eyes.' },
+];
+
+// Each preset makes one point. Pick one, press play, then change the query and run it again.
+const LINQ_PRESETS = [
+  { title: 'One item at a time', point: 'Where and Select stream: 5 goes all the way through before 3 is even read.',
+    source: 'new[] { 5, 3, 8, 1, 9 }', query: '.Where(n => n > 2).Select(n => n * 10)' },
+  { title: 'OrderBy has to wait', point: 'OrderBy cannot give out the smallest item until it has seen every item, so it reads the whole source first.',
+    source: 'new[] { 5, 3, 8, 1, 9 }', query: '.Where(n => n > 2).OrderBy(n => n).Select(n => n * 10)' },
+  { title: 'Take stops early', point: 'Take(2) stops pulling after two items: 1 and 9 are never read at all.',
+    source: 'new[] { 5, 3, 8, 1, 9 }', query: '.Select(n => n * 10).Take(2)' },
+  { title: 'Order of operators matters', point: 'Filtering first means Select does less work. Swap them and count the chips.',
+    source: 'Enumerable.Range(1, 10)', query: '.Select(n => n * n).Where(n => n % 2 == 0)' },
+  { title: 'GroupBy buffers too', point: 'GroupBy reads everything, then hands out one group per key.',
+    source: 'new[] { "apple", "avocado", "banana", "blueberry", "cherry" }', query: '.GroupBy(w => w[0]).Select(g => $"{g.Key}: {g.Count()}")' },
+  { title: 'Terminal operators run it', point: 'Sum is not lazy: it pulls everything and returns one number.',
+    source: 'new[] { 4, 7, 10, 13 }', query: '.Where(n => n % 2 == 0).Sum()' },
+  { title: 'Records and objects', point: 'Works with your own types. Watch Select pick a property out of each order.',
+    source: 'new[] { new Order("ann", 30m), new Order("bob", 120m), new Order("cy", 75m) }', query: '.Where(o => o.Total > 50).OrderByDescending(o => o.Total).Select(o => o.Customer)',
+    setup: 'record Order(string Customer, decimal Total);' },
 ];
 
 const trackHash = id => `#/track/${id}`;
@@ -169,6 +191,23 @@ function trackView(id) {
       h('span.btn.ghost', 'Open projects')));
 }
 
+function linqLab(lab) {
+  const slot = h('div');
+  const point = h('p.lv-point');
+  const pick = (p, btn) => {
+    slot.replaceChildren(linqViz(p, { editable: true }));
+    point.textContent = p.point;
+    btn?.parentElement.querySelectorAll('.pk-ch').forEach(b => b.classList.toggle('active', b === btn));
+  };
+  const chips = h('div.pk-challenges', LINQ_PRESETS.map((p, i) => h(`button.pk-ch${i === 0 ? '.active' : ''}`, { type: 'button', onclick: e => pick(p, e.currentTarget) }, p.title)));
+  page('labs',
+    h('a.back-link', { href: '#/labs' }, '← All labs'),
+    h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`),
+      h('p.muted', 'Every query here really runs. Each column is one stage; each chip is an item leaving that stage, in the exact order it happened.'))),
+    chips, point, slot);
+  pick(LINQ_PRESETS[0]);
+}
+
 function labsView(id) {
   if (!id) {
     return page('labs',
@@ -180,6 +219,7 @@ function labsView(id) {
   }
   const lab = LABS.find(l => l.id === id);
   if (!lab) return notFound();
+  if (id === 'linq') return linqLab(lab);
   const host = h('div.lab-host');
   page('labs',
     h('a.back-link', { href: '#/labs' }, '← All labs'),

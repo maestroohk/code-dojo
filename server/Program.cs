@@ -135,6 +135,9 @@ app.MapPost("/api/check", async (CheckRequest req) =>
 // Certificate lab: build a small PKI from a description and validate a chain with the real X509Chain.
 app.MapPost("/api/pki", (PkiLab.Request req) => Results.Json(PkiLab.Run(req), json));
 
+// LINQ in motion: run a query with every stage tapped, return the order items flowed through it.
+app.MapPost("/api/linqviz", async (LinqViz.Request req) => Results.Json(await LinqViz.Run(runner, req), json));
+
 // Workbench: run learner web apps live, send them requests, and watch the traffic between them.
 app.MapGet("/api/apps", () => Results.Json(apps.List(), json));
 app.MapGet("/api/apps/events", (long? since) => Results.Json(apps.Events(since ?? 0), json));
