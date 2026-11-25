@@ -1,0 +1,314 @@
+{
+  "title": "X509Chain and PEM export",
+  "summary": "Configure X509ChainPolicy precisely, read ChainElements and ChainStatus, and export a full chain as PEM.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "X509ChainPolicy, setting by setting",
+      "body": [
+        "```csharp",
+        "using var chain = new X509Chain();",
+        "var p = chain.ChainPolicy;",
+        "p.TrustMode = X509ChainTrustMode.CustomRootTrust;   // trust ONLY CustomTrustStore, not the OS roots",
+        "p.CustomTrustStore.Add(root);                       // your trust anchor(s)",
+        "p.ExtraStore.Add(intermediate);                     // candidates, like the certs a server sends",
+        "p.RevocationMode = X509RevocationMode.NoCheck;      // Online in production; NoCheck for offline tests",
+        "p.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);  // \"now\" for date checks",
+        "p.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"));                     // require serverAuth",
+        "",
+        "bool ok = chain.Build(leaf);",
+        "foreach (X509ChainElement e in chain.ChainElements)      // leaf first, anchor last",
+        "    Console.WriteLine(e.Certificate.Subject);",
+        "foreach (X509ChainStatus s in chain.ChainStatus)          // overall problems",
+        "    Console.WriteLine($\"{s.Status}: {s.StatusInformation}\");",
+        "```",
+        "",
+        "`VerificationTime` defaults to *now*, which makes tests time bombs. Set it. Each element also has its own `ChainElementStatus`",
+        "if you need to know *which* certificate failed."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each policy setting to what it controls.",
+      "pairs": [
+        [
+          "`TrustMode = CustomRootTrust`",
+          "ignore the OS root store"
+        ],
+        [
+          "`CustomTrustStore`",
+          "the certificates that end a chain successfully"
+        ],
+        [
+          "`ExtraStore`",
+          "extra certificates the builder may use as intermediates"
+        ],
+        [
+          "`VerificationTime`",
+          "the moment validity dates are checked against"
+        ],
+        [
+          "`ApplicationPolicy`",
+          "the EKU purposes the leaf must allow"
+        ],
+        [
+          "`RevocationMode`",
+          "whether CRL/OCSP are consulted"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the policy: trust only `root`, allow `inter` as an intermediate, and require server authentication.",
+      "code": [
+        "chain.ChainPolicy.TrustMode = X509ChainTrustMode.__1__;",
+        "chain.ChainPolicy.__2__.Add(root);",
+        "chain.ChainPolicy.__3__.Add(inter);",
+        "chain.ChainPolicy.__4__.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"));"
+      ],
+      "blanks": [
+        "CustomRootTrust",
+        "CustomTrustStore",
+        "ExtraStore",
+        "ApplicationPolicy"
+      ],
+      "bank": [
+        "System",
+        "CertificatePolicy",
+        "Store"
+      ],
+      "explain": "`ApplicationPolicy` checks EKU; `CertificatePolicy` is about certificate policy OIDs, a different extension."
+    },
+    {
+      "type": "predict",
+      "prompt": "Which certificate failed? `ChainElements` still lists every certificate found, even when `Build` returns false. Here the leaf expired in 2031. What does it print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}",
+        "var root = DojoCert(\"CN=Root\", null, true);",
+        "var inter = DojoCert(\"CN=Issuing CA\", root, true);",
+        "var leaf = DojoCert(\"CN=old.example\", inter, false, \"old.example\", null, 2030, 2031);",
+        "",
+        "using var chain = new X509Chain();",
+        "chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "chain.ChainPolicy.CustomTrustStore.Add(root);",
+        "chain.ChainPolicy.ExtraStore.Add(inter);",
+        "chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "chain.ChainPolicy.VerificationTime = new DateTime(2032, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "",
+        "Console.WriteLine(chain.Build(leaf));",
+        "foreach (var e in chain.ChainElements)",
+        "    Console.WriteLine(e.Certificate.Subject + \": \" + (e.ChainElementStatus.Length == 0 ? \"ok\" : e.ChainElementStatus[0].Status.ToString()));"
+      ],
+      "answer": [
+        "False",
+        "CN=old.example: NotTimeValid",
+        "CN=Issuing CA: ok",
+        "CN=Root: ok"
+      ],
+      "explain": "Per-element status pinpoints the culprit: only the leaf is out of date. `chain.ChainStatus` would just say `NotTimeValid` for the chain as a whole."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A unit test that builds a chain passed for a year, then started failing on 1 January with `NotTimeValid`. Nobody changed the code. What's the best fix?",
+      "options": [
+        "Set `ChainPolicy.VerificationTime` to a fixed date inside the test certificates' validity",
+        "Switch `RevocationMode` to `NoCheck`",
+        "Make the test certificates valid for 100 years",
+        "Catch the exception and mark the test inconclusive"
+      ],
+      "answer": 0,
+      "explain": "Without `VerificationTime` the chain checks against the real clock. A fixed time makes the test deterministic forever."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Report on a chain",
+      "prompt": [
+        "Write `List<string> ChainReport(X509Certificate2 leaf, X509Certificate2 root, List<X509Certificate2> intermediates)` that builds",
+        "a chain (custom root trust, `intermediates` in `ExtraStore`, no revocation, serverAuth policy, verification time 2031-06-01 UTC)",
+        "and returns one line per element, leaf first:",
+        "",
+        "```text",
+        "CN=shop.example: ok",
+        "CN=Issuing CA: ok",
+        "CN=Root: ok",
+        "```",
+        "",
+        "For an element with problems, write its status flags joined by `,` instead of `ok`. When no path is found at all",
+        "(`PartialChain`), the chain still contains whatever elements were found, so just report those."
+      ],
+      "starter": [
+        "List<string> ChainReport(X509Certificate2 leaf, X509Certificate2 root, List<X509Certificate2> intermediates)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "List<string> ChainReport(X509Certificate2 leaf, X509Certificate2 root, List<X509Certificate2> intermediates)",
+        "{",
+        "    using var chain = new X509Chain();",
+        "    chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    chain.ChainPolicy.CustomTrustStore.Add(root);",
+        "    foreach (var c in intermediates) chain.ChainPolicy.ExtraStore.Add(c);",
+        "    chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    chain.ChainPolicy.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"));",
+        "    chain.ChainPolicy.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    chain.Build(leaf);",
+        "    var lines = new List<string>();",
+        "    foreach (var e in chain.ChainElements)",
+        "    {",
+        "        string status = e.ChainElementStatus.Length == 0 ? \"ok\" : string.Join(\",\", e.ChainElementStatus.Select(s => s.Status));",
+        "        lines.Add(e.Certificate.Subject + \": \" + status);",
+        "    }",
+        "    return lines;",
+        "}"
+      ],
+      "hints": [
+        "Same policy setup as before; then loop over `chain.ChainElements`.",
+        "`string.Join(\",\", e.ChainElementStatus.Select(s => s.Status))`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoRoot = DojoCert(\"CN=Root\", null, true);",
+        "var dojoInter = DojoCert(\"CN=Issuing CA\", dojoRoot, true);",
+        "var dojoLeaf = DojoCert(\"CN=shop.example\", dojoInter, false, \"shop.example\", \"1.3.6.1.5.5.7.3.1\");",
+        "var dojoClient = DojoCert(\"CN=device\", dojoInter, false, null, \"1.3.6.1.5.5.7.3.2\");",
+        "Dojo.Eq(\"healthy chain\", new List<string> { \"CN=shop.example: ok\", \"CN=Issuing CA: ok\", \"CN=Root: ok\" }, ChainReport(dojoLeaf, dojoRoot, new() { dojoInter }));",
+        "Dojo.Eq(\"clientAuth leaf\", new List<string> { \"CN=device: NotValidForUsage\", \"CN=Issuing CA: ok\", \"CN=Root: ok\" }, ChainReport(dojoClient, dojoRoot, new() { dojoInter }));",
+        "Dojo.Eq(\"missing intermediate: only the leaf is found\", 1, ChainReport(dojoLeaf, dojoRoot, new()).Count);",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Exporting the full chain",
+      "body": [
+        "Servers like nginx, and Kestrel's `CertificatePath` setting, want a **full chain PEM**: the leaf, then each intermediate,",
+        "and normally **not** the root. One `-----BEGIN CERTIFICATE-----` block per certificate, one after another:",
+        "",
+        "```csharp",
+        "var sb = new StringBuilder();",
+        "foreach (var e in chain.ChainElements)",
+        "    if (e.Certificate.Subject != e.Certificate.Issuer)        // skip the self-signed root",
+        "        sb.AppendLine(e.Certificate.ExportCertificatePem());",
+        "File.WriteAllText(\"fullchain.pem\", sb.ToString());",
+        "```",
+        "",
+        "The private key goes in its own file with `key.ExportPkcs8PrivateKeyPem()` (protect it!), or the leaf plus key into a PFX with",
+        "`leaf.Export(X509ContentType.Pfx, password)`.",
+        "",
+        "To read a bundle back, `X509Certificate2Collection.ImportFromPem(text)` loads every block."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Write fullchain.pem",
+      "prompt": [
+        "Write `string FullChainPem(X509Certificate2 leaf, X509Certificate2 root, List<X509Certificate2> intermediates)`:",
+        "",
+        "1. build the chain as before (custom root trust, no revocation, verification time 2031-06-01 UTC; no EKU policy needed),",
+        "2. if `Build` fails, throw `InvalidOperationException`,",
+        "3. otherwise return the PEM of every chain element **except the root**, in chain order, each followed by `\\n`.",
+        "",
+        "`ExportCertificatePem()` gives one block without a trailing newline."
+      ],
+      "starter": [
+        "string FullChainPem(X509Certificate2 leaf, X509Certificate2 root, List<X509Certificate2> intermediates)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string FullChainPem(X509Certificate2 leaf, X509Certificate2 root, List<X509Certificate2> intermediates)",
+        "{",
+        "    using var chain = new X509Chain();",
+        "    chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    chain.ChainPolicy.CustomTrustStore.Add(root);",
+        "    foreach (var c in intermediates) chain.ChainPolicy.ExtraStore.Add(c);",
+        "    chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    chain.ChainPolicy.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    if (!chain.Build(leaf)) throw new InvalidOperationException(\"chain does not validate\");",
+        "    var sb = new StringBuilder();",
+        "    foreach (var e in chain.ChainElements)",
+        "        if (e.Certificate.Subject != e.Certificate.Issuer)",
+        "            sb.Append(e.Certificate.ExportCertificatePem()).Append('\\n');",
+        "    return sb.ToString();",
+        "}"
+      ],
+      "hints": [
+        "Skip the element whose Subject equals its Issuer.",
+        "Use `Append(...).Append('\\n')` rather than `AppendLine`, which may add `\\r\\n` on Windows."
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoRoot = DojoCert(\"CN=Root\", null, true);",
+        "var dojoInter = DojoCert(\"CN=Issuing CA\", dojoRoot, true);",
+        "var dojoLeaf = DojoCert(\"CN=shop.example\", dojoInter, false, \"shop.example\", \"1.3.6.1.5.5.7.3.1\");",
+        "var dojoPem = FullChainPem(dojoLeaf, dojoRoot, new() { dojoInter, dojoRoot });",
+        "Dojo.Eq(\"two certificate blocks\", 2, dojoPem.Split(\"-----BEGIN CERTIFICATE-----\").Length - 1);",
+        "var dojoBack = new X509Certificate2Collection();",
+        "dojoBack.ImportFromPem(dojoPem);",
+        "Dojo.Eq(\"leaf first, then the intermediate\", new List<string> { \"CN=shop.example\", \"CN=Issuing CA\" }, dojoBack.Cast<X509Certificate2>().Select(c => c.Subject).ToList());",
+        "Dojo.Check(\"ends with a newline\", dojoPem.EndsWith(\"\\n\"), \"add \\\\n after each block\");",
+        "Dojo.Throws<InvalidOperationException>(\"throws when the chain is broken\", () => FullChainPem(dojoLeaf, dojoRoot, new()));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    }
+  ]
+}

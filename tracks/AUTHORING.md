@@ -5,7 +5,7 @@ A track is a folder. Nothing is registered anywhere: drop files in and refresh.
 ```
 tracks/
   csharp/
-    track.json                    { "title", "language", "tagline" }
+    track.json                    { "title", "language", "tagline", "category", "icon", "order" }
     01-first-steps/
       module.json                 { "title", "summary" }
       01-hello-world.json         a lesson
@@ -182,6 +182,13 @@ Things that catch authors out:
   contents of ordinary strings or comments.
 - In a table cell, write a literal pipe as `\|`.
 
+## Topics in the learning center
+
+Every track is a topic card on the home page. `category` (e.g. "Programming", "Security") is shown above
+the title, `icon` is a short string or emoji, and `order` sorts the cards. A topic does not have to be about
+a programming language: set `"language": "csharp"` anyway when its exercises run C# (the certificates topic
+does, to drive `System.Security.Cryptography`).
+
 ## Projects
 
 A project is a module whose `module.json` has `"kind": "project"`. It appears under **Projects**
@@ -284,3 +291,21 @@ Rules for web steps:
 - A boss lesson is 3 to 5 `code` steps of rising difficulty that combine the module, with at most
   one short `learn` card to set the scene.
 - Teach one idea per card, with a concrete example. Say why the feature exists, not only what it does.
+
+### Blueprints
+
+A project's `module.json` may carry a `blueprint`: the finished application's architecture. The Projects
+page draws it in layers and lights each part up when the stage that builds it is finished.
+
+```json
+"blueprint": {
+  "layers": ["Client", "Pipeline", "Endpoints", "Services", "Data"],
+  "parts": [
+    { "id": "list", "label": "GET /tasks", "layer": "Endpoints", "stage": 2, "note": "optional one-liner" }
+  ],
+  "flow": [["list", "store"]]
+}
+```
+
+`stage` is 1-based. `flow` draws arrows between parts. A blueprint whose layers include `Endpoints` also
+gets a "Run my code in the Workbench" button, which opens the learner's latest passing stage as a live app.

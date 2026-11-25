@@ -88,6 +88,16 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6 } = {})
     get value() { return area.value; },
     set value(v) { area.value = v; errorLines = new Set(); warnLines = new Set(); paint(); },
     focus() { area.focus({ preventScroll: true }); },
+    /** Put the cursor on a line (1-based), select it, and scroll it into view. */
+    goto(line) {
+      const lines = area.value.split('\n');
+      const start = lines.slice(0, line - 1).reduce((n, l) => n + l.length + 1, 0);
+      area.focus();
+      area.setSelectionRange(start, start + (lines[line - 1]?.length ?? 0));
+      root.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      const lh = parseFloat(getComputedStyle(area).lineHeight) || 22;
+      root.querySelector('.ed-inner')?.scrollTo?.({ top: Math.max(0, (line - 4) * lh) });
+    },
     mark(diagnostics = []) {
       errorLines = new Set(diagnostics.filter(d => d.severity === 'error').map(d => d.line));
       warnLines = new Set(diagnostics.filter(d => d.severity !== 'error').map(d => d.line));

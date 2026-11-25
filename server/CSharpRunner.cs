@@ -46,6 +46,8 @@ public sealed class CSharpRunner
     readonly List<MetadataReference> _webRefs;
     readonly string _webRuntimeConfig;
     readonly SyntaxTree _webSupport;
+    readonly SyntaxTree _liveSupport;
+    public string DotnetPath => _dotnet;
 
     public CSharpRunner()
     {
@@ -88,6 +90,7 @@ public sealed class CSharpRunner
             },
         });
         _webSupport = CSharpSyntaxTree.ParseText(WebSupportSource, Parse, path: "DojoWeb.cs", encoding: Encoding.UTF8);
+        _liveSupport = CSharpSyntaxTree.ParseText(LiveSupportSource, Parse, path: "DojoLive.cs", encoding: Encoding.UTF8);
     }
 
     /// <summary>Wrap learner code so compiler line numbers point at what they typed.</summary>
@@ -102,10 +105,12 @@ public sealed class CSharpRunner
         return $"#line 1 \"{TestFile}\"\n{before}\n#line 1 \"{UserFile}\"\n{code}\n#line 1 \"{TestFile}\"\n{after}\n";
     }
 
-    public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false)
+    /// <param name="live">A web app for the Workbench: no tests, plus a tracer that reports every request it handles.</param>
+    public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false, bool live = false)
     {
         var tree = CSharpSyntaxTree.ParseText(BuildSource(code, template), Parse, path: "Source.cs", encoding: Encoding.UTF8);
-        SyntaxTree[] trees = web ? [tree, _support, _webSupport] : [tree, _support];
+        web |= live;
+        SyntaxTree[] trees = live ? [tree, _support, _webSupport, _liveSupport] : web ? [tree, _support, _webSupport] : [tree, _support];
         var comp = CSharpCompilation.Create("Exercise", trees, web ? _webRefs : _refs,
             new CSharpCompilationOptions(OutputKind.ConsoleApplication,
                 nullableContextOptions: NullableContextOptions.Enable,
@@ -295,6 +300,115 @@ public sealed class CSharpRunner
             .Select(l => l.Replace("Program.<<Main>$>g__", "").Replace("Program.<Main>$(String[] args)", "top-level code"));
         return string.Join("\n", lines).Trim();
     }
+
+    /// <summary>
+    /// Compiled into Workbench apps only. Listens to ASP.NET Core's and HttpClient's diagnostic events
+    /// (no change to the learner's pipeline) and prints one line per request, marked so the host can
+    /// separate it from the app's own output:
+    ///   \u001eTRACE\u001f{json}
+    /// </summary>
+    const string LiveSupportSource = """
+        #nullable enable
+        public static class DojoLive
+        {
+            [System.Runtime.CompilerServices.ModuleInitializer]
+            internal static void Start()
+            {
+                if (Environment.GetEnvironmentVariable("DOJO_LIVE") != "1") return;
+                System.Diagnostics.DiagnosticListener.AllListeners.Subscribe(new Watcher());
+            }
+
+            static readonly object Gate = new();
+            static readonly System.IO.TextWriter Out = Console.Out;
+
+            static void Emit(object record)
+            {
+                var json = JsonSerializer.Serialize(record);
+                lock (Gate) { Out.WriteLine("\u001eTRACE\u001f" + json); Out.Flush(); }
+            }
+
+            sealed class Watcher : IObserver<System.Diagnostics.DiagnosticListener>
+            {
+                public void OnNext(System.Diagnostics.DiagnosticListener l)
+                {
+                    if (l.Name is "Microsoft.AspNetCore" or "HttpHandlerDiagnosticListener") l.Subscribe(new Events());
+                }
+                public void OnError(Exception e) { }
+                public void OnCompleted() { }
+            }
+
+            sealed class Events : IObserver<KeyValuePair<string, object?>>
+            {
+                public void OnNext(KeyValuePair<string, object?> e)
+                {
+                    try { Handle(e.Key, e.Value); } catch { /* tracing must never break the app */ }
+                }
+                public void OnError(Exception e) { }
+                public void OnCompleted() { }
+            }
+
+            static void Handle(string name, object? payload)
+            {
+                switch (name)
+                {
+                    case "Microsoft.AspNetCore.Hosting.HttpRequestIn.Start" when payload is HttpContext ctx:
+                        ctx.Items["dojo.t0"] = System.Diagnostics.Stopwatch.GetTimestamp();
+                        break;
+                    case "Microsoft.AspNetCore.Routing.EndpointMatched" when payload is HttpContext ctx:
+                        ctx.Items["dojo.matched"] = System.Diagnostics.Stopwatch.GetTimestamp();
+                        break;
+                    case "Microsoft.AspNetCore.Hosting.UnhandledException" or "Microsoft.AspNetCore.Diagnostics.UnhandledException":
+                        var ex = payload?.GetType().GetProperty("exception")?.GetValue(payload) as Exception;
+                        var hc = payload?.GetType().GetProperty("httpContext")?.GetValue(payload) as HttpContext;
+                        if (hc is not null && ex is not null) hc.Items["dojo.error"] = ex.GetType().Name + ": " + ex.Message;
+                        break;
+                    case "Microsoft.AspNetCore.Hosting.HttpRequestIn.Stop" when payload is HttpContext ctx:
+                    {
+                        var t0 = ctx.Items["dojo.t0"] is long a ? a : System.Diagnostics.Stopwatch.GetTimestamp();
+                        var ms = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+                        var ep = ctx.GetEndpoint();
+                        var route = (ep as Microsoft.AspNetCore.Routing.RouteEndpoint)?.RoutePattern.RawText;
+                        var values = ctx.Request.RouteValues.Where(kv => kv.Key is not "controller" and not "action")
+                            .ToDictionary(kv => kv.Key, kv => kv.Value?.ToString());
+                        Emit(new
+                        {
+                            kind = "in",
+                            trace = ctx.Request.Headers["X-Dojo-Trace"].ToString(),
+                            method = ctx.Request.Method,
+                            path = ctx.Request.Path.Value,
+                            query = ctx.Request.QueryString.Value,
+                            contentType = ctx.Request.ContentType,
+                            status = ctx.Response.StatusCode,
+                            ms = Math.Round(ms, 1),
+                            matched = ctx.Items.ContainsKey("dojo.matched"),
+                            route,
+                            endpoint = ep?.DisplayName,
+                            routeValues = values,
+                            error = ctx.Items["dojo.error"] as string,
+                            at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        });
+                        break;
+                    }
+                    case "System.Net.Http.HttpRequestOut.Stop":
+                    {
+                        var req = payload?.GetType().GetProperty("Request")?.GetValue(payload) as HttpRequestMessage;
+                        var res = payload?.GetType().GetProperty("Response")?.GetValue(payload) as HttpResponseMessage;
+                        if (req is null) break;
+                        Emit(new
+                        {
+                            kind = "out",
+                            method = req.Method.Method,
+                            url = req.RequestUri?.ToString(),
+                            status = res is null ? 0 : (int)res.StatusCode,
+                            ms = Math.Round((System.Diagnostics.Activity.Current?.Duration ?? TimeSpan.Zero).TotalMilliseconds, 1),
+                            at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        """;
 
     /// <summary>
     /// Compiled into web projects. The learner writes a real Program.cs that ends in app.Run().

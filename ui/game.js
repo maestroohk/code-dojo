@@ -11,6 +11,8 @@ const DEFAULTS = () => ({
   review: [],         // [{ key, idx, box, due }]  steps answered wrong, resurfaced in Practice
   drafts: {},         // "track/module/lesson#idx" -> code the learner left in the editor
   projects: {},       // "track/module" -> the learner's latest passing program in that project
+  labs: {},           // lab id -> { solved: { challengeId: date }, model }
+  workbench: null,    // the project workbench: apps, saved requests
   stats: { correct: 0, wrong: 0, codePassed: 0, perfect: 0, hints: 0, drags: 0, fixes: 0, bestCombo: 0, practice: 0, reviewed: 0, bosses: 0 },
   settings: { freeRoam: false, dailyGoal: 60, sound: true, typing: false },
 });

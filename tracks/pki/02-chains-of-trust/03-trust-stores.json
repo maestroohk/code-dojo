@@ -1,0 +1,254 @@
+{
+  "title": "Trust stores and what servers send",
+  "summary": "Where roots live on Windows and elsewhere, and why a server must send its intermediates.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The trust store",
+      "body": [
+        "The end of every chain is a **trust anchor**: a root certificate your machine has decided to trust. Those live in a **trust store**.",
+        "",
+        "On Windows the certificate store has two locations and several folders:",
+        "",
+        "| Store path | Shown as | Holds |",
+        "|---|---|---|",
+        "| `Cert:\\LocalMachine\\Root` | Trusted Root Certification Authorities | roots trusted by the whole machine |",
+        "| `Cert:\\LocalMachine\\CA` | Intermediate Certification Authorities | intermediates (a cache, not anchors) |",
+        "| `Cert:\\LocalMachine\\My` | Personal | certificates **with private keys** that this machine uses (IIS, services) |",
+        "| `Cert:\\CurrentUser\\...` | the same folders, per user | trust and identities for one user only |",
+        "",
+        "```text",
+        "PS> Get-ChildItem Cert:\\LocalMachine\\Root | Select-Object Subject, NotAfter",
+        "PS> Get-ChildItem Cert:\\CurrentUser\\My",
+        "PS> certutil -store Root",
+        "```",
+        "",
+        "Other worlds keep their own lists: Linux in `/etc/ssl/certs` (update with `update-ca-certificates`), Java in a `cacerts`",
+        "keystore, Firefox in its own store, and a Docker image in whatever its base image shipped."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each Windows store to what you'd find there.",
+      "pairs": [
+        [
+          "`Cert:\\LocalMachine\\Root`",
+          "self-signed roots the machine trusts"
+        ],
+        [
+          "`Cert:\\LocalMachine\\CA`",
+          "intermediate CA certificates"
+        ],
+        [
+          "`Cert:\\LocalMachine\\My`",
+          "the IIS site's certificate and its private key"
+        ],
+        [
+          "`Cert:\\CurrentUser\\Root`",
+          "a root trusted only for your user account"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "Your internal API uses a certificate from the company's own root CA. Calls work from your Windows laptop,",
+        "but the same code in a **Linux Docker container** fails with `RemoteCertificateChainErrors`. Most likely cause?"
+      ],
+      "options": [
+        "The container's trust store doesn't contain the company root; IT pushed it to Windows machines only",
+        "Linux can't validate ECDSA certificates",
+        "The certificate is expired in the container's time zone",
+        "Containers don't support TLS"
+      ],
+      "answer": 0,
+      "explain": "Domain-joined Windows machines get corporate roots by Group Policy. A container starts from its base image's store. Copy the root into `/usr/local/share/ca-certificates/` and run `update-ca-certificates` in the Dockerfile."
+    },
+    {
+      "type": "learn",
+      "title": "The server must send the intermediates",
+      "body": [
+        "The client has the **roots**. It usually does *not* have every intermediate. So in the TLS handshake the server sends:",
+        "",
+        "```text",
+        "leaf  ->  intermediate(s)       (the root is optional; the client has it or it's no use)",
+        "```",
+        "",
+        "Forgetting the intermediate is one of the most common TLS mistakes, and a sneaky one, because some clients paper over it:",
+        "",
+        "- **Windows and browsers** often have the intermediate **cached** from another site, or download it via the leaf's",
+        "  *Authority Information Access* URL. It works on your machine.",
+        "- **Mobile apps, Java, curl, Linux and .NET on Linux** often don't. It fails there.",
+        "",
+        "That is why CAs hand you a `fullchain.pem` (leaf + intermediates). Configure the server with that file, not with `cert.pem` alone."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "Users on Android report `NET::ERR_CERT_AUTHORITY_INVALID` on your new site. On your Windows laptop Chrome shows a padlock.",
+        "The certificate is from a well-known public CA and not expired. What is most likely wrong?"
+      ],
+      "options": [
+        "The server sends only the leaf, not the intermediate; your laptop has the intermediate cached, the phone does not",
+        "Android doesn't trust that CA's root",
+        "The phone's clock is wrong",
+        "The certificate's SAN is missing the www name"
+      ],
+      "answer": 0,
+      "explain": "\"Works here, fails there\" with a public CA is the classic missing-intermediate signature. Fix the server to send the full chain. Online checkers like SSL Labs flag it as *Chain issues: Incomplete*."
+    },
+    {
+      "type": "sort",
+      "prompt": "In a TLS handshake for `shop.example`, what should the server send?",
+      "buckets": [
+        "Server sends it",
+        "Server should not send it"
+      ],
+      "items": [
+        [
+          "the leaf certificate",
+          0
+        ],
+        [
+          "the intermediate CA certificate",
+          0
+        ],
+        [
+          "the leaf's private key",
+          1
+        ],
+        [
+          "the intermediate's private key",
+          1
+        ],
+        [
+          "the root certificate (it's useless: clients must already have it)",
+          1
+        ],
+        [
+          "the `.pfx` password",
+          1
+        ]
+      ],
+      "explain": "Sending the root is harmless but pointless: a client only trusts a root it already has. Private keys never leave the server."
+    },
+    {
+      "type": "predict",
+      "prompt": "`X509Chain` builds chains in .NET. Here the trust store is replaced by our own root, and `ExtraStore` plays the role of \"certificates the server sent\". What does it print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "var root = DojoCert(\"CN=Dojo Root\", null, true);",
+        "var inter = DojoCert(\"CN=Dojo Issuing CA\", root, true);",
+        "var leaf = DojoCert(\"CN=shop.example\", inter, false);",
+        "",
+        "using var chain = new X509Chain();",
+        "chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "chain.ChainPolicy.CustomTrustStore.Add(root);",
+        "chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "chain.ChainPolicy.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "",
+        "Console.WriteLine(chain.Build(leaf));          // server sent only the leaf",
+        "chain.Reset();",
+        "chain.ChainPolicy.ExtraStore.Add(inter);        // server sent the intermediate too",
+        "Console.WriteLine(chain.Build(leaf));",
+        "Console.WriteLine(chain.ChainElements.Count);",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "answer": [
+        "False",
+        "True",
+        "3"
+      ],
+      "explain": "Without the intermediate there is no path from the leaf to the root. With it, the chain is leaf, intermediate, root: three elements."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Does the chain validate?",
+      "prompt": [
+        "Write `bool Validates(X509Certificate2 leaf, List<X509Certificate2> sent, X509Certificate2 root)` that returns whether",
+        "`leaf` chains up to `root`, using **only** `root` as the trust anchor and the `sent` certificates as extra candidates.",
+        "",
+        "Set up an `X509Chain` like the previous step:",
+        "",
+        "- `TrustMode = X509ChainTrustMode.CustomRootTrust` and add `root` to `CustomTrustStore`",
+        "- add every `sent` certificate to `ExtraStore`",
+        "- `RevocationMode = X509RevocationMode.NoCheck`",
+        "- `VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc)` (the test certificates are valid 2030 to 2035)",
+        "",
+        "Then return `chain.Build(leaf)`."
+      ],
+      "starter": [
+        "bool Validates(X509Certificate2 leaf, List<X509Certificate2> sent, X509Certificate2 root)",
+        "{",
+        "    using var chain = new X509Chain();",
+        "    // configure the policy, then build",
+        "}"
+      ],
+      "solution": [
+        "bool Validates(X509Certificate2 leaf, List<X509Certificate2> sent, X509Certificate2 root)",
+        "{",
+        "    using var chain = new X509Chain();",
+        "    chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    chain.ChainPolicy.CustomTrustStore.Add(root);",
+        "    foreach (var c in sent) chain.ChainPolicy.ExtraStore.Add(c);",
+        "    chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    chain.ChainPolicy.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    return chain.Build(leaf);",
+        "}"
+      ],
+      "hints": [
+        "Everything lives under `chain.ChainPolicy`.",
+        "`foreach (var c in sent) chain.ChainPolicy.ExtraStore.Add(c);`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoRoot = DojoCert(\"CN=Dojo Root\", null, true);",
+        "var dojoInter = DojoCert(\"CN=Dojo Issuing CA\", dojoRoot, true);",
+        "var dojoLeaf = DojoCert(\"CN=shop.example\", dojoInter, false);",
+        "var dojoEvil = DojoCert(\"CN=Dojo Root\", null, true);",
+        "Dojo.Eq(\"leaf + intermediate sent: valid\", true, Validates(dojoLeaf, new List<X509Certificate2> { dojoInter }, dojoRoot));",
+        "Dojo.Eq(\"only the leaf sent: not valid\", false, Validates(dojoLeaf, new List<X509Certificate2>(), dojoRoot));",
+        "Dojo.Eq(\"trusting a different root with the same name: not valid\", false, Validates(dojoLeaf, new List<X509Certificate2> { dojoInter }, dojoEvil));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    }
+  ]
+}

@@ -18,6 +18,7 @@ var root = FindRoot();
 var content = new Content(root);
 var runner = new CSharpRunner();
 var checker = new Checker(runner);
+using var apps = new AppHost(runner);
 var stateDir = Environment.GetEnvironmentVariable("DOJO_STATE") is { Length: > 0 } envState ? envState : Path.Combine(root, ".state");
 var progressFile = Path.Combine(stateDir, "progress.json");
 var progressLock = new object();
@@ -130,6 +131,18 @@ app.MapPost("/api/check", async (CheckRequest req) =>
         return Results.NotFound();
     return Results.Json(await checker.Check(step, req.Code ?? ""), json);
 });
+
+// Certificate lab: build a small PKI from a description and validate a chain with the real X509Chain.
+app.MapPost("/api/pki", (PkiLab.Request req) => Results.Json(PkiLab.Run(req), json));
+
+// Workbench: run learner web apps live, send them requests, and watch the traffic between them.
+app.MapGet("/api/apps", () => Results.Json(apps.List(), json));
+app.MapGet("/api/apps/events", (long? since) => Results.Json(apps.Events(since ?? 0), json));
+app.MapPost("/api/apps/start", async (AppHost.StartRequest req) => Results.Json(await apps.Start(req), json));
+app.MapPost("/api/apps/{id}/stop", (string id) => Results.Json(new { stopped = apps.Stop(id) }, json));
+app.MapPost("/api/apps/{id}/send", async (string id, AppHost.SendRequest req) => Results.Json(await apps.Send(id, req), json));
+app.MapPost("/api/outline", (RunRequest req) => Results.Json(CodeOutline.Read(req.Code ?? ""), json));
+app.Lifetime.ApplicationStopping.Register(apps.Dispose);
 
 app.Lifetime.ApplicationStarted.Register(() =>
 {

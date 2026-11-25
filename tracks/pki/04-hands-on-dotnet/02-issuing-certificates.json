@@ -1,0 +1,338 @@
+{
+  "title": "Issuing an intermediate and a leaf",
+  "summary": "Sign certificates with your root using CertificateRequest.Create, and attach private keys to the results.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Signing someone else's request",
+      "body": [
+        "To issue a certificate, build a request for the **new** key, then sign it with the **issuer's** certificate (which must carry its private key):",
+        "",
+        "```csharp",
+        "var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);                  // the new certificate's key",
+        "var req = new CertificateRequest(\"CN=Dojo Issuing CA\", key, HashAlgorithmName.SHA256);",
+        "// ... extensions ...",
+        "req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(root, true, false));",
+        "",
+        "using X509Certificate2 pub = req.Create(root, notBefore, notAfter, new byte[] { 0x10, 0x01 });  // serial number",
+        "X509Certificate2 inter = pub.CopyWithPrivateKey(key);                  // attach the new key",
+        "```",
+        "",
+        "Three rules that trip people up:",
+        "",
+        "1. `Create` returns a certificate **without** a private key. Use `CopyWithPrivateKey(key)` if you'll use it to sign or to serve TLS.",
+        "2. The child's validity must fit **inside** the issuer's, or `Create` throws.",
+        "3. The **serial number** must be unique per issuer. Real CAs use at least 64 random bits; fixed bytes are fine for tests.",
+        "",
+        "`CreateFromCertificate(root, includeKeyIdentifier: true, includeIssuerAndSerial: false)` copies the root's SKI into the child's AKI."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print? (`CreateRoot` is the method you wrote last lesson.)",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "X509Certificate2 CreateRoot(string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "        X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    return req.CreateSelfSigned(",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2050, 1, 1, 0, 0, 0, TimeSpan.Zero));",
+        "}",
+        "var root = CreateRoot(\"Dojo Root CA\");",
+        "var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "var req = new CertificateRequest(\"CN=Dojo Issuing CA\", key, HashAlgorithmName.SHA256);",
+        "req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));",
+        "",
+        "using var pub = req.Create(root,",
+        "    new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "    new DateTimeOffset(2040, 1, 1, 0, 0, 0, TimeSpan.Zero), new byte[] { 0x10, 0x01 });",
+        "Console.WriteLine(pub.Issuer);",
+        "Console.WriteLine(pub.SerialNumber);",
+        "Console.WriteLine(pub.HasPrivateKey);",
+        "using var inter = pub.CopyWithPrivateKey(key);",
+        "Console.WriteLine(inter.HasPrivateKey);",
+        "",
+        "try { req.Create(root, new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero), new DateTimeOffset(2060, 1, 1, 0, 0, 0, TimeSpan.Zero), new byte[] { 2 }); }",
+        "catch (ArgumentException) { Console.WriteLine(\"outlives the root\"); }"
+      ],
+      "answer": [
+        "CN=Dojo Root CA",
+        "1001",
+        "False",
+        "True",
+        "outlives the root"
+      ],
+      "explain": "The issuer is the root. The serial we chose prints as hex. `Create` gives a public-only certificate until you attach the key. And a child may not outlive its issuer (2060 > 2050)."
+    },
+    {
+      "type": "order",
+      "prompt": [
+        "Put the steps for issuing a leaf in order."
+      ],
+      "lines": [
+        "Generate a new key pair for the leaf",
+        "Create a `CertificateRequest` with the leaf's subject and public key",
+        "Add extensions: Basic Constraints, Key Usage, EKU, SAN, SKI, AKI",
+        "Call `req.Create(issuer, notBefore, notAfter, serial)`",
+        "Attach the leaf's private key with `CopyWithPrivateKey`"
+      ],
+      "explain": "The extensions must be added before `Create`: once signed, a certificate can't change without breaking its signature."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each call to what it gives you.",
+      "pairs": [
+        [
+          "`req.CreateSelfSigned(nb, na)`",
+          "a self-signed certificate with its private key"
+        ],
+        [
+          "`req.Create(issuer, nb, na, serial)`",
+          "a certificate signed by the issuer, with no private key"
+        ],
+        [
+          "`cert.CopyWithPrivateKey(key)`",
+          "a new object pairing the certificate with its key"
+        ],
+        [
+          "`X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false)`",
+          "an AKI pointing at the issuer's key"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which certificate in a chain usually carries this extension?",
+      "buckets": [
+        "Intermediate CA",
+        "TLS leaf"
+      ],
+      "items": [
+        [
+          "Basic Constraints `CA:TRUE, pathlen:0`",
+          0
+        ],
+        [
+          "Key Usage `KeyCertSign, CrlSign`",
+          0
+        ],
+        [
+          "EKU serverAuth",
+          1
+        ],
+        [
+          "SAN `DNS:shop.example`",
+          1
+        ],
+        [
+          "Key Usage `DigitalSignature`",
+          1
+        ],
+        [
+          "Basic Constraints `CA:FALSE`",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your code issues a leaf, then calls `chain.Build(leaf)`; it validates. You then configure Kestrel with that `leaf` object and it fails with \"The server mode SSL must use a certificate with the associated private key\". Why?",
+      "options": [
+        "You passed the result of `Create` directly, without `CopyWithPrivateKey`",
+        "The leaf isn't trusted",
+        "The SAN doesn't match the hostname",
+        "Kestrel needs a PFX file, not an object"
+      ],
+      "answer": 0,
+      "explain": "Validating a chain needs only public certificates. *Serving* TLS needs the private key, because the handshake proves possession of it."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Issue an intermediate",
+      "prompt": [
+        "Write `X509Certificate2 CreateIntermediate(X509Certificate2 root, string name)` that issues an intermediate CA signed by `root`:",
+        "",
+        "- Subject `CN=` + `name`, new ECDSA P-256 key, SHA-256",
+        "- valid 2030-01-01 to 2040-01-01 UTC, serial `new byte[] { 0x10, 0x01 }`",
+        "- Basic Constraints: CA, **path length 0** (may sign leaves only), critical",
+        "- Key Usage `KeyCertSign | CrlSign`, critical; a Subject Key Identifier; an Authority Key Identifier from `root`",
+        "- returned **with** its private key",
+        "",
+        "A `CreateRoot` is provided by the tests (valid 2030 to 2050)."
+      ],
+      "starter": [
+        "X509Certificate2 CreateIntermediate(X509Certificate2 root, string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    // extensions, Create, CopyWithPrivateKey",
+        "}"
+      ],
+      "solution": [
+        "X509Certificate2 CreateIntermediate(X509Certificate2 root, string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, true, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "        X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(root, true, false));",
+        "    using var cert = req.Create(root,",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2040, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new byte[] { 0x10, 0x01 });",
+        "    return cert.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "hints": [
+        "Path length 0: `new X509BasicConstraintsExtension(true, true, 0, true)`.",
+        "`X509AuthorityKeyIdentifierExtension.CreateFromCertificate(root, true, false)`",
+        "`using var cert = req.Create(root, nb, na, serial); return cert.CopyWithPrivateKey(key);`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "X509Certificate2 DojoRoot(string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "        X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    return req.CreateSelfSigned(",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2050, 1, 1, 0, 0, 0, TimeSpan.Zero));",
+        "}",
+        "var dojoRoot = DojoRoot(\"Dojo Root CA\");",
+        "var dojoInter = CreateIntermediate(dojoRoot, \"Dojo Issuing CA\");",
+        "Dojo.Eq(\"Subject\", \"CN=Dojo Issuing CA\", dojoInter.Subject);",
+        "Dojo.Eq(\"Issuer is the root\", \"CN=Dojo Root CA\", dojoInter.Issuer);",
+        "Dojo.Eq(\"has its private key\", true, dojoInter.HasPrivateKey);",
+        "Dojo.Eq(\"NotAfter\", \"2040-01-01\", dojoInter.NotAfter.ToUniversalTime().ToString(\"yyyy-MM-dd\"));",
+        "var dojoBc = dojoInter.Extensions.OfType<X509BasicConstraintsExtension>().FirstOrDefault();",
+        "Dojo.Check(\"Basic Constraints: CA, critical\", dojoBc != null && dojoBc.CertificateAuthority && dojoBc.Critical, \"add X509BasicConstraintsExtension(true, ..., critical: true)\");",
+        "var dojoKu = dojoInter.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();",
+        "Dojo.Check(\"Key Usage includes KeyCertSign and CrlSign\", dojoKu != null && dojoKu.KeyUsages.HasFlag(X509KeyUsageFlags.KeyCertSign) && dojoKu.KeyUsages.HasFlag(X509KeyUsageFlags.CrlSign), \"add X509KeyUsageExtension(KeyCertSign | CrlSign, true)\");",
+        "Dojo.Check(\"has a Subject Key Identifier\", dojoInter.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Any(), \"add X509SubjectKeyIdentifierExtension(req.PublicKey, false)\");",
+        "Dojo.Check(\"path length 0\", dojoBc != null && dojoBc.HasPathLengthConstraint && dojoBc.PathLengthConstraint == 0, \"use (true, true, 0, true)\");",
+        "var dojoAki = dojoInter.Extensions.OfType<X509AuthorityKeyIdentifierExtension>().FirstOrDefault();",
+        "string dojoRootSki = dojoRoot.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Single().SubjectKeyIdentifier!;",
+        "Dojo.Check(\"AKI points at the root's key\", dojoAki != null && dojoAki.KeyIdentifier.HasValue && Convert.ToHexString(dojoAki.KeyIdentifier.Value.Span) == dojoRootSki, \"add CreateFromCertificate(root, true, false)\");",
+        "using var dojoChain = new X509Chain();",
+        "dojoChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "dojoChain.ChainPolicy.CustomTrustStore.Add(dojoRoot);",
+        "dojoChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "dojoChain.ChainPolicy.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "Dojo.Check(\"chains to the root\", dojoChain.Build(dojoInter), string.Join(\",\", dojoChain.ChainStatus.Select(s => s.Status)));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Issue a server leaf",
+      "prompt": [
+        "Write `X509Certificate2 CreateLeaf(X509Certificate2 issuer, string host)` that issues a TLS server certificate:",
+        "",
+        "- Subject `CN=` + `host`, new ECDSA P-256 key, SHA-256",
+        "- valid 2030-01-01 to 2032-01-01 UTC, serial `new byte[] { 0x20, 0x01 }`",
+        "- Basic Constraints: not a CA, critical; Key Usage `DigitalSignature`, critical",
+        "- EKU serverAuth `1.3.6.1.5.5.7.3.1`; SAN with DNS name `host`",
+        "- SKI and an AKI from `issuer`; returned with its private key",
+        "",
+        "The tests make a root and an intermediate for you, then validate your leaf for serverAuth **with the CN fallback switched off**."
+      ],
+      "starter": [
+        "X509Certificate2 CreateLeaf(X509Certificate2 issuer, string host)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "X509Certificate2 CreateLeaf(X509Certificate2 issuer, string host)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + host, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(",
+        "        new OidCollection { new Oid(\"1.3.6.1.5.5.7.3.1\") }, false));",
+        "    var san = new SubjectAlternativeNameBuilder();",
+        "    san.AddDnsName(host);",
+        "    req.CertificateExtensions.Add(san.Build());",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    using var cert = req.Create(issuer,",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2032, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new byte[] { 0x20, 0x01 });",
+        "    return cert.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "hints": [
+        "Same shape as the intermediate, with leaf extensions.",
+        "SAN: `var san = new SubjectAlternativeNameBuilder(); san.AddDnsName(host); req.CertificateExtensions.Add(san.Build());`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "X509Certificate2 DojoRoot(string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "        X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    return req.CreateSelfSigned(",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2050, 1, 1, 0, 0, 0, TimeSpan.Zero));",
+        "}",
+        "X509Certificate2 DojoInter(X509Certificate2 root, string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, true, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "        X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(root, true, false));",
+        "    using var cert = req.Create(root,",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2040, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new byte[] { 0x10, 0x01 });",
+        "    return cert.CopyWithPrivateKey(key);",
+        "}",
+        "var dojoRoot = DojoRoot(\"Dojo Root CA\");",
+        "var dojoInter = DojoInter(dojoRoot, \"Dojo Issuing CA\");",
+        "var dojoLeaf = CreateLeaf(dojoInter, \"shop.example\");",
+        "Dojo.Eq(\"Subject\", \"CN=shop.example\", dojoLeaf.Subject);",
+        "Dojo.Eq(\"Issuer\", \"CN=Dojo Issuing CA\", dojoLeaf.Issuer);",
+        "Dojo.Eq(\"has its private key\", true, dojoLeaf.HasPrivateKey);",
+        "var dojoBc = dojoLeaf.Extensions.OfType<X509BasicConstraintsExtension>().FirstOrDefault();",
+        "Dojo.Check(\"not a CA\", dojoBc != null && !dojoBc.CertificateAuthority, \"add X509BasicConstraintsExtension(false, false, 0, true)\");",
+        "Dojo.Eq(\"SAN matches host (no CN fallback)\", true, dojoLeaf.MatchesHostname(\"shop.example\", allowCommonName: false));",
+        "using var dojoChain = new X509Chain();",
+        "dojoChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "dojoChain.ChainPolicy.CustomTrustStore.Add(dojoRoot);",
+        "dojoChain.ChainPolicy.ExtraStore.Add(dojoInter);",
+        "dojoChain.ChainPolicy.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"));",
+        "dojoChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "dojoChain.ChainPolicy.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "Dojo.Check(\"validates for serverAuth\", dojoChain.Build(dojoLeaf), string.Join(\",\", dojoChain.ChainStatus.Select(s => s.Status)));"
+      ]
+    }
+  ]
+}

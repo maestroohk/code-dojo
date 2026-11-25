@@ -1,0 +1,269 @@
+{
+  "title": "Expired, untrusted, incomplete",
+  "summary": "The three failures you'll see most, what each error message means, and how to tell them apart.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three ways a chain fails",
+      "body": [
+        "When validation fails, ask three questions in this order:",
+        "",
+        "| Question | If not... | .NET `X509ChainStatusFlags` | Chrome says |",
+        "|---|---|---|---|",
+        "| Can I build a path to *some* root? | **incomplete chain**: an intermediate is missing | `PartialChain` | `NET::ERR_CERT_AUTHORITY_INVALID` |",
+        "| Is that root in my trust store? | **untrusted root** (self-signed, private CA, MITM proxy) | `UntrustedRoot` | `NET::ERR_CERT_AUTHORITY_INVALID` |",
+        "| Is every certificate within its dates *right now*? | **expired / not yet valid** | `NotTimeValid` | `NET::ERR_CERT_DATE_INVALID` |",
+        "",
+        "Note that \"now\" is the **client's** clock. A laptop with a dead CMOS battery that thinks it's 2001 rejects every certificate on earth.",
+        "",
+        "In .NET client code all of these surface as `SslPolicyErrors.RemoteCertificateChainErrors` and an",
+        "`AuthenticationException: The remote certificate is invalid according to the validation procedure`. The details are in the chain status."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each error to its most likely cause.",
+      "pairs": [
+        [
+          "`NET::ERR_CERT_DATE_INVALID` on every site",
+          "the computer's clock is wrong"
+        ],
+        [
+          "`NotTimeValid` on one service since Monday",
+          "its certificate expired at the weekend"
+        ],
+        [
+          "`UntrustedRoot` for `https://localhost:5001`",
+          "a self-signed dev certificate that isn't trusted"
+        ],
+        [
+          "`PartialChain` from Linux, fine from Windows",
+          "the server doesn't send its intermediate"
+        ],
+        [
+          "`UntrustedRoot` only on the office network",
+          "a TLS-inspecting proxy re-signs traffic with the company's own root"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "Every HTTPS site fails on one kiosk PC with `NET::ERR_CERT_DATE_INVALID`. The certificates are fine on every other machine. What do you check first?"
+      ],
+      "options": [
+        "The kiosk's date and time",
+        "The kiosk's trust store",
+        "The sites' intermediates",
+        "The kiosk's DNS settings"
+      ],
+      "answer": 0,
+      "explain": "*Every* site failing, with a *date* error, on *one* machine: the common factor is that machine's clock."
+    },
+    {
+      "type": "learn",
+      "title": "An expired intermediate counts too",
+      "body": [
+        "Dates are checked on **every** certificate in the chain, not only the leaf. A freshly renewed leaf still fails if the server sends an",
+        "**old, expired intermediate** alongside it.",
+        "",
+        "```text",
+        "leaf           Not After: 2031-03-01     ok",
+        "intermediate   Not After: 2030-12-31     EXPIRED  -> whole chain NotTimeValid",
+        "root           Not After: 2045-01-01     ok",
+        "```",
+        "",
+        "Real-world example: when an old root that many chains led to expired in 2021, servers still sending a cross-signed",
+        "intermediate pointing to that root broke older clients. The fix is always the same: serve the chain the CA currently hands out.",
+        "",
+        "Check on the command line:",
+        "",
+        "```text",
+        "openssl s_client -connect shop.example:443 -showcerts      shows exactly what the server sends",
+        "openssl x509 -in cert.pem -noout -dates                    prints notBefore / notAfter",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A teammate renewed the leaf certificate yesterday, but clients still report `NotTimeValid`. `openssl s_client -showcerts` shows the leaf is fine. What is the next most likely cause?",
+      "options": [
+        "The server is still sending an expired intermediate in its chain file",
+        "The root is too new",
+        "The SAN is missing",
+        "The thumbprint changed"
+      ],
+      "answer": 0,
+      "explain": "Every certificate in the chain must be in date. Replace the chain file too, not just the leaf."
+    },
+    {
+      "type": "predict",
+      "prompt": "`DojoStatuses(...)` builds a chain trusting `root`, with `sent` as the extra certificates, checked at 1 June of `year`, and returns the status flags; `Show` joins them with commas or prints `(ok)`. The leaf `shortLived` is valid 2030 to 2031. What does it print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "var root = DojoCert(\"CN=Root\", null, true);",
+        "var inter = DojoCert(\"CN=Issuing CA\", root, true);",
+        "var leaf = DojoCert(\"CN=shop.example\", inter, false);",
+        "var shortLived = DojoCert(\"CN=short.example\", inter, false, null, null, 2030, 2031);",
+        "",
+        "string Show(X509ChainStatusFlags[] f) => f.Length == 0 ? \"(ok)\" : string.Join(\",\", f);",
+        "Console.WriteLine(Show(DojoStatuses(leaf, root, new() { inter }, 2031)));",
+        "Console.WriteLine(Show(DojoStatuses(leaf, root, new(), 2031)));",
+        "Console.WriteLine(Show(DojoStatuses(leaf, null, new() { inter, root }, 2031)));",
+        "Console.WriteLine(Show(DojoStatuses(shortLived, root, new() { inter }, 2032)));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}",
+        "X509ChainStatusFlags[] DojoStatuses(X509Certificate2 leaf, X509Certificate2? trustedRoot, List<X509Certificate2> sent, int year, string? eku = null)",
+        "{",
+        "    using var ch = new X509Chain();",
+        "    ch.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    if (trustedRoot != null) ch.ChainPolicy.CustomTrustStore.Add(trustedRoot);",
+        "    foreach (var c in sent) ch.ChainPolicy.ExtraStore.Add(c);",
+        "    ch.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    ch.ChainPolicy.VerificationTime = new DateTime(year, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    if (eku != null) ch.ChainPolicy.ApplicationPolicy.Add(new Oid(eku));",
+        "    ch.Build(leaf);",
+        "    return ch.ChainStatus.Select(s => s.Status).ToArray();",
+        "}"
+      ],
+      "answer": [
+        "(ok)",
+        "PartialChain",
+        "UntrustedRoot",
+        "NotTimeValid"
+      ],
+      "explain": "Valid; missing intermediate; complete chain but the root isn't trusted (the server even sent it, which doesn't help); and the leaf expired before mid-2032."
+    },
+    {
+      "type": "sort",
+      "prompt": "Is this a **trust** problem or a **time** problem?",
+      "buckets": [
+        "Trust (who signed it)",
+        "Time (when)"
+      ],
+      "items": [
+        [
+          "`UntrustedRoot`",
+          0
+        ],
+        [
+          "`PartialChain`",
+          0
+        ],
+        [
+          "`NotTimeValid`",
+          1
+        ],
+        [
+          "a self-signed certificate from a colleague",
+          0
+        ],
+        [
+          "the client's clock is set to 2019",
+          1
+        ],
+        [
+          "an expired intermediate",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Diagnose a status list",
+      "prompt": [
+        "Support tickets paste the chain status. Write `string Diagnose(X509ChainStatusFlags[] statuses)` that returns one verdict,",
+        "checking in this priority order:",
+        "",
+        "1. contains `PartialChain` -> `\"missing intermediate\"`",
+        "2. contains `UntrustedRoot` -> `\"untrusted root\"`",
+        "3. contains `NotTimeValid` -> `\"expired or not yet valid\"`",
+        "4. empty -> `\"ok\"`",
+        "5. anything else -> `\"other: \"` followed by the flags joined with `,`",
+        "",
+        "**Run checks** feeds it statuses from real chains as well as hand-made lists."
+      ],
+      "starter": [
+        "string Diagnose(X509ChainStatusFlags[] statuses)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "string Diagnose(X509ChainStatusFlags[] statuses)",
+        "{",
+        "    if (statuses.Contains(X509ChainStatusFlags.PartialChain)) return \"missing intermediate\";",
+        "    if (statuses.Contains(X509ChainStatusFlags.UntrustedRoot)) return \"untrusted root\";",
+        "    if (statuses.Contains(X509ChainStatusFlags.NotTimeValid)) return \"expired or not yet valid\";",
+        "    if (statuses.Length == 0) return \"ok\";",
+        "    return \"other: \" + string.Join(\",\", statuses);",
+        "}"
+      ],
+      "hints": [
+        "`statuses.Contains(X509ChainStatusFlags.PartialChain)` works because `System.Linq` is imported.",
+        "Check in the stated order and return as soon as one matches."
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoRoot = DojoCert(\"CN=Root\", null, true);",
+        "var dojoInter = DojoCert(\"CN=Issuing CA\", dojoRoot, true);",
+        "var dojoLeaf = DojoCert(\"CN=shop.example\", dojoInter, false);",
+        "Dojo.Eq(\"valid chain\", \"ok\", Diagnose(DojoStatuses(dojoLeaf, dojoRoot, new() { dojoInter }, 2031)));",
+        "Dojo.Eq(\"intermediate not sent\", \"missing intermediate\", Diagnose(DojoStatuses(dojoLeaf, dojoRoot, new(), 2031)));",
+        "Dojo.Eq(\"root not trusted\", \"untrusted root\", Diagnose(DojoStatuses(dojoLeaf, null, new() { dojoInter, dojoRoot }, 2031)));",
+        "Dojo.Eq(\"checked in 2036, after everything expired\", \"expired or not yet valid\", Diagnose(DojoStatuses(dojoLeaf, dojoRoot, new() { dojoInter }, 2036)));",
+        "Dojo.Eq(\"untrusted beats expired\", \"untrusted root\", Diagnose(new[] { X509ChainStatusFlags.NotTimeValid, X509ChainStatusFlags.UntrustedRoot }));",
+        "Dojo.Eq(\"other flags\", \"other: Revoked,NotValidForUsage\", Diagnose(new[] { X509ChainStatusFlags.Revoked, X509ChainStatusFlags.NotValidForUsage }));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}",
+        "X509ChainStatusFlags[] DojoStatuses(X509Certificate2 leaf, X509Certificate2? trustedRoot, List<X509Certificate2> sent, int year, string? eku = null)",
+        "{",
+        "    using var ch = new X509Chain();",
+        "    ch.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    if (trustedRoot != null) ch.ChainPolicy.CustomTrustStore.Add(trustedRoot);",
+        "    foreach (var c in sent) ch.ChainPolicy.ExtraStore.Add(c);",
+        "    ch.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    ch.ChainPolicy.VerificationTime = new DateTime(year, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    if (eku != null) ch.ChainPolicy.ApplicationPolicy.Add(new Oid(eku));",
+        "    ch.Build(leaf);",
+        "    return ch.ChainStatus.Select(s => s.Status).ToArray();",
+        "}"
+      ]
+    }
+  ]
+}

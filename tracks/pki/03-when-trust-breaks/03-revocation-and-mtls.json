@@ -1,0 +1,216 @@
+{
+  "title": "Revocation, dev certs and mutual TLS",
+  "summary": "How a certificate is cancelled before it expires, why dev certs need trusting, and what changes when the client shows a certificate too.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Revocation: cancelling a certificate early",
+      "body": [
+        "If a private key leaks, the certificate is still in date and still chains. The CA must **revoke** it, and clients must find out.",
+        "",
+        "- **CRL** (Certificate Revocation List): a file, signed by the CA, listing revoked serial numbers. Its URL is in the certificate's",
+        "  *CRL Distribution Points* extension. Clients download and cache it.",
+        "- **OCSP**: ask the CA's responder \"is serial X still good?\" and get a signed yes/no. The URL is in *Authority Information Access*.",
+        "- **OCSP stapling**: the *server* fetches the signed OCSP answer and sends it in the handshake, so clients don't have to call the CA.",
+        "",
+        "In .NET: `ChainPolicy.RevocationMode` is `Online` (fetch), `Offline` (cache only) or `NoCheck`. If the CRL/OCSP server can't be reached you get",
+        "`RevocationStatusUnknown` / `OfflineRevocation`; a revoked certificate gives `Revoked`.",
+        "",
+        "> **Tip:** Locked-down servers that can't reach the CA's CRL URL are a classic source of slow handshakes and",
+        "> `RevocationStatusUnknown`. Check the URL from the server with `certutil -url cert.cer`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to its description.",
+      "pairs": [
+        [
+          "CRL",
+          "a signed list of revoked serial numbers"
+        ],
+        [
+          "OCSP",
+          "a live signed answer about one certificate"
+        ],
+        [
+          "OCSP stapling",
+          "the server attaches a fresh OCSP answer to its handshake"
+        ],
+        [
+          "`RevocationStatusUnknown`",
+          "the client couldn't find out either way"
+        ],
+        [
+          "`Revoked`",
+          "the CA has cancelled this certificate"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A service fails TLS only on production servers, which have no outbound internet. Errors mention `RevocationStatusUnknown` and `OfflineRevocation`. What is going on?",
+      "options": [
+        "The servers can't reach the CA's CRL/OCSP URLs to check revocation",
+        "The certificate has been revoked",
+        "The root CA is untrusted on production",
+        "The certificate's SAN is wrong"
+      ],
+      "answer": 0,
+      "explain": "\"Unknown\" isn't \"revoked\". Allow the CRL/OCSP URLs through the firewall (or use a CA whose answers the server can staple). Don't fix it by switching revocation off everywhere."
+    },
+    {
+      "type": "learn",
+      "title": "Self-signed dev certificates",
+      "body": [
+        "`dotnet dev-certs https` creates a self-signed certificate for `localhost` and puts it in `Cert:\\CurrentUser\\My`.",
+        "Until you run `dotnet dev-certs https --trust`, browsers say `NET::ERR_CERT_AUTHORITY_INVALID`: the chain is just one",
+        "self-signed certificate, and it isn't in any trust store. `--trust` adds it to `Cert:\\CurrentUser\\Root`.",
+        "",
+        "That trust is per machine and per user: your Docker container, your colleague's laptop and your CI agent don't have it.",
+        "",
+        "The tempting \"fix\" is to switch validation off:",
+        "",
+        "```csharp",
+        "handler.ServerCertificateCustomValidationCallback = (_, _, _, _) => true;   // accepts ANY certificate",
+        "```",
+        "",
+        "That accepts an attacker's certificate too, and it has a way of reaching production. Trust the specific root instead,",
+        "for example with a `CustomTrustStore` as you've been doing in this course."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the safest way to let a test client call a service whose certificate comes from your team's private test CA?",
+      "options": [
+        "Validate against that CA's root explicitly (custom trust store or installing the root on the test machines)",
+        "`ServerCertificateCustomValidationCallback = (_, _, _, _) => true`",
+        "Call the service over plain HTTP instead",
+        "Ignore only `RemoteCertificateNameMismatch`"
+      ],
+      "answer": 0,
+      "explain": "Trusting one specific root keeps every other check (dates, names, the signature chain) working. Accept-all disables all of them."
+    },
+    {
+      "type": "learn",
+      "title": "Mutual TLS: the client shows a certificate too",
+      "body": [
+        "In normal TLS only the server proves who it is. In **mutual TLS (mTLS)** the server also asks the client for a certificate,",
+        "and the client proves it holds that certificate's private key.",
+        "",
+        "| | Server certificate | Client certificate |",
+        "|---|---|---|",
+        "| Who validates it | the client | the server |",
+        "| EKU needed | serverAuth `1.3.6.1.5.5.7.3.1` | clientAuth `1.3.6.1.5.5.7.3.2` |",
+        "| Name check | hostname vs SAN | your own rule (Subject, SAN, or thumbprint allow-list) |",
+        "| Trusted roots | public roots, usually | usually **your own private CA**, not the public ones |",
+        "",
+        "The server should trust *only* the CA that issues client certificates. If it trusted all public roots, anyone who bought a",
+        "certificate anywhere could connect. In .NET the client attaches one with `handler.ClientCertificates.Add(certWithKey)`."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "In mutual TLS, which side does each job?",
+      "buckets": [
+        "Client",
+        "Server"
+      ],
+      "items": [
+        [
+          "checks the server certificate's hostname",
+          0
+        ],
+        [
+          "checks the client certificate chains to the client CA",
+          1
+        ],
+        [
+          "holds the private key for a clientAuth certificate",
+          0
+        ],
+        [
+          "asks for a certificate during the handshake",
+          1
+        ],
+        [
+          "holds the private key for a serverAuth certificate",
+          1
+        ],
+        [
+          "adds a cert to `HttpClientHandler.ClientCertificates`",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Accept a client certificate",
+      "prompt": [
+        "You run an mTLS API. Write `bool AcceptClient(X509Certificate2 client, X509Certificate2 clientCaRoot, List<X509Certificate2> sent)`",
+        "that accepts the client only if:",
+        "",
+        "- it chains to `clientCaRoot` **only** (custom root trust), with `sent` as extra certificates,",
+        "- it is valid for **client authentication** (`ApplicationPolicy` with OID `1.3.6.1.5.5.7.3.2`),",
+        "- checked at `new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc)` with revocation off (`NoCheck`; there's no CRL in the test)."
+      ],
+      "starter": [
+        "bool AcceptClient(X509Certificate2 client, X509Certificate2 clientCaRoot, List<X509Certificate2> sent)",
+        "{",
+        "    using var chain = new X509Chain();",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "bool AcceptClient(X509Certificate2 client, X509Certificate2 clientCaRoot, List<X509Certificate2> sent)",
+        "{",
+        "    using var chain = new X509Chain();",
+        "    chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    chain.ChainPolicy.CustomTrustStore.Add(clientCaRoot);",
+        "    foreach (var c in sent) chain.ChainPolicy.ExtraStore.Add(c);",
+        "    chain.ChainPolicy.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.2\"));",
+        "    chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    chain.ChainPolicy.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    return chain.Build(client);",
+        "}"
+      ],
+      "hints": [
+        "It's the `Validates` setup from module 2 plus one line.",
+        "`chain.ChainPolicy.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.2\"));`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoClientRoot = DojoCert(\"CN=Client Root\", null, true);",
+        "var dojoClientCa = DojoCert(\"CN=Client Issuing CA\", dojoClientRoot, true);",
+        "var dojoGood = DojoCert(\"CN=device-42\", dojoClientCa, false, null, \"1.3.6.1.5.5.7.3.2\");",
+        "var dojoServerish = DojoCert(\"CN=device-43\", dojoClientCa, false, null, \"1.3.6.1.5.5.7.3.1\");",
+        "var dojoPublicRoot = DojoCert(\"CN=Some Public Root\", null, true);",
+        "var dojoStranger = DojoCert(\"CN=device-99\", dojoPublicRoot, false, null, \"1.3.6.1.5.5.7.3.2\");",
+        "Dojo.Eq(\"a clientAuth certificate from our CA is accepted\", true, AcceptClient(dojoGood, dojoClientRoot, new() { dojoClientCa }));",
+        "Dojo.Eq(\"a serverAuth-only certificate from our CA is refused\", false, AcceptClient(dojoServerish, dojoClientRoot, new() { dojoClientCa }));",
+        "Dojo.Eq(\"a clientAuth certificate from another CA is refused\", false, AcceptClient(dojoStranger, dojoClientRoot, new() { dojoPublicRoot }));",
+        "Dojo.Eq(\"missing the issuing CA is refused\", false, AcceptClient(dojoGood, dojoClientRoot, new()));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    }
+  ]
+}

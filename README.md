@@ -1,6 +1,22 @@
 # code-dojo
 
-A local, gamified workbench for learning to program. The first track is C#, from `Console.WriteLine` to expression trees: 8 modules, 50 lessons, 125 coding exercises.
+A local, gamified learning center. Topics are added as the need arises; today there are two:
+
+- **C#**, from `Console.WriteLine` to expression trees, plus real projects (a REST API, a console data tool).
+- **Certificates & PKI**: keys, signatures, certificate chains, trust stores, and why TLS says no.
+
+Alongside the courses:
+
+- **Labs**: sandboxes with real machinery. The certificate chain lab lets you build roots, intermediates and
+  server certificates like building blocks, wire up who signs whom, and watch real `X509Chain` validation
+  pass or fail, with fix-it challenges. Every lab has a visual board and a plain form view of the same model.
+- **Workbench**: run your own ASP.NET Core apps live inside the dojo. Send them requests (JSON, forms,
+  multipart file uploads, custom headers), see the response, the curl command and the C# test for it, and
+  watch each request travel through *your* code: the map is drawn from your `Program.cs` (middleware, then
+  endpoints) and lights up the path the request took. Run up to four apps at once; they find each other
+  through `builder.Configuration["Services:<name>"]`, and the traffic view draws who called whom.
+- **Project blueprints**: each project shows the architecture of the finished app, and lights up each part
+  as you finish the stage that builds it.
 
 Everything runs on your machine. Your code is compiled and executed for real, and graded by hidden tests.
 
@@ -28,10 +44,21 @@ The first lesson of every module is open, so you can start at your level. Profil
 
 Progress is saved to `.state/progress.json`.
 
+## Tests
+
+```
+dotnet test
+```
+
+The server tests cover content loading, grading, the certificate lab (healthy chains and each kind of
+broken one) and the Workbench (two live apps calling each other, multipart uploads, request tracing).
+
 ## Layout
 
 ```
-server/   ASP.NET Core app: compiles learner code with Roslyn, runs it in a separate process, grades it
+server/   ASP.NET Core app: compiles learner code with Roslyn, runs it in a separate process, grades it;
+          PkiLab.cs (certificate lab), AppHost.cs + CodeOutline.cs (Workbench)
+tests/    xUnit tests for the server
 ui/       the web app (plain ES modules, no build step, works offline)
 tracks/   the lessons, one JSON file each
 ```

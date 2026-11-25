@@ -1,0 +1,253 @@
+{
+  "title": "A root CA of your own",
+  "summary": "Create a self-signed root with the extensions a real CA certificate carries.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Anatomy of a root certificate",
+      "body": [
+        "A root is a self-signed certificate that is **allowed to issue**. Three extensions make that so:",
+        "",
+        "```csharp",
+        "var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "var req = new CertificateRequest(\"CN=Dojo Root CA\", key, HashAlgorithmName.SHA256);",
+        "",
+        "// 1. \"I am a CA\"  (certificateAuthority, hasPathLengthConstraint, pathLengthConstraint, critical)",
+        "req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));",
+        "// 2. \"My key may sign certificates and CRLs\"",
+        "req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "    X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "// 3. An ID for my key, so children can point at it (their AKI)",
+        "req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "",
+        "X509Certificate2 root = req.CreateSelfSigned(",
+        "    new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "    new DateTimeOffset(2050, 1, 1, 0, 0, 0, TimeSpan.Zero));",
+        "```",
+        "",
+        "`CreateSelfSigned` returns the certificate **with** its private key attached, which is what you need to sign children.",
+        "Roots are long-lived (here 20 years) because replacing one means touching every trust store that has it."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the root's extensions: it is a CA, the extension is critical, and its key may sign certificates.",
+      "code": [
+        "req.CertificateExtensions.Add(new X509BasicConstraintsExtension(__1__, false, 0, __2__));",
+        "req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "    X509KeyUsageFlags.__3__ | X509KeyUsageFlags.CrlSign, true));",
+        "req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.__4__, false));"
+      ],
+      "blanks": [
+        "true",
+        "true",
+        "KeyCertSign",
+        "PublicKey"
+      ],
+      "bank": [
+        "false",
+        "DigitalSignature",
+        "PrivateKey",
+        "KeyEncipherment"
+      ],
+      "explain": "Basic Constraints `(true, false, 0, true)` reads: CA yes, no path-length limit, (ignored limit), critical. The SKI is computed from the request's public key."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each constructor argument of `X509BasicConstraintsExtension(a, b, c, d)` to its meaning.",
+      "pairs": [
+        [
+          "`a` certificateAuthority",
+          "may this certificate issue others?"
+        ],
+        [
+          "`b` hasPathLengthConstraint",
+          "is there a limit on CAs below it?"
+        ],
+        [
+          "`c` pathLengthConstraint",
+          "how many CA levels may sit below it"
+        ],
+        [
+          "`d` critical",
+          "reject the certificate if this extension isn't understood"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "X509Certificate2 CreateRoot(string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "        X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    return req.CreateSelfSigned(",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2050, 1, 1, 0, 0, 0, TimeSpan.Zero));",
+        "}",
+        "var root = CreateRoot(\"Dojo Root CA\");",
+        "var bc = root.Extensions.OfType<X509BasicConstraintsExtension>().Single();",
+        "var ku = root.Extensions.OfType<X509KeyUsageExtension>().Single();",
+        "",
+        "Console.WriteLine(root.Subject == root.Issuer);",
+        "Console.WriteLine(root.HasPrivateKey);",
+        "Console.WriteLine(bc.CertificateAuthority);",
+        "Console.WriteLine(ku.KeyUsages);",
+        "Console.WriteLine(root.NotAfter.ToUniversalTime().Year - root.NotBefore.ToUniversalTime().Year);"
+      ],
+      "answer": [
+        "True",
+        "True",
+        "True",
+        "CrlSign, KeyCertSign",
+        "20"
+      ],
+      "explain": "Self-signed, carrying its key, marked as a CA. `[Flags]` enums print their set flags in value order, lowest first: `CrlSign` (2) before `KeyCertSign` (4)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You created a root with `X509BasicConstraintsExtension(false, false, 0, true)` by mistake. What happens when you try `req.Create(root, ...)` to issue an intermediate from it?",
+      "options": [
+        "`Create` throws: an issuer whose Basic Constraints says it isn't a CA can't issue",
+        "It works, but browsers will reject the intermediate later",
+        "It works fine; Basic Constraints only matters for leaves",
+        "It silently sets CA:TRUE on the root"
+      ],
+      "answer": 0,
+      "explain": "`CertificateRequest.Create` refuses up front with an `ArgumentException`. Even if you got such a chain from somewhere else, validators reject it with `InvalidBasicConstraints`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your team's private root CA (made with code like this) will be trusted by every internal service. Where should its private key live afterwards?",
+      "options": [
+        "Offline: exported once to an encrypted PFX or an HSM, locked away, used only to sign intermediates",
+        "In the source repository next to the code that created it, so the build can issue certificates",
+        "In `Cert:\\LocalMachine\\My` on every web server",
+        "Nowhere: delete it, the root is trusted anyway"
+      ],
+      "answer": 0,
+      "explain": "Anyone with the root key can mint a trusted certificate for any internal name. Keep it offline and let an intermediate do daily issuing. Deleting it works too, but then you can never issue a new intermediate."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Create a root",
+      "prompt": [
+        "Write `X509Certificate2 CreateRoot(string name)` that returns a self-signed root CA (with its private key):",
+        "",
+        "- Subject `CN=` + `name`, ECDSA P-256, SHA-256",
+        "- valid 2030-01-01 to 2050-01-01 UTC",
+        "- Basic Constraints: CA, no path length limit, critical",
+        "- Key Usage: `KeyCertSign | CrlSign`, critical",
+        "- a Subject Key Identifier",
+        "",
+        "The cryptography namespaces are imported."
+      ],
+      "starter": [
+        "X509Certificate2 CreateRoot(string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    // add three extensions, then self-sign",
+        "}"
+      ],
+      "solution": [
+        "X509Certificate2 CreateRoot(string name)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "        X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    return req.CreateSelfSigned(",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2050, 1, 1, 0, 0, 0, TimeSpan.Zero));",
+        "}"
+      ],
+      "hints": [
+        "Copy the pattern from the first card.",
+        "`req.CreateSelfSigned(notBefore, notAfter)` with 2030 and 2050."
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoRoot = CreateRoot(\"Dojo Root CA\");",
+        "Dojo.Eq(\"Subject\", \"CN=Dojo Root CA\", dojoRoot.Subject);",
+        "Dojo.Eq(\"self-signed\", dojoRoot.Subject, dojoRoot.Issuer);",
+        "Dojo.Eq(\"has its private key\", true, dojoRoot.HasPrivateKey);",
+        "Dojo.Eq(\"NotAfter\", \"2050-01-01\", dojoRoot.NotAfter.ToUniversalTime().ToString(\"yyyy-MM-dd\"));",
+        "var dojoBc = dojoRoot.Extensions.OfType<X509BasicConstraintsExtension>().FirstOrDefault();",
+        "Dojo.Check(\"Basic Constraints: CA, critical\", dojoBc != null && dojoBc.CertificateAuthority && dojoBc.Critical, \"add X509BasicConstraintsExtension(true, ..., critical: true)\");",
+        "var dojoKu = dojoRoot.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();",
+        "Dojo.Check(\"Key Usage includes KeyCertSign and CrlSign\", dojoKu != null && dojoKu.KeyUsages.HasFlag(X509KeyUsageFlags.KeyCertSign) && dojoKu.KeyUsages.HasFlag(X509KeyUsageFlags.CrlSign), \"add X509KeyUsageExtension(KeyCertSign | CrlSign, true)\");",
+        "Dojo.Check(\"has a Subject Key Identifier\", dojoRoot.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Any(), \"add X509SubjectKeyIdentifierExtension(req.PublicKey, false)\");",
+        "using var dojoChain = new X509Chain();",
+        "dojoChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "dojoChain.ChainPolicy.CustomTrustStore.Add(dojoRoot);",
+        "dojoChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "dojoChain.ChainPolicy.VerificationTime = new DateTime(2031, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "Dojo.Eq(\"validates as its own trust anchor\", true, dojoChain.Build(dojoRoot));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "A root that can only have one CA level",
+      "prompt": [
+        "Real roots often limit the depth below them. Write `X509Certificate2 CreateStrictRoot(string name, int pathLength)`:",
+        "the same as `CreateRoot`, but Basic Constraints **has** a path length constraint of `pathLength`.",
+        "",
+        "With `pathLength` 1 the root can sign intermediates, and those intermediates can sign only leaves."
+      ],
+      "starter": [
+        "X509Certificate2 CreateStrictRoot(string name, int pathLength)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "X509Certificate2 CreateStrictRoot(string name, int pathLength)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(\"CN=\" + name, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, true, pathLength, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(",
+        "        X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    return req.CreateSelfSigned(",
+        "        new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),",
+        "        new DateTimeOffset(2050, 1, 1, 0, 0, 0, TimeSpan.Zero));",
+        "}"
+      ],
+      "hints": [
+        "Only the Basic Constraints arguments change.",
+        "`new X509BasicConstraintsExtension(true, true, pathLength, true)`"
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoRoot = CreateStrictRoot(\"Strict Root\", 1);",
+        "var dojoBc = dojoRoot.Extensions.OfType<X509BasicConstraintsExtension>().FirstOrDefault();",
+        "Dojo.Check(\"Basic Constraints: CA, critical\", dojoBc != null && dojoBc.CertificateAuthority && dojoBc.Critical, \"add X509BasicConstraintsExtension(true, ..., critical: true)\");",
+        "var dojoKu = dojoRoot.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();",
+        "Dojo.Check(\"Key Usage includes KeyCertSign and CrlSign\", dojoKu != null && dojoKu.KeyUsages.HasFlag(X509KeyUsageFlags.KeyCertSign) && dojoKu.KeyUsages.HasFlag(X509KeyUsageFlags.CrlSign), \"add X509KeyUsageExtension(KeyCertSign | CrlSign, true)\");",
+        "Dojo.Check(\"has a Subject Key Identifier\", dojoRoot.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Any(), \"add X509SubjectKeyIdentifierExtension(req.PublicKey, false)\");",
+        "Dojo.Check(\"path length constraint is 1\", dojoBc != null && dojoBc.HasPathLengthConstraint && dojoBc.PathLengthConstraint == 1, \"pass true and pathLength as the 2nd and 3rd arguments\");",
+        "Dojo.Eq(\"Subject\", \"CN=Strict Root\", dojoRoot.Subject);",
+        "var dojoZero = CreateStrictRoot(\"Zero Root\", 0);",
+        "Dojo.Eq(\"pathLength 0 is kept\", 0, dojoZero.Extensions.OfType<X509BasicConstraintsExtension>().Single().PathLengthConstraint);"
+      ]
+    }
+  ]
+}

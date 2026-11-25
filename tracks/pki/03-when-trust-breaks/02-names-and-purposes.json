@@ -1,0 +1,281 @@
+{
+  "title": "Wrong name, wrong purpose",
+  "summary": "Hostname matching uses the SAN, wildcards cover one label, and a certificate is only good for the uses it lists.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The hostname must be in the SAN",
+      "body": [
+        "A perfectly valid chain still fails if the certificate isn't **for the host you connected to**.",
+        "",
+        "Modern clients match the hostname against the **Subject Alternative Name** list *only*. The Subject's `CN` used to be",
+        "checked too, but Chrome stopped in 2017 and the rules (RFC 6125, CA/Browser Forum) say: if it isn't in the SAN, it doesn't match.",
+        "",
+        "```text",
+        "Subject: CN=shop.example",
+        "X509v3 Subject Alternative Name:",
+        "    DNS:shop.example, DNS:www.shop.example, IP Address:10.0.0.5",
+        "```",
+        "",
+        "Wildcards: `*.shop.example` matches **exactly one** label in the leftmost position.",
+        "",
+        "| Name | `*.shop.example` matches? |",
+        "|---|---|",
+        "| `api.shop.example` | yes |",
+        "| `shop.example` | **no** (zero labels) |",
+        "| `a.b.shop.example` | **no** (two labels) |",
+        "",
+        "Chrome reports a mismatch as `NET::ERR_CERT_COMMON_NAME_INVALID`; .NET as `SslPolicyErrors.RemoteCertificateNameMismatch`.",
+        "Connecting by IP address needs an `IP Address:` SAN entry, not a DNS one."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "The certificate's SAN is `DNS:*.contoso.test, DNS:contoso.test`. Does it match?",
+      "buckets": [
+        "Matches",
+        "Does not match"
+      ],
+      "items": [
+        [
+          "`contoso.test`",
+          0
+        ],
+        [
+          "`api.contoso.test`",
+          0
+        ],
+        [
+          "`API.Contoso.Test`",
+          0
+        ],
+        [
+          "`v2.api.contoso.test`",
+          1
+        ],
+        [
+          "`contoso.test.evil.example`",
+          1
+        ],
+        [
+          "`10.1.2.3` (connecting by IP)",
+          1
+        ]
+      ],
+      "explain": "Matching is case-insensitive. The wildcard covers one label only. An IP connection needs an IP SAN."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "You moved an API from `api.contoso.test` to `orders.contoso.test`, reusing the old certificate (SAN: `DNS:api.contoso.test`).",
+        "The chain validates, but `HttpClient` throws. Which `SslPolicyErrors` value do you expect?"
+      ],
+      "options": [
+        "`RemoteCertificateNameMismatch`",
+        "`RemoteCertificateChainErrors`",
+        "`RemoteCertificateNotAvailable`",
+        "`None`"
+      ],
+      "answer": 0,
+      "explain": "The chain is fine, the name isn't. Issue a certificate with `orders.contoso.test` in its SAN (or both names)."
+    },
+    {
+      "type": "predict",
+      "prompt": "`MatchesHostname` (in .NET 7+) applies the SAN rules. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "var root = DojoCert(\"CN=Root\", null, true);",
+        "var cert = DojoCert(\"CN=whatever\", root, false, \"*.shop.example,shop.example\");",
+        "",
+        "Console.WriteLine(cert.MatchesHostname(\"api.shop.example\"));",
+        "Console.WriteLine(cert.MatchesHostname(\"shop.example\"));",
+        "Console.WriteLine(cert.MatchesHostname(\"a.b.shop.example\"));",
+        "Console.WriteLine(cert.MatchesHostname(\"whatever\"));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "answer": [
+        "True",
+        "True",
+        "False",
+        "False"
+      ],
+      "explain": "The bare name matches only because it is listed separately. Two labels don't match a wildcard. The CN `whatever` is ignored because the certificate has a SAN."
+    },
+    {
+      "type": "learn",
+      "title": "Purpose: Key Usage and EKU",
+      "body": [
+        "A certificate also says **what it may be used for**, and the client checks.",
+        "",
+        "- **Extended Key Usage (EKU)** lists purposes by OID. A TLS server certificate needs **serverAuth** (`1.3.6.1.5.5.7.3.1`).",
+        "  A client certificate for mutual TLS needs **clientAuth** (`1.3.6.1.5.5.7.3.2`). Code signing is another OID again.",
+        "- **Basic Constraints** `CA:FALSE` means it must never act as an issuer. A chain where a `CA:FALSE` certificate signed another",
+        "  certificate is rejected (`InvalidBasicConstraints`). Otherwise anyone with a website certificate could mint certificates for google.com.",
+        "- **Key Usage** must include `Certificate Sign` for a CA, and `Digital Signature` for a TLS leaf.",
+        "",
+        "In .NET you ask the chain to check a purpose with `ChainPolicy.ApplicationPolicy.Add(new Oid(\"1.3.6.1.5.5.7.3.1\"))`.",
+        "A failure shows up as `NotValidForUsage`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each failure to the field that causes it.",
+      "pairs": [
+        [
+          "`NET::ERR_CERT_COMMON_NAME_INVALID`",
+          "Subject Alternative Name"
+        ],
+        [
+          "`NotValidForUsage` when used as a server cert",
+          "Extended Key Usage"
+        ],
+        [
+          "`InvalidBasicConstraints`",
+          "Basic Constraints (`CA:FALSE` used as an issuer)"
+        ],
+        [
+          "`NotTimeValid`",
+          "Not Before / Not After"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "A team requested a certificate with EKU **TLS Web Client Authentication** only, and installed it on their web server.",
+        "What happens when browsers connect?"
+      ],
+      "options": [
+        "They reject it: the certificate isn't valid for server authentication",
+        "It works: EKU is only advisory",
+        "It works, but only for HTTP/1.1",
+        "The browser asks the user for a client certificate"
+      ],
+      "answer": 0,
+      "explain": "Purpose is enforced. A clientAuth-only certificate proves a *client's* identity, it can't stand in for a server. Reissue with serverAuth."
+    },
+    {
+      "type": "predict",
+      "prompt": "Same chain, asking for different purposes. The leaf has EKU **clientAuth** only. What does it print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "var root = DojoCert(\"CN=Root\", null, true);",
+        "var inter = DojoCert(\"CN=Issuing CA\", root, true);",
+        "var leaf = DojoCert(\"CN=device-42\", inter, false, null, \"1.3.6.1.5.5.7.3.2\");",
+        "",
+        "string Show(X509ChainStatusFlags[] f) => f.Length == 0 ? \"(ok)\" : string.Join(\",\", f);",
+        "Console.WriteLine(Show(DojoStatuses(leaf, root, new() { inter }, 2031, \"1.3.6.1.5.5.7.3.2\")));",
+        "Console.WriteLine(Show(DojoStatuses(leaf, root, new() { inter }, 2031, \"1.3.6.1.5.5.7.3.1\")));",
+        "Console.WriteLine(Show(DojoStatuses(leaf, root, new() { inter }, 2031)));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}",
+        "X509ChainStatusFlags[] DojoStatuses(X509Certificate2 leaf, X509Certificate2? trustedRoot, List<X509Certificate2> sent, int year, string? eku = null)",
+        "{",
+        "    using var ch = new X509Chain();",
+        "    ch.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;",
+        "    if (trustedRoot != null) ch.ChainPolicy.CustomTrustStore.Add(trustedRoot);",
+        "    foreach (var c in sent) ch.ChainPolicy.ExtraStore.Add(c);",
+        "    ch.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;",
+        "    ch.ChainPolicy.VerificationTime = new DateTime(year, 6, 1, 0, 0, 0, DateTimeKind.Utc);",
+        "    if (eku != null) ch.ChainPolicy.ApplicationPolicy.Add(new Oid(eku));",
+        "    ch.Build(leaf);",
+        "    return ch.ChainStatus.Select(s => s.Status).ToArray();",
+        "}"
+      ],
+      "answer": [
+        "(ok)",
+        "NotValidForUsage",
+        "(ok)"
+      ],
+      "explain": "As a client certificate it's fine; as a server certificate it isn't. With no `ApplicationPolicy` the chain doesn't check purpose at all, which is why TLS code adds one for you."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Wildcard matching",
+      "prompt": [
+        "Write `bool HostMatches(string sanName, string host)` that implements the SAN DNS rule:",
+        "",
+        "- comparison is case-insensitive;",
+        "- without a `*`, the names must be equal;",
+        "- `*.rest` matches a host that is exactly **one** extra label in front of `rest` (`a.rest`), where that label is not empty",
+        "  and contains no dot.",
+        "",
+        "```text",
+        "HostMatches(\"*.shop.example\", \"api.shop.example\")   true",
+        "HostMatches(\"*.shop.example\", \"shop.example\")       false",
+        "HostMatches(\"*.shop.example\", \"a.b.shop.example\")   false",
+        "```"
+      ],
+      "starter": [
+        "bool HostMatches(string sanName, string host)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "bool HostMatches(string sanName, string host)",
+        "{",
+        "    sanName = sanName.ToLowerInvariant();",
+        "    host = host.ToLowerInvariant();",
+        "    if (!sanName.StartsWith(\"*.\"))",
+        "        return sanName == host;",
+        "    string rest = sanName.Substring(1);          // \".shop.example\"",
+        "    if (!host.EndsWith(rest)) return false;",
+        "    string label = host.Substring(0, host.Length - rest.Length);",
+        "    return label.Length > 0 && !label.Contains('.');",
+        "}"
+      ],
+      "hints": [
+        "Lower-case both strings first.",
+        "For a wildcard keep the suffix including its dot: `sanName.Substring(1)` gives `.shop.example`.",
+        "What's left of the host before that suffix is the label; it must be non-empty with no dot."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"exact match\", true, HostMatches(\"shop.example\", \"shop.example\"));",
+        "Dojo.Eq(\"case-insensitive\", true, HostMatches(\"Shop.Example\", \"SHOP.example\"));",
+        "Dojo.Eq(\"different name\", false, HostMatches(\"shop.example\", \"www.shop.example\"));",
+        "Dojo.Eq(\"wildcard, one label\", true, HostMatches(\"*.shop.example\", \"api.shop.example\"));",
+        "Dojo.Eq(\"wildcard does not match the bare name\", false, HostMatches(\"*.shop.example\", \"shop.example\"));",
+        "Dojo.Eq(\"wildcard does not match two labels\", false, HostMatches(\"*.shop.example\", \"a.b.shop.example\"));",
+        "Dojo.Eq(\"suffix trick is rejected\", false, HostMatches(\"*.shop.example\", \"evilshop.example\"));",
+        "Dojo.Eq(\"empty label is rejected\", false, HostMatches(\"*.shop.example\", \".shop.example\"));"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,233 @@
+{
+  "title": "How a client builds a chain",
+  "summary": "Name matching, key identifiers and signature checks, step by step up to a trust anchor.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The client's algorithm",
+      "body": [
+        "When your browser or `HttpClient` receives a certificate, it runs roughly this loop:",
+        "",
+        "1. Start with the **leaf**.",
+        "2. Find a candidate issuer: a certificate whose **Subject** equals the leaf's **Issuer** (and, if present, whose",
+        "   **Subject Key Identifier** equals the leaf's **Authority Key Identifier**). Candidates come from what the server sent,",
+        "   local stores and caches.",
+        "3. **Verify the signature** on the current certificate using the candidate's public key. Names can be forged; signatures cannot.",
+        "4. Check the candidate is allowed to issue: `CA:TRUE`, Key Usage `Certificate Sign`, within any `pathlen`, and in its validity period.",
+        "5. Move up to the candidate and repeat, until you reach a certificate that is in the **trust store** (a *trust anchor*).",
+        "6. Finally check every certificate's dates, the leaf's hostname and EKU, and (optionally) revocation.",
+        "",
+        "If step 2 finds nothing, the chain is **partial**. If it ends at a self-signed root that isn't in the trust store, the root is **untrusted**."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": [
+        "Put the chain-building steps in order."
+      ],
+      "lines": [
+        "Take the leaf certificate the server presented",
+        "Look for a certificate whose Subject matches the leaf's Issuer",
+        "Verify the leaf's signature with that candidate's public key",
+        "Check the candidate is a CA allowed to sign certificates",
+        "Repeat one level up until reaching a certificate in the trust store",
+        "Check dates, hostname and usage across the finished chain"
+      ],
+      "explain": "Name matching only *finds* a candidate. The signature check is what proves the link."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does the client verify the signature instead of just trusting that the Issuer name matches?",
+      "options": [
+        "Anyone can create a certificate that *claims* any issuer name; only the real issuer's private key can make the signature verify",
+        "Names are case-sensitive and often mismatch",
+        "Signature checks are faster than string comparisons",
+        "The Issuer field is optional"
+      ],
+      "answer": 0,
+      "explain": "An attacker can self-sign `Issuer: CN=DigiCert Global Root G2` in seconds. It's the signature, made with a private key they don't have, that fails."
+    },
+    {
+      "type": "learn",
+      "title": "Key identifiers: telling same-named CAs apart",
+      "body": [
+        "CAs renew. After a renewal there can be **two** certificates called `CN=Example Issuing CA 2`, with different keys.",
+        "The name alone can't say which one signed a leaf. Two extensions solve it:",
+        "",
+        "- **Subject Key Identifier (SKI)**: an ID of *this* certificate's public key (usually a hash of it).",
+        "- **Authority Key Identifier (AKI)**: the SKI of the *issuer's* key, copied into the child when it was signed.",
+        "",
+        "```text",
+        "leaf     Issuer: CN=Example Issuing CA 2    AKI keyid: 9F:3B:...",
+        "old CA   Subject: CN=Example Issuing CA 2   SKI: 41:C2:...",
+        "new CA   Subject: CN=Example Issuing CA 2   SKI: 9F:3B:...   <- this one",
+        "```",
+        "",
+        "The chain builder prefers the candidate whose SKI equals the child's AKI, then confirms with the signature."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A leaf has `Authority Key Identifier: keyid:7A:0E:51`. Which candidate issuer should the client try first?",
+      "code": [
+        "leaf:        Issuer: CN=Contoso Issuing CA     AKI: 7A:0E:51",
+        "",
+        "Candidate 1: Subject: CN=Contoso Issuing CA    SKI: 22:B9:04",
+        "Candidate 2: Subject: CN=Contoso Issuing CA    SKI: 7A:0E:51",
+        "Candidate 3: Subject: CN=Fabrikam CA           SKI: 7A:0E:51"
+      ],
+      "options": [
+        "Candidate 2",
+        "Candidate 1",
+        "Candidate 3",
+        "Any of them: only the name matters"
+      ],
+      "answer": 0,
+      "explain": "Candidate 2's Subject Key Identifier equals the leaf's AKI. Candidate 3 has the right key ID but the wrong name, so it can't be the issuer (its name must match the leaf's Issuer too)."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each field to its role in chain building.",
+      "pairs": [
+        [
+          "child's **Issuer**",
+          "the name to look for"
+        ],
+        [
+          "parent's **Subject**",
+          "the name that must match it"
+        ],
+        [
+          "child's **Authority Key Identifier**",
+          "the ID of the key that signed the child"
+        ],
+        [
+          "parent's **Subject Key Identifier**",
+          "the ID of the parent's own key"
+        ],
+        [
+          "parent's **public key**",
+          "verifies the child's signature"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "`DojoCert` adds an SKI to every certificate and an AKI to every issued one. `SubjectKeyIdentifier` is a hex string; `KeyIdentifier` is bytes. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "var root = DojoCert(\"CN=Dojo Root\", null, true);",
+        "var oldCa = DojoCert(\"CN=Dojo Issuing CA\", root, true);",
+        "var newCa = DojoCert(\"CN=Dojo Issuing CA\", root, true);",
+        "var leaf = DojoCert(\"CN=shop.example\", newCa, false);",
+        "",
+        "string aki = Convert.ToHexString(leaf.Extensions.OfType<X509AuthorityKeyIdentifierExtension>().Single().KeyIdentifier!.Value.Span);",
+        "string Ski(X509Certificate2 c) => c.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Single().SubjectKeyIdentifier!;",
+        "",
+        "Console.WriteLine(oldCa.Subject == newCa.Subject);",
+        "Console.WriteLine(aki == Ski(oldCa));",
+        "Console.WriteLine(aki == Ski(newCa));",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ],
+      "answer": [
+        "True",
+        "False",
+        "True"
+      ],
+      "explain": "Same name, different keys. The AKI in the leaf points at exactly one of them."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Find the issuer",
+      "prompt": [
+        "Write `X509Certificate2? FindIssuer(X509Certificate2 child, List<X509Certificate2> candidates)` that returns the",
+        "candidate that issued `child`, using what a chain builder uses first:",
+        "",
+        "- the candidate's `Subject` equals the child's `Issuer`, **and**",
+        "- the candidate's Subject Key Identifier equals the child's Authority Key Identifier.",
+        "",
+        "Return `null` if no candidate matches. You may assume every test certificate has both extensions.",
+        "Get the hex strings like this:",
+        "",
+        "```csharp",
+        "string aki = Convert.ToHexString(child.Extensions.OfType<X509AuthorityKeyIdentifierExtension>().Single().KeyIdentifier!.Value.Span);",
+        "string ski = c.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Single().SubjectKeyIdentifier!;",
+        "```"
+      ],
+      "starter": [
+        "X509Certificate2? FindIssuer(X509Certificate2 child, List<X509Certificate2> candidates)",
+        "{",
+        "    // your code",
+        "}"
+      ],
+      "solution": [
+        "X509Certificate2? FindIssuer(X509Certificate2 child, List<X509Certificate2> candidates)",
+        "{",
+        "    string aki = Convert.ToHexString(child.Extensions.OfType<X509AuthorityKeyIdentifierExtension>().Single().KeyIdentifier!.Value.Span);",
+        "    foreach (var c in candidates)",
+        "    {",
+        "        string ski = c.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Single().SubjectKeyIdentifier!;",
+        "        if (c.Subject == child.Issuer && ski == aki)",
+        "            return c;",
+        "    }",
+        "    return null;",
+        "}"
+      ],
+      "hints": [
+        "Compute the child's AKI once, then loop over the candidates.",
+        "Both conditions must hold: `c.Subject == child.Issuer && ski == aki`."
+      ],
+      "template": [
+        "using System.Security.Cryptography;",
+        "using System.Security.Cryptography.X509Certificates;",
+        "{{CODE}}",
+        "var dojoRoot = DojoCert(\"CN=Dojo Root\", null, true);",
+        "var dojoOld = DojoCert(\"CN=Dojo Issuing CA\", dojoRoot, true);",
+        "var dojoNew = DojoCert(\"CN=Dojo Issuing CA\", dojoRoot, true);",
+        "var dojoOther = DojoCert(\"CN=Other CA\", dojoRoot, true);",
+        "var dojoLeaf = DojoCert(\"CN=shop.example\", dojoNew, false);",
+        "var dojoFound = FindIssuer(dojoLeaf, new List<X509Certificate2> { dojoOther, dojoOld, dojoNew });",
+        "Dojo.Check(\"picks the renewed CA, not the old one with the same name\", dojoFound != null && dojoFound.RawData.SequenceEqual(dojoNew.RawData), \"matched the wrong candidate (or none)\");",
+        "var dojoFound2 = FindIssuer(dojoNew, new List<X509Certificate2> { dojoLeaf, dojoRoot });",
+        "Dojo.Check(\"finds the root as issuer of the CA\", dojoFound2 != null && dojoFound2.RawData.SequenceEqual(dojoRoot.RawData), \"expected the root\");",
+        "Dojo.Check(\"returns null when the issuer is missing\", FindIssuer(dojoLeaf, new List<X509Certificate2> { dojoOld, dojoOther }) == null, \"only the old CA (wrong key) and an unrelated CA were offered\");",
+        "static X509Certificate2 DojoCert(string subject, X509Certificate2? issuer, bool isCa, string? dns = null, string? eku = null, int nbYear = 2030, int naYear = 2035)",
+        "{",
+        "    var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "    var req = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);",
+        "    req.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));",
+        "    req.CertificateExtensions.Add(new X509KeyUsageExtension(isCa ? X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign : X509KeyUsageFlags.DigitalSignature, true));",
+        "    req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));",
+        "    if (dns != null) { var b = new SubjectAlternativeNameBuilder(); foreach (var d in dns.Split(',')) b.AddDnsName(d); req.CertificateExtensions.Add(b.Build()); }",
+        "    if (eku != null) req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(eku) }, false));",
+        "    var nb = new DateTimeOffset(nbYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    var na = new DateTimeOffset(naYear, 1, 1, 0, 0, 0, TimeSpan.Zero);",
+        "    if (issuer == null) return req.CreateSelfSigned(nb, na);",
+        "    req.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, true, false));",
+        "    var serial = RandomNumberGenerator.GetBytes(8); serial[0] &= 0x7F;",
+        "    using var pub = req.Create(issuer, nb, na, serial);",
+        "    return pub.CopyWithPrivateKey(key);",
+        "}"
+      ]
+    }
+  ]
+}
