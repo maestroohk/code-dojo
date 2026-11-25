@@ -14,6 +14,7 @@ import { workbench } from './workbench.js';
 import { netLabs } from './netlabs.js';
 import { codeSpaces } from './codespaces.js';
 import { pyenvBanner } from './pyenv.js';
+import { featuresView } from './features.js';
 import { playgroundDebugger } from './debugger.js';
 import { dbStudio } from './dbstudio.js';
 import * as gamify from './gamify.js';
@@ -229,6 +230,7 @@ function home() {
     h('div.catalog', LABS.map(l => h('a.topic-card.lab', { href: `#/labs/${l.id}` },
       h('div.topic-icon', l.icon),
       h('div.topic-body', h('div.eyebrow', `Lab · ${l.category}`), h('h3', l.title), h('p.muted.small', l.text))))),
+    h('p.catalog-foot', h('a.btn.ghost', { href: '#/features' }, "What's in the dojo: features, status and what's next")),
     h('p.muted.small.catalog-foot', 'New topics are folders under tracks/; see tracks/AUTHORING.md.'));
 }
 
@@ -1059,6 +1061,7 @@ function route() {
     case 'labs': if (parts[1] === 'net' || parts[1] === 'linux') { leave = netLabs(page, parts[2], parts[1]); return; } return labsView(parts[1]);
     case 'workbench': leave = workbench(page); return;
     case 'spaces': leave = codeSpaces(page, parts[1]); return;
+    case 'features': return featuresView(page);
     case 'db': leave = dbStudio(page); return;
     case 'lesson': return lessonView(parts[1], parts[2], parts[3]);
     case 'practice': return practiceView();
