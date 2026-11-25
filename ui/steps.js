@@ -5,6 +5,7 @@ import { enableDrag, Board } from './dnd.js';
 import { createEditor } from './editor.js';
 import { state, save } from './game.js';
 import { linqViz } from './linqviz.js';
+import { codeTrace } from './codetrace.js';
 
 export const DRAG_TYPES = new Set(['order', 'blanks', 'match', 'sort']);
 
@@ -123,7 +124,7 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.linq && linqViz(step.linq)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }

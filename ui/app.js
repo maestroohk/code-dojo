@@ -7,6 +7,7 @@ import { createEditor } from './editor.js';
 import { blueprint } from './blueprint.js';
 import { pkiLab } from './lab-pki.js';
 import { linqViz } from './linqviz.js';
+import { codeTrace } from './codetrace.js';
 import { workbench } from './workbench.js';
 
 const app = document.getElementById('app');
@@ -88,9 +89,51 @@ function stars(n, max = 3) {
 const LABS = [
   { id: 'pki', icon: '🔐', title: 'Certificate chain lab', category: 'Security',
     text: 'Build roots, intermediates and server certificates like blocks, wire up who signs whom, and watch real chain validation succeed or fail. Eight fix-it challenges.' },
+  { id: 'code', icon: '▶', title: 'Code in motion', category: 'Foundations',
+    text: 'Step through any program line by line, forwards and backwards: watch loops count, variables change, arrays get sorted and recursive calls stack up.' },
   { id: 'linq', icon: '⇶', title: 'LINQ in motion', category: 'C#',
     text: 'Type a query and watch every item travel through Where, Select, OrderBy and GroupBy in the order it really happens. See deferred execution and buffering with your own eyes.' },
 ];
+
+const CODE_PRESETS = [
+  { title: 'A counting loop', group: 'Loops', point: 'Watch i and sum. The condition is tested once more than the body runs: the last test fails and the loop ends.',
+    code: ['var sum = 0;', 'for (var i = 1; i <= 4; i++)', '{', '    sum += i;', '}', 'Console.WriteLine($"sum = {sum}");'] },
+  { title: 'Nested loops', group: 'Loops', point: 'The inner loop runs completely for every single turn of the outer loop.',
+    code: ['for (var row = 1; row <= 3; row++)', '{', '    var line = "";', '    for (var col = 1; col <= row; col++)', '        line += "*";', '    Console.WriteLine(line);', '}'] },
+  { title: 'While: until it is done', group: 'Loops', point: 'A while loop does not know in advance how many times it will run. Here: halving until we reach 1.',
+    code: ['var n = 40;', 'var steps = 0;', 'while (n > 1)', '{', '    n = n % 2 == 0 ? n / 2 : 3 * n + 1;', '    steps++;', '}', 'Console.WriteLine(steps);'] },
+  { title: 'Swapping two values', group: 'State', point: 'Without a temporary variable, the first assignment would destroy a value you still need.',
+    code: ['var a = 3;', 'var b = 7;', 'var temp = a;', 'a = b;', 'b = temp;', 'Console.WriteLine($"{a} {b}");'] },
+  { title: 'Bubble sort', group: 'Algorithms', point: 'Each pass bubbles the largest remaining value to the end. Watch the boxes swap.',
+    code: ['int[] a = { 5, 2, 4, 1, 3 };', 'for (var pass = 0; pass < a.Length - 1; pass++)', '{', '    for (var j = 0; j < a.Length - 1 - pass; j++)', '    {', '        if (a[j] > a[j + 1])', '            (a[j], a[j + 1]) = (a[j + 1], a[j]);', '    }', '}', 'Console.WriteLine(string.Join(", ", a));'] },
+  { title: 'Binary search', group: 'Algorithms', point: 'Every step halves the range lo..hi. 16 items need at most 5 looks.',
+    code: ['int[] a = { 2, 5, 8, 12, 16, 23, 38, 41, 56, 72 };', 'var target = 41;', 'var lo = 0;', 'var hi = a.Length - 1;', 'var found = -1;', 'while (lo <= hi)', '{', '    var mid = (lo + hi) / 2;', '    if (a[mid] == target) { found = mid; break; }', '    if (a[mid] < target) lo = mid + 1;', '    else hi = mid - 1;', '}', 'Console.WriteLine($"found at {found}");'] },
+  { title: 'Recursion: factorial', group: 'Functions', point: 'Each call waits for the one it made. Watch the call stack grow to the base case, then unwind.',
+    code: ['Console.WriteLine(Factorial(4));', '', 'int Factorial(int n)', '{', '    if (n <= 1) return 1;', '    var rest = Factorial(n - 1);', '    return n * rest;', '}'] },
+  { title: 'Two pointers', group: 'Algorithms', point: 'Reverse in place: one pointer from each end, meeting in the middle.',
+    code: ['char[] word = "dojo!".ToCharArray();', 'var left = 0;', 'var right = word.Length - 1;', 'while (left < right)', '{', '    (word[left], word[right]) = (word[right], word[left]);', '    left++;', '    right--;', '}', 'Console.WriteLine(new string(word));'] },
+  { title: 'A list growing', group: 'Collections', point: 'Lists grow as you add. Watch the boxes appear, and Remove close the gap.',
+    code: ['var basket = new List<string>();', 'basket.Add("apple");', 'basket.Add("bread");', 'basket.Add("milk");', 'basket.Remove("bread");', 'basket.Insert(0, "eggs");', 'Console.WriteLine(basket.Count);'] },
+];
+
+function codeLab(lab) {
+  const slot = h('div');
+  const point = h('p.lv-point');
+  const pick = (p, btn) => {
+    slot.replaceChildren(codeTrace(p, { editable: true }));
+    point.textContent = p.point;
+    btn?.closest('.ct-presets').querySelectorAll('.pk-ch').forEach(b => b.classList.toggle('active', b === btn));
+  };
+  const groups = [...new Set(CODE_PRESETS.map(p => p.group))];
+  page('labs',
+    h('a.back-link', { href: '#/labs' }, '← All labs'),
+    h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`),
+      h('p.muted', 'Pick an example or write your own. The code really runs; then you can replay every step, forwards and backwards.'))),
+    h('div.ct-presets', groups.map(g => h('div.ct-group', h('span.muted.small', g),
+      CODE_PRESETS.filter(p => p.group === g).map(p => h(`button.pk-ch${p === CODE_PRESETS[0] ? '.active' : ''}`, { type: 'button', onclick: e => pick(p, e.currentTarget) }, p.title))))),
+    point, slot);
+  pick(CODE_PRESETS[0]);
+}
 
 // Each preset makes one point. Pick one, press play, then change the query and run it again.
 const LINQ_PRESETS = [
@@ -220,6 +263,7 @@ function labsView(id) {
   const lab = LABS.find(l => l.id === id);
   if (!lab) return notFound();
   if (id === 'linq') return linqLab(lab);
+  if (id === 'code') return codeLab(lab);
   const host = h('div.lab-host');
   page('labs',
     h('a.back-link', { href: '#/labs' }, '← All labs'),

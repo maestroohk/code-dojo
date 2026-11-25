@@ -141,6 +141,13 @@ public sealed class CSharpRunner
         return (new Compiled(dir, dll, web), diags);
     }
 
+    /// <summary>A compilation of plain learner code (no #line mapping), for semantic analysis only.</summary>
+    public CSharpCompilation Analyze(SyntaxTree tree) =>
+        CSharpCompilation.Create("Analysis", [tree, _support], _refs,
+            new CSharpCompilationOptions(OutputKind.ConsoleApplication, nullableContextOptions: NullableContextOptions.Enable, concurrentBuild: false));
+
+    public static CSharpParseOptions ParseOptions => Parse;
+
     /// <summary>Cheap check used by the puzzle validator: does this compile, without emitting anything?</summary>
     public bool CompilesClean(string code)
     {
