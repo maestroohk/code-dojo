@@ -1,6 +1,6 @@
 // Views and the lesson player.
 // Routes: #/ (topics)  #/track/t  #/lesson/t/m/l  #/labs  #/labs/pki  #/projects  #/workbench  #/practice  #/playground  #/profile
-import { h, md, inline, api, shuffle, ask } from './util.js';
+import { h, md, inline, api, shuffle, ask, loader } from './util.js';
 import * as game from './game.js';
 import { renderStep, renderRunOutput, DRAG_TYPES, TYPE_LABEL } from './steps.js';
 import { createEditor } from './editor.js';
@@ -595,6 +595,7 @@ function play({ title, items, mode, meta, onFinish }) {
 
 async function lessonView(trackId, moduleId, lessonId) {
   const track = tracks.find(t => t.id === trackId);
+  document.documentElement.dataset.codeLang = track?.language || 'csharp';
   const module = track?.modules.find(m => m.id === moduleId);
   const index = module?.lessons.findIndex(l => l.id === lessonId) ?? -1;
   if (index < 0) return notFound();
@@ -603,7 +604,9 @@ async function lessonView(trackId, moduleId, lessonId) {
   const meta = module.lessons[index];
   const key = game.lessonKey(track, module, meta);
   let lesson;
-  try { lesson = await api(`lesson/${key}`); } catch { return notFound(); }
+  const slow = setTimeout(() => app.replaceChildren(loader(meta.title)), 150);
+  try { lesson = await api(`lesson/${key}`); } catch { clearTimeout(slow); return notFound(); }
+  clearTimeout(slow);
 
   const items = lesson.steps.map((step, idx) => ({ step, lessonKey: key, idx, track: trackId, module: moduleId, lesson: lessonId }));
   play({
@@ -767,6 +770,7 @@ async function playground() {
   const s = game.state;
   s.settings.playLang ||= 'csharp';
   const lang = all.find(l => l.id === s.settings.playLang) || all[0];
+  document.documentElement.dataset.codeLang = lang.web ? 'javascript' : lang.id;
   const KEY = lang.id === 'csharp' ? 'playground' : `playground:${lang.id}`;   // C# keeps its old draft
   const sample = lang.id === 'csharp' ? CSHARP_SAMPLE : lang.web ? WEB_SAMPLE : lang.sample || '';
 
@@ -925,6 +929,7 @@ function notFound() {
 
 function route() {
   leave?.(); leave = null;
+  document.documentElement.dataset.codeLang = 'csharp';
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   switch (parts[0]) {
     case undefined: return home();
@@ -946,15 +951,33 @@ function applyTextSize() {
   if (term) document.documentElement.style.setProperty('--term-size', term + 'px');
 }
 
-async function boot() {
+/** Your numbers, kept for the boot screen so it can greet you before the server answers. */
+function saveHud() {
   try {
-    [tracks] = await Promise.all([api('tracks'), game.load()]);
+    const lv = game.levelInfo();
+    localStorage.setItem('dojo-hud', JSON.stringify({ xp: game.state.xp, streak: game.streak(), level: lv.level, rank: lv.rank }));
+    localStorage.setItem('dojo-text-size', game.state.settings.textSize || 'normal');
+  } catch { }
+}
+
+async function boot() {
+  const stage = (pct, text) => window.dojoBoot?.(pct, text);
+  const started = Date.now();
+  try {
+    stage(35, 'Loading your topics…');
+    const topics = api('tracks').then(t => { stage(70, 'Loading your progress…'); return t; });
+    [tracks] = await Promise.all([topics, game.load()]);
     applyTextSize();
+    saveHud();
+    stage(100, 'Ready.');
   } catch (e) {
     app.replaceChildren(h('div.empty', h('h2', 'Cannot reach the dojo server'), h('p.muted', 'Start it with dojo.cmd and refresh this page.')));
     return;
   }
+  // Let the bar reach the end, and give the fact a moment to be read on a fast machine.
+  await new Promise(r => setTimeout(r, Math.max(250, 900 - (Date.now() - started))));
   window.addEventListener('hashchange', route);
+  window.addEventListener('beforeunload', saveHud);
   route();
 }
 

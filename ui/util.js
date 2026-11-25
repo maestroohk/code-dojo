@@ -72,16 +72,33 @@ export async function api(path, body, method) {
 
 // ---------------------------------------------------------------- highlighting
 
-const KEYWORDS = new Set(('abstract as async await base bool break byte case catch char checked class const continue ' +
+const CS_KEYWORDS = new Set(('abstract as async await base bool break byte case catch char checked class const continue ' +
   'decimal default delegate do double else enum event explicit extern false finally fixed float for foreach get global ' +
   'goto if implicit in init int interface internal is lock long namespace new null object operator out override params ' +
   'private protected public readonly record ref required return sbyte sealed set short sizeof stackalloc static string ' +
   'struct switch this throw true try typeof uint ulong unchecked unsafe ushort using var virtual void volatile when where ' +
   'while with yield nameof not and or dynamic nint').split(' '));
 
-const TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|([$@]{0,3}"(?:\\.|""|[^"\\\n])*"?|'(?:\\.|[^'\\\n])+')|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?[fFdDmMuUlL]*\b)|([A-Za-z_]\w*)|([\s\S])/g;
+const CS_TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|([$@]{0,3}"(?:\\.|""|[^"\\\n])*"?|'(?:\\.|[^'\\\n])+')|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?[fFdDmMuUlL]*\b)|([A-Za-z_]\w*)|([\s\S])/g;
 
-export function highlight(code) {
+// Other languages: their own keywords, comments and string forms. Editors follow the language of the
+// current lesson or playground tab (set on <html data-code-lang>); fenced blocks use their own tag.
+const PY_KEYWORDS = new Set(('False None True and as assert async await break class continue def del elif else except finally for from ' +
+  'global if import in is lambda nonlocal not or pass raise return try while with yield match case self print len range').split(' '));
+const JS_KEYWORDS = new Set(('break case catch class const continue debugger default delete do else export extends finally for function if ' +
+  'import in instanceof let new return super switch this throw try typeof var void while with yield async await of null undefined true false ' +
+  'interface type enum implements private protected public readonly abstract as is keyof infer never unknown any number string boolean ' +
+  'declare namespace satisfies static get set').split(' '));
+const PY_TOKEN = /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|[rRbBfFuU]{0,2}"(?:\\.|[^"\\\n])*"?|[rRbBfFuU]{0,2}'(?:\\.|[^'\\\n])*'?)|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?j?\b)|([A-Za-z_]\w*)|([\s\S])/g;
+const JS_TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(`(?:\\.|[^`\\])*`?|"(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?)|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?n?\b)|([A-Za-z_$][\w$]*)|([\s\S])/g;
+const LANGS = {
+  python: [PY_TOKEN, PY_KEYWORDS], py: [PY_TOKEN, PY_KEYWORDS],
+  javascript: [JS_TOKEN, JS_KEYWORDS], js: [JS_TOKEN, JS_KEYWORDS], typescript: [JS_TOKEN, JS_KEYWORDS], ts: [JS_TOKEN, JS_KEYWORDS],
+  tsx: [JS_TOKEN, JS_KEYWORDS], jsx: [JS_TOKEN, JS_KEYWORDS], java: [CS_TOKEN, CS_KEYWORDS],
+};
+
+export function highlight(code, lang) {
+  const [TOKEN, KEYWORDS] = LANGS[lang || document.documentElement.dataset.codeLang] || [CS_TOKEN, CS_KEYWORDS];
   let out = '';
   TOKEN.lastIndex = 0;
   let m;
@@ -115,7 +132,7 @@ export function inline(s) {
 
 export function codeBlock(code, lang = 'csharp') {
   const plain = lang === 'text' || lang === 'output' || lang === 'txt';
-  return `<pre class="code${plain ? ' plain' : ''}"${plain ? '' : ` data-code="${esc(code)}"`}><code>${plain ? esc(code) : highlight(code)}</code></pre>`;
+  return `<pre class="code${plain ? ' plain' : ''}"${plain ? '' : ` data-code="${esc(code)}"`}><code>${plain ? esc(code) : highlight(code, lang === 'csharp' || lang === 'cs' ? 'csharp' : lang)}</code></pre>`;
 }
 
 export function md(text) {
@@ -179,4 +196,16 @@ export function md(text) {
   }
   flush();
   return out.join('\n');
+}
+
+// ---------------------------------------------------------------- loading
+
+/** The in-app loader: the dojo mark, what is loading, and a fact to read while you wait. */
+export function loader(what = 'Loading') {
+  const tips = window.DOJO_TIPS || [];
+  return h('div.loader',
+    h('div.boot-mark.small', { 'aria-hidden': 'true' }, h('span', '{'), h('span.boot-cursor'), h('span', '}')),
+    h('div.loader-what', `Opening ${what}…`),
+    h('div.loader-bar', h('div.loader-run')),
+    tips.length > 0 && h('div.boot-tip', h('div.boot-tip-head', 'Did you know?'), h('div', { html: tips[Math.floor(Math.random() * tips.length)] })));
 }

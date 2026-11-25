@@ -1,7 +1,7 @@
 // Live network labs: real Docker networks (hosts, routers, servers) you work on from an in-page
 // terminal. The server (NetLabs.cs) starts and stops labs, checks tasks by running commands inside
 // the containers, and bridges each terminal tab to `docker exec` over a WebSocket.
-import { h, api, md, ask } from './util.js';
+import { h, api, md, ask, loader } from './util.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 const s = (tag, attrs = {}, ...kids) => {
@@ -292,7 +292,7 @@ function terminal(labId, node, { onStatus } = {}) {
 // ---------------------------------------------------------------- one lab
 
 function labPage(page, id, cleanups) {
-  const root = h('div.nl-lab', h('p.muted', 'Loading the lab...'));
+  const root = h('div.nl-lab', loader('the lab'));
   page('labs', h('a.back-link', { href: '#/labs/net' }, '← All network labs'), root);
   const terms = new Map();   // node -> terminal
   let active = null, lab = null, busy = false;
