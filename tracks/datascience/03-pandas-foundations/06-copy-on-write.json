@@ -1,0 +1,283 @@
+{
+  "title": "Copies, views and copy-on-write",
+  "summary": "Why changing a selection never changes the original in pandas 3, and how to change data on purpose.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The old problem",
+      "body": [
+        "In pandas 1 and 2, selecting rows sometimes gave a **view** (sharing memory with the",
+        "original) and sometimes a **copy**, depending on internals you could not see. So this was a",
+        "coin toss:",
+        "",
+        "```python",
+        "north = df[df[\"region\"] == \"North\"]",
+        "north[\"qty\"] = 0          # does df change? \"it depends\"",
+        "```",
+        "",
+        "pandas warned with the infamous `SettingWithCopyWarning`, and many people silenced it with",
+        "`.copy()` everywhere without understanding why.",
+        "",
+        "**pandas 3 uses copy-on-write.** Every object you derive from a DataFrame (a selection, a",
+        "column, a filtered frame) *behaves as a copy*. Changing it never changes the original.",
+        "Internally pandas still shares memory until the moment you write, so this costs nothing."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print? (pandas 3)",
+      "code": [
+        "import pandas as pd",
+        "",
+        "df = pd.DataFrame({\"region\": [\"N\", \"S\", \"N\"], \"qty\": [3, 5, 2]})",
+        "north = df[df[\"region\"] == \"N\"]",
+        "north[\"qty\"] = 0",
+        "col = df[\"qty\"]",
+        "col.iloc[0] = 99",
+        "print(df[\"qty\"].tolist())",
+        "print(north[\"qty\"].tolist(), col.tolist())"
+      ],
+      "answer": [
+        "[3, 5, 2]",
+        "[0, 0] [99, 5, 2]"
+      ],
+      "explain": "Under copy-on-write, `north` and `col` are independent once you write to them. `df` is untouched."
+    },
+    {
+      "type": "learn",
+      "title": "Changing data on purpose",
+      "body": [
+        "To change the original, write to it **in one step**, through `loc` on the DataFrame itself:",
+        "",
+        "```python",
+        "df.loc[df[\"region\"] == \"N\", \"qty\"] = 0        # updates df",
+        "df[\"qty\"] = df[\"qty\"].clip(lower=0)           # replace a whole column",
+        "```",
+        "",
+        "**Chained assignment** (two indexing steps, then `=`) never works in pandas 3:",
+        "",
+        "```python",
+        "df[df[\"region\"] == \"N\"][\"qty\"] = 0     # ChainedAssignmentError warning, df unchanged",
+        "df[\"qty\"][0] = 0                       # same",
+        "```",
+        "",
+        "The first `[...]` produces a new object; the second `[...] = ` changes that temporary,",
+        "which is then thrown away. pandas 3 tells you with a `ChainedAssignmentError` warning."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which line changes `df` in pandas 3?",
+      "options": [
+        "`df.loc[df[\"qty\"] < 0, \"qty\"] = 0`",
+        "`df[df[\"qty\"] < 0][\"qty\"] = 0`",
+        "`df[\"qty\"][df[\"qty\"] < 0] = 0`",
+        "`neg = df[df[\"qty\"] < 0]; neg[\"qty\"] = 0`"
+      ],
+      "answer": 0,
+      "explain": "Only `df.loc[rows, col] = value` writes into `df` directly. The others change a temporary or a separate object."
+    },
+    {
+      "type": "sort",
+      "prompt": "In pandas 3, does `df` change?",
+      "buckets": [
+        "df changes",
+        "df stays the same"
+      ],
+      "items": [
+        [
+          "`df.loc[0, \"qty\"] = 1`",
+          0
+        ],
+        [
+          "`df[\"total\"] = df[\"qty\"] * 2`",
+          0
+        ],
+        [
+          "`df.loc[df[\"qty\"] > 2, \"flag\"] = True`",
+          0
+        ],
+        [
+          "`s = df[\"qty\"]; s[0] = 1`",
+          1
+        ],
+        [
+          "`df[df[\"qty\"] > 2][\"qty\"] = 0`",
+          1
+        ],
+        [
+          "`sub = df.head(2); sub[\"qty\"] = 0`",
+          1
+        ],
+        [
+          "`out = df.assign(qty=0)`",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "import pandas as pd",
+        "",
+        "df = pd.DataFrame({\"qty\": [4, -1, 6, -3]})",
+        "df[df[\"qty\"] < 0][\"qty\"] = 0",
+        "print(df[\"qty\"].tolist())",
+        "df.loc[df[\"qty\"] < 0, \"qty\"] = 0",
+        "print(df[\"qty\"].tolist())"
+      ],
+      "answer": [
+        "[4, -1, 6, -3]",
+        "[4, 0, 6, 0]"
+      ],
+      "explain": "The chained version is silently a no-op on `df` (pandas warns on stderr). The `loc` version writes in place."
+    },
+    {
+      "type": "learn",
+      "title": "Functions: return new, or change in place, and say which",
+      "body": [
+        "With copy-on-write you no longer need defensive `.copy()` calls to protect the original from",
+        "accidents: a selection can never write back. You still choose a style for each function:",
+        "",
+        "- **return a new frame** (`df.assign(...)`, or `out = df.copy()` then modify `out`): the",
+        "  caller's data is untouched. Prefer this: it is easier to test and reason about.",
+        "- **modify in place** with `df.loc[...] = ...` and return `None`, like `list.sort()`: say so",
+        "  in the name or docstring.",
+        "",
+        "`.copy()` is still the explicit way to say \"I want my own independent table to modify\"."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the chained assignment",
+      "prompt": [
+        "This `cap_quantities(df, cap)` is meant to set every `qty` above `cap` to `cap` **in the",
+        "DataFrame passed in**, and return nothing. Under pandas 3 it does nothing at all. Fix it."
+      ],
+      "starter": "import pandas as pd\n\n\ndef cap_quantities(df, cap):\n    df[df[\"qty\"] > cap][\"qty\"] = cap\n",
+      "solution": [
+        "import pandas as pd",
+        "",
+        "",
+        "def cap_quantities(df, cap):",
+        "    df.loc[df[\"qty\"] > cap, \"qty\"] = cap"
+      ],
+      "hints": [
+        "Two separate `[...]` then `=` changes a temporary.",
+        "`df.loc[df[\"qty\"] > cap, \"qty\"] = cap`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "import pandas as _pd",
+        "_df = _pd.DataFrame({\"product\": [\"a\", \"b\", \"c\"], \"qty\": [5, 20, 12]})",
+        "_r = cap_quantities(_df, 10)",
+        "Dojo.eq(\"quantities capped in place\", [5, 10, 10], _df[\"qty\"].tolist())",
+        "Dojo.check(\"returns None (changes in place)\", _r is None, \"returned \" + type(_r).__name__)",
+        "_df2 = _pd.DataFrame({\"qty\": [1, 2]})",
+        "cap_quantities(_df2, 5)",
+        "Dojo.eq(\"nothing above the cap\", [1, 2], _df2[\"qty\"].tolist())"
+      ],
+      "require": [
+        {
+          "pattern": "\\.loc\\[",
+          "message": "Writes through df.loc[rows, column]"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Discount, without side effects",
+      "prompt": [
+        "Write `discounted(df, category, pct)` that returns a **new** DataFrame where the `price` of",
+        "rows whose `category` equals `category` is reduced by `pct` percent (rounded to 2 decimals).",
+        "Other rows keep their price. The DataFrame passed in must not change.",
+        "",
+        "```python",
+        "discounted(df, \"toys\", 25)   # toys priced 8.0 become 6.0",
+        "```",
+        "",
+        "Make your own copy with `out = df.copy()`, change it with `out.loc[...]`, return it."
+      ],
+      "starter": "import pandas as pd\n\n\ndef discounted(df, category, pct):\n    pass\n",
+      "solution": [
+        "import pandas as pd",
+        "",
+        "",
+        "def discounted(df, category, pct):",
+        "    out = df.copy()",
+        "    mask = out[\"category\"] == category",
+        "    out.loc[mask, \"price\"] = (out.loc[mask, \"price\"] * (1 - pct / 100)).round(2)",
+        "    return out"
+      ],
+      "hints": [
+        "`out = df.copy()` and `mask = out[\"category\"] == category`.",
+        "`out.loc[mask, \"price\"] = (out.loc[mask, \"price\"] * (1 - pct / 100)).round(2)`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "import pandas as _pd",
+        "_df = _pd.DataFrame({\"item\": [\"car\", \"ball\", \"pen\"], \"category\": [\"toys\", \"toys\", \"office\"], \"price\": [8.0, 3.99, 1.5]})",
+        "_out = discounted(_df, \"toys\", 25)",
+        "Dojo.eq(\"toys are 25% off\", [6.0, 2.99, 1.5], _out[\"price\"].tolist())",
+        "Dojo.eq(\"the input is unchanged\", [8.0, 3.99, 1.5], _df[\"price\"].tolist())",
+        "Dojo.eq(\"no matching category\", [8.0, 3.99, 1.5], discounted(_df, \"food\", 50)[\"price\"].tolist())"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bfor\\b",
+          "message": "No loop"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Update prices in place",
+      "prompt": [
+        "Write `update_prices(df, changes)` where `changes` is a dict `{product: new_price}`. Change",
+        "the `price` of every row whose `product` is a key in `changes` **in the DataFrame passed",
+        "in**, and return the number of rows changed (an `int`). Products not in `df` are ignored.",
+        "",
+        "```python",
+        "n = update_prices(df, {\"Widget\": 3.0, \"Nope\": 1.0})",
+        "n   # 2 (there are two Widget rows)",
+        "```",
+        "",
+        "Hint: `df[\"product\"].map(changes)` gives the new price or NaN for each row."
+      ],
+      "starter": "import pandas as pd\n\n\ndef update_prices(df, changes):\n    pass\n",
+      "solution": [
+        "import pandas as pd",
+        "",
+        "",
+        "def update_prices(df, changes):",
+        "    mask = df[\"product\"].isin(list(changes))",
+        "    df.loc[mask, \"price\"] = df.loc[mask, \"product\"].map(changes)",
+        "    return int(mask.sum())"
+      ],
+      "hints": [
+        "`mask = df[\"product\"].isin(list(changes))`",
+        "`df.loc[mask, \"price\"] = df.loc[mask, \"product\"].map(changes)`; return `int(mask.sum())`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "import io",
+        "import pandas as _pd",
+        "_df = _pd.read_csv(io.StringIO('order_id,product,region,qty,price\\n1001,Widget,North,3,2.50\\n1002,Gadget,South,1,10.00\\n1003,Widget,South,5,2.50\\n1004,Gizmo,East,2,7.25\\n1005,Gadget,North,4,10.00\\n1006,Gizmo,North,1,7.25\\n'))",
+        "_n = update_prices(_df, {\"Widget\": 3.0, \"Nope\": 1.0})",
+        "Dojo.eq(\"rows changed\", 2, _n)",
+        "Dojo.eq(\"prices updated in place\", [3.0, 10.0, 3.0, 7.25, 10.0, 7.25], _df[\"price\"].tolist())",
+        "_n2 = update_prices(_df, {\"Gizmo\": 8.0, \"Gadget\": 9.5})",
+        "Dojo.eq(\"two products at once\", (4, [3.0, 9.5, 3.0, 8.0, 9.5, 8.0]), (_n2, _df[\"price\"].tolist()))"
+      ],
+      "require": [
+        {
+          "pattern": "\\.loc\\[",
+          "message": "Writes through df.loc"
+        }
+      ]
+    }
+  ]
+}
