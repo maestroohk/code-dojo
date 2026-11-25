@@ -1,0 +1,322 @@
+{
+  "title": "Deferred execution traps",
+  "summary": "Streaming versus buffering operators, captured variables that change, exceptions that surface late, and bugs from enumerating twice.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Streaming and buffering",
+      "body": [
+        "Most operators **stream**: they pass each item on as soon as they have it (`Where`, `Select`, `Take`, `SelectMany`, `Zip`).",
+        "",
+        "Some must see **every** item before they can hand out even the first. They **buffer**:",
+        "",
+        "- `OrderBy`: the smallest item could be the last one.",
+        "- `GroupBy`: a group is not complete until the end.",
+        "- `Reverse`: the last item has to come out first.",
+        "",
+        "Watch this pipeline. Every item runs through the first `Select` before **anything** leaves `OrderBy`, then the sorted items stream out through the last `Select` one by one.",
+        "",
+        "Why it matters: `OrderBy` on an infinite sequence never finishes, and `.OrderBy(...).First()` still reads the whole source."
+      ],
+      "linq": {
+        "source": "new[] { 3, 1, 2 }",
+        "query": ".Select(n => n * 2).OrderBy(n => n).Select(n => n + 1)"
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Each stage prints as it runs. What does this print?",
+      "code": [
+        "var q = new[] { 3, 1, 2 }",
+        "    .Select(n => { Console.Write($\"a{n} \"); return n; })",
+        "    .OrderBy(n => n)",
+        "    .Select(n => { Console.Write($\"b{n} \"); return n; });",
+        "",
+        "foreach (var n in q.Take(2))",
+        "    Console.Write($\"[{n}] \");"
+      ],
+      "answer": "a3 a1 a2 b1 [1] b2 [2]",
+      "explain": "`OrderBy` buffers, so all three `a` lines run first, even though only two items are wanted. After the sort, items stream again: `b1`, then the loop body, then `b2`. `Take(2)` stops before `b3`."
+    },
+    {
+      "type": "learn",
+      "title": "The query reads variables late",
+      "body": [
+        "A lambda does not copy the variables it uses. It **captures** them, and reads their value **when it runs**, which for a lazy query is when you enumerate.",
+        "",
+        "```csharp",
+        "int minAge = 18;",
+        "var adults = people.Where(p => p.Age >= minAge);",
+        "",
+        "minAge = 65;                // changes the query!",
+        "foreach (var p in adults)   // runs now, with minAge = 65",
+        "```",
+        "",
+        "The same goes for the source: a query over a `List` sees items added **after** the query was built, because it only reads the list when enumerated.",
+        "",
+        "That can be handy (one query, reused as data changes) or a nasty bug. When you want \"the answer as of now\", call `ToList()` right away."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var scores = new List<int> { 40, 75, 90 };",
+        "int pass = 50;",
+        "",
+        "var passed = scores.Where(s => s >= pass);",
+        "var snapshot = passed.ToList();",
+        "",
+        "pass = 80;",
+        "scores.Add(85);",
+        "",
+        "Console.WriteLine(string.Join(\",\", passed));",
+        "Console.WriteLine(string.Join(\",\", snapshot));"
+      ],
+      "answer": [
+        "90,85",
+        "75,90"
+      ],
+      "explain": "`passed` runs at the `string.Join`, so it sees the new threshold 80 **and** the new score 85. `snapshot` ran when `ToList()` was called, with 50 and the old list, and never changes again."
+    },
+    {
+      "type": "learn",
+      "title": "Exceptions show up late",
+      "body": [
+        "Because nothing runs when a query is built, nothing can **fail** then either.",
+        "",
+        "```csharp",
+        "List<int> parsed;",
+        "IEnumerable<int> numbers;",
+        "try",
+        "{",
+        "    numbers = lines.Select(int.Parse);   // nothing parsed yet",
+        "}",
+        "catch (FormatException) { ... }          // never catches anything",
+        "",
+        "parsed = numbers.ToList();               // throws HERE, outside the try",
+        "```",
+        "",
+        "The exception is thrown wherever the query is **enumerated**: maybe in another method, or much later. The stack trace then points somewhere surprising.",
+        "",
+        "The fix: enumerate (`ToList()`) **inside** the `try`, or handle bad items in the query itself, for example with `int.TryParse`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`\"x\"` is not a number. Which line throws the `FormatException`?",
+      "code": [
+        "string[] raw = { \"4\", \"x\", \"6\" };",
+        "var nums  = raw.Select(int.Parse);          // line 1",
+        "var big   = nums.Where(n => n > 5);         // line 2",
+        "var first = nums.First();                   // line 3",
+        "var total = big.Sum();                      // line 4"
+      ],
+      "options": [
+        "Line 4",
+        "Line 1",
+        "Line 2",
+        "Line 3"
+      ],
+      "answer": 0,
+      "explain": "Lines 1 and 2 only build recipes. Line 3 enumerates, but `First()` stops after `\"4\"` and never reaches `\"x\"`. Line 4 has to look at every item, so it is the one that parses `\"x\"` and throws."
+    },
+    {
+      "type": "learn",
+      "title": "Changing a list while a query reads it",
+      "body": [
+        "A query over a `List<T>` holds an enumerator on that list. If the list changes **while** the query is being enumerated, the enumerator throws `InvalidOperationException: Collection was modified`.",
+        "",
+        "```csharp",
+        "var overdue = invoices.Where(i => i.DaysLate > 30);",
+        "foreach (var inv in overdue)",
+        "    invoices.Remove(inv);        // throws on the next step",
+        "```",
+        "",
+        "The query reads `invoices` lazily, so removing from it mid-loop breaks the walk. Materialise first:",
+        "",
+        "```csharp",
+        "foreach (var inv in overdue.ToList())   // a separate copy to walk over",
+        "    invoices.Remove(inv);",
+        "```",
+        "",
+        "(`invoices.RemoveAll(i => i.DaysLate > 30)` is even simpler.)"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe, or a deferred-execution trap?",
+      "buckets": [
+        "Safe",
+        "Trap"
+      ],
+      "items": [
+        [
+          "`var list = q.ToList();` then `list.Count` and `list.Max()`",
+          0
+        ],
+        [
+          "`q.Count()` then `q.Max()` when `q` reads a file",
+          1
+        ],
+        [
+          "`foreach (var x in items.Where(f)) items.Add(...)`",
+          1
+        ],
+        [
+          "`foreach (var x in items.Where(f).ToList()) items.Add(...)`",
+          0
+        ],
+        [
+          "`try { q = src.Select(Parse); } catch { }` then using `q`",
+          1
+        ],
+        [
+          "`q.Select(x => counter++)` enumerated twice",
+          1
+        ],
+        [
+          "`Naturals().Where(IsPrime).Take(5)` on an infinite source",
+          0
+        ],
+        [
+          "`Naturals().OrderBy(n => n).Take(5)` on an infinite source",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Ticket numbers that keep changing",
+      "prompt": [
+        "`Issue` gives each request a ticket number, starting at `start`. The tests call it and then look at the result **twice**: once to count, once to print. The numbers come out different each time.",
+        "",
+        "Fix it so the ticket numbers are given out exactly once. Keep the `Select` that numbers them."
+      ],
+      "starter": [
+        "static IEnumerable<string> Issue(List<string> requests, int start)",
+        "{",
+        "    int next = start;",
+        "    return requests.Select(r => $\"#{next++} {r}\");",
+        "}"
+      ],
+      "solution": [
+        "static IEnumerable<string> Issue(List<string> requests, int start)",
+        "{",
+        "    int next = start;",
+        "    return requests.Select(r => $\"#{next++} {r}\").ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoTickets = Issue(new List<string> { \"printer\", \"vpn\", \"login\" }, 100);",
+        "Dojo.Eq(\"3 tickets\", 3, dojoTickets.Count());",
+        "Dojo.Eq(\"numbered from 100, even when read again\", new List<string> { \"#100 printer\", \"#101 vpn\", \"#102 login\" }, dojoTickets.ToList());",
+        "Dojo.Eq(\"still the same the third time\", \"#100 printer\", dojoTickets.First());"
+      ],
+      "require": [
+        {
+          "pattern": "\\.Select\\s*\\(",
+          "message": "Still numbers with Select"
+        }
+      ],
+      "hints": [
+        "Each time the tests enumerate the result, the lambda runs again and `next` keeps counting up.",
+        "Run the query once, at the moment `Issue` is called.",
+        "Add `.ToList()` after the `Select`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Filters that all look the same",
+      "prompt": [
+        "`Buckets` builds one filter per remainder, then counts how many numbers fall into each: `Buckets([1, 2, 3, 4, 5, 6, 7], 3)` should be `[2, 3, 2]` (remainder 0: 3 and 6; remainder 1: 1, 4 and 7; remainder 2: 2 and 5).",
+        "",
+        "It returns `[0, 0, 0]`. Every lambda captured the **same** `i`, and reads it after the loop has finished, when it is `3`. Fix it so each filter keeps its own remainder."
+      ],
+      "starter": [
+        "static List<int> Buckets(List<int> nums, int k)",
+        "{",
+        "    var filters = new List<Func<int, bool>>();",
+        "    for (int i = 0; i < k; i++)",
+        "        filters.Add(n => n % k == i);",
+        "",
+        "    return filters.Select(f => nums.Count(f)).ToList();",
+        "}"
+      ],
+      "solution": [
+        "static List<int> Buckets(List<int> nums, int k)",
+        "{",
+        "    var filters = new List<Func<int, bool>>();",
+        "    for (int i = 0; i < k; i++)",
+        "    {",
+        "        int r = i;",
+        "        filters.Add(n => n % k == r);",
+        "    }",
+        "",
+        "    return filters.Select(f => nums.Count(f)).ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"Buckets(1..7, 3)\", new List<int> { 2, 3, 2 }, Buckets(new List<int> { 1, 2, 3, 4, 5, 6, 7 }, 3));",
+        "Dojo.Eq(\"Buckets(1..4, 2)\", new List<int> { 2, 2 }, Buckets(new List<int> { 1, 2, 3, 4 }, 2));",
+        "Dojo.Eq(\"Buckets(empty, 2)\", new List<int> { 0, 0 }, Buckets(new List<int>(), 2));"
+      ],
+      "hints": [
+        "A `for` loop has **one** `i` for the whole loop. Every lambda reads that one variable.",
+        "Declare a new variable inside the loop body. Each pass gets its own copy.",
+        "`{ int r = i; filters.Add(n => n % k == r); }`. (A `foreach` over `Enumerable.Range(0, k)` also works: it makes a fresh variable each pass.)"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Parse safely, fail early",
+      "prompt": [
+        "Readings arrive as text. Write `static List<int> ParseReadings(List<string> raw)`:",
+        "",
+        "- trim each value; skip blank ones",
+        "- if any remaining value is not a whole number, throw `FormatException` **from inside this method** (so callers see the error at the call, not later)",
+        "- otherwise return the numbers",
+        "",
+        "Use LINQ for the work, and make sure the whole query has run before the method returns."
+      ],
+      "starter": [
+        "static List<int> ParseReadings(List<string> raw)",
+        "{",
+        "    return new List<int>();",
+        "}"
+      ],
+      "solution": [
+        "static List<int> ParseReadings(List<string> raw)",
+        "{",
+        "    return raw",
+        "        .Select(s => s.Trim())",
+        "        .Where(s => s.Length > 0)",
+        "        .Select(int.Parse)",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"parses and skips blanks\", new List<int> { 4, 12, -3 }, ParseReadings(new List<string> { \" 4\", \"\", \"12 \", \"   \", \"-3\" }));",
+        "Dojo.Throws<FormatException>(\"a bad value throws during the call\", () => ParseReadings(new List<string> { \"1\", \"two\", \"3\" }));",
+        "Dojo.Eq(\"nothing to parse\", new List<int>(), ParseReadings(new List<string> { \" \" }));"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\b(foreach|for|while)\\b",
+          "message": "Does not use a loop"
+        }
+      ],
+      "hints": [
+        "`Select(s => s.Trim())`, then `Where` to drop the empty ones.",
+        "`int.Parse` throws `FormatException` on bad text: that is the behaviour you want.",
+        "Return type is `List<int>`, so finish with `.ToList()`: that is what makes it run, and throw, inside the method."
+      ]
+    }
+  ]
+}

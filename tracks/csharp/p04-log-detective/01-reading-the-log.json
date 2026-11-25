@@ -1,0 +1,265 @@
+{
+  "title": "Stage 1: Reading the log",
+  "summary": "Split each line, check its shape with a list pattern, and skip the garbage with TryParse.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Briefing: what the server wrote",
+      "body": [
+        "Over five stages you build a **log detective**: a program that reads a web server's access log and answers the questions people ask after a bad afternoon. Which endpoints are slow? Who was hit by errors? When did it start?",
+        "",
+        "Every line has six space-separated fields: time, client IP, method, path, status code and duration.",
+        "",
+        "```text",
+        "2026-03-04T10:00:01 10.0.0.1 GET /api/orders 200 120ms",
+        "2026-03-04T10:00:05 10.0.0.2 GET /api/search 200 340ms",
+        "-- server restarted --",
+        "2026-03-04T10:00:09 10.0.0.1 POST /api/orders 201 95ms",
+        "",
+        "2026-03-04T10:01:00 10.0.0.3 GET /health 200 3ms",
+        "2026-03-04T25:00:00 10.0.0.1 GET /api/orders 200 120ms",
+        "2026-03-04T10:02:10 10.0.0.2 GET /api/search 500 1200ms",
+        "2026-03-04T10:02:11 10.0.0.2 FETCH /api/orders 200 80ms",
+        "2026-03-04T10:02:12 10.0.0.2 GET /api/orders 200 fastms",
+        "```",
+        "",
+        "Logs are never clean. A restart banner, a timestamp with hour 25, a method that does not exist, `fastms` where a number should be: all of it must be skipped, not crash the program.",
+        "",
+        "The tool for picking a line apart is a **list pattern**. It checks the number of items *and* names them in one go:",
+        "",
+        "```csharp",
+        "var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "",
+        "if (parts is not [var stamp, var ip, var method, var path, var status, var took])",
+        "    return null;                      // not exactly six fields",
+        "if (method is not (\"GET\" or \"POST\" or \"PUT\" or \"DELETE\"))",
+        "    return null;                      // an or-pattern on a string",
+        "```",
+        "",
+        "The rest is `TryParse`, as in any parser: `DateTime.TryParseExact` for the time, `int.TryParse` for the status, and the duration with its `ms` suffix cut off by a range, `took[..^2]`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "List patterns check length and bind names. What does this print?",
+      "code": [
+        "string Describe(string[] parts) => parts switch",
+        "{",
+        "    [] => \"empty\",",
+        "    [var only] => $\"one: {only}\",",
+        "    [var first, .., var last] => $\"{first}..{last} ({parts.Length})\",",
+        "};",
+        "",
+        "Console.WriteLine(Describe(new string[0]));",
+        "Console.WriteLine(Describe(new[] { \"GET\" }));",
+        "Console.WriteLine(Describe(new[] { \"a\", \"b\", \"c\", \"d\" }));"
+      ],
+      "answer": [
+        "empty",
+        "one: GET",
+        "a..d (4)"
+      ],
+      "explain": "`[]` matches only an empty array, `[var only]` exactly one item, and `..` (a slice pattern) soaks up any number of items in the middle."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why split with `StringSplitOptions.RemoveEmptyEntries`?",
+      "options": [
+        "Two spaces in a row would otherwise produce an empty field and the line would have the wrong number of parts",
+        "It makes `Split` faster by skipping a copy",
+        "Without it `Split(' ')` throws on a blank line",
+        "It trims the ends of every field"
+      ],
+      "answer": 0,
+      "explain": "`\"a  b\".Split(' ')` gives `[\"a\", \"\", \"b\"]`. Servers love padding columns with extra spaces, and `RemoveEmptyEntries` makes that harmless."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the check that cuts the `ms` suffix off the duration and parses the number.",
+      "code": [
+        "if (!took.__1__(\"ms\") || !int.TryParse(took[__2__], out var ms))",
+        "    return null;"
+      ],
+      "blanks": [
+        "EndsWith",
+        "..^2"
+      ],
+      "bank": [
+        "StartsWith",
+        "2..",
+        "^2",
+        "Contains"
+      ],
+      "explain": "`EndsWith(\"ms\")` makes sure the suffix is there. `..^2` is a range: from the start up to two before the end, so `\"120ms\"` becomes `\"120\"`."
+    },
+    {
+      "type": "code",
+      "title": "Parse the log",
+      "prompt": [
+        "Parse every line into an `Entry` and print it back in a tidy form.",
+        "",
+        "1. At the bottom of the file declare:",
+        "",
+        "```csharp",
+        "record Entry(DateTime Time, string Ip, string Method, string Path, int Status, int Ms)",
+        "{",
+        "    public string Endpoint => $\"{Method} {Path}\";",
+        "}",
+        "```",
+        "",
+        "2. Write `Entry? TryParseEntry(string line)`. Return `null` unless the line has exactly six fields (use a list pattern), the method is `GET`, `POST`, `PUT` or `DELETE`, the time parses with the format `yyyy-MM-ddTHH:mm:ss`, the status is a number, and the duration is a number followed by `ms`.",
+        "3. Ignore blank lines. Parse the others with `Select(TryParseEntry).OfType<Entry>()`.",
+        "4. Print each entry as `HH:mm:ss ip endpoint status msms`, then `Parsed: N, skipped: M` where `M` counts the non-blank lines that failed.",
+        "",
+        "For this input:",
+        "",
+        "```text",
+        "2026-03-04T10:00:01 10.0.0.1 GET /api/orders 200 120ms",
+        "2026-03-04T10:00:05 10.0.0.2 GET /api/search 200 340ms",
+        "-- server restarted --",
+        "2026-03-04T10:00:09 10.0.0.1 POST /api/orders 201 95ms",
+        "",
+        "2026-03-04T10:01:00 10.0.0.3 GET /health 200 3ms",
+        "2026-03-04T25:00:00 10.0.0.1 GET /api/orders 200 120ms",
+        "2026-03-04T10:02:10 10.0.0.2 GET /api/search 500 1200ms",
+        "2026-03-04T10:02:11 10.0.0.2 FETCH /api/orders 200 80ms",
+        "2026-03-04T10:02:12 10.0.0.2 GET /api/orders 200 fastms",
+        "```",
+        "",
+        "print exactly:",
+        "",
+        "```text",
+        "10:00:01 10.0.0.1 GET /api/orders 200 120ms",
+        "10:00:05 10.0.0.2 GET /api/search 200 340ms",
+        "10:00:09 10.0.0.1 POST /api/orders 201 95ms",
+        "10:01:00 10.0.0.3 GET /health 200 3ms",
+        "10:02:10 10.0.0.2 GET /api/search 500 1200ms",
+        "Parsed: 5, skipped: 4",
+        "```"
+      ],
+      "starter": [
+        "using System.Globalization;",
+        "",
+        "var lines = new List<string>();",
+        "string? line;",
+        "while ((line = Console.ReadLine()) is not null)",
+        "    lines.Add(line);",
+        "",
+        "// Parse the lines into Entry records here."
+      ],
+      "solution": [
+        "using System.Globalization;",
+        "",
+        "var lines = new List<string>();",
+        "string? line;",
+        "while ((line = Console.ReadLine()) is not null)",
+        "    lines.Add(line);",
+        "",
+        "var candidates = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();",
+        "",
+        "var entries = candidates",
+        "    .Select(TryParseEntry)",
+        "    .OfType<Entry>()",
+        "    .ToList();",
+        "",
+        "foreach (var e in entries)",
+        "    Console.WriteLine($\"{e.Time:HH:mm:ss} {e.Ip} {e.Endpoint} {e.Status} {e.Ms}ms\");",
+        "",
+        "Console.WriteLine($\"Parsed: {entries.Count}, skipped: {candidates.Count - entries.Count}\");",
+        "",
+        "Entry? TryParseEntry(string line)",
+        "{",
+        "    var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "    if (parts is not [var stamp, var ip, var method, var path, var status, var took])",
+        "        return null;",
+        "    if (method is not (\"GET\" or \"POST\" or \"PUT\" or \"DELETE\"))",
+        "        return null;",
+        "    if (!DateTime.TryParseExact(stamp, \"yyyy-MM-ddTHH:mm:ss\", CultureInfo.InvariantCulture, DateTimeStyles.None, out var time))",
+        "        return null;",
+        "    if (!int.TryParse(status, out var code))",
+        "        return null;",
+        "    if (!took.EndsWith(\"ms\") || !int.TryParse(took[..^2], out var ms))",
+        "        return null;",
+        "    return new Entry(time, ip, method, path, code, ms);",
+        "}",
+        "",
+        "record Entry(DateTime Time, string Ip, string Method, string Path, int Status, int Ms)",
+        "{",
+        "    public string Endpoint => $\"{Method} {Path}\";",
+        "}"
+      ],
+      "tests": [
+        {
+          "name": "a short log with junk",
+          "stdin": [
+            "2026-03-04T10:00:01 10.0.0.1 GET /api/orders 200 120ms",
+            "2026-03-04T10:00:05 10.0.0.2 GET /api/search 200 340ms",
+            "-- server restarted --",
+            "2026-03-04T10:00:09 10.0.0.1 POST /api/orders 201 95ms",
+            "",
+            "2026-03-04T10:01:00 10.0.0.3 GET /health 200 3ms",
+            "2026-03-04T25:00:00 10.0.0.1 GET /api/orders 200 120ms",
+            "2026-03-04T10:02:10 10.0.0.2 GET /api/search 500 1200ms",
+            "2026-03-04T10:02:11 10.0.0.2 FETCH /api/orders 200 80ms",
+            "2026-03-04T10:02:12 10.0.0.2 GET /api/orders 200 fastms"
+          ],
+          "expect": [
+            "10:00:01 10.0.0.1 GET /api/orders 200 120ms",
+            "10:00:05 10.0.0.2 GET /api/search 200 340ms",
+            "10:00:09 10.0.0.1 POST /api/orders 201 95ms",
+            "10:01:00 10.0.0.3 GET /health 200 3ms",
+            "10:02:10 10.0.0.2 GET /api/search 500 1200ms",
+            "Parsed: 5, skipped: 4"
+          ]
+        },
+        {
+          "name": "a quiet morning",
+          "stdin": [
+            "2026-05-01T08:00:00 192.168.1.5 GET /index 200 12ms",
+            "2026-05-01T08:00:01 192.168.1.5 GET /style.css 200 4ms",
+            "2026-05-01T08:20:00 192.168.1.5 GET /index 304 2ms",
+            "2026-05-01T08:59:00 192.168.1.9 POST /login 302 88ms",
+            "2026-05-01T09:00:30 192.168.1.5 GET /index 200 15ms",
+            "2026-05-01T09:01:00 192.168.1.9 GET /index 200 11ms"
+          ],
+          "expect": [
+            "08:00:00 192.168.1.5 GET /index 200 12ms",
+            "08:00:01 192.168.1.5 GET /style.css 200 4ms",
+            "08:20:00 192.168.1.5 GET /index 304 2ms",
+            "08:59:00 192.168.1.9 POST /login 302 88ms",
+            "09:00:30 192.168.1.5 GET /index 200 15ms",
+            "09:01:00 192.168.1.9 GET /index 200 11ms",
+            "Parsed: 6, skipped: 0"
+          ]
+        },
+        {
+          "name": "only junk",
+          "stdin": [
+            "hello",
+            "GET / 200",
+            "2026-01-01T00:00:00 1.1.1.1 GET / x 5ms"
+          ],
+          "expect": [
+            "Parsed: 0, skipped: 3"
+          ]
+        }
+      ],
+      "require": [
+        {
+          "pattern": "is\\s+not\\s*\\[",
+          "message": "Checks the fields with a list pattern"
+        },
+        {
+          "pattern": "OfType<Entry>",
+          "message": "Drops failures with OfType<Entry>()"
+        }
+      ],
+      "hints": [
+        "`var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries); if (parts is not [var stamp, var ip, var method, var path, var status, var took]) return null;`",
+        "`DateTime.TryParseExact(stamp, \"yyyy-MM-ddTHH:mm:ss\", CultureInfo.InvariantCulture, DateTimeStyles.None, out var time)`",
+        "Print with `$\"{e.Time:HH:mm:ss} {e.Ip} {e.Endpoint} {e.Status} {e.Ms}ms\"`."
+      ]
+    }
+  ]
+}

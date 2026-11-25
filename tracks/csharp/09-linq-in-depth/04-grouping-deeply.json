@@ -1,0 +1,373 @@
+{
+  "title": "Grouping deeply",
+  "summary": "GroupBy with element and result selectors, composite keys, groups inside groups, ToLookup versus GroupBy, and CountBy and AggregateBy.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The other GroupBy overloads",
+      "body": [
+        "Module 6 used `GroupBy(key)` and then a `Select`. `GroupBy` can do more of the work itself.",
+        "",
+        "**Element selector**: choose what goes *into* each group, not the whole item.",
+        "",
+        "```csharp",
+        "// log lines like \"WARN disk\"",
+        "var byLevel = log.GroupBy(",
+        "    l => l.Split(' ')[0],      // key: the level",
+        "    l => l.Split(' ')[1]);     // element: only the message",
+        "```",
+        "",
+        "**Result selector**: turn each group into a result in the same call.",
+        "",
+        "```csharp",
+        "var summary = log.GroupBy(",
+        "    l => l.Split(' ')[0],",
+        "    (level, lines) => $\"{level}: {lines.Count()}\");",
+        "```",
+        "",
+        "One more thing that surprises people: groups come out in the order their key **first appears**. `GroupBy` does not sort."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "string[] log = { \"WARN disk\", \"ERROR db\", \"WARN cpu\", \"INFO up\", \"ERROR net\" };",
+        "",
+        "var groups = log.GroupBy(l => l.Split(' ')[0], l => l.Split(' ')[1]);",
+        "foreach (var g in groups)",
+        "    Console.WriteLine($\"{g.Key}: {string.Join(\",\", g)}\");"
+      ],
+      "answer": [
+        "WARN: disk,cpu",
+        "ERROR: db,net",
+        "INFO: up"
+      ],
+      "explain": "Groups appear in first-seen order (WARN came first), not alphabetically. Inside a group, items keep their original order too. The element selector put only the message into each group. Add `.OrderBy(g => g.Key)` if you need sorted groups."
+    },
+    {
+      "type": "learn",
+      "title": "Composite keys",
+      "body": [
+        "\"Average grade **per course per term**\" needs a key made of two values. Use an **anonymous type** or a **tuple**:",
+        "",
+        "```csharp",
+        "record Grade(string Student, string Course, string Term, int Score);",
+        "",
+        "var byCourseTerm = grades.GroupBy(g => new { g.Course, g.Term });",
+        "// or: grades.GroupBy(g => (g.Course, g.Term));",
+        "",
+        "foreach (var grp in byCourseTerm)",
+        "    Console.WriteLine($\"{grp.Key.Course} {grp.Key.Term}: {grp.Average(g => g.Score)}\");",
+        "```",
+        "",
+        "This works because anonymous types, tuples and records compare **by value**: two keys with the same `Course` and `Term` are equal. An ordinary `class` compares **by reference**, so `new MyKey(\"Math\", \"T1\")` twice gives two different keys, and nothing gets grouped."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`KeyClass` is an ordinary class with no `Equals` override. What does the last line print?",
+      "code": [
+        "var staff = new[] { (\"IT\", \"Jr\"), (\"IT\", \"Sr\"), (\"IT\", \"Jr\"), (\"HR\", \"Jr\") };",
+        "",
+        "Console.WriteLine(staff.GroupBy(s => (s.Item1, s.Item2)).Count());                 // 3",
+        "Console.WriteLine(staff.GroupBy(s => new KeyRecord(s.Item1, s.Item2)).Count());    // 3",
+        "Console.WriteLine(staff.GroupBy(s => new KeyClass(s.Item1, s.Item2)).Count());     // ?",
+        "",
+        "record KeyRecord(string Dept, string Level);",
+        "class KeyClass(string dept, string level) { public string Dept = dept; public string Level = level; }"
+      ],
+      "options": [
+        "`4`",
+        "`3`",
+        "`2`",
+        "`1`"
+      ],
+      "answer": 0,
+      "explain": "Each `new KeyClass(...)` is a different object, and a class without `Equals`/`GetHashCode` is only equal to itself. Every item gets its own group: 4. Tuples, anonymous types and records compare by value, so the two `(IT, Jr)` rows merge."
+    },
+    {
+      "type": "learn",
+      "title": "Groups inside groups, and ToLookup",
+      "body": [
+        "A group is a sequence, so you can **group it again**:",
+        "",
+        "```csharp",
+        "var report = staff",
+        "    .GroupBy(e => e.Dept)",
+        "    .Select(d => new",
+        "    {",
+        "        Dept = d.Key,",
+        "        Levels = d.GroupBy(e => e.Level).Select(l => $\"{l.Key}={l.Count()}\")",
+        "    });",
+        "// IT: Jr=2, Sr=1",
+        "```",
+        "",
+        "**`GroupBy` vs `ToLookup`**: they build the same shape, but",
+        "",
+        "- `GroupBy` is **lazy**. It does nothing until enumerated, and it regroups **every time** you enumerate it.",
+        "- `ToLookup` runs **now**, once, and gives an `ILookup` you can index: `lookup[\"IT\"]`. A missing key gives an empty sequence.",
+        "",
+        "Use `GroupBy` inside a query you are still building. Use `ToLookup` when you will look groups up by key, many times."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which one does each describe?",
+      "buckets": [
+        "`GroupBy`",
+        "`ToLookup`"
+      ],
+      "items": [
+        [
+          "Runs only when enumerated",
+          0
+        ],
+        [
+          "Runs immediately, once",
+          1
+        ],
+        [
+          "Can be indexed: `x[\"IT\"]`",
+          1
+        ],
+        [
+          "Regroups each time you loop over it",
+          0
+        ],
+        [
+          "Gives an empty sequence for a missing key",
+          1
+        ],
+        [
+          "Can be followed by more lazy operators before anything runs",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "CountBy and AggregateBy",
+      "body": [
+        "Two very common groupings got their own shortcuts in .NET 9. They skip building the groups and keep only a running number per key.",
+        "",
+        "```csharp",
+        "// how many movies per genre",
+        "genres.CountBy(g => g)",
+        "// same as: genres.GroupBy(g => g).Select(g => KeyValuePair.Create(g.Key, g.Count()))",
+        "",
+        "// revenue per region",
+        "sales.AggregateBy(s => s.Region, 0m, (sum, s) => sum + s.Amount)",
+        "```",
+        "",
+        "Both give a sequence of `KeyValuePair<TKey, TValue>`, in first-seen key order. Add `.ToDictionary()` (no arguments) to turn that into a dictionary, or deconstruct each pair: `foreach (var (key, value) in ...)`.",
+        "",
+        "`AggregateBy` is `Aggregate` (lesson 6) done once per key: a key, a starting value, and how to fold each item in."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "string[] genres = { \"Drama\", \"SciFi\", \"Drama\", \"Comedy\", \"SciFi\", \"Drama\" };",
+        "",
+        "foreach (var (genre, n) in genres.CountBy(g => g))",
+        "    Console.WriteLine($\"{genre} {n}\");",
+        "",
+        "var longest = genres.AggregateBy(g => g[0], 0, (best, g) => Math.Max(best, g.Length));",
+        "Console.WriteLine(string.Join(\" \", longest.Select(p => $\"{p.Key}{p.Value}\")));"
+      ],
+      "answer": [
+        "Drama 3",
+        "SciFi 2",
+        "Comedy 1",
+        "D5 S5 C6"
+      ],
+      "explain": "`CountBy` counts per key in first-seen order. The `AggregateBy` key is the first letter, it starts each key at 0 and keeps the longest length seen."
+    },
+    {
+      "type": "code",
+      "title": "Average per course per term",
+      "prompt": [
+        "The tests define `record Grade(string Student, string Course, string Term, int Score);`",
+        "",
+        "Write `static List<string> CourseAverages(List<Grade> grades)`. One line per **course and term** pair, as `\"Math T1: 85.5\"` (one decimal: `{avg:0.0}`), sorted by course, then by term. No loops."
+      ],
+      "starter": [
+        "static List<string> CourseAverages(List<Grade> grades)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "static List<string> CourseAverages(List<Grade> grades)",
+        "{",
+        "    return grades",
+        "        .GroupBy(g => new { g.Course, g.Term })",
+        "        .OrderBy(grp => grp.Key.Course)",
+        "        .ThenBy(grp => grp.Key.Term)",
+        "        .Select(grp => $\"{grp.Key.Course} {grp.Key.Term}: {grp.Average(g => g.Score):0.0}\")",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoGrades = new List<Grade>",
+        "{",
+        "    new(\"Ana\", \"Math\", \"T2\", 70), new(\"Bo\", \"Math\", \"T1\", 90), new(\"Ana\", \"Art\", \"T1\", 60),",
+        "    new(\"Ana\", \"Math\", \"T1\", 81), new(\"Cy\", \"Math\", \"T2\", 75), new(\"Bo\", \"Art\", \"T1\", 65),",
+        "};",
+        "Dojo.Eq(\"one line per course and term, sorted\", new List<string> { \"Art T1: 62.5\", \"Math T1: 85.5\", \"Math T2: 72.5\" }, CourseAverages(dojoGrades));",
+        "Dojo.Eq(\"no grades\", new List<string>(), CourseAverages(new List<Grade>()));",
+        "record Grade(string Student, string Course, string Term, int Score);"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\b(foreach|for|while)\\b",
+          "message": "Does not use a loop"
+        }
+      ],
+      "hints": [
+        "Group by both values at once: `GroupBy(g => new { g.Course, g.Term })`.",
+        "Sort the groups: `.OrderBy(grp => grp.Key.Course).ThenBy(grp => grp.Key.Term)`.",
+        "`$\"{grp.Key.Course} {grp.Key.Term}: {grp.Average(g => g.Score):0.0}\"`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Headcount by department and level",
+      "prompt": [
+        "The tests define `record Employee(string Name, string Dept, string Level);`",
+        "",
+        "Write `static List<string> Headcount(List<Employee> staff)`. One line per department, sorted by department, listing how many people are at each level, levels sorted A to Z:",
+        "",
+        "```text",
+        "HR: Jr=1",
+        "IT: Jr=2, Sr=1",
+        "```",
+        "",
+        "No loops. Group, then group each group again."
+      ],
+      "starter": [
+        "static List<string> Headcount(List<Employee> staff)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "static List<string> Headcount(List<Employee> staff)",
+        "{",
+        "    return staff",
+        "        .GroupBy(e => e.Dept)",
+        "        .OrderBy(d => d.Key)",
+        "        .Select(d => d.Key + \": \" + string.Join(\", \",",
+        "            d.GroupBy(e => e.Level).OrderBy(l => l.Key).Select(l => $\"{l.Key}={l.Count()}\")))",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoStaff = new List<Employee>",
+        "{",
+        "    new(\"Ana\", \"IT\", \"Sr\"), new(\"Bo\", \"IT\", \"Jr\"), new(\"Cy\", \"HR\", \"Jr\"), new(\"Di\", \"IT\", \"Jr\"), new(\"Ed\", \"Ops\", \"Mid\"), new(\"Fa\", \"Ops\", \"Lead\"),",
+        "};",
+        "Dojo.Eq(\"departments and levels both sorted\", new List<string> { \"HR: Jr=1\", \"IT: Jr=2, Sr=1\", \"Ops: Lead=1, Mid=1\" }, Headcount(dojoStaff));",
+        "Dojo.Eq(\"nobody\", new List<string>(), Headcount(new List<Employee>()));",
+        "record Employee(string Name, string Dept, string Level);"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\b(foreach|for|while)\\b",
+          "message": "Does not use a loop"
+        }
+      ],
+      "hints": [
+        "Outer: `staff.GroupBy(e => e.Dept).OrderBy(d => d.Key)`.",
+        "Inside the `Select`, each `d` is a sequence of employees: group it again by `Level`.",
+        "`string.Join(\", \", d.GroupBy(e => e.Level).OrderBy(l => l.Key).Select(l => $\"{l.Key}={l.Count()}\"))`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Dictionary loops to CountBy and AggregateBy",
+      "prompt": [
+        "The tests define `record Order(string Customer, decimal Total);`",
+        "",
+        "These two methods are written with loops. Rewrite each as **one expression**, using `CountBy` in the first and `AggregateBy` in the second. No loops.",
+        "",
+        "```csharp",
+        "static Dictionary<string, int> OrdersPer(List<Order> orders)",
+        "{",
+        "    var d = new Dictionary<string, int>();",
+        "    foreach (var o in orders) d[o.Customer] = d.GetValueOrDefault(o.Customer) + 1;",
+        "    return d;",
+        "}",
+        "",
+        "static Dictionary<string, decimal> SpendPer(List<Order> orders)",
+        "{",
+        "    var d = new Dictionary<string, decimal>();",
+        "    foreach (var o in orders) d[o.Customer] = d.GetValueOrDefault(o.Customer) + o.Total;",
+        "    return d;",
+        "}",
+        "```"
+      ],
+      "starter": [
+        "static Dictionary<string, int> OrdersPer(List<Order> orders)",
+        "{",
+        "    return new Dictionary<string, int>();",
+        "}",
+        "",
+        "static Dictionary<string, decimal> SpendPer(List<Order> orders)",
+        "{",
+        "    return new Dictionary<string, decimal>();",
+        "}"
+      ],
+      "solution": [
+        "static Dictionary<string, int> OrdersPer(List<Order> orders)",
+        "{",
+        "    return orders.CountBy(o => o.Customer).ToDictionary();",
+        "}",
+        "",
+        "static Dictionary<string, decimal> SpendPer(List<Order> orders)",
+        "{",
+        "    return orders.AggregateBy(o => o.Customer, 0m, (sum, o) => sum + o.Total).ToDictionary();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoOrders = new List<Order> { new(\"Maya\", 30m), new(\"Omar\", 60m), new(\"Maya\", 45m), new(\"Lena\", 15m), new(\"Maya\", 5m) };",
+        "var dojoCount = OrdersPer(dojoOrders);",
+        "var dojoSpend = SpendPer(dojoOrders);",
+        "Dojo.Eq(\"Maya has 3 orders\", 3, dojoCount.GetValueOrDefault(\"Maya\"));",
+        "Dojo.Eq(\"Lena has 1 order\", 1, dojoCount.GetValueOrDefault(\"Lena\"));",
+        "Dojo.Eq(\"3 customers counted\", 3, dojoCount.Count);",
+        "Dojo.Eq(\"Maya spent 80\", 80m, dojoSpend.GetValueOrDefault(\"Maya\"));",
+        "Dojo.Eq(\"Omar spent 60\", 60m, dojoSpend.GetValueOrDefault(\"Omar\"));",
+        "Dojo.Eq(\"no orders, empty dictionary\", 0, SpendPer(new List<Order>()).Count);",
+        "record Order(string Customer, decimal Total);"
+      ],
+      "require": [
+        {
+          "pattern": "CountBy",
+          "message": "Uses CountBy"
+        },
+        {
+          "pattern": "AggregateBy",
+          "message": "Uses AggregateBy"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\b(foreach|for|while)\\b",
+          "message": "Does not use a loop"
+        }
+      ],
+      "hints": [
+        "Both return a sequence of `KeyValuePair`s. `.ToDictionary()` with no arguments turns that into a dictionary.",
+        "`orders.CountBy(o => o.Customer).ToDictionary()`",
+        "`orders.AggregateBy(o => o.Customer, 0m, (sum, o) => sum + o.Total).ToDictionary()`"
+      ]
+    }
+  ]
+}

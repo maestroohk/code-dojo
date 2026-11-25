@@ -1,0 +1,345 @@
+{
+  "title": "Joins",
+  "summary": "Inner joins that silently drop rows, GroupJoin and the left-join pattern, and dictionaries and lookups for fast matching.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Join is an inner join",
+      "body": [
+        "You met `Join` in module 6. Two facts about it cause most join bugs:",
+        "",
+        "1. An item with **no partner is dropped**, on both sides.",
+        "2. An item with **several partners appears several times**, once per pair.",
+        "",
+        "```csharp",
+        "record Customer(int Id, string Name);",
+        "record Order(int CustomerId, decimal Total);",
+        "",
+        "var q = customers.Join(orders,",
+        "    c => c.Id,                 // key from the left",
+        "    o => o.CustomerId,         // key from the right",
+        "    (c, o) => $\"{c.Name}:{o.Total}\");",
+        "```",
+        "",
+        "The same in query syntax. Note the keyword is `equals`, not `==`, and the left key must come first:",
+        "",
+        "```csharp",
+        "var q = from c in customers",
+        "        join o in orders on c.Id equals o.CustomerId",
+        "        select $\"{c.Name}:{o.Total}\";",
+        "```"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Omar has no orders and order `9` has no customer. What does this print?",
+      "code": [
+        "var customers = new[] { new Customer(1, \"Maya\"), new Customer(2, \"Omar\"), new Customer(3, \"Lena\") };",
+        "var orders = new[] { new Order(1, 30m), new Order(1, 45m), new Order(3, 15m), new Order(9, 99m) };",
+        "",
+        "var q = customers.Join(orders, c => c.Id, o => o.CustomerId, (c, o) => $\"{c.Name}:{o.Total}\");",
+        "Console.WriteLine(string.Join(\" \", q));",
+        "Console.WriteLine(q.Count());",
+        "",
+        "record Customer(int Id, string Name);",
+        "record Order(int CustomerId, decimal Total);"
+      ],
+      "answer": [
+        "Maya:30 Maya:45 Lena:15",
+        "3"
+      ],
+      "explain": "Maya has two orders, so she appears twice. Omar (no orders) and order 9 (no customer) are silently dropped. No error, just missing rows: check your counts after a join."
+    },
+    {
+      "type": "learn",
+      "title": "GroupJoin: every left item, with its matches",
+      "body": [
+        "Often you want **every** customer, each with **their list** of orders, even if that list is empty. That is `GroupJoin`:",
+        "",
+        "```csharp",
+        "var q = customers.GroupJoin(orders,",
+        "    c => c.Id,",
+        "    o => o.CustomerId,",
+        "    (c, theirs) => $\"{c.Name}: {theirs.Count()} orders, {theirs.Sum(o => o.Total)}\");",
+        "// Maya: 2 orders, 75",
+        "// Omar: 0 orders, 0",
+        "// Lena: 1 orders, 15",
+        "```",
+        "",
+        "The result selector gets one customer and a **sequence** of their orders. Every customer appears exactly once.",
+        "",
+        "In query syntax it is `join ... into`:",
+        "",
+        "```csharp",
+        "from c in customers",
+        "join o in orders on c.Id equals o.CustomerId into theirs",
+        "select new { c.Name, Count = theirs.Count() };",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Using the same data (Omar has no orders), what does `GroupJoin` give for Omar?",
+      "code": "customers.GroupJoin(orders, c => c.Id, o => o.CustomerId, (c, theirs) => (c.Name, theirs))",
+      "options": [
+        "One result, with an empty `theirs`",
+        "No result: Omar is dropped like in `Join`",
+        "One result, with `theirs` set to `null`",
+        "It throws, because Omar has no match"
+      ],
+      "answer": 0,
+      "explain": "That is the whole point of `GroupJoin`: one result per left item, and an unmatched one gets an **empty** sequence, never `null`. So `Count()` and `Sum()` on it are safe."
+    },
+    {
+      "type": "learn",
+      "title": "The left join pattern",
+      "body": [
+        "SQL's `LEFT JOIN` gives one **row per pair**, plus one row with blanks for each left item that had no match. LINQ builds it from three pieces:",
+        "",
+        "```csharp",
+        "var rows = from c in customers",
+        "           join o in orders on c.Id equals o.CustomerId into theirs",
+        "           from x in theirs.DefaultIfEmpty()        // empty group -> one null",
+        "           select $\"{c.Name}: {x?.Total ?? 0}\";",
+        "// Maya: 30, Maya: 45, Omar: 0, Lena: 15",
+        "```",
+        "",
+        "1. `join ... into` groups each customer's orders (a `GroupJoin`).",
+        "2. `DefaultIfEmpty()` turns an **empty** group into a group holding one `default` (here `null`).",
+        "3. The second `from` flattens it again (a `SelectMany`).",
+        "",
+        "Because `x` can be `null`, use `?.` and `??` when you read it."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the left join so that Omar shows up as `Omar: 0`.",
+      "code": [
+        "var rows = from c in customers",
+        "           join o in orders on c.Id __1__ o.CustomerId __2__ theirs",
+        "           from x in theirs.__3__()",
+        "           select $\"{c.Name}: {x?.Total ?? 0}\";"
+      ],
+      "blanks": [
+        "equals",
+        "into",
+        "DefaultIfEmpty"
+      ],
+      "bank": [
+        "==",
+        "on",
+        "FirstOrDefault",
+        "as"
+      ],
+      "explain": "`equals` compares the keys, `into` keeps the groups (a GroupJoin), and `DefaultIfEmpty` gives an empty group one `null` item so the customer survives the final `from`."
+    },
+    {
+      "type": "learn",
+      "title": "Matching fast: dictionaries and lookups",
+      "body": [
+        "The obvious way to match two lists is a loop inside a loop, which checks **every pair**. With 10,000 orders and 10,000 customers that is 100 million comparisons.",
+        "",
+        "```csharp",
+        "foreach (var o in orders)",
+        "    foreach (var c in customers)          // slow: scans all customers for every order",
+        "        if (c.Id == o.CustomerId) ...",
+        "```",
+        "",
+        "`Join` does not do that. It builds a hash table of one side first, then looks each item up. You can do the same by hand, which is handy when you match **many times**:",
+        "",
+        "```csharp",
+        "var customerById = customers.ToDictionary(c => c.Id);   // one per key",
+        "var ordersByCustomer = orders.ToLookup(o => o.CustomerId); // many per key",
+        "",
+        "customerById[7]            // throws if 7 is missing; use TryGetValue",
+        "ordersByCustomer[7]        // empty sequence if 7 is missing, never throws",
+        "```",
+        "",
+        "Build it **once**, outside any loop, then each lookup is instant."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var orders = new[] { new Order(1, 30m), new Order(1, 45m), new Order(3, 15m) };",
+        "",
+        "var byCustomer = orders.ToLookup(o => o.CustomerId);",
+        "Console.WriteLine(byCustomer[1].Sum(o => o.Total));",
+        "Console.WriteLine(byCustomer[2].Count());",
+        "Console.WriteLine(byCustomer.Count);",
+        "",
+        "try { orders.ToDictionary(o => o.CustomerId); }",
+        "catch (Exception e) { Console.WriteLine(e.GetType().Name); }",
+        "",
+        "record Order(int CustomerId, decimal Total);"
+      ],
+      "answer": [
+        "75",
+        "0",
+        "2",
+        "ArgumentException"
+      ],
+      "explain": "A lookup with a missing key gives an empty sequence, so `Count()` is 0. `byCustomer.Count` is the number of **keys** (1 and 3). `ToDictionary` throws because customer 1 has two orders and a dictionary key must be unique."
+    },
+    {
+      "type": "code",
+      "title": "Staff directory",
+      "prompt": [
+        "The tests define:",
+        "",
+        "```csharp",
+        "record Employee(string Name, int DeptId);",
+        "record Department(int Id, string Name);",
+        "```",
+        "",
+        "Write `static List<string> Directory(List<Employee> staff, List<Department> depts)` with a join (`Join` or `join ... on ... equals`). One line per employee whose department exists, as `\"Ana (Sales)\"`, sorted by employee name. Employees with an unknown `DeptId` are left out."
+      ],
+      "starter": [
+        "static List<string> Directory(List<Employee> staff, List<Department> depts)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "static List<string> Directory(List<Employee> staff, List<Department> depts)",
+        "{",
+        "    return staff",
+        "        .Join(depts, e => e.DeptId, d => d.Id, (e, d) => new { e.Name, Dept = d.Name })",
+        "        .OrderBy(x => x.Name)",
+        "        .Select(x => $\"{x.Name} ({x.Dept})\")",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoDepts = new List<Department> { new(1, \"Sales\"), new(2, \"IT\"), new(3, \"Legal\") };",
+        "var dojoStaff = new List<Employee> { new(\"Omar\", 2), new(\"Ana\", 1), new(\"Zed\", 9), new(\"Cy\", 1) };",
+        "Dojo.Eq(\"joined and sorted, unknown department left out\", new List<string> { \"Ana (Sales)\", \"Cy (Sales)\", \"Omar (IT)\" }, Directory(dojoStaff, dojoDepts));",
+        "Dojo.Eq(\"no departments means nobody\", new List<string>(), Directory(dojoStaff, new List<Department>()));",
+        "record Employee(string Name, int DeptId);",
+        "record Department(int Id, string Name);"
+      ],
+      "require": [
+        {
+          "pattern": "\\.Join\\s*\\(|\\bjoin\\b",
+          "message": "Uses a join"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\b(foreach|for|while)\\b",
+          "message": "Does not use a loop"
+        }
+      ],
+      "hints": [
+        "`staff.Join(depts, e => e.DeptId, d => d.Id, (e, d) => ...)`",
+        "Keep both names in an anonymous object, sort by the employee name, then format.",
+        "An inner join drops `Zed` for you: that is exactly what the task wants."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Every customer, even the quiet ones",
+      "prompt": [
+        "The tests define:",
+        "",
+        "```csharp",
+        "record Customer(int Id, string Name);",
+        "record Order(int CustomerId, decimal Total);",
+        "```",
+        "",
+        "Write `static List<string> CustomerTotals(List<Customer> customers, List<Order> orders)`. One line for **every** customer, in the order of `customers`, as `\"Maya: 2 orders, 75\"`. A customer with no orders is `\"Omar: 0 orders, 0\"`. No loops."
+      ],
+      "starter": [
+        "static List<string> CustomerTotals(List<Customer> customers, List<Order> orders)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "static List<string> CustomerTotals(List<Customer> customers, List<Order> orders)",
+        "{",
+        "    return customers",
+        "        .GroupJoin(orders, c => c.Id, o => o.CustomerId,",
+        "            (c, theirs) => $\"{c.Name}: {theirs.Count()} orders, {theirs.Sum(o => o.Total)}\")",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoCustomers = new List<Customer> { new(1, \"Maya\"), new(2, \"Omar\"), new(3, \"Lena\") };",
+        "var dojoOrders = new List<Order> { new(1, 30m), new(3, 15m), new(1, 45m), new(8, 5m) };",
+        "Dojo.Eq(\"every customer once, with counts and totals\", new List<string> { \"Maya: 2 orders, 75\", \"Omar: 0 orders, 0\", \"Lena: 1 orders, 15\" }, CustomerTotals(dojoCustomers, dojoOrders));",
+        "Dojo.Eq(\"no orders at all\", new List<string> { \"Maya: 0 orders, 0\", \"Omar: 0 orders, 0\", \"Lena: 0 orders, 0\" }, CustomerTotals(dojoCustomers, new List<Order>()));",
+        "record Customer(int Id, string Name);",
+        "record Order(int CustomerId, decimal Total);"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\b(foreach|for|while)\\b",
+          "message": "Does not use a loop"
+        }
+      ],
+      "hints": [
+        "`Join` would drop Omar. You want every customer exactly once.",
+        "`GroupJoin` hands the result selector a customer and the sequence of their orders.",
+        "`(c, theirs) => $\"{c.Name}: {theirs.Count()} orders, {theirs.Sum(o => o.Total)}\"`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Who reports to whom",
+      "prompt": [
+        "The tests define `record Staff(int Id, string Name, int? ManagerId);`",
+        "",
+        "Write `static List<string> WithManagers(List<Staff> staff)`: one line per person, in list order, as `\"Bo -> Ana\"`. If `ManagerId` is `null` or not the id of anyone in the list, write `\"Ana -> (none)\"`.",
+        "",
+        "The list can be long, so do **not** search the whole list for every person. Build a `Dictionary` from id to name **once** with `ToDictionary`, then look each manager up."
+      ],
+      "starter": [
+        "static List<string> WithManagers(List<Staff> staff)",
+        "{",
+        "    // slow version: searches every person for every person",
+        "    return staff",
+        "        .Select(s => $\"{s.Name} -> {staff.FirstOrDefault(m => m.Id == s.ManagerId)?.Name ?? \"(none)\"}\")",
+        "        .ToList();",
+        "}"
+      ],
+      "solution": [
+        "static List<string> WithManagers(List<Staff> staff)",
+        "{",
+        "    var nameById = staff.ToDictionary(s => s.Id, s => s.Name);",
+        "    return staff",
+        "        .Select(s => $\"{s.Name} -> {(s.ManagerId is int id && nameById.TryGetValue(id, out var boss) ? boss : \"(none)\")}\")",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoStaff = new List<Staff> { new(1, \"Ana\", null), new(2, \"Bo\", 1), new(3, \"Cy\", 2), new(4, \"Di\", 99) };",
+        "Dojo.Eq(\"managers looked up\", new List<string> { \"Ana -> (none)\", \"Bo -> Ana\", \"Cy -> Bo\", \"Di -> (none)\" }, WithManagers(dojoStaff));",
+        "Dojo.Eq(\"an empty list\", new List<string>(), WithManagers(new List<Staff>()));",
+        "record Staff(int Id, string Name, int? ManagerId);"
+      ],
+      "require": [
+        {
+          "pattern": "ToDictionary",
+          "message": "Builds a dictionary with ToDictionary"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "FirstOrDefault|\\.First\\s*\\(|\\.Where\\s*\\(",
+          "message": "Does not search the list for each person"
+        }
+      ],
+      "hints": [
+        "`var nameById = staff.ToDictionary(s => s.Id, s => s.Name);` before the query.",
+        "`ManagerId` is an `int?`. `s.ManagerId is int id` checks for null and unwraps in one go.",
+        "`nameById.TryGetValue(id, out var boss) ? boss : \"(none)\"`"
+      ]
+    }
+  ]
+}
