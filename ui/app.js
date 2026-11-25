@@ -3,7 +3,7 @@
 import { h, md, inline, api, shuffle, ask, loader } from './util.js';
 import * as game from './game.js';
 import { renderStep, renderRunOutput, DRAG_TYPES, TYPE_LABEL } from './steps.js';
-import { createEditor } from './editor.js';
+import { createEditor, autocompleteOn, setAutocomplete } from './editor.js';
 import { blueprint } from './blueprint.js';
 import { pkiLab } from './lab-pki.js';
 import { linqViz } from './linqviz.js';
@@ -770,7 +770,9 @@ async function playground() {
   const s = game.state;
   s.settings.playLang ||= 'csharp';
   const lang = all.find(l => l.id === s.settings.playLang) || all[0];
-  document.documentElement.dataset.codeLang = lang.web ? 'javascript' : lang.id;
+  document.documentElement.dataset.codeLang = lang.web ? 'html' : lang.id;
+  const acToggle = () => h('label.small.pg-ac', { title: 'Suggestions as you type, auto-closing brackets, quotes and tags. Ctrl+Space suggests on demand; Ctrl+/ comments lines.' },
+    h('input', { type: 'checkbox', checked: autocompleteOn(), onchange: e => setAutocomplete(e.target.checked) }), ' Autocomplete');
   const KEY = lang.id === 'csharp' ? 'playground' : `playground:${lang.id}`;   // C# keeps its old draft
   const sample = lang.id === 'csharp' ? CSHARP_SAMPLE : lang.web ? WEB_SAMPLE : lang.sample || '';
 
@@ -818,6 +820,7 @@ async function playground() {
         h('div', editor.el,
           h('div.code-tools',
             h('label.small', tw, ' Tailwind CSS'),
+            acToggle(),
             h('span.muted.small', s.settings.tailwind ? 'loaded from the Tailwind CDN, so it needs internet' : ''),
             h('span.spacer'),
             h('button.btn.ghost.small', { type: 'button', onclick: async () => { if (await ask('Reset to the example?', { ok: 'Reset' })) { editor.value = sample; delete s.drafts[KEY]; game.save(); render(); } } }, 'Reset'))),
@@ -854,7 +857,7 @@ async function playground() {
       editor.el,
       h('div.code-tools', runBtn,
         h('button.btn.ghost', { type: 'button', onclick: async () => { if (await ask('Reset to the example?', { ok: 'Reset' })) { editor.value = sample; delete s.drafts[KEY]; game.save(); } } }, 'Reset'),
-        status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to run')),
+        status, h('span.spacer'), acToggle(), h('span.muted.small', 'Ctrl+Space suggest · Ctrl+/ comment · Ctrl+Enter run')),
       h('details.stdin', h('summary', 'Program input'), stdin),
       panel));
 }

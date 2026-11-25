@@ -1,8 +1,14 @@
 // A small code editor: a transparent <textarea> over a syntax-highlighted <pre>.
 // No dependencies, works offline. Tab indents, Enter keeps indentation, Ctrl+Enter runs.
+// ui/assist.js adds completion, auto-closing and comment toggling (switchable: autocompleteOn()).
 import { h, highlight } from './util.js';
+import { attachAssist } from './assist.js';
 
-export function createEditor({ value = '', onChange, onRun, minLines = 6 } = {}) {
+/** The learner's choice, shared by every editor. */
+export const autocompleteOn = () => localStorage.getItem('dojo-autocomplete') !== 'off';
+export const setAutocomplete = on => localStorage.setItem('dojo-autocomplete', on ? 'on' : 'off');
+
+export function createEditor({ value = '', onChange, onRun, minLines = 6, language, assist = true } = {}) {
   const gutter = h('div.ed-gutter', { 'aria-hidden': 'true' });
   const pre = h('pre.ed-pre', { 'aria-hidden': 'true' });
   const area = h('textarea.ed-area', {
@@ -13,7 +19,7 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6 } = {})
 
   const paint = () => {
     const text = area.value;
-    pre.innerHTML = highlight(text) + '\n';
+    pre.innerHTML = highlight(text, lang()) + '\n';
     const count = Math.max(text.split('\n').length, minLines);
     gutter.innerHTML = Array.from({ length: count }, (_, i) =>
       `<span class="${errorLines.has(i + 1) ? 'err' : warnLines.has(i + 1) ? 'warn' : ''}">${i + 1}</span>`).join('');
@@ -31,7 +37,11 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6 } = {})
     onChange?.(area.value);
   });
 
+  const lang = () => (typeof language === 'function' ? language() : language) || document.documentElement.dataset.codeLang || 'csharp';
+  if (assist) attachAssist(area, { language: lang, enabled: autocompleteOn, insert: text => insert(text), onPopupHost: p => root.querySelector('.ed-code').append(p) });
+
   area.addEventListener('keydown', e => {
+    if (e.defaultPrevented) return;      // the assist already handled this key
     const { selectionStart: s, selectionEnd: en, value: v } = area;
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onRun?.(); return; }
     if (e.key === 'Escape') { area.blur(); return; }

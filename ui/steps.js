@@ -56,6 +56,7 @@ function typeDrill(target, ctx, onClose) {
   let done = false;
 
   const editor = createEditor({
+    assist: false,          // typing practice: no suggestions or auto-closing
     minLines: Math.max(4, target.split('\n').length + 1),
     onRun: () => run(),
     onChange(value) {
@@ -255,7 +256,7 @@ function order(step, ctx) {
   // Typing mode: the shuffled lines stay on screen as raw material, and you type the program.
   const strip = s => s.replace(/\s+/g, '');
   let typing = prefersTyping();
-  const editor = createEditor({ minLines: step.lines.length + 1, onChange: () => ctx.onChange(), onRun: () => ctx.submit() });
+  const editor = createEditor({ assist: false, minLines: step.lines.length + 1, onChange: () => ctx.onChange(), onRun: () => ctx.submit() });
   const typedBox = h('div.typed-box', h('p.muted', 'Type the lines above in the right order. Spacing does not matter.'), editor.el);
   const dragHelp = h('p.muted', 'Drag the lines, or use the arrows.');
   const apply = () => {
