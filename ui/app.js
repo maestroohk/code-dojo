@@ -161,6 +161,16 @@ const LINQ_PRESETS = [
 ];
 
 const trackHash = id => `#/track/${id}`;
+
+// A detour: from a project stage into the lesson that teaches what it needs, and back to the exact step.
+//   { back: '#/lesson/...stage', title: 'Stage 7: ...', step: 3, lesson: 'csharp/06-.../03-...' }
+const getDetour = () => { try { return JSON.parse(sessionStorage.getItem('detour') || 'null'); } catch { return null; } };
+const setDetour = d => (d ? sessionStorage.setItem('detour', JSON.stringify(d)) : sessionStorage.removeItem('detour'));
+function lessonByKey(key) {
+  const [t, m, l] = key.split('/');
+  const track = tracks.find(x => x.id === t), module = track?.modules.find(x => x.id === m), lesson = module?.lessons.find(x => x.id === l);
+  return lesson && { track, module, lesson };
+}
 const currentTrack = () => tracks.find(t => t.id === sessionStorage.getItem('track')) || tracks[0];
 
 /** The learning center: every topic and lab on one page. */
@@ -355,11 +365,11 @@ function projectsView() {
  * Plays a list of steps. Used for lessons and for practice sessions.
  *   items: [{ step, lessonKey, idx, track, module, lesson }]
  */
-function play({ title, items, mode, meta, onFinish }) {
+function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], detour = null }) {
   const total = items.length;
-  let pos = 0, combo = 0, bestCombo = 0, earned = 0, mistakes = 0, firstTry = 0, answered = 0;
+  let pos = Math.min(startAt, Math.max(0, items.length - 1)), combo = 0, bestCombo = 0, earned = 0, mistakes = 0, firstTry = 0, answered = 0;
   let current = null, phase = 'answer', attempts = 0, hints = 0, revealed = false;
-  let furthest = 0;   // steps before this one are finished; going Back to them is a read-only review
+  let furthest = pos; // steps before this one are finished; going Back to them is a read-only review
   const replay = mode === 'lesson' && game.isDone(meta.key);
   const project = !!meta?.project;
   const boss = meta?.lesson?.kind === 'boss' || project;   // project code pays like boss code
@@ -381,7 +391,22 @@ function play({ title, items, mode, meta, onFinish }) {
       h('header.play-top',
         h('button.icon-btn', { type: 'button', title: 'Leave', 'aria-label': 'Leave', onclick: quit }, '✕'),
         progress, comboEl, xpEl),
-      h('main.play-main', h('div.play-meta', typeTag, h('span.muted.small', title)), stage, hintBox),
+      detour && h('div.detour-bar',
+        h('span', 'Studying for ', h('b', detour.title)),
+        h('a.btn.primary.small', { href: detour.back }, '← Back to the project')),
+      h('main.play-main', h('div.play-meta', typeTag, h('span.muted.small', title)),
+        prereqs.length > 0 && h('div.prereqs',
+          h('span.muted.small', 'Learn it first:'),
+          prereqs.map(k => {
+            const found = lessonByKey(k);
+            if (!found) return null;
+            const done = game.isDone(k);
+            return h(`button.prereq${done ? '.done' : ''}`, {
+              type: 'button', title: done ? 'You finished this lesson. Open it again to refresh it.' : 'Opens the lesson; a button there brings you back to this exact step.',
+              onclick: () => { setDetour({ back: location.hash, title: title.split(' · ').pop(), step: pos, lesson: k }); location.hash = `#/lesson/${k}`; },
+            }, done ? '✓ ' : '📖 ', found.lesson.title);
+          })),
+        stage, hintBox),
       h('footer.play-foot', feedback, h('div.foot-row', h('div.foot-left', hintBtn, skipBtn), h('div.foot-right', backBtn, mainBtn)))));
   window.scrollTo(0, 0);
 
@@ -398,7 +423,7 @@ function play({ title, items, mode, meta, onFinish }) {
     if (answered > 0 && pos < total &&
         !(await ask('Leave this session? The XP you earned so far is kept, but it will not count as finished.', { ok: 'Leave', cancel: 'Keep going' }))) return;
     // Practice lives at #/practice and lessons at #/lesson/..., so always go via the router.
-    const target = mode === 'practice' ? '#/practice' : project ? '#/projects' : trackHash(sessionStorage.getItem('track') || tracks[0]?.id);
+    const target = detour ? detour.back : mode === 'practice' ? '#/practice' : project ? '#/projects' : trackHash(sessionStorage.getItem('track') || tracks[0]?.id);
     if (location.hash === target) route(); else location.hash = target;
   }
 
@@ -599,18 +624,23 @@ async function lessonView(trackId, moduleId, lessonId) {
   const module = track?.modules.find(m => m.id === moduleId);
   const index = module?.lessons.findIndex(l => l.id === lessonId) ?? -1;
   if (index < 0) return notFound();
-  if (!game.isUnlocked(track, module, index)) { location.hash = '#/'; return; }
-
   const meta = module.lessons[index];
   const key = game.lessonKey(track, module, meta);
+  const detour = getDetour();
+  const onDetour = detour?.lesson === key;                       // studying a concept for a project stage
+  const returning = detour && detour.back === location.hash;     // coming back to the stage
+  if (!onDetour && !game.isUnlocked(track, module, index)) { location.hash = '#/'; return; }
   let lesson;
   const slow = setTimeout(() => app.replaceChildren(loader(meta.title)), 150);
   try { lesson = await api(`lesson/${key}`); } catch { clearTimeout(slow); return notFound(); }
   clearTimeout(slow);
 
   const items = lesson.steps.map((step, idx) => ({ step, lessonKey: key, idx, track: trackId, module: moduleId, lesson: lessonId }));
+  const startAt = returning ? detour.step : 0;
+  if (returning) setDetour(null);
   play({
     title: `${module.title} · ${lesson.title}`, items, mode: 'lesson',
+    startAt, prereqs: lesson.prereqs || [], detour: onDetour ? detour : null,
     meta: { key, lesson: meta, project: game.isProject(module), moduleKey: `${trackId}/${moduleId}` },
     onFinish(r) {
       const starCount = game.starsFor(r.mistakes);
@@ -631,7 +661,7 @@ async function lessonView(trackId, moduleId, lessonId) {
       const isProject = game.isProject(module);
       const lastStage = isProject && index === module.lessons.length - 1;
       summary({
-        r, starCount, bonus, fresh, leveledUp, level, track, key, lessonTitle: lesson.title,
+        r, starCount, bonus, fresh, leveledUp, level, track, key, lessonTitle: lesson.title, detour: onDetour ? detour : null,
         heading: lastStage ? 'Project shipped!' : isProject ? 'Stage complete!' : meta.kind === 'boss' ? 'Boss defeated!' : 'Lesson complete!',
         siblings: isProject ? module.lessons.map(l => ({ key: game.lessonKey(track, module, l), lesson: l })) : null,
       });
@@ -639,7 +669,7 @@ async function lessonView(trackId, moduleId, lessonId) {
   });
 }
 
-function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice, siblings }) {
+function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice, siblings, detour }) {
   leave?.(); leave = null;
   game.sound('done');
   confetti();
@@ -663,7 +693,10 @@ function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, hea
       leveledUp && h('div.level-up', `⬆️ Level ${level.level}: ${level.rank}`),
       fresh.length > 0 && h('div.summary-badges', fresh.map(a => h('div.badge-row', h('span.badge-icon', a.icon), h('div', h('strong', a.title), h('div.muted.small', a.text))))),
       h('div.summary-actions',
+        detour && h('a.btn.primary.big', { href: detour.back }, `Back to ${detour.title}`),
+        detour ? null :
         h('a.btn.ghost', { href: home }, siblings ? 'Back to projects' : 'Back to the map'),
+        detour ? null :
         practice ? h('a.btn.primary.big', { href: '#/practice', onclick: () => setTimeout(route) }, 'Practice again')
           : next ? h('a.btn.primary.big', { href: `#/lesson/${next.key}` }, siblings ? 'Next stage' : next.lesson.kind === 'boss' ? 'Face the boss' : 'Next lesson')
             : h('a.btn.primary.big', { href: home }, 'Done')))));

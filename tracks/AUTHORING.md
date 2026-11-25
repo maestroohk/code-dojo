@@ -333,6 +333,18 @@ messages are correct; the one-line helper prelude is accounted for.
   one short `learn` card to set the scene.
 - Teach one idea per card, with a concrete example. Say why the feature exists, not only what it does.
 
+### Learn it first: prerequisite lessons
+
+A stage (or any lesson) may list the lessons that teach what it needs:
+
+```json
+{ "title": "Stage 5: Querying", "prereqs": ["csharp/06-generics-and-linq/03-linq-basics"], "steps": [ ... ] }
+```
+
+They show as chips above every step (a tick when already finished). Clicking one opens that lesson even
+if it is still locked, with a banner and a Back to the project button that returns to the exact step the
+learner left; their code is kept. Use full keys (track/module/lesson) that exist; 1 to 4 per stage.
+
 ### Blueprints
 
 A project's `module.json` may carry a `blueprint`: the finished application's architecture. The Projects
