@@ -1,0 +1,270 @@
+{
+  "title": "The DAG, reachability and packfiles",
+  "summary": "History is a directed acyclic graph of commits. Reachability decides what log shows and what gc deletes; packfiles store it all compactly.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "History is a DAG",
+      "body": [
+        "Commits point to their parents, never the other way, and a commit cannot be its own ancestor. That makes history a **directed acyclic graph** (DAG):",
+        "",
+        "```text",
+        "A---B---C-------M   main",
+        "     \\         /",
+        "      D---E---F     (merged feature)",
+        "```",
+        "",
+        "- Many commits can share a parent (branching).",
+        "- A merge commit has several parents (M: first parent C, second parent F).",
+        "- Nothing points forward: Git cannot cheaply ask *what are B's children?*, only *what are M's ancestors?*",
+        "",
+        "Every history command is a graph walk:",
+        "",
+        "| Command | Walk |",
+        "|---|---|",
+        "| `git log main` | everything reachable from main |",
+        "| `git log --first-parent main` | follow only first parents: the *mainline* (C, B, A plus M) |",
+        "| `git log main..feature` | reachable from feature, minus reachable from main |",
+        "| `git merge-base a b` | best common ancestor |"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "For the graph above, which commits does `git log --first-parent --format=%s main` print? (Messages are the letters; one per line, newest first.)",
+      "code": "git log --first-parent --format=%s main",
+      "answer": [
+        "M",
+        "C",
+        "B",
+        "A"
+      ],
+      "verify": false,
+      "explain": "From M, take only the first parent each time: C, then B, then A. D, E and F are reachable only through M's second parent."
+    },
+    {
+      "type": "sort",
+      "prompt": "Is the commit reachable from `main` in the graph above?",
+      "buckets": [
+        "Reachable",
+        "Not reachable"
+      ],
+      "items": [
+        [
+          "A",
+          0
+        ],
+        [
+          "E",
+          0
+        ],
+        [
+          "F",
+          0
+        ],
+        [
+          "M",
+          0
+        ],
+        [
+          "The old commit you replaced with `--amend`",
+          1
+        ],
+        [
+          "Commits of a branch you deleted without merging",
+          1
+        ]
+      ],
+      "explain": "Everything merged is reachable through the merge commit's second parent, so a merged branch can be deleted without losing anything. Amended-away and unmerged deleted work is reachable only from the reflog."
+    },
+    {
+      "type": "learn",
+      "title": "Reachability and garbage collection",
+      "body": [
+        "An object is **reachable** if you can get to it from a ref (branch, tag, HEAD, stash) or a reflog entry, following commit -> parents, commit -> tree, tree -> blobs and sub-trees.",
+        "",
+        "Unreachable objects (from an abandoned rebase, an amended commit, a deleted branch, a blob you `git add`ed and then changed) are kept for a grace period and then removed by `git gc` (which also runs automatically now and then).",
+        "",
+        "```text",
+        "git gc                      # pack objects, prune old unreachable ones",
+        "git fsck --lost-found       # list dangling commits and blobs: a last-resort rescue",
+        "git count-objects -vH       # how much is loose vs packed",
+        "```",
+        "",
+        "> **Tip:** Even an uncommitted file you once `git add`ed exists as a blob. `git fsck --lost-found` can sometimes find it after a bad `reset --hard`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Loose objects and packfiles",
+      "body": [
+        "A new object is first written **loose**: one zlib-compressed file at `.git/objects/ce/013625030ba8...` (first two hex characters as the folder).",
+        "",
+        "Thousands of small files are slow, so `git gc` and every fetch or push use **packfiles**: `.git/objects/pack/pack-<id>.pack` with an `.idx` index.",
+        "",
+        "Inside a pack, objects can be stored as **deltas**: *\"this blob is that other blob, plus these changes\"*. So while each commit is *logically* a full snapshot, the storage is close to *\"only what changed\"*, often smaller than the working tree itself.",
+        "",
+        "This is also what travels over the network: `fetch` and `push` negotiate which commits the other side lacks and send a pack of just the missing objects."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is the first `git fetch` after a teammate's push fast, even on a big repository?",
+      "options": [
+        "Client and server compare which commits each has, and the server sends one pack containing only the missing objects, often as deltas",
+        "Git downloads only the files you have open",
+        "Fetch copies the whole repository each time, but compressed",
+        "Git skips history and downloads the latest snapshot only"
+      ],
+      "answer": 0,
+      "explain": "Reachability again: the server walks from its tips back until it meets commits you already have."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the tool or term to what it does.",
+      "pairs": [
+        [
+          "`git gc`",
+          "packs objects and prunes old unreachable ones"
+        ],
+        [
+          "packfile",
+          "many objects in one file, often stored as deltas"
+        ],
+        [
+          "loose object",
+          "one zlib file under `.git/objects/xx/`"
+        ],
+        [
+          "`git fsck --lost-found`",
+          "lists dangling objects you might rescue"
+        ],
+        [
+          "`--first-parent`",
+          "walk only the mainline of merges"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Walk the graph",
+      "prompt": [
+        "Write two graph walks over `parents` (commit -> parent ids, first parent first):",
+        "",
+        "- `FirstParentLog(start, parents)`: start, then repeatedly its **first** parent, until a commit with no parents.",
+        "- `Log(start, parents)`: every commit reachable from `start`, **breadth-first**, visiting parents in order, each commit once.",
+        "",
+        "```text",
+        "A <- B <- C <- M       FirstParentLog(\"M\") = M, C, B, A",
+        "      \\       /        Log(\"M\")            = M, C, F, B, E, A, D",
+        "       D <- E <- F",
+        "```"
+      ],
+      "starter": [
+        "static List<string> FirstParentLog(string start, Dictionary<string, string[]> parents)",
+        "{",
+        "    return new List<string>();",
+        "}",
+        "",
+        "static List<string> Log(string start, Dictionary<string, string[]> parents)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "static List<string> FirstParentLog(string start, Dictionary<string, string[]> parents)",
+        "{",
+        "    var result = new List<string>();",
+        "    var c = start;",
+        "    while (true)",
+        "    {",
+        "        result.Add(c);",
+        "        if (parents[c].Length == 0) break;",
+        "        c = parents[c][0];",
+        "    }",
+        "    return result;",
+        "}",
+        "",
+        "static List<string> Log(string start, Dictionary<string, string[]> parents)",
+        "{",
+        "    var result = new List<string>();",
+        "    var seen = new HashSet<string>();",
+        "    var queue = new Queue<string>();",
+        "    queue.Enqueue(start);",
+        "    while (queue.Count > 0)",
+        "    {",
+        "        var c = queue.Dequeue();",
+        "        if (!seen.Add(c)) continue;",
+        "        result.Add(c);",
+        "        foreach (var p in parents[c]) queue.Enqueue(p);",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "`FirstParentLog` is a simple loop over `parents[c][0]`.",
+        "`Log` is a BFS with a `Queue<string>` and a `HashSet<string>`; add to the result when you first dequeue a commit."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoG = new Dictionary<string, string[]> {",
+        "    [\"A\"] = new string[0], [\"B\"] = new[] { \"A\" }, [\"C\"] = new[] { \"B\" }, [\"D\"] = new[] { \"B\" },",
+        "    [\"E\"] = new[] { \"D\" }, [\"F\"] = new[] { \"E\" }, [\"M\"] = new[] { \"C\", \"F\" } };",
+        "Dojo.Eq(\"first-parent from M\", new List<string> { \"M\", \"C\", \"B\", \"A\" }, FirstParentLog(\"M\", dojoG));",
+        "Dojo.Eq(\"first-parent from F\", new List<string> { \"F\", \"E\", \"D\", \"B\", \"A\" }, FirstParentLog(\"F\", dojoG));",
+        "Dojo.Eq(\"full BFS from M\", new List<string> { \"M\", \"C\", \"F\", \"B\", \"E\", \"A\", \"D\" }, Log(\"M\", dojoG));",
+        "Dojo.Eq(\"root only\", new List<string> { \"A\" }, Log(\"A\", dojoG));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "How much does deduplication save?",
+      "prompt": [
+        "Content addressing means identical file contents are stored once. Given a list of snapshots (each `path -> content`), write `StoredBlobs(snapshots)` returning how many **distinct blobs** Git stores for all of them. Use your `BlobId` from lesson 1 (include it).",
+        "",
+        "```text",
+        "commit 1: README=\"hi\", App.cs=\"v1\"",
+        "commit 2: README=\"hi\", App.cs=\"v2\"",
+        "commit 3: README=\"hi\", App.cs=\"v1\", docs/README=\"hi\"",
+        "-> 3 blobs: \"hi\", \"v1\", \"v2\"",
+        "```"
+      ],
+      "starter": [
+        "static int StoredBlobs(List<Dictionary<string, string>> snapshots)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "static string BlobId(string content)",
+        "{",
+        "    var body = Encoding.UTF8.GetBytes(content);",
+        "    var header = Encoding.UTF8.GetBytes($\"blob {body.Length}\\0\");",
+        "    var hash = System.Security.Cryptography.SHA1.HashData(header.Concat(body).ToArray());",
+        "    return Convert.ToHexString(hash).ToLowerInvariant();",
+        "}",
+        "",
+        "static int StoredBlobs(List<Dictionary<string, string>> snapshots)",
+        "{",
+        "    return snapshots.SelectMany(s => s.Values).Select(BlobId).Distinct().Count();",
+        "}"
+      ],
+      "hints": [
+        "`SelectMany(s => s.Values)` flattens every file's content.",
+        "Map to `BlobId`, then `Distinct().Count()`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoS = new List<Dictionary<string, string>> {",
+        "    new() { [\"README\"] = \"hi\", [\"App.cs\"] = \"v1\" },",
+        "    new() { [\"README\"] = \"hi\", [\"App.cs\"] = \"v2\" },",
+        "    new() { [\"README\"] = \"hi\", [\"App.cs\"] = \"v1\", [\"docs/README\"] = \"hi\" } };",
+        "Dojo.Eq(\"three commits, three blobs\", 3, StoredBlobs(dojoS));",
+        "Dojo.Eq(\"one empty file\", 1, StoredBlobs(new() { new() { [\"a\"] = \"\", [\"b\"] = \"\" } }));",
+        "Dojo.Eq(\"nothing\", 0, StoredBlobs(new()));"
+      ]
+    }
+  ]
+}

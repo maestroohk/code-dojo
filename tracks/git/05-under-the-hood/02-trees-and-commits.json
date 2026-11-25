@@ -1,0 +1,250 @@
+{
+  "title": "Trees and commits",
+  "summary": "A tree is a sorted directory listing; a commit is a short text naming a tree and its parents. Rebuild real tree and commit ids byte for byte.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Trees",
+      "body": [
+        "A tree object lists one directory. `git cat-file -p` shows it as text:",
+        "",
+        "```text",
+        "$ git cat-file -p a45ecc3",
+        "100644 blob ce013625030ba8dba906f756967f9e9ca394464a    hello.txt",
+        "040000 tree b7b85f87e7da7d7d2944fed5dda605b377f87459    src",
+        "```",
+        "",
+        "| Mode | Meaning |",
+        "|---|---|",
+        "| `100644` | normal file |",
+        "| `100755` | executable file |",
+        "| `120000` | symbolic link |",
+        "| `40000` | sub-directory (a tree; shown padded as `040000`) |",
+        "",
+        "The **stored** bytes are binary: for each entry, `<mode> <name>\\0` followed by the **20 raw bytes** of the id (not 40 hex characters). Entries are sorted by name, where a directory sorts as if its name ended in `/`.",
+        "",
+        "Because a tree holds its children's ids, the root tree's id is a fingerprint of the **whole** snapshot: change any file anywhere and every tree above it gets a new id."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You change one line in `src/Api/Orders.cs`. Which objects are new in the next commit?",
+      "options": [
+        "A new blob for Orders.cs, new trees for `src/Api`, `src` and the root, and the new commit",
+        "Only a new blob",
+        "Every blob and tree in the project",
+        "Only the commit"
+      ],
+      "answer": 0,
+      "explain": "Ids flow upwards. Unchanged sibling files and folders keep their ids and are simply referenced again, which is why commits are cheap."
+    },
+    {
+      "type": "predict",
+      "prompt": "A tree entry for a file is `<mode> <name>\\0` plus the raw id bytes. How many bytes is this entry?",
+      "code": [
+        "var entry = Encoding.UTF8.GetBytes(\"100644 hello.txt\\0\").Length + 20;",
+        "Console.WriteLine(entry);"
+      ],
+      "answer": "37",
+      "explain": "`100644` (6) + space (1) + `hello.txt` (9) + NUL (1) = 17, plus 20 raw bytes of SHA-1. A 40-character hex id would have been twice as long."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Compute a tree id",
+      "prompt": [
+        "Write `TreeId(List<(string Mode, string Name, string Id)> entries)` that returns a real Git tree id:",
+        "",
+        "1. Sort entries by name with `StringComparer.Ordinal`, but compare a directory (mode `40000`) as `name + \"/\"`.",
+        "2. Body = for each entry: UTF-8 bytes of `\"<mode> <name>\\0\"` then `Convert.FromHexString(id)` (20 bytes).",
+        "3. Id = SHA-1 of `\"tree <body length>\\0\"` + body, as lowercase hex.",
+        "",
+        "The checks use the real ids of a repo holding `hello.txt` and `src/App.cs`."
+      ],
+      "starter": [
+        "static string TreeId(List<(string Mode, string Name, string Id)> entries)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "static string TreeId(List<(string Mode, string Name, string Id)> entries)",
+        "{",
+        "    string Key((string Mode, string Name, string Id) e) => e.Mode == \"40000\" ? e.Name + \"/\" : e.Name;",
+        "    var body = new List<byte>();",
+        "    foreach (var e in entries.OrderBy(Key, StringComparer.Ordinal))",
+        "    {",
+        "        body.AddRange(Encoding.UTF8.GetBytes($\"{e.Mode} {e.Name}\\0\"));",
+        "        body.AddRange(Convert.FromHexString(e.Id));",
+        "    }",
+        "    var header = Encoding.UTF8.GetBytes($\"tree {body.Count}\\0\");",
+        "    var hash = System.Security.Cryptography.SHA1.HashData(header.Concat(body).ToArray());",
+        "    return Convert.ToHexString(hash).ToLowerInvariant();",
+        "}"
+      ],
+      "hints": [
+        "Build the body in a `List<byte>` with `AddRange`.",
+        "A local function `Key(e)` returns `e.Name + \"/\"` for trees, `e.Name` otherwise; pass it to `OrderBy` with `StringComparer.Ordinal`.",
+        "The header length is the body's byte count."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"tree with hello.txt\", \"aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7\", TreeId(new() { (\"100644\", \"hello.txt\", \"ce013625030ba8dba906f756967f9e9ca394464a\") }));",
+        "Dojo.Eq(\"src/ with App.cs\", \"b7b85f87e7da7d7d2944fed5dda605b377f87459\", TreeId(new() { (\"100644\", \"App.cs\", \"c9ff7826ecbf3abd69c4dd08dbaddd463d9d9055\") }));",
+        "Dojo.Eq(\"root: a file and a sub-tree (given out of order)\", \"a45ecc342b99792adf11582f987b95ee5fcd810e\", TreeId(new() { (\"40000\", \"src\", \"b7b85f87e7da7d7d2944fed5dda605b377f87459\"), (\"100644\", \"hello.txt\", \"ce013625030ba8dba906f756967f9e9ca394464a\") }));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Commits",
+      "body": [
+        "A commit object is plain text:",
+        "",
+        "```text",
+        "$ git cat-file -p b0313db",
+        "tree aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7",
+        "author Ada <ada@example.com> 1700000000 +0000",
+        "committer Ada <ada@example.com> 1700000000 +0000",
+        "",
+        "Add hello",
+        "```",
+        "",
+        "- `tree`: the root tree of the snapshot.",
+        "- `parent` lines: none for the first commit, one normally, two (or more) for a merge.",
+        "- `author` (who wrote the change) and `committer` (who made this commit object), each with a Unix timestamp and time zone. They differ after a rebase or cherry-pick: you become the committer.",
+        "- a blank line, then the message (ending with a newline).",
+        "",
+        "Its id is `SHA1(\"commit <size>\\0\" + text)`. Since the parent id is part of the text, **a commit's id seals its entire history**: change any ancestor and every descendant's id changes."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You cherry-pick a teammate's commit. In the new commit, who is the author and who is the committer?",
+      "options": [
+        "Author: your teammate (who wrote the change). Committer: you, with the current time",
+        "Both are you",
+        "Both are your teammate",
+        "Author is you, committer is your teammate"
+      ],
+      "answer": 0,
+      "explain": "Git keeps credit for the change with its author. `git log --format=fuller` shows both."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the lines of a commit object with one parent.",
+      "lines": [
+        "tree aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7",
+        "parent b0313dbfea675ba0583498b791d496a6786d5f5f",
+        "author Ada <ada@example.com> 1700000000 +0000",
+        "committer Ada <ada@example.com> 1700000000 +0000",
+        "",
+        "Second"
+      ],
+      "explain": "Header lines in fixed order (tree, parents, author, committer), a blank line, then the message."
+    },
+    {
+      "type": "code",
+      "mode": "write",
+      "title": "Compute a commit id",
+      "prompt": [
+        "Write two methods:",
+        "",
+        "- `CommitText(tree, parents, person, time, message)` builds the exact object text: `tree <id>`, one `parent <id>` line per parent, `author <person> <time> +0000`, `committer <person> <time> +0000`, an empty line, then the message, then a final `\\n`. Every line ends in `\\n`.",
+        "- `CommitId(...)` returns SHA-1 of `\"commit <byte length>\\0\" + text` as lowercase hex.",
+        "",
+        "`person` is like `Ada <ada@example.com>`. The checks use ids made by real `git commit-tree`."
+      ],
+      "starter": [
+        "static string CommitText(string tree, List<string> parents, string person, long time, string message)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "static string CommitId(string tree, List<string> parents, string person, long time, string message)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "static string CommitText(string tree, List<string> parents, string person, long time, string message)",
+        "{",
+        "    var sb = new StringBuilder();",
+        "    sb.Append($\"tree {tree}\\n\");",
+        "    foreach (var p in parents) sb.Append($\"parent {p}\\n\");",
+        "    sb.Append($\"author {person} {time} +0000\\n\");",
+        "    sb.Append($\"committer {person} {time} +0000\\n\");",
+        "    sb.Append($\"\\n{message}\\n\");",
+        "    return sb.ToString();",
+        "}",
+        "",
+        "static string CommitId(string tree, List<string> parents, string person, long time, string message)",
+        "{",
+        "    var body = Encoding.UTF8.GetBytes(CommitText(tree, parents, person, time, message));",
+        "    var header = Encoding.UTF8.GetBytes($\"commit {body.Length}\\0\");",
+        "    var hash = System.Security.Cryptography.SHA1.HashData(header.Concat(body).ToArray());",
+        "    return Convert.ToHexString(hash).ToLowerInvariant();",
+        "}"
+      ],
+      "hints": [
+        "Use a `StringBuilder` and append `\\n` explicitly; do not use `AppendLine` (on Windows it adds `\\r\\n`).",
+        "The text ends with the message followed by one `\\n`.",
+        "Hash exactly like `BlobId`, with `commit` as the type."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoWho = \"Ada <ada@example.com>\";",
+        "Dojo.Eq(\"first commit text\", \"tree aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7\\nauthor Ada <ada@example.com> 1700000000 +0000\\ncommitter Ada <ada@example.com> 1700000000 +0000\\n\\nAdd hello\\n\",",
+        "    CommitText(\"aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7\", new(), dojoWho, 1700000000, \"Add hello\"));",
+        "Dojo.Eq(\"first commit id (git commit-tree)\", \"b0313dbfea675ba0583498b791d496a6786d5f5f\", CommitId(\"aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7\", new(), dojoWho, 1700000000, \"Add hello\"));",
+        "Dojo.Eq(\"second commit, with a parent\", \"1b0ca98a4adf40e6313895d1b0500672ee30d710\", CommitId(\"aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7\", new() { \"b0313dbfea675ba0583498b791d496a6786d5f5f\" }, dojoWho, 1700000000, \"Second\"));",
+        "Dojo.Check(\"changing only the time changes the id\", CommitId(\"aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7\", new(), dojoWho, 1700000001, \"Add hello\") != \"b0313dbfea675ba0583498b791d496a6786d5f5f\", \"ids must differ\");"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "You amend a commit and change nothing but the message. Which of its ids change? List the ones that change, one per line, from: `tree`, `commit`, `parent`.",
+      "code": "git commit --amend -m \"Better message\"",
+      "answer": "commit",
+      "verify": false,
+      "explain": "The snapshot is identical, so the root tree id is the same, and the parent is the same. The message is part of the commit text, so the commit id changes."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each change to the ids it alters.",
+      "pairs": [
+        [
+          "Edit one file's contents",
+          "its blob, every tree above it, and the commit"
+        ],
+        [
+          "Rename a file (same content)",
+          "the trees above it and the commit, not the blob"
+        ],
+        [
+          "Change only the commit message",
+          "only the commit"
+        ],
+        [
+          "Rebase onto a new base",
+          "every replayed commit, because their parents change"
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Trees sort directories as if their name ended in `/`. What order does this print?",
+      "code": [
+        "var names = new List<(string Name, bool IsDir)> { (\"app.cs\", false), (\"app\", true), (\"app-tests\", true) };",
+        "foreach (var n in names.OrderBy(n => n.IsDir ? n.Name + \"/\" : n.Name, StringComparer.Ordinal))",
+        "    Console.WriteLine(n.Name);"
+      ],
+      "answer": [
+        "app-tests",
+        "app.cs",
+        "app"
+      ],
+      "explain": "Compare `app-tests/`, `app.cs` and `app/`: after `app`, the next characters are `-` (45), `.` (46) and `/` (47). Getting this order wrong gives a different, invalid tree id."
+    }
+  ]
+}
