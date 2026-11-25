@@ -174,6 +174,7 @@ app.MapPost("/api/apps/{id}/send", async (string id, AppHost.SendRequest req) =>
 app.MapPost("/api/outline", (RunRequest req) => Results.Json(CodeOutline.Read(req.Code ?? ""), json));
 // Live network labs: Docker-based networking and security labs with an in-page terminal (NetLabs.cs).
 NetLabs.Map(app, root, stateDir);
+PyEnv.Map(app);   // one-click data science environment (numpy, pandas, matplotlib)
 // Code spaces: real multi-file .NET projects with NuGet packages, built and run with the dotnet CLI (CodeSpaces.cs).
 CodeSpaces.Map(app, runner);
 // Database studio: SQLite files plus PostgreSQL / SQL Server / MySQL in Docker, one query UI (DbStudio.cs).

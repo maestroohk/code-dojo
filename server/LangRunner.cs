@@ -82,7 +82,7 @@ public sealed class LangRunner
 
     static readonly Lang[] All =
     [
-        new("python", "Python", "main.py", null, [PyEnvPython() ?? "python", "-I", "-X", "utf8", "main.py"], (PyEnvPython() ?? "python") + " --version",
+        new("python", "Python", "main.py", null, ["python", "-I", "-X", "utf8", "main.py"], "python --version",
             "# Python: indentation is the block structure.\nscores = {\"ann\": 91, \"bob\": 78, \"cy\": 85}\n\nfor name, score in sorted(scores.items(), key=lambda kv: -kv[1]):\n    print(f\"{name:<5}{score:>4}\")\n\nprint(\"average:\", sum(scores.values()) / len(scores))\n"),
         new("javascript", "JavaScript", "main.js", null, ["node", "main.js"], "node --version",
             "// JavaScript (Node.js)\nconst scores = { ann: 91, bob: 78, cy: 85 };\n\nObject.entries(scores)\n  .sort(([, a], [, b]) => b - a)\n  .forEach(([name, score]) => console.log(`${name.padEnd(5)}${String(score).padStart(4)}`));\n\nconst values = Object.values(scores);\nconsole.log('average:', values.reduce((a, b) => a + b) / values.length);\n"),
@@ -147,7 +147,8 @@ public sealed class LangRunner
 
     static async Task<Result> Exec(string dir, string[] cmd, string? stdin, int cpuMs, int wallMs)
     {
-        var exe = cmd[0].StartsWith("./") ? Path.Combine(dir, cmd[0][2..] + (OperatingSystem.IsWindows() ? ".exe" : "")) : cmd[0];
+        // "python" means the dojo environment when it exists (checked per run, so setting it up needs no restart).
+        var exe = cmd[0] == "python" ? PyEnvPython() ?? "python" : cmd[0].StartsWith("./") ? Path.Combine(dir, cmd[0][2..] + (OperatingSystem.IsWindows() ? ".exe" : "")) : cmd[0];
         var psi = new ProcessStartInfo(exe)
         {
             WorkingDirectory = dir,

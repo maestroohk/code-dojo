@@ -13,6 +13,7 @@ import { vimLab } from './lab-vim.js';
 import { workbench } from './workbench.js';
 import { netLabs } from './netlabs.js';
 import { codeSpaces } from './codespaces.js';
+import { pyenvBanner } from './pyenv.js';
 import { playgroundDebugger } from './debugger.js';
 import { dbStudio } from './dbstudio.js';
 import * as gamify from './gamify.js';
@@ -255,6 +256,7 @@ function trackView(id) {
 
   page('home',
     h('a.back-link', { href: '#/' }, '← All topics'),
+    track.id === 'datascience' && pyenvBanner(),
     hero,
     h('div.track-head',
       h('div', h('h2.track-title', `${track.title} track`), h('p.muted', track.tagline || '')),
@@ -967,6 +969,7 @@ async function playground() {
   page('playground',
     h('div.track-head', h('div', h('h2.track-title', 'Playground'), h('p.muted', 'Try an idea in any language you have installed. Break something on purpose, see what happens. Nothing here is graded.'))),
     tabs,
+    lang.id === 'python' && pyenvBanner({ reason: 'Charts and data work in Python need numpy, pandas and matplotlib.' }),
     h('div.playground',
       editor.el,
       h('div.code-tools', runBtn, pgDebug?.button,
