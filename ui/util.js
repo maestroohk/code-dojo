@@ -111,6 +111,7 @@ const LANGS = {
   python: [PY_TOKEN, PY_KEYWORDS], py: [PY_TOKEN, PY_KEYWORDS],
   javascript: [JS_TOKEN, JS_KEYWORDS], js: [JS_TOKEN, JS_KEYWORDS], typescript: [JS_TOKEN, JS_KEYWORDS], ts: [JS_TOKEN, JS_KEYWORDS],
   tsx: [JS_TOKEN, JS_KEYWORDS], jsx: [JS_TOKEN, JS_KEYWORDS], html: [JS_TOKEN, JS_KEYWORDS], java: [CS_TOKEN, CS_KEYWORDS],
+  json: [JS_TOKEN, new Set(['true', 'false', 'null'])], css: [JS_TOKEN, new Set(['important', 'inherit', 'initial', 'none', 'auto'])],
 };
 
 export function highlight(code, lang) {

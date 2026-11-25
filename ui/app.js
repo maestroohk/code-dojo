@@ -9,16 +9,18 @@ import { pkiLab } from './lab-pki.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
 import { subnetTrainer } from './lab-subnet.js';
+import { netBuildLab } from './lab-netbuild.js';
+import { archBuildLab } from './lab-archbuild.js';
 import { vimLab } from './lab-vim.js';
 import { workbench } from './workbench.js';
 import { netLabs } from './netlabs.js';
 import { codeSpaces } from './codespaces.js';
 import { pyenvBanner } from './pyenv.js';
 import { featuresView } from './features.js';
-import { netBuildLab } from './lab-netbuild.js';
-import { archBuildLab } from './lab-archbuild.js';
 import { playgroundDebugger } from './debugger.js';
 import { dbStudio } from './dbstudio.js';
+import * as builds from './builds.js';
+import { welcomeView, pathPanel, shouldWelcome } from './welcome.js';
 import * as gamify from './gamify.js';
 
 const app = document.getElementById('app');
@@ -75,6 +77,7 @@ function header(active) {
       link('#/labs', 'Labs', 'labs'),
       h(`a.nav-link${active === 'practice' ? '.active' : ''}`, { href: '#/practice' }, 'Practice', due > 0 && h('span.badge', due)),
       link('#/projects', 'Projects', 'projects'),
+      link('#/builds', 'Builds', 'builds'),
       link('#/workbench', 'Workbench', 'workbench'),
       link('#/spaces', 'Code spaces', 'spaces'),
       link('#/db', 'Databases', 'db'),
@@ -210,6 +213,7 @@ function home() {
       resume && h('div.hero-resume',
         h('a.btn.primary.big', { href: `#/lesson/${resume.key}`, onclick: () => sessionStorage.setItem('track', recent.id) }, 'Continue'),
         h('span.muted.small', `${recent.title} · ${resume.lesson.title}`))),
+    pathPanel(tracks, { nextLesson: game.nextLesson, trackProgress: game.trackProgress }),
     gamify.todayPanel({ refresh: () => { if (!location.hash || location.hash === '#/') home(); } }),
     // Topics grouped by category, in the order their first topic appears.
     [...new Set(sorted.map(t => t.category || 'Topics'))].map(cat => [
@@ -272,6 +276,7 @@ function trackView(id) {
         h('div', h('b', `${prog.done}/${prog.total}`), h('span.muted', 'lessons')),
         h('div', h('b', `${prog.stars}/${prog.maxStars}`), h('span.muted', 'stars')),
         h('div', h('b', game.state.xp.toLocaleString()), h('span.muted', 'total XP')))),
+    builds.trackPanel(track, { refresh: () => trackView(track.id) }),
     gamify.trackMastery(track),
     modules,
     projects.length > 0 && h('a.project-teaser', { href: '#/projects' },
@@ -504,7 +509,12 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
       draftKey: `${item.lessonKey}#${item.idx}`,
       // Projects: open with the learner's latest passing program, and remember each new one.
       carried: project ? game.state.projects[meta.moduleKey] : undefined,
-      onPassed: project ? codeNow => { game.state.projects[meta.moduleKey] = codeNow; game.save(); } : undefined,
+      onPassed: codeNow => {
+        if (project) game.state.projects[meta.moduleKey] = codeNow;
+        const added = builds.record(tracks, item, codeNow);   // "Your builds": the newest version of this piece
+        if (added) toast(builds.pieceToast(added), 'info');
+        game.save();
+      },
     });
     current = { item, view };
     typeTag.textContent = TYPE_LABEL[item.step.type] || item.step.type;
@@ -683,13 +693,14 @@ async function lessonView(trackId, moduleId, lessonId) {
   if (!onDetour && !game.isUnlocked(track, module, index)) { location.hash = '#/'; return; }
   let lesson;
   const slow = setTimeout(() => app.replaceChildren(loader(meta.title)), 150);
-  try { lesson = await api(`lesson/${key}`); } catch { clearTimeout(slow); return notFound(); }
+  const dream = builds.dreamParam(track);
+  try { lesson = await api(`lesson/${key}${dream ? `?dream=${encodeURIComponent(dream)}` : ''}`); } catch { clearTimeout(slow); return notFound(); }
   clearTimeout(slow);
 
   const items = lesson.steps.map((step, idx) => ({ step, lessonKey: key, idx, track: trackId, module: moduleId, lesson: lessonId }));
   const startAt = returning ? detour.step : 0;
   if (returning) setDetour(null);
-  play({
+  const start = () => play({
     title: `${module.title} · ${lesson.title}`, items, mode: 'lesson',
     startAt, prereqs: lesson.prereqs || [], detour: onDetour ? detour : null,
     meta: { key, lesson: meta, project: game.isProject(module), moduleKey: `${trackId}/${moduleId}` },
@@ -720,6 +731,7 @@ async function lessonView(trackId, moduleId, lessonId) {
       });
     },
   });
+  if (!onDetour && !returning && builds.needsReveal(track, key)) builds.revealScreen(app, track, start); else start();
 }
 
 function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice, siblings, detour, again }) {
@@ -744,6 +756,7 @@ function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, hea
         h('div', h('b', r.bestCombo), h('span.muted', 'best combo'))),
       bonus > 0 && h('p.muted.small', `Includes a ${bonus} XP completion bonus${r.replay ? ' (replays earn less)' : ''}.`),
       leveledUp && h('div.level-up', `⬆️ Level ${level.level}: ${level.rank}`),
+      !practice && track && builds.summaryPanel(track, key),
       fresh.length > 0 && h('div.summary-badges', fresh.map(a => h('div.badge-row', h('span.badge-icon', a.icon), h('div', h('strong', a.title), h('div.muted.small', a.text))))),
       h('div.summary-actions',
         detour && h('a.btn.primary.big', { href: detour.back }, `Back to ${detour.title}`),
@@ -1045,6 +1058,10 @@ function profile() {
       h('div.badges', game.ACHIEVEMENTS.map(a => h(`div.badge-card${s.achievements[a.id] ? '.earned' : ''}`,
         h('div.badge-icon', a.icon), h('div', h('strong', a.title), h('div.muted.small', a.text)))))),
     h('section.panel',
+      h('h2', 'Your path'),
+      h('p.muted', s.profile ? 'Your path, dream suggestions and daily goal come from the welcome questions.' : 'Answer a few questions to get a path through the topics, dream projects that fit you and a daily goal.'),
+      h('a.btn.ghost', { href: '#/welcome' }, s.profile ? 'Retake the questions' : 'Tailor the dojo to you')),
+    h('section.panel',
       h('h2', 'Settings'),
       setting('Text size', 'Make everything bigger: text, code, buttons and terminals.', h('select', {
         onchange: e => { s.settings.textSize = e.target.value; applyTextSize(); game.save(true); },
@@ -1074,7 +1091,7 @@ function route() {
   document.documentElement.dataset.codeLang = 'csharp';
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   switch (parts[0]) {
-    case undefined: return home();
+    case undefined: if (shouldWelcome()) { location.replace('#/welcome'); return; } return home();
     case 'track': return trackView(parts[1]);
     case 'labs': if (parts[1] === 'net' || parts[1] === 'linux') { leave = netLabs(page, parts[2], parts[1]); return; } return labsView(parts[1]);
     case 'workbench': leave = workbench(page); return;
@@ -1086,6 +1103,8 @@ function route() {
     case 'quick': return quickView();
     case 'challenge': return challengeView();
     case 'projects': return projectsView();
+    case 'builds': return builds.buildsView(page, tracks);
+    case 'welcome': return welcomeView(page, tracks);
     case 'playground': return playground();
     case 'profile': return profile();
     default: return notFound();

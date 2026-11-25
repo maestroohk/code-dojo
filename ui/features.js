@@ -13,6 +13,9 @@ const FEATURES = [
     { name: 'Graded code in Python, JavaScript, TypeScript', status: 'done', note: 'Same three kinds of check as C#. Charts graded by inspecting the figure.' },
     { name: 'Graded SQL', status: 'done', note: 'Real SQLite; results compared any-order, ordered, or by resulting table state.' },
     { name: 'EF Core exercises', status: 'done', note: 'EF Core with SQLite runs for real inside exercises.' },
+    { name: 'Your builds', status: 'done', link: '#/builds', note: 'Every topic assembles a real tool from your passing code. Pieces light up as you earn them; open it as a Code space or download a .zip. The Git topic builds gitkit (more topics are being converted).' },
+    { name: 'Dream projects to choose from', status: 'done', note: 'A topic can offer 4 to 5 dreams; pick one on the topic page, change it later, keep every piece you earned. Lessons can serve a different exercise per dream.' },
+    { name: 'Welcome questions and Your path', status: 'done', link: '#/welcome', note: 'Seven quick questions give you a path through the topics, dream suggestions and a daily goal. Retake from Profile.' },
     { name: 'Visualizers in lessons', status: 'done', note: 'Code in motion (step through programs) and LINQ in motion on learn cards.' },
   ] },
   { area: 'Labs', items: [

@@ -4,7 +4,9 @@ import { SQL_KEYWORD_LIST } from './util.js';
 // Tailwind classes inside class="..."); Ctrl+Space to complete and Ctrl+/ to toggle comments.
 // Attached to the textarea of ui/editor.js.
 
-const KIND_ICON = { method: 'ƒ', property: '◆', field: '▪', constant: 'π', event: '⚡', local: 'x', parameter: 'p', namespace: '{}', class: 'C', record: 'R', struct: 'S', interface: 'I', enum: 'E', keyword: 'k' };
+const KIND_ICON = { function: 'ƒ', variable: 'x', module: '{}', method: 'ƒ', property: '◆', field: '▪', constant: 'π', event: '⚡', local: 'x', parameter: 'p', namespace: '{}', class: 'C', record: 'R', struct: 'S', interface: 'I', enum: 'E', keyword: 'k' };
+// Languages whose completion comes from the server (the `remote` option).
+const REMOTE_LANGS = new Set(['csharp', 'python', 'javascript', 'typescript']);
 const PAIRS = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
 const VOID_TAGS = new Set('area base br col embed hr img input link meta source track wbr'.split(' '));
 
@@ -106,6 +108,9 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
       const m = MEMBERS[base] || {};
       return { word: dot[2], list: (m[dot[1]] || m._ || '').split(' ').filter(Boolean), min: 0 };
     }
+    // "text".  f().  xs[0].  : only the server can say what these are.
+    const anyDot = REMOTE_LANGS.has(L) && before.match(/[)\]"'`]\.(\w*)$/);
+    if (anyDot) return { word: anyDot[1], list: [], min: 0 };
     const w = before.match(/([A-Za-z_]\w*)$/);
     if (!w) return null;
     const words = new Set([...(vocab?.()?.words || []), ...(KW[base] || '').split(' ')]);
@@ -118,8 +123,8 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
     if (!enabled() && !force) return close();
     const ctx = context();
     if (!ctx || (ctx.word.length < ctx.min && !force)) return close();
-    // C#: the compiler knows the real members and what is in scope; ask it (debounced).
-    if (remote && lang() === 'csharp') {
+    // C#, Python, JS/TS: the server knows the real members and what is in scope; ask it (debounced).
+    if (remote && REMOTE_LANGS.has(lang())) {
       const ticket = ++asked;
       clearTimeout(timer);
       timer = setTimeout(async () => {

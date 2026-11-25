@@ -16,7 +16,15 @@ public static class Validator
         void Error(string where, string msg) { errors++; Console.WriteLine($"  ERROR {where}: {msg}"); }
         void Warn(string where, string msg) { warnings++; Console.WriteLine($"  warn  {where}: {msg}"); }
 
-        foreach (var track in content.Tracks().OfType<JsonObject>())
+        // Artifacts ("Your builds") and the build markers on code steps: checked per track.
+        var allTracks = content.Tracks();
+        foreach (var issue in Builds.Check(allTracks, content.TracksDir))
+        {
+            if (filter is not null && !issue.Where.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
+            if (issue.Error) Error(issue.Where, issue.Message); else Warn(issue.Where, issue.Message);
+        }
+
+        foreach (var track in allTracks.OfType<JsonObject>())
         foreach (var module in (track["modules"] as JsonArray ?? []).OfType<JsonObject>())
         foreach (var meta in (module["lessons"] as JsonArray ?? []).OfType<JsonObject>())
         {
@@ -43,6 +51,13 @@ public static class Validator
                 where += $" ({type})";
                 try
                 {
+                    if (step["build"] is { } build)
+                    {
+                        if (type != "code") throw new("\"build\" only works on code steps");
+                        if (build is not JsonObject b) throw new("\"build\" must be an object");
+                        if (b["transform"] is { } tf && Builds.Text(tf) is not { } tfText) throw new("build \"transform\" must be a string or an array of lines");
+                        else if (b["transform"] is not null && !Builds.Text(b["transform"])!.Contains("{{CODE}}")) throw new("build \"transform\" needs {{CODE}} where the learner's code goes");
+                    }
                     switch (type)
                     {
                         case "learn":
@@ -141,21 +156,37 @@ public static class Validator
                                 if ((int)item![1]! < 0 || (int)item[1]! >= buckets.Count) throw new($"item '{item[0]}' has a bad bucket");
                             break;
                         case "code":
-                            code++;
-                            Need(step, "prompt");
-                            var solution = Need(step, "solution");
-                            async Task<CheckResult> Grade(string c) => language == "csharp" ? await checker.Check(step, c)
-                                : language == "sql" ? SqlChecker.Check(step, c) : await PolyChecker.Check(langs, step, c, language);
-                            var good = await Grade(solution);
-                            if (!good.Passed)
+                            // A step with "variants" (one per dream) is several exercises: prove every one is solvable.
+                            // In a track with dreams, every step is checked once per dream (variant + lexicon applied).
+                            var trackDreams = (track["dreams"] as JsonArray ?? []).OfType<JsonObject>().Where(d => d["id"] is JsonValue).ToList();
+                            var versions = new List<(string Label, JsonObject Step)>();
+                            if (trackDreams.Count > 0)
+                                foreach (var d in trackDreams)
+                                    versions.Add(($" [dream {d["id"]}]", Content.ForDream(step, (string)d["id"]!, d["lexicon"] as JsonObject)));
+                            else
                             {
-                                var why = !good.Compiled
-                                    ? string.Join("; ", good.Diagnostics.Where(d => d.Severity == "error").Select(d => $"{d.File}({d.Line}) {d.Id} {d.Message}"))
-                                    : string.Join("; ", good.Tests.Where(t => !t.Pass).Select(t => $"{t.Name}: {t.Detail}")) + " " + good.Stderr;
-                                Error(where, "reference solution does not pass -> " + why.Replace("\n", " | "));
+                                versions.Add(("", step));
+                                foreach (var dreamId in (step["variants"] as JsonObject ?? []).Select(p => p.Key))
+                                    versions.Add(($" [dream {dreamId}]", Content.ApplyVariant(step, dreamId)));
                             }
-                            var starter = (string?)step["starter"] ?? "";
-                            if ((await Grade(starter)).Passed) Warn(where, "the starter code already passes");
+                            foreach (var (label, version) in versions)
+                            {
+                                code++;
+                                Need(version, "prompt");
+                                var solution = Need(version, "solution");
+                                async Task<CheckResult> Grade(string c) => language == "csharp" ? await checker.Check(version, c)
+                                    : language == "sql" ? SqlChecker.Check(version, c) : await PolyChecker.Check(langs, version, c, language);
+                                var good = await Grade(solution);
+                                if (!good.Passed)
+                                {
+                                    var why = !good.Compiled
+                                        ? string.Join("; ", good.Diagnostics.Where(d => d.Severity == "error").Select(d => $"{d.File}({d.Line}) {d.Id} {d.Message}"))
+                                        : string.Join("; ", good.Tests.Where(t => !t.Pass).Select(t => $"{t.Name}: {t.Detail}")) + " " + good.Stderr;
+                                    Error(where + label, "reference solution does not pass -> " + why.Replace("\n", " | "));
+                                }
+                                var starter = (string?)version["starter"] ?? "";
+                                if ((await Grade(starter)).Passed) Warn(where + label, "the starter code already passes");
+                            }
                             break;
                         default:
                             throw new($"unknown step type '{type}'");

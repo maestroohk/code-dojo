@@ -392,3 +392,106 @@ page draws it in layers and lights each part up when the stage that builds it is
 
 `stage` is 1-based. `flow` draws arrows between parts. A blueprint whose layers include `Endpoints` also
 gets a "Run my code in the Workbench" button, which opens the learner's latest passing stage as a live app.
+
+## Building a real artifact
+
+Every topic can quietly assemble a real, usable artifact (a tool, a service, a script kit, a database) from the
+learner's own passing code. The learner sees it as a dream on the topic page, watches its pieces light up as they
+pass lessons, and finds it under **Builds** (`#/builds`), where they can open it as a Code space or download a
+.zip. `tracks/git` is the reference: it builds **gitkit**, a .NET tool with real Git hooks. The full plan for every
+topic is in `docs/CURRICULUM.md`.
+
+### Declare the artifact in `track.json`
+
+```json
+"artifacts": [
+  {
+    "id": "gitkit",
+    "title": "gitkit",
+    "icon": "⎇",
+    "kind": "dotnet-console",
+    "pitch": "Your own Git sidekick: a command-line tool that refuses sloppy commit messages ...",
+    "summary": "One line for lists.",
+    "features": ["`gitkit lint-msg`: a commit-msg hook that enforces the 50/72 rules", "..."],
+    "preview": { "type": "terminal", "frames": [ { "cmd": "gitkit hash-object README.md", "out": ["ce0136..."] } ] },
+    "run": "dotnet run -- help",
+    "template": {
+      "gitkit.csproj": ["<Project Sdk=\"Microsoft.NET.Sdk\">", "..."],
+      "Program.cs": ["return GitKit.Kit.Run(args);"],
+      "Lint.cs": ["// a stub until the learner writes it", "..."]
+    }
+  }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Unique across all tracks; 1-40 letters, digits, `-` or `_`, starting with a letter. Also the Code space name. |
+| `kind` | `dotnet-console`, `dotnet-web`, `python`, `node`, `shell`, `sql`, `docs` or `infra`. Picks the kind of Code space it opens as (`shell`, `sql`, `docs`, `infra` open as plain folders). |
+| `pitch`, `features`, `preview` | The dream reveal: shown big on the topic page and before the topic's first lesson, then as a compact header. `preview` may hold `frames` (a terminal session typed out), `demo` (Markdown, usually a fenced code block) and/or `image` (a path under the track folder, e.g. `assets/kit.png`; .png .jpg .gif .webp .svg). |
+| `run` | How to run the finished thing; shown on the Builds page. |
+| `template` | Every file that is not a lesson piece: project files, the host program, README, and a **stub for every piece** so the artifact builds and runs at every stage. Each value is a string or an array of lines. Paths are relative, use `/`, and may not use `..`, `.git` or absolute paths. |
+
+### Mark the pieces on code steps
+
+Any code step, in any language (C#, Python, TypeScript, SQL), can add a piece:
+
+```json
+{ "type": "code", "title": "A commit message linter", ...,
+  "build": { "artifact": "gitkit", "file": "Lint.cs", "title": "Commit message linter",
+             "unlocks": "gitkit lint-msg now refuses sloppy commit messages.",
+             "transform": ["namespace GitKit;", "", "public static partial class Kit", "{", "    {{CODE}}", "}"] } }
+```
+
+- When the learner passes the step, their code (after `transform`) is saved as the newest version of `file`.
+  Revealing the solution does not count.
+- `transform` (optional) wraps the code into a real file: `{{CODE}}` marks where it goes, and when `{{CODE}}` is
+  indented every line of the code gets that indent. Use it to put a learner's top-level methods into a class.
+- `mode`: `replace` (default) or `append` (adds to what the template and earlier pieces left in the file).
+- `stub` (optional): what the file holds until the piece is earned, when the template does not have the file.
+- `unlocks` (optional): one line for the "piece added" toast.
+- **Pieces grow by replacement.** Several lessons may build the same file with `replace`; pieces apply in teaching
+  order (lesson key, then step), so a later lesson's version replaces an earlier one. That is intended. `dojo
+  validate` only warns when two steps of the *same* lesson replace the same file, or when a `replace` wipes what
+  earlier steps appended.
+- The template's stub and the learner's piece must expose the same names, so the host compiles either way. In
+  gitkit, `Kit.cs` calls `Lint(...)`; the stub throws "not built yet, pass lesson X" and the piece does the work.
+
+### Dreams: let the learner choose
+
+Instead of one fixed artifact, a track may offer 4 to 5 **dreams**: themes over one shared skeleton. The learner
+picks one on the topic page (the profile from the welcome questions suggests one) and can change it later; every
+dream keeps its own pieces, and pieces carry over to the new dream when its skeleton has the same file.
+
+```json
+"dreams": [
+  { "id": "sidekick", "title": "Sidekick", "icon": "◆", "pitch": "...", "tags": ["productivity", "web"],
+    "needs": ["docker"], "preview": { ... }, "lexicon": { "App": "Sidekick", "item": "task" },
+    "artifact": { "kind": "dotnet-web", "template": { ... }, "run": "dotnet run --project src/sk" } }
+]
+```
+
+- The first dream is the flagship and the default. The dream's `id` is its artifact id.
+- `tags` match the interests in the learner's profile; `needs: ["docker"]` lowers it for Windows-only learners.
+- A build marker for the chosen dream says `"artifact": "@dream"` (or leaves `artifact` out).
+- **Lexicon**: `{{key}}` in a step's title, prompt, starter, solution, template, tests, explain, hints, a learn
+  card's body and `build.file` / `build.title` is replaced from the chosen dream's `lexicon`. `{{CODE}}` and unknown
+  keys are left alone.
+- **Variants**: when wording is not enough, a step carries `"variants": { "<dreamId>": { ... } }`. A variant
+  overrides any of `prompt`, `starter`, `solution`, `tests`, `template`, `require`, `forbid`, `hints`, `explain`,
+  `title`, and the piece's `file`, `transform`, `stub`, `unlocks` (or a nested `"build": { ... }`). The server
+  serves and grades the version for the learner's dream, so tests always match the prompt shown.
+- `dojo validate` checks every step once per dream, so every variant's reference solution must pass.
+
+### What `dojo validate` checks
+
+Artifact and dream ids are valid and unique, `kind` is known, template paths are safe and values are text,
+preview images exist in the track folder, every marker names a declared artifact (or a dream track for `@dream`),
+marker files are safe paths, variants name real dreams, and each reference solution passes for every dream.
+It warns when an artifact has no pitch, no `run`, or no lesson that builds it.
+
+### Export
+
+"Open as a Code space" writes the template plus the learner's pieces into a space named after the artifact. The
+space remembers the hash of every file it wrote. A file the learner has edited in the space since is never
+overwritten: the new version is written beside it as `name.dojo-new`. "Download as .zip" gives the same files.

@@ -82,8 +82,9 @@ app.UseStaticFiles(new StaticFileOptions { FileProvider = ui });
 
 app.MapGet("/api/tracks", () => Results.Text(content.Tracks().ToJsonString(), "application/json"));
 
-app.MapGet("/api/lesson/{track}/{module}/{lesson}", (string track, string module, string lesson) =>
-    content.Lesson(track, module, lesson) is { } l
+// ?dream= serves each step's variant for the learner's chosen dream (see Builds.cs, "dreams").
+app.MapGet("/api/lesson/{track}/{module}/{lesson}", (string track, string module, string lesson, string? dream) =>
+    content.Lesson(track, module, lesson, dream) is { } l
         ? Results.Text(l.ToJsonString(), "application/json")
         : Results.NotFound());
 
@@ -144,7 +145,7 @@ app.MapPost("/api/check", async (CheckRequest req) =>
 {
     var language = content.Language(req.Track);
     if (language != "csharp" && !PolyChecker.Handles(language) && !SqlChecker.Handles(language)) return Results.BadRequest("unsupported language");
-    var lesson = content.Lesson(req.Track, req.Module, req.Lesson);
+    var lesson = content.Lesson(req.Track, req.Module, req.Lesson, req.Dream);
     if ((lesson?["steps"] as JsonArray)?.ElementAtOrDefault(req.Step) is not JsonObject step || (string?)step["type"] != "code")
         return Results.NotFound();
     if (language == "sql") return Results.Json<object>(SqlChecker.Check(step, req.Code ?? ""), json);
@@ -160,7 +161,7 @@ app.MapPost("/api/pki", (PkiLab.Request req) => Results.Json(PkiLab.Run(req), js
 app.MapPost("/api/linqviz", async (LinqViz.Request req) => Results.Json(await LinqViz.Run(runner, req), json));
 
 // Code intelligence for the editors: type-aware completion, go to definition, references, hover.
-app.MapPost("/api/intel", (CodeIntel.Request req) => Results.Json(CodeIntel.Run(runner, req), json));
+app.MapPost("/api/intel", async (CodeIntel.Request req) => Results.Json(await CodeIntel.RunAny(runner, req), json));
 
 // Code in motion: run a program with every statement traced (line, variables, call stack, output).
 app.MapPost("/api/trace", async (CodeTrace.Request req) => Results.Json(await CodeTrace.Run(runner, req), json));
@@ -177,6 +178,8 @@ NetLabs.Map(app, root, stateDir);
 PyEnv.Map(app);   // one-click data science environment (numpy, pandas, matplotlib)
 // Code spaces: real multi-file .NET projects with NuGet packages, built and run with the dotnet CLI (CodeSpaces.cs).
 CodeSpaces.Map(app, runner);
+// Your builds: the real artifact each topic assembles from the learner's passing code (Builds.cs).
+Builds.Map(app, content, CodeSpaces.DefaultRoot());
 // Database studio: SQLite files plus PostgreSQL / SQL Server / MySQL in Docker, one query UI (DbStudio.cs).
 DbStudio.Map(app, stateDir);
 app.Lifetime.ApplicationStopping.Register(apps.Dispose);
@@ -204,4 +207,4 @@ static string FindRoot()
 }
 
 record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework, string? Language = null, System.Text.Json.Nodes.JsonNode? Setup = null);
-record CheckRequest(string Track, string Module, string Lesson, int Step, string? Code);
+record CheckRequest(string Track, string Module, string Lesson, int Step, string? Code, string? Dream = null);

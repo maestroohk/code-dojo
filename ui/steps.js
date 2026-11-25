@@ -594,7 +594,7 @@ function code(step, ctx) {
     async check() {
       setBusy(true, 'Running the checks…');
       try {
-        const r = await api('check', { track: ctx.track, module: ctx.module, lesson: ctx.lesson, step: ctx.idx, code: editor.value });
+        const r = await api('check', { track: ctx.track, module: ctx.module, lesson: ctx.lesson, step: ctx.idx, code: editor.value, dream: step.variant });
         editor.mark(r.diagnostics);
         renderRunOutput(panel, r);
         passed = r.passed;

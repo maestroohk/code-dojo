@@ -5,6 +5,8 @@ import { h, highlight, api } from './util.js';
 import { attachAssist } from './assist.js';
 
 /** The learner's choice, shared by every editor. */
+/** Languages the server answers code-intelligence questions for (definition, references, hover, completion). */
+const INTEL_LANGS = new Set(['csharp', 'python', 'javascript', 'typescript']);
 export const autocompleteOn = () => localStorage.getItem('dojo-autocomplete') !== 'off';
 export const setAutocomplete = on => localStorage.setItem('dojo-autocomplete', on ? 'on' : 'off');
 
@@ -65,10 +67,14 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
   });
 
   const lang = () => (typeof language === 'function' ? language() : language) || document.documentElement.dataset.codeLang || 'csharp';
-  // ---- code intelligence (C#): the server compiles the files with Roslyn and answers questions.
-  const allFiles = () => (files ? files() : [{ path, code: area.value }]).map(f => (f.path === path ? { path, code: area.value } : f));
-  const intel = (action, position) => api('intel', { action, files: allFiles(), path, position, references: references?.() });
-  const isCs = () => lang() === 'csharp';
+  // ---- code intelligence: C# (Roslyn), Python (server/intel/pyintel.py) and JavaScript/TypeScript (server/JsIntel.cs).
+  // The server reads the files and answers questions; the language goes with each request.
+  const allFiles = () => {
+    const list = (files ? files() : [{ path, code: area.value }]).map(f => (f.path === path ? { path, code: area.value } : f));
+    return list.some(f => f.path === path) ? list : [...list, { path, code: area.value }];
+  };
+  const intel = (action, position) => api('intel', { action, files: allFiles(), path, position, references: references?.(), language: lang() });
+  const hasIntel = () => INTEL_LANGS.has(lang());
   if (assist) attachAssist(area, {
     language: lang, enabled: autocompleteOn, insert: text => insert(text),
     onPopupHost: p => root.querySelector('.ed-code').append(p),
@@ -92,13 +98,13 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
     tip.style.left = `${Math.min(x, window.innerWidth - 420)}px`; tip.style.top = `${y + 18}px`;
   };
   async function goToDefinition(pos) {
-    if (!isCs()) return;
+    if (!hasIntel()) return;
     const r = await intel('definition', pos).catch(() => null);
     if (r?.definition) jump(r.definition);
     else if (r?.external) { const c = caretXY(pos); showTip(r.external, c.x, c.y); }
   }
   async function findReferences(pos) {
-    if (!isCs()) return;
+    if (!hasIntel()) return;
     const r = await intel('references', pos).catch(() => null);
     const list = r?.references || [];
     refs.hidden = false;
@@ -127,7 +133,7 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
   }
   let hoverTimer = null, lastHover = -1;
   area.addEventListener('mousemove', e => {
-    if (!isCs()) return;
+    if (!hasIntel()) return;
     clearTimeout(hoverTimer);
     const pos = offsetAt(e);
     if (pos < 0 || !/\w/.test(area.value[pos] || '')) { tip.hidden = true; lastHover = -1; return; }
@@ -141,7 +147,7 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
   area.addEventListener('mouseleave', () => { clearTimeout(hoverTimer); tip.hidden = true; lastHover = -1; });
   area.addEventListener('mousedown', e => {
     tip.hidden = true;
-    if ((e.ctrlKey || e.metaKey) && isCs()) { const pos = offsetAt(e); if (pos >= 0) { e.preventDefault(); goToDefinition(pos); } }
+    if ((e.ctrlKey || e.metaKey) && hasIntel()) { const pos = offsetAt(e); if (pos >= 0) { e.preventDefault(); goToDefinition(pos); } }
   });
   area.addEventListener('keydown', e => {
     if (e.key === 'F12') { e.preventDefault(); (e.shiftKey ? findReferences : goToDefinition)(area.selectionStart); }

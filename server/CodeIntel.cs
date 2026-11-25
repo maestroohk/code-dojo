@@ -13,12 +13,31 @@ namespace CodeDojo;
 public static class CodeIntel
 {
     public record FileText(string Path, string Code);
-    public record Request(string Action, FileText[] Files, string Path, int Position, string[]? References);
+    /// <summary>Language: csharp (the default), python, javascript or typescript.</summary>
+    public record Request(string Action, FileText[] Files, string Path, int Position, string[]? References, string? Language = null);
     public record Item(string Label, string Kind, string? Detail);
     public record Location(string Path, int Line, int Column, int Length, string Preview);
     public record Response(List<Item>? Items, Location? Definition, string? External, List<Location>? References, string? Hover);
 
     static readonly ConcurrentDictionary<string, MetadataReference> ExtraRefs = new();
+
+    /// <summary>Answers for any language: C# here (Roslyn), Python in PyIntel, JavaScript/TypeScript in JsIntel.</summary>
+    public static async Task<Response> RunAny(CSharpRunner runner, Request req)
+    {
+        var lang = req.Language?.ToLowerInvariant() ?? (req.Path ?? "") switch
+        {
+            var p when p.EndsWith(".py", StringComparison.OrdinalIgnoreCase) => "python",
+            var p when System.Text.RegularExpressions.Regex.IsMatch(p, @"\.(m|c)?tsx?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase) => "typescript",
+            var p when System.Text.RegularExpressions.Regex.IsMatch(p, @"\.(m|c)?jsx?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase) => "javascript",
+            _ => "csharp",
+        };
+        return lang switch
+        {
+            "python" => await PyIntel.Run(req),
+            "javascript" or "typescript" or "js" or "ts" => JsIntel.Run(req),
+            _ => Run(runner, req),
+        };
+    }
 
     public static Response Run(CSharpRunner runner, Request req)
     {

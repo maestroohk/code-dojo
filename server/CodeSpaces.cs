@@ -22,7 +22,12 @@ public sealed partial class CodeSpaces : IDisposable
     const long FileCap = 1_800_000;                      // under the server's 2 MB request limit
     static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(5), TestTimeout = TimeSpan.FromMinutes(10),
         PackageTimeout = TimeSpan.FromMinutes(3), CreateTimeout = TimeSpan.FromMinutes(5), IdleRun = TimeSpan.FromMinutes(20);
-    static readonly HashSet<string> SkipDirs = new(StringComparer.OrdinalIgnoreCase) { "bin", "obj", ".git", ".vs", ".idea", "node_modules", "TestResults" };
+    static readonly HashSet<string> SkipDirs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "bin", "obj", ".git", ".vs", ".idea", "node_modules", "TestResults",
+        // Python and Node: environments, caches and build output the learner never edits.
+        ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".next", ".turbo",
+    };
     const string MetaFile = ".dojo-space.json";
 
     public string Root { get; }
@@ -53,12 +58,13 @@ public sealed partial class CodeSpaces : IDisposable
 
     // ================================================================ records
 
-    public record Template(string Id, string Name, string Description);
+    /// <summary>A starting point. <see cref="Kind"/> is dotnet, python or node.</summary>
+    public record Template(string Id, string Name, string Description, string Kind = "dotnet");
     public record CreateRequest(string? Name, string? Template);
     public record WriteRequest(string? Path, string? Code);
     public record FsRequest(string? Op, string? Path, string? To);
     public record JobRequest(string? Project);
-    public record PackageRequest(string? Project, string? Id, string? Version, bool? Remove);
+    public record PackageRequest(string? Project, string? Id, string? Version, bool? Remove, bool? Dev = null);
     public record StdinRequest(string? Text);
     public record SendRequest(string? Method, string? Path, string[][]? Headers, string? Body, string? ContentType);
     public record Problem(string Severity, string Code, string Message, string? File, int Line, int Column, string? Project);
@@ -71,6 +77,13 @@ public sealed partial class CodeSpaces : IDisposable
         new("web", "Web API", "ASP.NET Core minimal API on a private port. Call it from the request panel or your browser."),
         new("solution", "Library + tests", "A solution with three projects: a class library, a console app that uses it, and an xUnit test project."),
         new("empty", "Empty folder", "Nothing at all. Add your own files and projects."),
+        new("py-script", "Python script", "main.py in its own virtual environment (.venv). Add PyPI packages from the side panel.", "python"),
+        new("py-package", "Python package + tests", "A package folder, a main.py that uses it, and pytest tests. pyproject.toml configures pytest.", "python"),
+        new("py-api", "Python HTTP API", "A small JSON API on Python's built-in http.server (no packages needed). Swap in FastAPI later if you like.", "python"),
+        new("node-script", "Node.js script", "index.js as an ES module, with a package.json for npm packages.", "node"),
+        new("node-ts", "TypeScript script", "main.ts that Node runs directly (Node strips the types), plus tsconfig.json for the editor.", "node"),
+        new("node-express", "Express API", "A JSON API with Express on a private port. Needs npm install (done for you when the registry is reachable).", "node"),
+        new("node-next", "Next.js + Tailwind", "A Next.js app (app router, TypeScript) styled with Tailwind CSS. Needs npm install.", "node"),
     ];
 
     sealed class SpaceState
@@ -96,6 +109,9 @@ public sealed partial class CodeSpaces : IDisposable
         public Task Done = Task.CompletedTask;
         public string? FailedTest, FailedMessage;
         public bool ExpectMessage;
+        /// <summary>dotnet, python or node: which output parser reads this job's lines.</summary>
+        public string Lang = "dotnet";
+        public readonly PolyParser Parser = new();
         public bool Running => Status == "running";
         public string? Url => Web && Port > 0 ? $"http://127.0.0.1:{Port}" : null;
     }
@@ -370,7 +386,9 @@ public sealed partial class CodeSpaces : IDisposable
                 try { template = (string?)JsonNode.Parse(File.ReadAllText(Path.Combine(d.FullName, MetaFile)))?["template"]; } catch { }
                 var projects = ProjectFiles(d.FullName).Select(Path.GetFileNameWithoutExtension).ToList();
                 var job = _states.TryGetValue(d.Name, out var s) ? s.Job : null;
-                return new { name = d.Name, template, modified = d.LastWriteTimeUtc, projects, running = job is { Running: true, Kind: "run" } };
+                var kind = DetectKind(d.FullName);
+                if (kind != "dotnet") projects = PolySummary(d.FullName, kind);
+                return new { name = d.Name, template, kind, modified = d.LastWriteTimeUtc, projects, running = job is { Running: true, Kind: "run" } };
             }).ToList();
         return new { root = Root, templates = Templates, spaces };
     }
@@ -378,10 +396,11 @@ public sealed partial class CodeSpaces : IDisposable
     public object Detail(string name)
     {
         if (SpaceDir(name) is not { } dir || !Directory.Exists(dir)) return new { error = "No such space." };
+        if (DetectKind(dir) is not "dotnet" and var kind) return PolyDetail(name, dir, kind);
         var sln = SolutionFile(dir);
         return new
         {
-            name, dir, solution = sln is null ? null : Rel(dir, sln),
+            name, dir, kind = "dotnet", solution = sln is null ? null : Rel(dir, sln),
             projects = ProjectFiles(dir).Select(p => DescribeProject(dir, p)).ToList(),
             tree = Tree(dir),
             job = _states.TryGetValue(name, out var s) && s.Job is { } j ? Describe(j) : null,
@@ -433,8 +452,9 @@ public sealed partial class CodeSpaces : IDisposable
         var dir = Path.Combine(Root, req.Name!);
         if (Directory.Exists(dir) || File.Exists(dir)) return new { error = $"A space called \"{req.Name}\" already exists." };
         Directory.CreateDirectory(dir);
-        File.WriteAllText(Path.Combine(dir, MetaFile), JsonSerializer.Serialize(new { template = tpl.Id, created = DateTimeOffset.UtcNow }));
+        File.WriteAllText(Path.Combine(dir, MetaFile), JsonSerializer.Serialize(new { template = tpl.Id, kind = tpl.Kind, created = DateTimeOffset.UtcNow }));
         if (tpl.Id == "empty") return new { ok = true, name = req.Name };
+        if (tpl.Kind != "dotnet") return await CreatePoly(req.Name!, dir, tpl);
 
         var p = ProjectName(req.Name!);
         var s = State(req.Name!);
@@ -630,15 +650,19 @@ public sealed partial class CodeSpaces : IDisposable
         return $"namespace {ns};\n\npublic {kind} {type}\n{{\n}}\n";
     }
 
-    /// <summary>Every C# file of the space (for the intelligence service): small files only, newline-normalized.</summary>
-    public object Sources(string name)
+    /// <summary>
+    /// Every source file of the space in one language (for the intelligence service): small files only,
+    /// newline-normalized. C# by default; "python" or "typescript"/"javascript" (all JS and TS files).
+    /// </summary>
+    public object Sources(string name, string? lang = null)
     {
         if (SpaceDir(name) is not { } dir || !Directory.Exists(dir)) return new { error = "No such space." };
+        var exts = SourceExtensions(lang);
         var files = new List<object>();
         long total = 0;
         foreach (var (path, isDir, size) in Tree(dir))
         {
-            if (isDir || !path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+            if (isDir || !exts.Contains(Path.GetExtension(path))) continue;
             var full = Path.Combine(dir, path);
             if (size > 300_000 || (total += size) > 4_000_000 || files.Count >= SourceCap) continue;
             files.Add(new { path, code = Normalize(File.ReadAllText(full)) });
@@ -661,6 +685,11 @@ public sealed partial class CodeSpaces : IDisposable
             s.Lines.Add(new(Next(), stream, text));
             if (s.Lines.Count > LineCap) s.Lines.RemoveRange(0, s.Lines.Count - LineCap);
             if (stream == "sys" || job is null) return;
+            if (job.Lang != "dotnet")
+            {
+                foreach (var pp in job.Parser.Feed(job.Lang, text, dir)) AddProblem(s, pp);
+                return;
+            }
             if (ParseDiagnostic(text, dir) is { } p) AddProblem(s, p);
             else if (job.Kind == "test") ParseTestLine(s, job, text, dir);
         }
@@ -695,7 +724,7 @@ public sealed partial class CodeSpaces : IDisposable
         started = j.Started, ms = (long)((j.Running ? DateTimeOffset.UtcNow : j.Ended) - j.Started).TotalMilliseconds,
     };
 
-    (Job? Job, string? Error) StartJob(SpaceState s, string dir, string kind, string? project, Func<Job, Task<int>> body, bool web = false)
+    (Job? Job, string? Error) StartJob(SpaceState s, string dir, string kind, string? project, Func<Job, Task<int>> body, bool web = false, string lang = "dotnet")
     {
         Job job;
         lock (s.Gate)
@@ -711,7 +740,7 @@ public sealed partial class CodeSpaces : IDisposable
             }
             if (kind == "run" && _states.Values.Count(x => x.Job is { Running: true, Kind: "run" }) >= MaxRuns)
                 return (null, $"At most {MaxRuns} programs can run at once. Stop one in another space first.");
-            job = new Job { Kind = kind, Project = project, Web = web };
+            job = new Job { Kind = kind, Project = project, Web = web, Lang = lang };
             s.Job = job;
             s.Problems.Clear(); s.ProblemKeys.Clear();
         }
@@ -738,9 +767,9 @@ public sealed partial class CodeSpaces : IDisposable
         try { if (j.Proc is { HasExited: false } p) { p.Kill(entireProcessTree: true); p.WaitForExit(5000); } } catch { }
     }
 
-    ProcessStartInfo Psi(string cwd, IEnumerable<string> args)
+    ProcessStartInfo Psi(string cwd, IEnumerable<string> args, string? exe = null)
     {
-        var psi = new ProcessStartInfo(_dotnet)
+        var psi = new ProcessStartInfo(exe ?? _dotnet)
         {
             WorkingDirectory = cwd,
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
@@ -763,13 +792,17 @@ public sealed partial class CodeSpaces : IDisposable
         return psi;
     }
 
-    /// <summary>Run dotnet with <paramref name="args"/>, streaming every line into the space's output.</summary>
-    async Task<int> Exec(SpaceState s, Job job, string cwd, IReadOnlyList<string> args, TimeSpan? timeout, Action<ProcessStartInfo>? configure)
+    /// <summary>
+    /// Run dotnet (or <paramref name="exe"/>, shown as <paramref name="shown"/>) with <paramref name="args"/>,
+    /// streaming every line into the space's output. Problems are parsed relative to <paramref name="spaceDir"/>.
+    /// </summary>
+    async Task<int> Exec(SpaceState s, Job job, string cwd, IReadOnlyList<string> args, TimeSpan? timeout, Action<ProcessStartInfo>? configure,
+        string? exe = null, string? shown = null, string? spaceDir = null, int hide = 0)
     {
-        var dir = cwd;
+        var dir = spaceDir ?? cwd;
         if (job.Stopped) return -1;
-        Append(s, null, "sys", "> dotnet " + string.Join(' ', args.Select(a => a.Contains(' ') ? $"\"{a}\"" : a)), dir);
-        var psi = Psi(cwd, args);
+        Append(s, null, "sys", $"> {shown ?? "dotnet"} " + string.Join(' ', args.Skip(hide).Select(a => a.Contains(' ') ? $"\"{a}\"" : a)), dir);
+        var psi = Psi(cwd, args, exe);
         configure?.Invoke(psi);
         var p = Process.Start(psi)!;
         job.Proc = p;
@@ -833,14 +866,15 @@ public sealed partial class CodeSpaces : IDisposable
     }
 
 
-    public object Build(string name, JobRequest req) => Launch(name, req.Project, "build", (s, dir, target, job) =>
+    public object Build(string name, JobRequest req) => PolyKind(name) is { } k ? PolyBuild(name, k, req) : Launch(name, req.Project, "build", (s, dir, target, job) =>
         Exec(s, job, dir, ["build", Rel(dir, target), "-nologo", "-nodeReuse:false", "-v:minimal"], BuildTimeout, null));
 
-    public object Test(string name, JobRequest req) => Launch(name, req.Project, "test", (s, dir, target, job) =>
+    public object Test(string name, JobRequest req) => PolyKind(name) is { } k ? PolyTest(name, k, req) : Launch(name, req.Project, "test", (s, dir, target, job) =>
         Exec(s, job, dir, ["test", Rel(dir, target), "-nologo", "--logger", "console;verbosity=normal"], TestTimeout, null));
 
     public object Run(string name, JobRequest req)
     {
+        if (PolyKind(name) is { } k) return PolyRun(name, k, req);
         int port;
         using (var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0)) { probe.Start(); port = ((IPEndPoint)probe.LocalEndpoint).Port; }
         return Launch(name, req.Project, "run", async (s, dir, target, job) =>
@@ -879,6 +913,7 @@ public sealed partial class CodeSpaces : IDisposable
 
     public object ChangePackage(string name, PackageRequest req)
     {
+        if (PolyKind(name) is { } k) return PolyPackage(name, k, req);
         if (!ValidPackageId(req.Id)) return new { error = "That is not a valid package id." };
         if (req.Version is { Length: > 0 } && !ValidVersion(req.Version)) return new { error = "That is not a valid version." };
         if (string.IsNullOrWhiteSpace(req.Project) || !req.Project.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)) return new { error = "Pick the project to add the package to." };
@@ -893,7 +928,7 @@ public sealed partial class CodeSpaces : IDisposable
         });
     }
 
-    public object Restore(string name, JobRequest req) => Launch(name, req.Project, "restore", (s, dir, target, job) =>
+    public object Restore(string name, JobRequest req) => PolyKind(name) is { } k ? PolyRestore(name, k) : Launch(name, req.Project, "restore", (s, dir, target, job) =>
         Exec(s, job, dir, ["restore", Rel(dir, target)], BuildTimeout, null));
 
     object Launch(string name, string? project, string kind, Func<SpaceState, string, string, Job, Task<int>> body, bool webCheck = false)
@@ -1067,7 +1102,7 @@ public sealed partial class CodeSpaces : IDisposable
         app.MapGet("/api/spaces/{name}/file", (string name, string? path) => J(spaces.ReadFile(name, path)));
         app.MapPost("/api/spaces/{name}/file", (string name, WriteRequest req) => J(spaces.WriteFile(name, req)));
         app.MapPost("/api/spaces/{name}/fs", (string name, FsRequest req) => J(spaces.Fs(name, req)));
-        app.MapGet("/api/spaces/{name}/sources", (string name) => J(spaces.Sources(name)));
+        app.MapGet("/api/spaces/{name}/sources", (string name, string? lang) => J(spaces.Sources(name, lang)));
         app.MapPost("/api/spaces/{name}/build", (string name, JobRequest req) => J(spaces.Build(name, req)));
         app.MapPost("/api/spaces/{name}/run", (string name, JobRequest req) => J(spaces.Run(name, req)));
         app.MapPost("/api/spaces/{name}/test", (string name, JobRequest req) => J(spaces.Test(name, req)));
@@ -1080,6 +1115,7 @@ public sealed partial class CodeSpaces : IDisposable
         app.MapGet("/api/nuget/search", async (string? q, int? take) => J(await spaces.Search(q, take)));
         app.MapGet("/api/nuget/versions", async (string? id) => J(await spaces.Versions(id)));
         MapDebug(app, spaces, runner, json);   // the time-travel debugger (CodeSpaces.Debug.cs, CodeDebugger.cs)
+        MapPoly(app, spaces, json);            // Python and Node spaces: PyPI and npm (CodeSpaces.Poly.cs)
         app.Lifetime.ApplicationStopping.Register(spaces.Dispose);
         return spaces;
     }
