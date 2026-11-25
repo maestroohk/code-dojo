@@ -17,7 +17,10 @@ export function h(tag, ...rest) {
         if (k === 'html') el.innerHTML = v;
         else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
         else if (k === 'dataset') Object.assign(el.dataset, v);
-        else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+        else if (k === 'style' && typeof v === 'object') {
+          // Custom properties (--name) need setProperty; Object.assign silently drops them.
+          for (const [p, val] of Object.entries(v)) p.startsWith('--') ? el.style.setProperty(p, val) : (el.style[p] = val);
+        }
         else if (k in el && k !== 'list') el[k] = v;
         else el.setAttribute(k, v);
       }
@@ -91,7 +94,20 @@ const JS_KEYWORDS = new Set(('break case catch class const continue debugger def
   'declare namespace satisfies static get set').split(' '));
 const PY_TOKEN = /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|[rRbBfFuU]{0,2}"(?:\\.|[^"\\\n])*"?|[rRbBfFuU]{0,2}'(?:\\.|[^'\\\n])*'?)|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?j?\b)|([A-Za-z_]\w*)|([\s\S])/g;
 const JS_TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(`(?:\\.|[^`\\])*`?|"(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?)|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?n?\b)|([A-Za-z_$][\w$]*)|([\s\S])/g;
+// SQL: keywords in any case, -- and /* */ comments, 'strings' with '' escapes.
+export const SQL_KEYWORD_LIST = ('SELECT FROM WHERE AND OR NOT IN IS NULL AS ON JOIN INNER LEFT RIGHT FULL OUTER CROSS NATURAL USING ' +
+  'GROUP BY ORDER HAVING LIMIT OFFSET DISTINCT ALL UNION INTERSECT EXCEPT INSERT INTO VALUES UPDATE SET DELETE CREATE TABLE VIEW ' +
+  'INDEX UNIQUE PRIMARY KEY FOREIGN REFERENCES DEFAULT CHECK CONSTRAINT DROP ALTER ADD COLUMN RENAME TO IF EXISTS CASE WHEN THEN ' +
+  'ELSE END BETWEEN LIKE GLOB ESCAPE ASC DESC WITH RECURSIVE BEGIN COMMIT ROLLBACK TRANSACTION SAVEPOINT RELEASE TRIGGER AFTER BEFORE ' +
+  'INSTEAD OF FOR EACH ROW CAST COLLATE NOCASE AUTOINCREMENT INTEGER TEXT REAL BLOB NUMERIC VARCHAR CHAR INT BIGINT BOOLEAN DATE ' +
+  'TIMESTAMP DECIMAL SERIAL TRUE FALSE OVER PARTITION WINDOW ROWS RANGE PRECEDING FOLLOWING CURRENT UNBOUNDED FILTER RETURNING ' +
+  'CONFLICT REPLACE IGNORE ABORT EXPLAIN QUERY PLAN PRAGMA VACUUM ANALYZE TOP IDENTITY GO SCHEMA DATABASE TRUNCATE MERGE MATCHED OUTPUT ' +
+  'COUNT SUM AVG MIN MAX COALESCE IFNULL NULLIF ROUND LENGTH UPPER LOWER SUBSTR TRIM ABS STRFTIME DATE DATETIME JULIANDAY ' +
+  'GROUP_CONCAT ROW_NUMBER RANK DENSE_RANK LAG LEAD FIRST_VALUE LAST_VALUE NTILE IIF INSTR PRINTF TOTAL').split(' ');
+const SQL_KEYWORDS = new Set(SQL_KEYWORD_LIST.flatMap(k => [k, k.toLowerCase()]));
+const SQL_TOKEN = /(--[^\n]*|\/\*[\s\S]*?\*\/)|('(?:''|[^'])*'?)|(\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([A-Za-z_]\w*)|([\s\S])/g;
 const LANGS = {
+  sql: [SQL_TOKEN, SQL_KEYWORDS], sqlite: [SQL_TOKEN, SQL_KEYWORDS], postgres: [SQL_TOKEN, SQL_KEYWORDS], tsql: [SQL_TOKEN, SQL_KEYWORDS], mysql: [SQL_TOKEN, SQL_KEYWORDS],
   python: [PY_TOKEN, PY_KEYWORDS], py: [PY_TOKEN, PY_KEYWORDS],
   javascript: [JS_TOKEN, JS_KEYWORDS], js: [JS_TOKEN, JS_KEYWORDS], typescript: [JS_TOKEN, JS_KEYWORDS], ts: [JS_TOKEN, JS_KEYWORDS],
   tsx: [JS_TOKEN, JS_KEYWORDS], jsx: [JS_TOKEN, JS_KEYWORDS], html: [JS_TOKEN, JS_KEYWORDS], java: [CS_TOKEN, CS_KEYWORDS],

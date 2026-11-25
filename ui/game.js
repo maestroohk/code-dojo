@@ -15,7 +15,17 @@ const DEFAULTS = () => ({
   workbench: null,    // the project workbench: apps, saved requests
   stats: { correct: 0, wrong: 0, codePassed: 0, perfect: 0, hints: 0, drags: 0, fixes: 0, bestCombo: 0, practice: 0, reviewed: 0, bosses: 0 },
   settings: { freeRoam: false, dailyGoal: 60, sound: true, typing: false },
+  // The habit layer (see habits.js, quests.js, mastery.js, rewards.js). Older saves get these on load.
+  habit: { freezes: 0, frozen: {}, freezeDays: {}, celebrated: [], best: 0, comebackDay: null, usedFreezes: 0 },
+  quests: null,       // { day, ids, progress: { id: n }, done: { id: true }, chest: null | { xp, freeze } }
+  league: { seenWeek: null, bestTier: null },
+  challenge: { day: null, key: null, idx: null, done: false, solved: false, streak: 0, best: 0, last: null, wins: 0 },
+  accuracy: {},       // track id -> { right, total }: first-try answers, for topic mastery
+  rewards: { title: null, theme: 'copper', titles: {}, levelSeen: 0 },
 });
+
+/** Nested objects that later versions grew new fields in: merged field by field on load. */
+const NESTED = ['stats', 'settings', 'habit', 'league', 'challenge', 'rewards'];
 
 export let state = DEFAULTS();
 let saveTimer = null;
@@ -23,7 +33,23 @@ let saveTimer = null;
 export async function load() {
   const saved = await api('progress').catch(() => ({}));
   const base = DEFAULTS();
-  state = { ...base, ...saved, stats: { ...base.stats, ...saved.stats }, settings: { ...base.settings, ...saved.settings } };
+  state = { ...base, ...saved };
+  for (const k of NESTED) state[k] = { ...base[k], ...(saved[k] || {}) };
+}
+
+// ---------------------------------------------------------------- events
+// A tiny bus so the habit layer (quests, mastery, streak rewards) can react to what happens
+// in lessons and labs without those views knowing about it.
+//   'xp'      { n, source, leveledUp, level }      'answer' { correct, firstTry, combo, mode, type, typed, track }
+//   'lesson'  { key, track, stars, boss, replay, mistakes, exercises, firstTime, project }
+//   'session' { mode }   'practice' { answered }   'challenge' { solved, xp }
+
+const listeners = new Set();
+export function on(fn) { listeners.add(fn); return () => listeners.delete(fn); }
+export function emit(type, data = {}) {
+  for (const fn of listeners) {
+    try { fn(type, data); } catch (e) { console.error('habit layer:', e); }   // never break a lesson
+  }
 }
 
 export function save(now) {
@@ -40,12 +66,15 @@ export function reset() { state = DEFAULTS(); return save(true); }
 export const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 export const addDays = (n, from = new Date()) => { const d = new Date(from); d.setDate(d.getDate() + n); return d; };
 
+/** A day counts for the streak if you earned XP on it, or a streak freeze covered it. */
+export const activeOn = key => state.days[key] > 0 || !!state.habit?.frozen?.[key];
+
 /** Consecutive active days ending today (or yesterday, so the streak survives until midnight). */
 export function streak() {
   let d = new Date();
-  if (!state.days[dayKey(d)]) d = addDays(-1, d);
+  if (!activeOn(dayKey(d))) d = addDays(-1, d);
   let n = 0;
-  while (state.days[dayKey(d)] > 0) { n++; d = addDays(-1, d); }
+  while (activeOn(dayKey(d))) { n++; d = addDays(-1, d); }
   return n;
 }
 export const todayXp = () => state.days[dayKey()] || 0;
@@ -80,11 +109,15 @@ export function stepXp(step, { attempts, hints, revealed, combo, replay, boss })
   return Math.max(1, Math.round(xp));
 }
 
-export function addXp(n) {
+/** Adds XP to the total and to today. `source` defaults to 'lab' while a lab page is open. */
+export function addXp(n, source) {
   const before = levelInfo().level;
   state.xp += n;
   state.days[dayKey()] = todayXp() + n;
-  return { leveledUp: levelInfo().level > before, level: levelInfo() };
+  const result = { leveledUp: levelInfo().level > before, level: levelInfo() };
+  source ||= typeof location !== 'undefined' && location.hash.startsWith('#/labs') ? 'lab' : 'other';
+  emit('xp', { n, source, ...result });
+  return result;
 }
 
 export const starsFor = mistakes => (mistakes === 0 ? 3 : mistakes <= 2 ? 2 : 1);
@@ -176,6 +209,11 @@ export const ACHIEVEMENTS = [
   { id: 'xp-5000', icon: '🚀', title: 'Liftoff', text: 'Earn 5,000 XP.', test: s => s.xp >= 5000 },
 ];
 
+/** More achievements from other modules (per topic, quests, league...). Ids already present are skipped. */
+export function registerAchievements(list) {
+  for (const a of list) if (!ACHIEVEMENTS.some(x => x.id === a.id)) ACHIEVEMENTS.push(a);
+}
+
 /** Returns achievements earned just now. */
 export function checkAchievements(tracks) {
   const fresh = [];
@@ -195,14 +233,15 @@ export function sound(kind) {
   if (!state.settings.sound) return;
   try {
     audio ||= new (window.AudioContext || window.webkitAudioContext)();
-    const notes = { right: [660, 880], wrong: [220, 180], level: [523, 659, 784, 1047], done: [523, 784, 1047] }[kind] || [440];
+    const notes = { right: [660, 880], wrong: [220, 180], level: [523, 659, 784, 1047], done: [523, 784, 1047],
+      quest: [587, 880], chest: [392, 523, 659, 784, 1047], milestone: [523, 659, 784, 1047, 1319], tick: [1320], freeze: [988, 740] }[kind] || [440];
     notes.forEach((freq, i) => {
       const osc = audio.createOscillator(), gain = audio.createGain();
       osc.type = kind === 'wrong' ? 'triangle' : 'sine';
       osc.frequency.value = freq;
       const t = audio.currentTime + i * 0.09;
       gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.exponentialRampToValueAtTime(0.08, t + 0.01);
+      gain.gain.exponentialRampToValueAtTime(kind === 'tick' ? 0.025 : 0.08, t + 0.01);
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
       osc.connect(gain).connect(audio.destination);
       osc.start(t);

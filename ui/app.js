@@ -11,8 +11,9 @@ import { codeTrace } from './codetrace.js';
 import { subnetTrainer } from './lab-subnet.js';
 import { vimLab } from './lab-vim.js';
 import { workbench } from './workbench.js';
-import { codeSpaces } from './codespaces.js';
 import { netLabs } from './netlabs.js';
+import { codeSpaces } from './codespaces.js';
+import * as gamify from './gamify.js';
 
 const app = document.getElementById('app');
 let tracks = [];
@@ -37,7 +38,8 @@ function confetti() {
   document.body.append(canvas);
   const ctx = canvas.getContext('2d');
   const W = canvas.width = innerWidth, H = canvas.height = innerHeight;
-  const colors = ['#d9773f', '#22c98a', '#ffb020', '#ff5d73', '#36b3ff'];
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#d9773f';
+  const colors = [accent, '#22c98a', '#ffb020', '#ff5d73', '#36b3ff'];
   const bits = Array.from({ length: 110 }, () => ({
     x: W / 2 + (Math.random() - 0.5) * 200, y: H * 0.35, vx: (Math.random() - 0.5) * 14, vy: -Math.random() * 13 - 3,
     s: 4 + Math.random() * 6, r: Math.random() * 6, c: colors[Math.floor(Math.random() * colors.length)],
@@ -72,17 +74,19 @@ function header(active) {
       link('#/playground', 'Playground', 'playground'),
       link('#/profile', 'Profile', 'profile')),
     h('div.stats',
-      h(`div.stat.streak${days > 0 && game.state.days[game.dayKey()] ? '.lit' : ''}`, { title: `${days}-day streak` }, h('span', '🔥'), h('b', days)),
+      h(`div.stat.streak${days > 0 && game.state.days[game.dayKey()] ? '.lit' : ''}`, { title: `${days}-day streak${gamify.freezes() ? ` · ${gamify.freezes()} streak freeze${gamify.freezes() === 1 ? '' : 's'}` : ''}` },
+        h('span', '🔥'), h('b', days), gamify.freezes() > 0 && h('span.stat-freeze', '❄'.repeat(gamify.freezes()))),
       h('div.stat.goal', { title: `Daily goal: ${today} of ${goal} XP` },
         h('div.ring', { style: { '--p': Math.min(1, today / goal) } }), h('b', `${today}`), h('span.muted', `/ ${goal} XP`)),
       h('a.stat.level', { href: '#/profile', title: `${lv.rank}: ${lv.into} of ${lv.need} XP to the next level` },
         h('span.level-num', lv.level),
-        h('div.level-meta', h('span.level-rank', lv.rank), h('div.bar', h('div.bar-fill', { style: { width: `${(lv.into / lv.need) * 100}%` } }))))));
+        h('div.level-meta', h('span.level-rank', gamify.headerTitle(lv.rank)), h('div.bar', h('div.bar-fill', { style: { width: `${(lv.into / lv.need) * 100}%` } }))))));
 }
 
 function page(active, ...content) {
   app.replaceChildren(header(active), h('main.page', content));
   window.scrollTo(0, 0);
+  gamify.afterPage();
 }
 
 // ---------------------------------------------------------------- home / map
@@ -193,6 +197,7 @@ function home() {
       resume && h('div.hero-resume',
         h('a.btn.primary.big', { href: `#/lesson/${resume.key}`, onclick: () => sessionStorage.setItem('track', recent.id) }, 'Continue'),
         h('span.muted.small', `${recent.title} · ${resume.lesson.title}`))),
+    gamify.todayPanel({ refresh: () => { if (!location.hash || location.hash === '#/') home(); } }),
     // Topics grouped by category, in the order their first topic appears.
     [...new Set(sorted.map(t => t.category || 'Topics'))].map(cat => [
       h('h2.section-title', cat),
@@ -210,6 +215,7 @@ function home() {
             h('span', `${game.lessonModules(t).length} modules`),
             projects > 0 && h('span', `${projects} projects`),
             h('span', `${prog.done}/${prog.total} lessons`)),
+          gamify.topicChip(t),
           h('div.bar', h('div.bar-fill', { style: { width: `${(prog.done / Math.max(1, prog.total)) * 100}%` } })),
           next && h('div.small.topic-next', `Next: ${next.lesson.title}`)));
       }))]),
@@ -251,6 +257,7 @@ function trackView(id) {
         h('div', h('b', `${prog.done}/${prog.total}`), h('span.muted', 'lessons')),
         h('div', h('b', `${prog.stars}/${prog.maxStars}`), h('span.muted', 'stars')),
         h('div', h('b', game.state.xp.toLocaleString()), h('span.muted', 'total XP')))),
+    gamify.trackMastery(track),
     modules,
     projects.length > 0 && h('a.project-teaser', { href: '#/projects' },
       h('div', h('div.eyebrow', 'Projects'), h('h2', 'Build something real'),
@@ -386,6 +393,8 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
   const replay = mode === 'lesson' && game.isDone(meta.key);
   const project = !!meta?.project;
   const boss = meta?.lesson?.kind === 'boss' || project;   // project code pays like boss code
+  const challenge = mode === 'challenge';                  // the daily challenge: double XP
+  game.emit('session', { mode });
 
   const progress = h('div.play-bar', h('div.play-fill'));
   const comboEl = h('div.combo');
@@ -436,7 +445,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
     if (answered > 0 && pos < total &&
         !(await ask('Leave this session? The XP you earned so far is kept, but it will not count as finished.', { ok: 'Leave', cancel: 'Keep going' }))) return;
     // Practice lives at #/practice and lessons at #/lesson/..., so always go via the router.
-    const target = detour ? detour.back : mode === 'practice' ? '#/practice' : project ? '#/projects' : trackHash(sessionStorage.getItem('track') || tracks[0]?.id);
+    const target = detour ? detour.back : meta?.quick || challenge ? '#/' : mode === 'practice' ? '#/practice' : project ? '#/projects' : trackHash(sessionStorage.getItem('track') || tracks[0]?.id);
     if (location.hash === target) route(); else location.hash = target;
   }
 
@@ -541,6 +550,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
       if (attempts === 1 && hints === 0) { combo++; firstTry++; } else combo = 0;
       bestCombo = Math.max(bestCombo, combo);
       xp = mode === 'practice' ? 6 : game.stepXp(step, { attempts, hints, revealed, combo, replay, boss });
+      if (challenge) xp *= 2;
       // Typing an answer is harder than dragging it, so it pays a little more.
       if (current.typed) { xp += replay || mode === 'practice' ? 1 : 4; game.state.stats.typed = (game.state.stats.typed || 0) + 1; }
       game.state.stats.correct++;
@@ -548,6 +558,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
       if (DRAG_TYPES.has(step.type)) game.state.stats.drags++;
       game.state.stats.bestCombo = Math.max(game.state.stats.bestCombo, bestCombo);
     }
+    game.emit('answer', { correct: correctNow && !revealed, firstTry: attempts === 1 && hints === 0, combo, mode, type: step.type, typed: !!current.typed, track: item.track });
     if (mode === 'practice') game.reviewed(item.lessonKey, item.idx, correctNow && !revealed && attempts === 1);
     else if (step.type !== 'code' && (attempts > 1 || revealed)) game.missed(item.lessonKey, item.idx);
 
@@ -667,6 +678,8 @@ async function lessonView(trackId, moduleId, lessonId) {
       };
       if (r.mistakes === 0 && r.exercises > 0) game.state.stats.perfect++;
       if (r.boss && !before) game.state.stats.bosses++;
+      game.emit('lesson', { key, track: trackId, stars: starCount, boss: meta.kind === 'boss', replay: r.replay, mistakes: r.mistakes, exercises: r.exercises,
+        firstTime: !before, project: game.isProject(module), firstInTrack: !before && game.flatLessons(track).filter(x => game.isDone(x.key)).length === 1 });
       const { leveledUp, level } = game.addXp(bonus);
       game.save(true);
       const fresh = game.checkAchievements(tracks);
@@ -682,7 +695,7 @@ async function lessonView(trackId, moduleId, lessonId) {
   });
 }
 
-function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice, siblings, detour }) {
+function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice, siblings, detour, again }) {
   leave?.(); leave = null;
   game.sound('done');
   confetti();
@@ -699,7 +712,7 @@ function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, hea
       lessonTitle && h('p.muted', lessonTitle),
       !practice && h('div.big-stars', stars(starCount)),
       h('div.summary-stats',
-        h('div', h('b', `+${r.earned + bonus}`), h('span.muted', 'XP earned')),
+        h('div', h('b', { dataset: { tick: r.earned + bonus, prefix: '+' } }, `+${r.earned + bonus}`), h('span.muted', 'XP earned')),
         h('div', h('b', `${accuracy}%`), h('span.muted', 'first try')),
         h('div', h('b', r.bestCombo), h('span.muted', 'best combo'))),
       bonus > 0 && h('p.muted.small', `Includes a ${bonus} XP completion bonus${r.replay ? ' (replays earn less)' : ''}.`),
@@ -710,10 +723,56 @@ function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, hea
         detour ? null :
         h('a.btn.ghost', { href: home }, siblings ? 'Back to projects' : 'Back to the map'),
         detour ? null :
-        practice ? h('a.btn.primary.big', { href: '#/practice', onclick: () => setTimeout(route) }, 'Practice again')
+        practice ? h('a.btn.primary.big', { href: again || '#/practice', onclick: () => setTimeout(route) }, again === '#/' ? 'Done' : 'Practice again')
           : next ? h('a.btn.primary.big', { href: `#/lesson/${next.key}` }, siblings ? 'Next stage' : next.lesson.kind === 'boss' ? 'Face the boss' : 'Next lesson')
-            : h('a.btn.primary.big', { href: home }, 'Done')))));
+            : h('a.btn.primary.big', { href: home }, 'Done')),
+      !detour && gamify.oneMore({ track, key, practice }))));
   window.scrollTo(0, 0);
+}
+
+// ---------------------------------------------------------------- quick session and daily challenge (rules in gamify.js)
+
+/** Five due reviews or quick questions; with nothing to review yet, the next lesson instead. */
+async function quickView() {
+  const slow = setTimeout(() => app.replaceChildren(loader('a quick session')), 150);
+  const items = await gamify.quickItems(5);
+  clearTimeout(slow);
+  if (location.hash !== '#/quick') return;
+  if (!items.length) { location.replace(gamify.resumeTarget()?.href || '#/'); return; }
+  play({
+    title: 'Quick session', items, mode: 'practice', meta: { quick: true },
+    onFinish(r) {
+      game.state.stats.practice++;
+      game.save(true);
+      const fresh = game.checkAchievements(tracks);
+      game.save(true);
+      summary({ r, starCount: 0, bonus: 0, fresh, heading: 'Quick session done', practice: true, again: '#/' });
+    },
+  });
+}
+
+/** The daily challenge: one hard exercise, double XP, its own streak. */
+async function challengeView() {
+  if (gamify.challengeDone()) { location.replace('#/'); return; }
+  const slow = setTimeout(() => app.replaceChildren(loader('the daily challenge')), 150);
+  const ch = await gamify.loadChallenge();
+  clearTimeout(slow);
+  if (location.hash !== '#/challenge') return;
+  if (!ch) return page('home', h('div.empty', h('h2', 'No challenge today'), h('p.muted', 'Open a topic first.'), h('a.btn.primary', { href: '#/' }, 'Back')));
+  document.documentElement.dataset.codeLang = tracks.find(t => t.id === ch.item.track)?.language || 'csharp';
+  play({
+    title: `Daily challenge · ${ch.trackTitle} · ${ch.lessonTitle}`, items: [ch.item], mode: 'challenge', meta: {},
+    onFinish(r) {
+      const solved = r.earned > 0;
+      const bonus = solved ? 20 : 0;
+      if (bonus) game.addXp(bonus);
+      gamify.finishChallenge(solved, r.earned + bonus);
+      const fresh = game.checkAchievements(tracks);
+      game.save(true);
+      summary({ r, starCount: 0, bonus, fresh, heading: solved ? 'Challenge won!' : 'Challenge over', practice: true, again: '#/',
+        lessonTitle: solved ? 'Double XP, and your challenge streak grows.' : 'The answer was shown, so no XP today. A fresh challenge tomorrow.' });
+    },
+  });
 }
 
 // ---------------------------------------------------------------- practice
@@ -946,6 +1005,7 @@ function profile() {
       h('div.card', h('b.card-num', s.stats.codePassed), h('span.muted', 'code exercises passed')),
       h('div.card', h('b.card-num', answered ? `${Math.round((s.stats.correct / answered) * 100)}%` : '–'), h('span.muted', 'answers correct')),
       h('div.card', h('b.card-num', s.stats.bestCombo), h('span.muted', 'best combo'))),
+    gamify.profilePanels(profile),
     h('section.panel', h('h2', 'Activity'), h('div.heatmap', cells), h('p.muted.small', 'Brighter squares are days you reached more of your daily goal.')),
     h('section.panel',
       h('h2', `Achievements  ${Object.keys(s.achievements).length} / ${game.ACHIEVEMENTS.length}`),
@@ -988,6 +1048,8 @@ function route() {
     case 'spaces': leave = codeSpaces(page, parts[1]); return;
     case 'lesson': return lessonView(parts[1], parts[2], parts[3]);
     case 'practice': return practiceView();
+    case 'quick': return quickView();
+    case 'challenge': return challengeView();
     case 'projects': return projectsView();
     case 'playground': return playground();
     case 'profile': return profile();
@@ -1017,6 +1079,7 @@ async function boot() {
     stage(35, 'Loading your topics…');
     const topics = api('tracks').then(t => { stage(70, 'Loading your progress…'); return t; });
     [tracks] = await Promise.all([topics, game.load()]);
+    gamify.init(tracks);
     applyTextSize();
     saveHud();
     stage(100, 'Ready.');
