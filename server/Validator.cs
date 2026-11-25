@@ -46,6 +46,19 @@ public static class Validator
                     {
                         case "learn":
                             Need(step, "body");
+                            // Visualizers on a card run for real in the app, so they must run here too.
+                            if (step["trace"] is JsonObject trace)
+                            {
+                                var traceCode = trace["code"] is JsonArray arr ? string.Join("\n", arr.Select(l => (string?)l)) : (string?)trace["code"];
+                                var t = await CodeTrace.Run(runner, new(traceCode, (string?)trace["stdin"]));
+                                if (t.Error is not null) Error(where, "trace: " + t.Error + " " + string.Join(" ", t.Diagnostics.Where(d => d.Severity == "error").Select(d => $"line {d.Line}: {d.Message}")));
+                                else if (t.Truncated) Warn(where, "trace: stopped after the step limit; use a smaller example");
+                            }
+                            if (step["linq"] is JsonObject linq)
+                            {
+                                var q = await LinqViz.Run(runner, new((string?)linq["source"], (string?)linq["query"], (string?)linq["setup"]));
+                                if (q.Error is not null) Error(where, "linq: " + q.Error);
+                            }
                             break;
                         case "mcq":
                             Need(step, "prompt");
