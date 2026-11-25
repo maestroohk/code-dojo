@@ -19,6 +19,7 @@ var content = new Content(root);
 var runner = new CSharpRunner();
 var checker = new Checker(runner);
 using var apps = new AppHost(runner);
+var langs = new LangRunner();
 var stateDir = Environment.GetEnvironmentVariable("DOJO_STATE") is { Length: > 0 } envState ? envState : Path.Combine(root, ".state");
 var progressFile = Path.Combine(stateDir, "progress.json");
 var progressLock = new object();
@@ -107,8 +108,21 @@ app.MapPut("/api/progress", async (HttpRequest req) =>
 });
 
 // Free run: compile and execute whatever is in the editor, no grading.
+// Languages the playground can run here: C# always, others when their toolchain is installed.
+app.MapGet("/api/languages", () => Results.Json(
+    new[] { new { id = "csharp", name = "C#", sample = (string?)null } }
+        .Concat(langs.Available.Select(l => new { id = l.Id, name = l.Name, sample = (string?)l.Sample })), json));
+
 app.MapPost("/api/run", async (RunRequest req) =>
 {
+    if (req.Language is { Length: > 0 } other && other != "csharp")
+    {
+        if (langs.Find(other) is not { } lang) return Results.BadRequest($"{other} is not installed on this machine");
+        var r = await langs.Run(lang, req.Code ?? "", req.Stdin);
+        if (!r.Compiled)
+            return Results.Json(new { compiled = false, diagnostics = new[] { new Diag("error", lang.Name, r.CompileOutput, 0, 0, "") } }, json);
+        return Results.Json(new { compiled = true, diagnostics = Array.Empty<Diag>(), r.Stdout, r.Stderr, r.ExitCode, r.TimedOut, r.Truncated, r.Ms }, json);
+    }
     if (content.Language(req.Track ?? "csharp") != "csharp") return Results.BadRequest("unsupported language");
     var (program, diags) = runner.Compile(req.Code ?? "", req.Template, req.Framework == "web");
     if (program is null) return Results.Json(new { compiled = false, diagnostics = diags }, json);
@@ -172,5 +186,5 @@ static string FindRoot()
     throw new DirectoryNotFoundException("Cannot find the code-dojo folder (the one holding tracks/ and ui/).");
 }
 
-record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework);
+record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework, string? Language = null);
 record CheckRequest(string Track, string Module, string Lesson, int Step, string? Code);

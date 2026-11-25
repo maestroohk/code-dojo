@@ -169,8 +169,9 @@ function home() {
         h('div.eyebrow', 'Learning center'),
         h('h1', 'What do you want to get better at?'),
         h('p.muted', 'Topics are courses with exercises. Labs are sandboxes where you build and break things. Projects are real apps you grow stage by stage and can run in the Workbench.')),
-      resume && h('a.btn.primary.big', { href: `#/lesson/${resume.key}`, onclick: () => sessionStorage.setItem('track', recent.id) },
-        `Continue ${recent.title}`)),
+      resume && h('div.hero-resume',
+        h('a.btn.primary.big', { href: `#/lesson/${resume.key}`, onclick: () => sessionStorage.setItem('track', recent.id) }, 'Continue'),
+        h('span.muted.small', `${recent.title} · ${resume.lesson.title}`))),
     // Topics grouped by category, in the order their first topic appears.
     [...new Set(sorted.map(t => t.category || 'Topics'))].map(cat => [
       h('h2.section-title', cat),
@@ -714,28 +715,106 @@ async function practiceView() {
 
 // ---------------------------------------------------------------- playground
 
-function playground() {
-  const KEY = 'playground';
-  const sample = [
-    '// A scratchpad. Anything you write here runs as a real C# program.',
-    'var languages = new List<string> { "C#", "F#", "Visual Basic" };',
-    '',
-    'foreach (var name in languages.OrderBy(n => n.Length))',
-    '{',
-    '    Console.WriteLine($"{name} has {name.Length} characters");',
-    '}',
-  ].join('\n');
+const WEB_SAMPLE = `<!-- HTML, CSS and JavaScript, previewed live. Tick "Tailwind" to style with utility classes. -->
+<main class="min-h-screen grid place-items-center bg-stone-100">
+  <div class="w-80 rounded-xl bg-white p-6 shadow">
+    <h1 class="text-xl font-semibold text-stone-800">Counter</h1>
+    <p class="mt-1 text-sm text-stone-500">Click the button. The script below updates the page.</p>
+    <button id="btn" class="mt-4 rounded-lg bg-orange-600 px-4 py-2 font-medium text-white hover:bg-orange-700">
+      Clicked <span id="n">0</span> times
+    </button>
+  </div>
+</main>
+
+<script>
+  let n = 0;
+  document.getElementById('btn').addEventListener('click', () => {
+    n++;
+    document.getElementById('n').textContent = n;
+    console.log('clicked', n);
+  });
+</script>`;
+
+const CSHARP_SAMPLE = [
+  '// A scratchpad. Anything you write here runs as a real C# program.',
+  'var languages = new List<string> { "C#", "F#", "Visual Basic" };',
+  '',
+  'foreach (var name in languages.OrderBy(n => n.Length))',
+  '{',
+  '    Console.WriteLine($"{name} has {name.Length} characters");',
+  '}',
+].join('\n');
+
+let languages = null;
+
+async function playground() {
+  languages ||= await api('languages').catch(() => [{ id: 'csharp', name: 'C#' }]);
+  const all = [...languages, { id: 'web', name: 'HTML / CSS / JS', web: true }];
+  const s = game.state;
+  s.settings.playLang ||= 'csharp';
+  const lang = all.find(l => l.id === s.settings.playLang) || all[0];
+  const KEY = lang.id === 'csharp' ? 'playground' : `playground:${lang.id}`;   // C# keeps its old draft
+  const sample = lang.id === 'csharp' ? CSHARP_SAMPLE : lang.web ? WEB_SAMPLE : lang.sample || '';
+
   const panel = h('div.output', { hidden: true });
   const status = h('span.muted.small');
-  const stdin = h('textarea.answer.mono', { rows: 3, spellcheck: false, placeholder: 'Lines for Console.ReadLine(), if your program reads input' });
+  const stdin = h('textarea.answer.mono', { rows: 3, spellcheck: false, placeholder: 'Lines your program reads from standard input' });
   let busy = false;
 
+  const tabs = h('div.pg-langs', all.map(l => h(`button.tab.small${l.id === lang.id ? '.active' : ''}`, {
+    type: 'button', onclick: () => { s.settings.playLang = l.id; game.save(); playground(); },
+  }, l.name)), h('span.muted.small.pg-more', { title: 'Install Go, Rust, Ruby or PHP and restart the dojo: they appear here automatically.' }, '+ more when installed'));
+
+  // ---- the web tab: a live preview in a sandboxed frame, no server involved
+  if (lang.web) {
+    const frame = h('iframe.pg-frame', { sandbox: 'allow-scripts allow-modals', title: 'Preview' });
+    const logs = h('pre.pg-console');
+    s.settings.tailwind ??= true;
+    const tw = h('input', { type: 'checkbox', checked: s.settings.tailwind, onchange: e => { s.settings.tailwind = e.target.checked; game.save(); render(); } });
+    let t;
+    const render = () => {
+      logs.textContent = '';
+      const bridge = `<script>(()=>{const send=(k,a)=>parent.postMessage({dojo:'console',k,a:a.map(x=>{try{return typeof x==='object'?JSON.stringify(x):String(x)}catch{return String(x)}}).join(' ')},'*');
+        for(const k of ['log','info','warn','error']){const o=console[k];console[k]=(...a)=>{send(k,a);o.apply(console,a)}}
+        addEventListener('error',e=>send('error',[e.message+' (line '+e.lineno+')']));})();<\/script>`;
+      const tailwind = s.settings.tailwind ? '<script src="https://cdn.tailwindcss.com"><\/script>' : '';
+      frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8">${bridge}${tailwind}</head><body>${editor.value}</body></html>`;
+    };
+    const onMsg = e => {
+      if (e.source !== frame.contentWindow || e.data?.dojo !== 'console') return;
+      if (/cdn.tailwindcss.com should not be used in production/.test(e.data.a)) return;   // the CDN's own nag
+      logs.append(h(`div.pg-log.${e.data.k}`, e.data.a));
+      logs.scrollTop = logs.scrollHeight;
+    };
+    window.addEventListener('message', onMsg);
+    leave = () => window.removeEventListener('message', onMsg);
+    const editor = createEditor({
+      value: s.drafts[KEY] ?? sample, minLines: 18,
+      onChange: v => { s.drafts[KEY] = v; game.save(); clearTimeout(t); t = setTimeout(render, 400); },
+      onRun: render,
+    });
+    page('playground',
+      h('div.track-head', h('div', h('h2.track-title', 'Playground'), h('p.muted', 'Try an idea in any language you have installed. Nothing here is graded.'))),
+      tabs,
+      h('div.pg-web',
+        h('div', editor.el,
+          h('div.code-tools',
+            h('label.small', tw, ' Tailwind CSS'),
+            h('span.muted.small', s.settings.tailwind ? 'loaded from the Tailwind CDN, so it needs internet' : ''),
+            h('span.spacer'),
+            h('button.btn.ghost.small', { type: 'button', onclick: async () => { if (await ask('Reset to the example?', { ok: 'Reset' })) { editor.value = sample; delete s.drafts[KEY]; game.save(); render(); } } }, 'Reset'))),
+        h('div.pg-preview', frame, h('div.ct-head', 'Console'), logs)));
+    render();
+    return;
+  }
+
+  // ---- languages that run on this machine
   const run = async () => {
     if (busy) return;
-    busy = true; runBtn.disabled = true; status.textContent = 'Compiling and running…';
+    busy = true; runBtn.disabled = true; status.textContent = lang.id === 'java' ? 'Compiling and running (Java takes a moment)…' : 'Running…';
     try {
-      const r = await api('run', { track: tracks[0]?.id || 'csharp', code: editor.value, stdin: stdin.value });
-      editor.mark(r.diagnostics);
+      const r = await api('run', { track: 'csharp', language: lang.id, code: editor.value, stdin: stdin.value });
+      if (lang.id === 'csharp') editor.mark(r.diagnostics);
       renderRunOutput(panel, r);
     } catch {
       panel.hidden = false;
@@ -744,18 +823,19 @@ function playground() {
     busy = false; runBtn.disabled = false; status.textContent = '';
   };
   const editor = createEditor({
-    value: game.state.drafts[KEY] ?? sample,
-    onChange: v => { game.state.drafts[KEY] = v; game.save(); },
+    value: s.drafts[KEY] ?? sample,
+    onChange: v => { s.drafts[KEY] = v; game.save(); },
     onRun: run, minLines: 14,
   });
   const runBtn = h('button.btn.primary', { type: 'button', onclick: run }, '▶ Run');
 
   page('playground',
-    h('div.track-head', h('div', h('h2.track-title', 'Playground'), h('p.muted', 'Try an idea, break something on purpose, see what happens. Nothing here is graded.'))),
+    h('div.track-head', h('div', h('h2.track-title', 'Playground'), h('p.muted', 'Try an idea in any language you have installed. Break something on purpose, see what happens. Nothing here is graded.'))),
+    tabs,
     h('div.playground',
       editor.el,
       h('div.code-tools', runBtn,
-        h('button.btn.ghost', { type: 'button', onclick: async () => { if (await ask('Clear the playground?', { ok: 'Clear' })) { editor.value = ''; delete game.state.drafts[KEY]; game.save(); } } }, 'Clear'),
+        h('button.btn.ghost', { type: 'button', onclick: async () => { if (await ask('Reset to the example?', { ok: 'Reset' })) { editor.value = sample; delete s.drafts[KEY]; game.save(); } } }, 'Reset'),
         status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to run')),
       h('details.stdin', h('summary', 'Program input'), stdin),
       panel));
