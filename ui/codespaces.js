@@ -1,0 +1,692 @@
+// Code spaces: real multi-file .NET projects on this machine (%USERPROFILE%\code-dojo\spaces\<name>),
+// edited, built, run and tested right here, with NuGet packages. The server drives the real dotnet CLI
+// (server/CodeSpaces.cs); the editor's C# intelligence sees every file of the project plus the
+// assemblies its packages restored, so completion and F12 work across files and into packages.
+//   #/spaces          the list, with a create dialog
+//   #/spaces/<name>   the IDE: explorer, editor tabs, problems, output, NuGet, request panel for web apps
+import { h, ask } from './util.js';
+import { createEditor } from './editor.js';
+
+const enc = encodeURIComponent;
+async function call(path, body, method) {
+  const res = await fetch('/api/' + path, body === undefined ? {} : {
+    method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  return res.json();
+}
+const put = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false));
+const TEMPLATE_ICON = { console: '>_', web: '{ }', solution: '▦', empty: '∅' };
+
+/** An in-page text prompt (window.prompt may be blocked in embedded browsers). */
+function promptBox(message, value = '', ok = 'OK') {
+  return new Promise(resolve => {
+    const input = h('input.cs-prompt-input', { value, spellcheck: false, autocomplete: 'off' });
+    const done = v => { overlay.remove(); resolve(v); };
+    const overlay = h('div.modal-back', { onclick: e => { if (e.target === overlay) done(null); } },
+      h('div.modal', { role: 'dialog', 'aria-modal': 'true' }, h('p', message), input,
+        h('div.modal-actions', h('button.btn.ghost', { type: 'button', onclick: () => done(null) }, 'Cancel'),
+          h('button.btn.primary', { type: 'button', onclick: () => done(input.value.trim()) }, ok))));
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); done(input.value.trim()); }
+      if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    });
+    document.body.append(overlay);
+    input.focus();
+    const slash = value.lastIndexOf('/') + 1, dot = value.lastIndexOf('.');
+    input.setSelectionRange(slash, dot > slash ? dot : value.length);
+  });
+}
+
+export function codeSpaces(page, name) {
+  return name ? ide(page, decodeURIComponent(name)) : spacesList(page);
+}
+
+// ================================================================ the list
+
+function spacesList(page) {
+  let data = null;
+  const grid = h('div.cs-cards');
+  const where = h('span.muted.small');
+
+  async function load() {
+    try { data = await call('spaces'); } catch { put(grid, h('p.muted', 'Could not reach the dojo server.')); return; }
+    where.textContent = `Stored in ${data.root}`;
+    put(grid,
+      h('button.cs-card.cs-new', { type: 'button', onclick: createDialog }, h('div.cs-card-icon', '+'), h('b', 'New space'), h('span.muted.small', 'Console app, web API, library + tests, or empty')),
+      data.spaces.map(s => h('div.cs-card',
+        h('a.cs-card-main', { href: `#/spaces/${enc(s.name)}` },
+          h('div.cs-card-icon', TEMPLATE_ICON[s.template] || '▤'),
+          h('b', s.name, s.running && h('span.cs-dot.on', { title: 'Running' })),
+          h('span.muted.small', s.projects.length ? s.projects.join(' · ') : 'no projects yet'),
+          h('span.muted.small', `Changed ${new Date(s.modified).toLocaleString()}`)),
+        h('div.cs-card-actions',
+          h('a.btn.primary.small', { href: `#/spaces/${enc(s.name)}` }, 'Open'),
+          h('button.btn.ghost.small', { type: 'button', onclick: async () => {
+            if (!await ask(`Move "${s.name}" to the trash? It goes to ${data.root}\\.trash, so you can still get it back.`, { ok: 'Move to trash', danger: true })) return;
+            const r = await call(`spaces/${enc(s.name)}/delete`, {});
+            if (r.error) alertBox(r.error); else load();
+          } }, 'Delete')))),
+      data.spaces.length === 0 && h('p.muted.cs-empty-note', 'No spaces yet. A space is a real .NET project folder: build it, run it, test it and add NuGet packages, all from here.'));
+  }
+
+  function createDialog() {
+    let template = 'console';
+    const nameInput = h('input.cs-prompt-input', { placeholder: 'my-app', spellcheck: false, autocomplete: 'off' });
+    const status = h('div.small.muted');
+    const out = h('pre.cs-create-out', { hidden: true });
+    const tpls = h('div.cs-templates');
+    const paintTemplates = () => put(tpls, data.templates.map(t => h(`button.cs-template${t.id === template ? '.active' : ''}`, { type: 'button', onclick: () => { template = t.id; paintTemplates(); } },
+      h('span.cs-template-icon', TEMPLATE_ICON[t.id] || '▤'), h('b', t.name), h('span.small.muted', t.description))));
+    paintTemplates();
+    const createBtn = h('button.btn.primary', { type: 'button', onclick: create }, 'Create');
+    const overlay = h('div.modal-back', { onclick: e => { if (e.target === overlay && !createBtn.disabled) overlay.remove(); } },
+      h('div.modal.cs-create', { role: 'dialog', 'aria-modal': 'true' },
+        h('h3', 'New code space'),
+        h('label.small.muted', 'Name (letters, digits, - and _)'), nameInput,
+        h('label.small.muted', 'Template'), tpls, status, out,
+        h('div.modal-actions', h('button.btn.ghost', { type: 'button', onclick: () => overlay.remove() }, 'Cancel'), createBtn)));
+    nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') create(); if (e.key === 'Escape') overlay.remove(); });
+    document.body.append(overlay);
+    nameInput.focus();
+
+    async function create() {
+      const name = nameInput.value.trim();
+      if (!/^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(name)) { status.textContent = 'Use 1–40 letters, digits, - or _, starting with a letter.'; return; }
+      createBtn.disabled = true;
+      status.textContent = template === 'empty' ? 'Creating…' : 'Running dotnet new and restoring packages… (the first time can take a minute)';
+      try {
+        const r = await call('spaces', { name, template });
+        if (r.error) {
+          status.textContent = r.error;
+          if (r.output) { out.hidden = false; out.textContent = r.output; }
+          createBtn.disabled = false;
+          return;
+        }
+        overlay.remove();
+        location.hash = `#/spaces/${enc(name)}`;
+      } catch { status.textContent = 'Could not reach the dojo server.'; createBtn.disabled = false; }
+    }
+  }
+
+  page('spaces',
+    h('div.cs-list',
+      h('div.track-head',
+        h('div', h('h2.track-title', 'Code spaces'),
+          h('p.muted', 'Real .NET projects on your machine: many files, NuGet packages, build, run and test, with code intelligence across the whole project.')),
+        where),
+      grid));
+  load();
+  return () => { };
+}
+
+function alertBox(message) { return ask(message, { ok: 'OK', cancel: 'Close' }); }
+
+// ================================================================ the IDE
+
+function ide(page, space) {
+  const base = `spaces/${enc(space)}`;
+  let detail = null;                 // { projects, tree, solution, job }
+  const sources = new Map();         // every .cs file: path -> text (what the intelligence service sees)
+  const tabs = [];                   // { path, saved, editor, dirty, binary, el }
+  let active = null;
+  let since = 0, job = null, problems = [], problemsKey = '';
+  let stopped = false, pollTimer = null;
+  let target = localStorage.getItem(`dojo-space-target:${space}`) || '';
+  let pkgProject = '';
+  const expanded = new Set(JSON.parse(localStorage.getItem(`dojo-space-open:${space}`) || '[]'));
+  let autosave = localStorage.getItem('dojo-space-autosave') === 'on';
+  let bottomTab = 'output';
+  let nugetTouched = false;     // the learner picked the NuGet project by hand: stop following the open file
+
+  // ------------------------------------------------------------ project helpers
+
+  const projects = () => detail?.projects || [];
+  const projectOf = path => projects().filter(p => p.dir === '' || path.startsWith(p.dir + '/')).sort((a, b) => b.dir.length - a.dir.length)[0];
+  const byPath = p => projects().find(x => x.path === p);
+  /** The project and everything it references, transitively. */
+  function closure(project) {
+    const seen = new Set(), out = [];
+    const walk = p => { if (!p || seen.has(p.path)) return; seen.add(p.path); out.push(p); p.projectRefs.forEach(r => walk(byPath(r))); };
+    walk(project);
+    return out;
+  }
+  const isBuildOutput = p => /(^|\/)(bin|obj)\//.test(p);
+  /** What the intelligence service needs for a file: its project's sources, its references' sources, its global usings. */
+  function intelFiles(path) {
+    const proj = projectOf(path);
+    if (!proj) return [...sources].map(([p, code]) => ({ path: p, code }));
+    const set = closure(proj);
+    const others = projects().filter(p => !set.includes(p) && p.dir.length > proj.dir.length);
+    const files = [];
+    for (const [p, code] of sources) {
+      if (isBuildOutput(p)) continue;
+      const owner = projectOf(p);
+      if (owner && set.includes(owner) && !others.includes(owner)) files.push({ path: p, code });
+    }
+    for (const p of set) if (p.globalUsings) files.push({ path: `${p.dir ? p.dir + '/' : ''}obj/GlobalUsings.g.cs`, code: p.globalUsings });
+    return files;
+  }
+  const intelRefs = path => {
+    const proj = projectOf(path);
+    return proj ? [...new Set(closure(proj).flatMap(p => p.references))] : [];
+  };
+
+  // ------------------------------------------------------------ loading
+
+  async function loadDetail() {
+    const d = await call(base);
+    if (d.error) { put(root, h('div.empty', h('h2', d.error), h('a.btn.primary', { href: '#/spaces' }, 'All spaces'))); stopped = true; return false; }
+    detail = d;
+    if (!pkgProject || !byPath(pkgProject)) pkgProject = (projects().find(p => p.kind !== 'test') || projects()[0])?.path || '';
+    if (target && !(target === detail.solution || byPath(target))) target = '';
+    paintTree(); paintToolbar(); paintInstalled();
+    return true;
+  }
+  async function loadSources() {
+    const r = await call(`${base}/sources`);
+    if (r.files) {
+      const open = new Set(tabs.map(t => t.path));
+      for (const f of r.files) if (!open.has(f.path)) sources.set(f.path, f.code);
+      for (const p of [...sources.keys()]) if (!r.files.some(f => f.path === p) && !open.has(p)) sources.delete(p);
+    }
+  }
+
+  // ------------------------------------------------------------ tabs + editors
+
+  const tabBar = h('div.cs-tabs');
+  const edHost = h('div.cs-edhost');
+  const emptyEd = h('div.cs-noeditor.muted', 'Open a file from the explorer.');
+
+  const langOf = p => /\.cs$/i.test(p) ? 'csharp' : /\.(js|mjs|json|ts)$/i.test(p) ? 'javascript' : /\.(html?|cshtml|razor|csproj|props|targets|xml|slnx|config)$/i.test(p) ? 'html' : /\.py$/i.test(p) ? 'python' : 'text';
+
+  async function openFile(path, at) {
+    let tab = tabs.find(t => t.path === path);
+    if (!tab) {
+      const r = await call(`${base}/file?path=${enc(path)}`);
+      if (r.error && !r.binary) { alertBox(r.error); return; }
+      tab = { path, saved: r.code ?? '', dirty: false, binary: !!r.binary };
+      if (tab.binary) tab.el = h('div.cs-noeditor.muted', `${path} is a binary or very large file (${(r.size || 0).toLocaleString()} bytes) and cannot be edited here.`);
+      else {
+        const lang = langOf(path);
+        tab.editor = createEditor({
+          value: tab.saved, minLines: 30, language: lang, path,
+          assist: true,
+          files: () => intelFiles(tab.path),
+          references: () => intelRefs(tab.path),
+          onNavigate: (p, line, col, len) => { if (!/\/?obj\//.test(p)) openFile(p, { line, col, len }); },
+          onChange: v => {
+            if (lang === 'csharp') sources.set(tab.path, v);
+            const dirty = v !== tab.saved;
+            if (dirty !== tab.dirty) { tab.dirty = dirty; paintTabs(); paintTree(); }
+            if (autosave) { clearTimeout(tab.timer); tab.timer = setTimeout(() => save(tab), 900); }
+          },
+          onRun: () => run(),
+        });
+        tab.el = tab.editor.el;
+        markTab(tab);
+      }
+      tabs.push(tab);
+      edHost.append(tab.el);
+      saveTabs();
+    }
+    activate(tab);
+    if (at && tab.editor) requestAnimationFrame(() => tab.editor.select(at.line, at.col || 1, at.len || 0));
+  }
+
+  function activate(tab) {
+    active = tab;
+    for (const t of tabs) t.el.hidden = t !== tab;
+    emptyEd.hidden = !!tab;
+    paintTabs(); paintTree();
+    if (tab?.editor) tab.editor.focus();
+    if (tab) { const proj = projectOf(tab.path); if (proj && proj.path !== pkgProject && !nugetTouched) { pkgProject = proj.path; paintInstalled(); } }
+    saveTabs();
+  }
+
+  async function closeTab(tab) {
+    if (tab.dirty && !await ask(`${tab.path} has unsaved changes. Close it anyway?`, { ok: 'Discard changes', danger: true })) return;
+    if (tab.dirty) sources.set(tab.path, tab.saved);
+    tabs.splice(tabs.indexOf(tab), 1);
+    tab.el.remove();
+    if (active === tab) activate(tabs.at(-1) || null);
+    else paintTabs();
+    saveTabs();
+  }
+
+  function saveTabs() {
+    try { localStorage.setItem(`dojo-space-tabs:${space}`, JSON.stringify({ open: tabs.map(t => t.path), active: active?.path })); } catch { }
+  }
+
+  function paintTabs() {
+    put(tabBar, tabs.map(t => h(`div.cs-tab${t === active ? '.active' : ''}`, { title: t.path, onmousedown: e => { if (e.button === 1) { e.preventDefault(); closeTab(t); } } },
+      h('button.cs-tab-name', { type: 'button', onclick: () => activate(t) }, t.path.split('/').pop(), t.dirty && h('span.cs-dirty', { title: 'Unsaved' }, '●')),
+      h('button.cs-tab-x', { type: 'button', title: 'Close', onclick: () => closeTab(t) }, '×'))),
+      h('span.spacer'),
+      h('label.cs-autosave.small.muted', { title: 'Save a file a moment after you stop typing' },
+        h('input', { type: 'checkbox', checked: autosave, onchange: e => { autosave = e.target.checked; localStorage.setItem('dojo-space-autosave', autosave ? 'on' : 'off'); if (autosave) tabs.filter(t => t.dirty).forEach(save); } }),
+        'Auto-save'));
+  }
+
+  async function save(tab = active) {
+    if (!tab?.editor || !tab.dirty) return true;
+    const code = tab.editor.value;
+    const r = await call(`${base}/file`, { path: tab.path, code }).catch(() => ({ error: 'Could not reach the dojo server.' }));
+    if (r.error) { setStatus(r.error); return false; }
+    tab.saved = code;
+    tab.dirty = tab.editor.value !== code;
+    paintTabs(); paintTree();
+    return true;
+  }
+  const saveAll = async () => { for (const t of tabs.filter(t => t.dirty)) if (!await save(t)) return false; return true; };
+
+  function markTab(tab) {
+    if (!tab.editor) return;
+    tab.editor.mark(problems.filter(p => p.file === tab.path && p.line > 0).map(p => ({ severity: p.severity, line: p.line })));
+  }
+
+  // ------------------------------------------------------------ explorer
+
+  const treeEl = h('div.cs-tree', { tabindex: 0 });
+  const menu = h('div.cs-menu', { hidden: true });
+  document.addEventListener('mousedown', closeMenu, true);
+  function closeMenu(e) { if (!menu.hidden && !menu.contains(e?.target)) menu.hidden = true; }
+
+  function buildTree() {
+    const rootNode = { path: '', dir: true, children: [] };
+    const index = new Map([['', rootNode]]);
+    for (const e of detail?.tree || []) {
+      const parent = e.path.includes('/') ? e.path.slice(0, e.path.lastIndexOf('/')) : '';
+      const node = { path: e.path, name: e.path.split('/').pop(), dir: e.dir, children: [] };
+      index.set(e.path, node);
+      (index.get(parent) || rootNode).children.push(node);
+    }
+    const sort = n => { n.children.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })); n.children.forEach(sort); };
+    sort(rootNode);
+    return rootNode;
+  }
+
+  const fileIcon = name => /\.cs$/i.test(name) ? 'C#' : /\.csproj$/i.test(name) ? '⚙' : /\.slnx?$/i.test(name) ? '▦' : /\.json$/i.test(name) ? '{}' : /\.md$/i.test(name) ? '¶' : '·';
+
+  function paintTree() {
+    if (!detail) return;
+    const rows = [];
+    const dirty = new Set(tabs.filter(t => t.dirty).map(t => t.path));
+    const errFiles = new Set(problems.filter(p => p.severity === 'error' && p.file).map(p => p.file));
+    const walk = (node, depth) => {
+      for (const c of node.children) {
+        const open = expanded.has(c.path);
+        rows.push(h(`div.cs-node${c.dir ? '.dir' : ''}${active?.path === c.path ? '.active' : ''}`, {
+          style: { paddingLeft: `${8 + depth * 14}px` }, title: c.path,
+          onclick: () => { if (c.dir) { open ? expanded.delete(c.path) : expanded.add(c.path); saveExpanded(); paintTree(); } else openFile(c.path); },
+          oncontextmenu: e => { e.preventDefault(); showMenu(e, c); },
+        },
+        h('span.cs-node-icon', c.dir ? (open ? '▾' : '▸') : fileIcon(c.name)),
+        h(`span.cs-node-name${errFiles.has(c.path) ? '.err' : ''}`, c.name),
+        dirty.has(c.path) && h('span.cs-dirty', '●')));
+        if (c.dir && open) walk(c, depth + 1);
+      }
+    };
+    walk(buildTree(), 0);
+    put(treeEl, rows.length ? rows : h('div.muted.small.cs-pad', 'Empty. Right-click here or use + to add a file.'));
+  }
+  const saveExpanded = () => { try { localStorage.setItem(`dojo-space-open:${space}`, JSON.stringify([...expanded])); } catch { } };
+  treeEl.addEventListener('contextmenu', e => { if (e.target === treeEl || e.target.classList.contains('cs-pad')) { e.preventDefault(); showMenu(e, { path: '', dir: true }); } });
+
+  function showMenu(e, node) {
+    const folder = node.dir ? node.path : node.path.split('/').slice(0, -1).join('/');
+    const item = (label, fn) => h('button.cs-menu-item', { type: 'button', onclick: () => { menu.hidden = true; fn(); } }, label);
+    put(menu,
+      item('New file…', () => newEntry('newfile', folder)),
+      item('New folder…', () => newEntry('mkdir', folder)),
+      node.path && item('Rename / move…', () => rename(node)),
+      node.path && item('Delete', () => remove(node)));
+    menu.hidden = false;
+    menu.style.left = `${Math.min(e.clientX, innerWidth - 200)}px`;
+    menu.style.top = `${Math.min(e.clientY, innerHeight - 160)}px`;
+  }
+
+  async function fs(op, path, to) {
+    const r = await call(`${base}/fs`, { op, path, to }).catch(() => ({ error: 'Could not reach the dojo server.' }));
+    if (r.error) { alertBox(r.error); return null; }
+    await Promise.all([loadDetail(), loadSources()]);
+    return r;
+  }
+
+  async function newEntry(op, folder) {
+    const label = op === 'mkdir' ? 'New folder' : 'New file (for C#, a class named after the file is started for you)';
+    const name = await promptBox(label, folder ? `${folder}/` : '', 'Create');
+    if (!name || name.endsWith('/')) return;
+    const r = await fs(op, name);
+    if (!r) return;
+    let p = r.path; while (p.includes('/')) { p = p.slice(0, p.lastIndexOf('/')); expanded.add(p); }
+    saveExpanded(); paintTree();
+    if (op === 'newfile') openFile(r.path);
+  }
+
+  async function rename(node) {
+    const to = await promptBox(`Rename or move ${node.path}`, node.path, 'Rename');
+    if (!to || to === node.path) return;
+    const dirtyHere = tabs.filter(t => t.dirty && (t.path === node.path || t.path.startsWith(node.path + '/')));
+    for (const t of dirtyHere) await save(t);
+    const r = await fs('rename', node.path, to);
+    if (!r) return;
+    for (const t of tabs) {
+      if (t.path === node.path || t.path.startsWith(node.path + '/')) {
+        const np = r.path + t.path.slice(node.path.length);
+        if (sources.has(t.path)) { sources.set(np, sources.get(t.path)); sources.delete(t.path); }
+        t.path = np;
+      }
+    }
+    paintTabs(); paintTree(); saveTabs();
+  }
+
+  async function remove(node) {
+    if (!await ask(`Move ${node.path} to the trash?`, { ok: 'Move to trash', danger: true })) return;
+    const r = await fs('delete', node.path);
+    if (!r) return;
+    for (const t of [...tabs]) if (t.path === node.path || t.path.startsWith(node.path + '/')) { t.dirty = false; await closeTab(t); }
+  }
+
+  // ------------------------------------------------------------ toolbar: build, run, test
+
+  const targetSel = h('select.cs-target', { title: 'What Build, Run and Test act on', onchange: e => { target = e.target.value; localStorage.setItem(`dojo-space-target:${space}`, target); paintToolbar(); } });
+  const buildBtn = h('button.btn.ghost', { type: 'button', title: 'Build (Ctrl+Shift+B)', onclick: () => runJob('build') }, '⚒ Build');
+  const runBtn = h('button.btn.primary', { type: 'button', title: 'Run (F5 or Ctrl+Enter)', onclick: () => run() }, '▶ Run');
+  const stopBtn = h('button.btn.ghost', { type: 'button', title: 'Stop', onclick: stop }, '■ Stop');
+  const testBtn = h('button.btn.ghost', { type: 'button', title: 'Run the tests', onclick: () => runJob('test') }, '✓ Test');
+  const statusEl = h('span.cs-status.small');
+  const urlEl = h('span.cs-url');
+  let statusNote = '';
+  const setStatus = text => { statusNote = text; paintStatus(); };
+
+  function runnable() {
+    const t = target && byPath(target);
+    if (t && (t.kind === 'console' || t.kind === 'web')) return t;
+    return projects().find(p => p.kind === 'console' || p.kind === 'web');
+  }
+
+  function paintToolbar() {
+    const opts = [h('option', { value: '' }, detail?.solution ? `Whole solution (${detail.solution})` : 'Default project')];
+    if (detail?.solution) opts.push(h('option', { value: detail.solution, selected: target === detail.solution }, detail.solution));
+    for (const p of projects()) opts.push(h('option', { value: p.path, selected: target === p.path }, `${p.name}  ·  ${p.kind}`));
+    put(targetSel, opts);
+    targetSel.value = target;
+    const busy = job?.status === 'running';
+    buildBtn.disabled = testBtn.disabled = busy && job.kind !== 'run';
+    runBtn.disabled = (busy && job.kind !== 'run') || !runnable();
+    testBtn.hidden = !projects().some(p => p.kind === 'test');
+    stopBtn.disabled = !busy;
+    runBtn.textContent = busy && job.kind === 'run' ? '↻ Restart' : '▶ Run';
+    paintStatus();
+    paintRequestTab();
+  }
+
+  function paintStatus() {
+    if (job) {
+      const secs = (job.ms / 1000).toFixed(1);
+      const what = `${job.kind}${job.project ? ' ' + job.project.split('/').pop() : ''}`;
+      const state = job.status === 'running' ? (job.kind === 'run' && job.listening ? 'running' : `${job.kind === 'run' ? 'starting' : 'running'} · ${secs}s`) : `${job.status} · ${secs}s`;
+      statusEl.className = `cs-status small ${job.status}`;
+      statusEl.textContent = `${what}: ${state}${statusNote ? ' · ' + statusNote : ''}`;
+    } else { statusEl.className = 'cs-status small'; statusEl.textContent = statusNote; }
+    put(urlEl, job?.status === 'running' && job.url && job.listening && [
+      h('a.mono.small', { href: job.url, target: '_blank', rel: 'noopener', title: 'Open in a new browser tab' }, job.url + ' ↗'),
+    ]);
+  }
+
+  async function runJob(kind, project) {
+    if (!await saveAll()) return;
+    statusNote = '';
+    const projectArg = project ?? (target || null);
+    const r = await call(`${base}/${kind}`, { project: kind === 'run' ? runnable()?.path || null : projectArg }).catch(() => ({ error: 'Could not reach the dojo server.' }));
+    if (r.error) { setStatus(r.error); return; }
+    job = r.job;
+    if (kind !== 'run' || bottomTab !== 'request') showBottom('output');
+    paintToolbar();
+    pollSoon(150);
+  }
+  const run = () => runJob('run');
+
+  async function stop() { await call(`${base}/stop`, {}).catch(() => null); pollSoon(100); }
+
+  // ------------------------------------------------------------ bottom panel: problems, output, request
+
+  const problemsEl = h('div.cs-problems');
+  const outEl = h('pre.cs-output');
+  const stdin = h('input.cs-stdin.mono', { placeholder: 'Type input for the running program and press Enter', spellcheck: false,
+    onkeydown: async e => {
+      if (e.key !== 'Enter') return;
+      const text = stdin.value; stdin.value = '';
+      await call(`${base}/stdin`, { text }).catch(() => null);
+      pollSoon(100);
+    } });
+  const requestEl = h('div.cs-request');
+  const bottomTabs = h('div.cs-bottom-tabs');
+  const bottomBody = h('div.cs-bottom-body');
+  let outLines = [];
+
+  function showBottom(tab) { bottomTab = tab; paintBottom(); }
+  function paintBottom() {
+    const errs = problems.filter(p => p.severity === 'error').length, warns = problems.length - errs;
+    const web = runnable()?.kind === 'web' || !!job?.url;
+    put(bottomTabs,
+      h(`button.tab.small${bottomTab === 'problems' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('problems') }, `Problems${problems.length ? ` (${errs} error${errs === 1 ? '' : 's'}, ${warns} warning${warns === 1 ? '' : 's'})` : ''}`),
+      h(`button.tab.small${bottomTab === 'output' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('output') }, 'Output'),
+      web && h(`button.tab.small${bottomTab === 'request' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('request') }, 'Request'),
+      h('span.spacer'),
+      bottomTab === 'output' && h('button.btn.ghost.small', { type: 'button', onclick: () => { outLines = []; outEl.textContent = ''; } }, 'Clear'));
+    put(bottomBody,
+      bottomTab === 'problems' && problemsEl,
+      bottomTab === 'output' && [outEl, job?.status === 'running' && job.kind === 'run' && stdin],
+      bottomTab === 'request' && requestEl);
+    if (bottomTab === 'output') outEl.scrollTop = outEl.scrollHeight;
+  }
+
+  function paintProblems() {
+    put(problemsEl, problems.length ? problems.map(p => h(`button.cs-problem.${p.severity}`, { type: 'button', disabled: !p.file, onclick: () => p.file && openFile(p.file, { line: p.line || 1, col: p.column || 1 }) },
+      h('span.cs-sev', p.severity === 'error' ? '✕' : '!'),
+      h('span.cs-code.mono', p.code),
+      h('span.cs-msg', p.message),
+      p.file && h('span.cs-where.mono', `${p.file}${p.line ? `:${p.line}` : ''}`)))
+      : h('div.muted.small.cs-pad', job ? 'No problems.' : 'Build to see errors and warnings here.'));
+  }
+
+  function appendOutput(lines) {
+    if (!lines.length) return;
+    const nearBottom = outEl.scrollHeight - outEl.scrollTop - outEl.clientHeight < 40;
+    const text = lines.map(l => (l.stream === 'in' ? '< ' : '') + l.text);
+    outLines.push(...text);
+    if (outLines.length > 4000) { outLines = outLines.slice(-3000); outEl.textContent = outLines.join('\n') + '\n'; }
+    else outEl.append(document.createTextNode(text.join('\n') + '\n'));
+    if (nearBottom) outEl.scrollTop = outEl.scrollHeight;
+  }
+
+  // A small request client for web projects (the Workbench's tracer only sees apps it compiled itself).
+  const req = JSON.parse(sessionStorage.getItem(`dojo-space-req:${space}`) || 'null') || { method: 'GET', path: '/', body: '' };
+  let reply = null;
+  function paintRequestTab() {
+    const saveReq = () => sessionStorage.setItem(`dojo-space-req:${space}`, JSON.stringify(req));
+    const live = job?.status === 'running' && job.url && job.listening;
+    const send = async () => {
+      reply = { pending: true }; paintRequestTab();
+      reply = await call(`${base}/send`, { method: req.method, path: req.path, body: ['GET', 'HEAD', 'DELETE'].includes(req.method) ? null : req.body, contentType: 'application/json' })
+        .catch(() => ({ error: 'Could not reach the dojo server.' }));
+      paintRequestTab();
+    };
+    let body = reply?.body || '';
+    try { if (reply?.headers?.some(([k, v]) => /content-type/i.test(k) && /json/.test(v))) body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
+    put(requestEl,
+      h('div.wb-line',
+        h('select.wb-method', { onchange: e => { req.method = e.target.value; saveReq(); paintRequestTab(); } }, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(m => h('option', { selected: req.method === m }, m))),
+        h('span.wb-base.mono.small', live ? job.url : '(not running)'),
+        h('input.wb-path.mono', { value: req.path, oninput: e => { req.path = e.target.value; saveReq(); }, onkeydown: e => { if (e.key === 'Enter') send(); } }),
+        h('button.btn.primary.small', { type: 'button', disabled: !live, onclick: send }, 'Send')),
+      !['GET', 'HEAD', 'DELETE'].includes(req.method) && h('textarea.answer.mono.cs-req-body', { rows: 4, spellcheck: false, placeholder: '{ "json": "body" }', value: req.body, oninput: e => { req.body = e.target.value; saveReq(); } }),
+      !live && h('p.muted.small', 'Run the web project, then send it requests from here, or open its URL in your browser.'),
+      reply?.pending && h('p.muted.small', 'Sending…'),
+      reply?.error && h('div.wb-problem', reply.error),
+      reply?.status && h('div.wb-line', h(`span.wb-status.${reply.status < 400 ? 'ok' : reply.status < 500 ? 'warn' : 'bad'}`, `${reply.status} ${reply.reason || ''}`), h('span.muted.small', `${reply.ms} ms · ${reply.size.toLocaleString()} bytes`)),
+      reply?.status && h('pre.code.plain.cs-req-out', body || '(empty body)'));
+    if (bottomTab === 'request') paintBottom();
+  }
+
+  // ------------------------------------------------------------ NuGet
+
+  const nugetEl = h('div.cs-nuget');
+  const pkgSel = h('select.cs-pkg-project', { onchange: e => { pkgProject = e.target.value; nugetTouched = true; paintInstalled(); } });
+  const searchInput = h('input.cs-search', { type: 'search', placeholder: 'Search nuget.org (e.g. Humanizer, Serilog, Dapper)', spellcheck: false });
+  const resultsEl = h('div.cs-results');
+  const installedEl = h('div.cs-installed');
+  let searchTimer = null, searchTicket = 0;
+  searchInput.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(search, 350); });
+  searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); search(); } });
+
+  async function search() {
+    const q = searchInput.value.trim();
+    const ticket = ++searchTicket;
+    if (!q) { put(resultsEl); return; }
+    put(resultsEl, h('div.muted.small.cs-pad', 'Searching nuget.org…'));
+    const r = await call(`nuget/search?q=${enc(q)}&take=20`).catch(() => ({ error: 'Could not reach the dojo server.' }));
+    if (ticket !== searchTicket) return;
+    if (r.error) { put(resultsEl, h('div.wb-problem.small', r.error)); return; }
+    put(resultsEl, r.packages.length ? r.packages.map(resultCard) : h('div.muted.small.cs-pad', 'No packages found.'));
+  }
+
+  const fmt = n => n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : String(n);
+
+  function resultCard(p) {
+    const installed = byPath(pkgProject)?.packages.find(x => x.id.toLowerCase() === p.id.toLowerCase());
+    const versions = h('select.cs-version', p.versions?.length ? p.versions.map(v => h('option', { value: v, selected: v === p.version }, v)) : h('option', p.version));
+    let loadedAll = false;
+    versions.addEventListener('focus', async () => {
+      if (loadedAll) return; loadedAll = true;
+      const r = await call(`nuget/versions?id=${enc(p.id)}`).catch(() => null);
+      if (r?.versions?.length) { const cur = versions.value; put(versions, r.versions.map(v => h('option', { value: v, selected: v === cur }, v))); }
+    });
+    return h('div.cs-result',
+      h('div.cs-result-head', h('b', p.id), p.verified && h('span.cs-badge', { title: 'The owner of this id prefix is verified by nuget.org' }, '✓ verified'), h('span.muted.small', `${fmt(p.downloads)} downloads`)),
+      p.description && h('div.small.cs-desc', p.description),
+      p.authors?.length > 0 && h('div.small.muted', `by ${p.authors.join(', ')}`),
+      h('div.cs-result-actions', versions,
+        installed ? h('span.small.muted', `installed ${installed.version || ''}`) : null,
+        h('button.btn.primary.small', { type: 'button', disabled: !pkgProject, onclick: () => packageOp(p.id, versions.value, false) }, installed ? 'Update' : 'Install')));
+  }
+
+  function paintInstalled() {
+    put(pkgSel, projects().map(p => h('option', { value: p.path, selected: p.path === pkgProject }, p.name)));
+    const proj = byPath(pkgProject);
+    put(installedEl, !proj ? h('div.muted.small.cs-pad', 'Create a project first.')
+      : proj.packages.length ? proj.packages.map(p => h('div.cs-installed-row', h('b.mono.small', p.id), h('span.muted.small.mono', p.version || '(central)'), h('span.spacer'),
+        h('button.btn.ghost.small', { type: 'button', onclick: async () => { if (await ask(`Remove ${p.id} from ${proj.name}?`, { ok: 'Remove' })) packageOp(p.id, null, true); } }, 'Remove')))
+        : h('div.muted.small.cs-pad', 'No packages yet.'));
+  }
+
+  async function packageOp(id, version, remove) {
+    if (!pkgProject) return;
+    const r = await call(`${base}/package`, { project: pkgProject, id, version, remove }).catch(() => ({ error: 'Could not reach the dojo server.' }));
+    if (r.error) { setStatus(r.error); return; }
+    job = r.job; showBottom('output'); paintToolbar(); pollSoon(150);
+  }
+
+  put(nugetEl,
+    h('div.cs-panel-head', h('b', 'NuGet packages'), h('span.spacer'), h('span.small.muted', 'for'), pkgSel),
+    searchInput, resultsEl,
+    h('div.cs-panel-sub', 'Installed'), installedEl);
+
+  // ------------------------------------------------------------ polling
+
+  function pollSoon(ms) { clearTimeout(pollTimer); pollTimer = setTimeout(poll, ms); }
+  async function poll() {
+    if (stopped) return;
+    const was = job?.status;
+    try {
+      const r = await call(`${base}/events?since=${since}`);
+      if (!r.error) {
+        appendOutput(r.lines);
+        since = r.seq || since;
+        const before = job;
+        job = r.job;
+        const key = JSON.stringify(r.problems);
+        if (key !== problemsKey) {
+          problemsKey = key; problems = r.problems;
+          paintProblems(); tabs.forEach(markTab); paintTree();
+          if (problems.some(p => p.severity === 'error') && job?.status !== 'running') showBottom('problems');
+        }
+        paintToolbar();
+        if (bottomTab === 'output' || before?.status !== job?.status) paintBottom();
+        if (was === 'running' && job && job.status !== 'running') {
+          // A build, restore or package change rewrites obj/: refresh references, usings and packages.
+          await loadDetail().catch(() => { });
+          if (job.status === 'succeeded' && (job.kind === 'build' || job.kind === 'run')) setStatus('');
+        }
+      }
+    } catch { /* server restarting */ }
+    if (!stopped) pollSoon(job?.status === 'running' ? 500 : 2500);
+  }
+
+  // ------------------------------------------------------------ layout
+
+  const root = h('div.cs-ide',
+    h('div.cs-toolbar',
+      h('a.back-link.cs-back', { href: '#/spaces' }, '← Spaces'),
+      h('b.cs-title', space),
+      targetSel, buildBtn, runBtn, stopBtn, testBtn, statusEl, h('span.spacer'), urlEl),
+    h('aside.cs-explorer',
+      h('div.cs-panel-head', h('b', 'Explorer'), h('span.spacer'),
+        h('button.icon-btn.small', { type: 'button', title: 'New file', onclick: () => newEntry('newfile', '') }, '+'),
+        h('button.icon-btn.small', { type: 'button', title: 'New folder', onclick: () => newEntry('mkdir', '') }, '▱'),
+        h('button.icon-btn.small', { type: 'button', title: 'Refresh', onclick: () => Promise.all([loadDetail(), loadSources()]) }, '↻')),
+      treeEl),
+    h('section.cs-center', tabBar, h('div.cs-edwrap', edHost)),
+    h('section.cs-bottom', bottomTabs, bottomBody),
+    h('aside.cs-side', nugetEl),
+    menu);
+  edHost.append(emptyEd);
+
+  // Keyboard: Ctrl+S save, Ctrl+Shift+B build, F5 run.
+  const onKey = e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); e.shiftKey ? saveAll() : save(); }
+    else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); runJob('build'); }
+    else if (e.key === 'F5') { e.preventDefault(); if (!runBtn.disabled) run(); }
+  };
+  document.addEventListener('keydown', onKey, true);
+  const onUnload = e => { if (tabs.some(t => t.dirty)) { e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('beforeunload', onUnload);
+
+  page('spaces', root);
+  paintTabs(); paintBottom(); paintProblems(); paintRequestTab();
+
+  (async () => {
+    try {
+      const [ok] = await Promise.all([loadDetail(), loadSources()]);
+      if (!ok) return;
+      const remembered = JSON.parse(localStorage.getItem(`dojo-space-tabs:${space}`) || 'null');
+      const exists = p => detail.tree.some(e => e.path === p && !e.dir);
+      const toOpen = (remembered?.open || []).filter(exists);
+      if (!toOpen.length) {
+        const main = runnable() || projects()[0];
+        const guess = main ? `${main.dir ? main.dir + '/' : ''}Program.cs` : null;
+        const first = guess && exists(guess) ? guess : detail.tree.find(e => !e.dir && /\.cs$/i.test(e.path))?.path;
+        if (first) toOpen.push(first);
+      }
+      for (const p of toOpen) {
+        await openFile(p);
+        let d = p; while (d.includes('/')) { d = d.slice(0, d.lastIndexOf('/')); expanded.add(d); }
+      }
+      if (remembered?.active && tabs.some(t => t.path === remembered.active)) activate(tabs.find(t => t.path === remembered.active));
+      paintTree();
+    } catch { put(root, h('div.empty', h('h2', 'Could not reach the dojo server'), h('a.btn.primary', { href: '#/spaces' }, 'All spaces'))); }
+    poll();
+  })();
+
+  return () => {
+    stopped = true;
+    clearTimeout(pollTimer);
+    document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('mousedown', closeMenu, true);
+    window.removeEventListener('beforeunload', onUnload);
+    // Leaving the page keeps your work: unsaved files are written to disk.
+    tabs.filter(t => t.dirty).forEach(t => call(`${base}/file`, { path: t.path, code: t.editor.value }).catch(() => { }));
+  };
+}

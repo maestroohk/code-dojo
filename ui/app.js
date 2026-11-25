@@ -11,6 +11,7 @@ import { codeTrace } from './codetrace.js';
 import { subnetTrainer } from './lab-subnet.js';
 import { vimLab } from './lab-vim.js';
 import { workbench } from './workbench.js';
+import { codeSpaces } from './codespaces.js';
 import { netLabs } from './netlabs.js';
 
 const app = document.getElementById('app');
@@ -67,6 +68,7 @@ function header(active) {
       h(`a.nav-link${active === 'practice' ? '.active' : ''}`, { href: '#/practice' }, 'Practice', due > 0 && h('span.badge', due)),
       link('#/projects', 'Projects', 'projects'),
       link('#/workbench', 'Workbench', 'workbench'),
+      link('#/spaces', 'Code spaces', 'spaces'),
       link('#/playground', 'Playground', 'playground'),
       link('#/profile', 'Profile', 'profile')),
     h('div.stats',
@@ -983,6 +985,7 @@ function route() {
     case 'track': return trackView(parts[1]);
     case 'labs': if (parts[1] === 'net') { leave = netLabs(page, parts[2]); return; } return labsView(parts[1]);
     case 'workbench': leave = workbench(page); return;
+    case 'spaces': leave = codeSpaces(page, parts[1]); return;
     case 'lesson': return lessonView(parts[1], parts[2], parts[3]);
     case 'practice': return practiceView();
     case 'projects': return projectsView();
