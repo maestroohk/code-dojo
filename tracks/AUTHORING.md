@@ -229,7 +229,7 @@ needs, and one to three `code` steps that grow the program. Two extra fields on 
   step of the project, not with `starter`. Still give a `starter`: it must be exactly the previous
   code step's `solution`, so the step is solvable on its own (and it is what a learner who jumps in
   gets). Every `solution` is the whole program so far.
-- `"framework": "web"` — compile against ASP.NET Core and test over HTTP (below).
+- `"framework": "web"` — compile against ASP.NET Core and test over HTTP (below). `"web+efcore"` adds EF Core.
 
 Write each prompt as a small spec: the endpoints or behaviour to add, with example requests and
 responses. Say what must keep working. Later stages re-test earlier behaviour.
@@ -278,7 +278,8 @@ Rules for web steps:
   `Microsoft.Extensions.DependencyInjection`, `.Hosting`, `.Logging`, `System.Net`,
   `System.Net.Http`, `System.Net.Http.Json` and `System.Text.Json`.
 - Only what ships in the ASP.NET Core shared framework is available: minimal APIs, DI, middleware,
-  configuration, logging, `System.Text.Json`. No NuGet: no EF Core, no Swagger. Store data in memory.
+  configuration, logging, `System.Text.Json`. No other NuGet packages (no Swagger), with one exception:
+  `"framework": "web+efcore"` adds EF Core with SQLite (next section). Otherwise store data in memory.
 - The server starts fresh for every check, so tests must create the data they rely on and must not
   assume ids beyond what the stage's spec promises (for example "the first task created gets id 1").
 - One uncaught exception in `DojoTests.Run` ends the tests with a single failed row. Guard reads
@@ -286,6 +287,35 @@ Rules for web steps:
 - Do not test timing. Do not rely on `DateTime.Now` values, only on their presence if needed.
 - The Run button is hidden on steps with a template, so the prompt should tell the learner that
   **Run checks** starts the server and calls it.
+
+### EF Core steps (`"framework": "efcore"`)
+
+`"framework": "efcore"` compiles a step against EF Core and SQLite (`Microsoft.EntityFrameworkCore.Sqlite`,
+the version the server ships with) and makes it run; `"web+efcore"` combines it with a web step. It applies
+to `code` and `predict` steps. A track can set a default for all its C# steps in `track.json`
+(`"framework": "efcore"`, as `tracks/efcore` does); a step's own `framework` wins, and "Try it" on learn-card
+samples uses the track default.
+
+- Extra implicit usings: `Microsoft.EntityFrameworkCore` (+ `.ChangeTracking`, `.Diagnostics`, `.Infrastructure`,
+  `.Metadata.Builders`, `.Migrations`, `.Storage.ValueConversion`), `Microsoft.Data.Sqlite`,
+  `System.ComponentModel.DataAnnotations` (+ `.Schema`), and for console steps `Microsoft.Extensions.Logging`
+  and `Microsoft.Extensions.DependencyInjection`.
+- Every run starts in a fresh, empty folder, so `UseSqlite("Data Source=library.db")` plus
+  `Database.EnsureCreated()` always starts from an empty database. Steps with several `tests` reuse the folder
+  between runs: call `EnsureDeleted()` first, or prefer one template run. For a database that lives only in
+  memory, keep one open `SqliteConnection("Data Source=:memory:")` and pass it to `UseSqlite(connection)`.
+- To show SQL deterministically, log only executed commands (plain `LogTo(Console.WriteLine)` includes
+  timings): `.LogTo((id, level) => id == RelationalEventId.CommandExecuted, e => Console.WriteLine(((CommandExecutedEventData)e).Command.CommandText.ReplaceLineEndings(" ")))`.
+  `ToQueryString()` shows one query without running it. Both are fine in `predict` answers.
+- Methods called inside a query must not be local functions (expression trees cannot reference them); put
+  them in a `static class`. SQLite stores `decimal` as text and cannot sort by it: use `int` cents or `double`.
+- In web+efcore templates, tests can count the SQL commands a request runs by subscribing to the
+  `Microsoft.EntityFrameworkCore` `DiagnosticListener` (see `tracks/efcore/p01-library-api`).
+- EF Core programs JIT a large library and build a model before the first query (about 1 to 1.5 s of CPU),
+  so their CPU limit is 8 seconds instead of 4.
+- `dotnet ef` cannot run in a step; migrations can still be written by hand (with `[DbContext]` and
+  `[Migration]` attributes) and applied with `Database.Migrate()`. Ignore
+  `RelationalEventId.PendingModelChangesWarning` when there is no model snapshot.
 
 ## Tracks in Python, JavaScript or TypeScript
 
@@ -313,7 +343,7 @@ messages are correct; the one-line helper prelude is accounted for.
 - Learner code is compiled as C# (latest) with nullable enabled, as a top-level-statements program.
 - These usings are implicit: `System`, `System.Collections.Generic`, `System.IO`, `System.Linq`,
   `System.Text`, `System.Threading`, `System.Threading.Tasks`.
-- Only the base class library is referenced. No NuGet packages.
+- Only the base class library is referenced. No NuGet packages (except EF Core for `"framework": "efcore"` steps).
 - Culture is fixed to `en-US`, so number and date formatting is predictable.
 - A run is stopped after 4 seconds of CPU time, or 15 seconds on the clock (the generous clock limit
   is deliberate: security scanners sometimes pause a new program for several seconds). Keep delays

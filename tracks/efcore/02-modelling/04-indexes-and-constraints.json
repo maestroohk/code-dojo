@@ -1,0 +1,307 @@
+{
+  "title": "Indexes and constraints",
+  "summary": "Unique indexes, composite indexes, check constraints and default values: rules the database keeps for you.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Indexes",
+      "body": [
+        "Without an index, `WHERE \"Email\" = 'a@b.c'` reads every row. An **index** is a sorted copy of one or more columns that lets the database jump straight to the matches, like the index at the back of a book.",
+        "",
+        "```csharp",
+        "[Index(nameof(Email), IsUnique = true)]",
+        "class Member",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Email { get; set; } = \"\";",
+        "    public string Name { get; set; } = \"\";",
+        "}",
+        "```",
+        "",
+        "becomes",
+        "",
+        "```text",
+        "CREATE UNIQUE INDEX \"IX_Members_Email\" ON \"Members\" (\"Email\");",
+        "```",
+        "",
+        "A **unique** index is also a rule: no two rows may share an email. This is how you keep a natural value unique while using a generated key.",
+        "",
+        "Fluent API: `model.Entity<Member>().HasIndex(m => m.Email).IsUnique();`",
+        "",
+        "Indexes are not free: every insert and update must maintain them too. Add them for columns you **filter, join or sort on**, not for every column. The primary key is always indexed already."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using var db = new ClubDb();",
+        "db.Database.EnsureCreated();",
+        "db.Members.Add(new Member { Email = \"ana@example.com\", Name = \"Ana\" });",
+        "db.SaveChanges();",
+        "db.Members.Add(new Member { Email = \"ana@example.com\", Name = \"Another Ana\" });",
+        "try",
+        "{",
+        "    db.SaveChanges();",
+        "}",
+        "catch (DbUpdateException e) when (e.InnerException is SqliteException { SqliteErrorCode: 19 })",
+        "{",
+        "    Console.WriteLine(\"duplicate email\");",
+        "}",
+        "db.ChangeTracker.Clear();",
+        "Console.WriteLine(db.Members.Count());",
+        "",
+        "[Index(nameof(Email), IsUnique = true)]",
+        "class Member",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Email { get; set; } = \"\";",
+        "    public string Name { get; set; } = \"\";",
+        "}",
+        "",
+        "class ClubDb : DbContext",
+        "{",
+        "    public DbSet<Member> Members => Set<Member>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=club.db\");",
+        "}"
+      ],
+      "answer": [
+        "duplicate email",
+        "1"
+      ],
+      "explain": "The second insert breaks the unique index. SQLite reports error 19 (a constraint failed), which EF Core wraps in a `DbUpdateException`. The failed row is never stored. `ChangeTracker.Clear()` drops the still-pending `Added` entity so the context is clean again."
+    },
+    {
+      "type": "learn",
+      "title": "Composite indexes and constraints",
+      "body": [
+        "An index can cover several columns. Order matters: an index on `(LastName, FirstName)` helps `WHERE LastName = ...` and `WHERE LastName = ... AND FirstName = ...`, but not `WHERE FirstName = ...` alone, just as a phone book sorted by surname does not help you find every \"Ana\".",
+        "",
+        "```csharp",
+        "model.Entity<Member>().HasIndex(m => new { m.LastName, m.FirstName });",
+        "```",
+        "",
+        "Two more rules the database can keep:",
+        "",
+        "```csharp",
+        "model.Entity<Book>(book =>",
+        "{",
+        "    book.ToTable(t => t.HasCheckConstraint(\"CK_Books_Copies\", \"\\\"Copies\\\" >= 0\"));   // never negative",
+        "    book.Property(b => b.Copies).HasDefaultValue(1);                                   // DEFAULT 1",
+        "});",
+        "```",
+        "",
+        "A **check constraint** is a SQL condition every row must satisfy. A **default value** is used when the insert does not supply one."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You have an index on `(City, Street)`. Which query can use it best?",
+      "options": [
+        "`Where(a => a.City == \"Kampala\" && a.Street == \"Main\")`",
+        "`Where(a => a.Street == \"Main\")`",
+        "`OrderBy(a => a.Street)`",
+        "`Where(a => a.Number == 4)`"
+      ],
+      "answer": 0,
+      "explain": "A composite index is sorted by its first column, then the next. It helps queries that start from the left: `City`, or `City` and `Street`. `Street` alone would have to scan the whole index."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using var db = new LibraryDb();",
+        "db.Database.EnsureCreated();",
+        "db.Books.Add(new Book { Title = \"Dune\", Copies = 3 });",
+        "db.Books.Add(new Book { Title = \"Emma\", Copies = -1 });",
+        "try { db.SaveChanges(); Console.WriteLine(\"saved\"); }",
+        "catch (DbUpdateException) { Console.WriteLine(\"refused\"); }",
+        "db.ChangeTracker.Clear();",
+        "Console.WriteLine(db.Books.Count());",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Copies { get; set; }",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model)",
+        "        => model.Entity<Book>().ToTable(t => t.HasCheckConstraint(\"CK_Books_Copies\", \"\\\"Copies\\\" >= 0\"));",
+        "}"
+      ],
+      "answer": [
+        "refused",
+        "0"
+      ],
+      "explain": "`SaveChanges` runs in a transaction. The second insert breaks the check constraint, so the whole save is rolled back: not even Dune was stored."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the configuration so `Isbn` is unique, `(Author, Title)` is indexed, and `Copies` defaults to 1.",
+      "lines": [
+        "model.Entity<Book>(book =>",
+        "{",
+        "    book.HasIndex(b => b.Isbn).IsUnique();",
+        "    book.HasIndex(b => new { b.Author, b.Title });",
+        "    book.Property(b => b.Copies).HasDefaultValue(1);",
+        "});"
+      ],
+      "explain": "Inside the `Entity<Book>` block the three lines are independent; this course lists them in the order the prompt asks for.",
+      "also": [
+        [
+          "model.Entity<Book>(book =>",
+          "{",
+          "    book.HasIndex(b => new { b.Author, b.Title });",
+          "    book.HasIndex(b => b.Isbn).IsUnique();",
+          "    book.Property(b => b.Copies).HasDefaultValue(1);",
+          "});"
+        ],
+        [
+          "model.Entity<Book>(book =>",
+          "{",
+          "    book.Property(b => b.Copies).HasDefaultValue(1);",
+          "    book.HasIndex(b => b.Isbn).IsUnique();",
+          "    book.HasIndex(b => new { b.Author, b.Title });",
+          "});"
+        ],
+        [
+          "model.Entity<Book>(book =>",
+          "{",
+          "    book.Property(b => b.Copies).HasDefaultValue(1);",
+          "    book.HasIndex(b => new { b.Author, b.Title });",
+          "    book.HasIndex(b => b.Isbn).IsUnique();",
+          "});"
+        ],
+        [
+          "model.Entity<Book>(book =>",
+          "{",
+          "    book.HasIndex(b => b.Isbn).IsUnique();",
+          "    book.Property(b => b.Copies).HasDefaultValue(1);",
+          "    book.HasIndex(b => new { b.Author, b.Title });",
+          "});"
+        ],
+        [
+          "model.Entity<Book>(book =>",
+          "{",
+          "    book.HasIndex(b => new { b.Author, b.Title });",
+          "    book.Property(b => b.Copies).HasDefaultValue(1);",
+          "    book.HasIndex(b => b.Isbn).IsUnique();",
+          "});"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The registration endpoint already checks `AnyAsync(a => a.Username == name)` before inserting. Why still add a unique index?",
+      "options": [
+        "Two requests can both pass the check at the same moment; only the database can guarantee uniqueness",
+        "The index makes the check unnecessary to write",
+        "EF Core ignores the check without an index",
+        "SQLite requires an index on every string column"
+      ],
+      "answer": 0,
+      "explain": "Check-then-insert is a race. The check gives a friendly message in the common case; the unique index is what makes a duplicate impossible, and turns the race into a `DbUpdateException` you can map to 409."
+    },
+    {
+      "type": "code",
+      "title": "Rules for usernames",
+      "prompt": [
+        "Write an `Account` entity and an `AppDb` context (`Data Source=app.db`, `DbSet<Account> Accounts`):",
+        "",
+        "- `int Id`, `string Username`, `int Age`, `string Plan`",
+        "- `Username` is **unique**",
+        "- a check constraint named `CK_Accounts_Age` requires `\"Age\" >= 13`",
+        "- `Plan` defaults to `'free'` in the database (`HasDefaultValue(\"free\")`)",
+        "",
+        "Then write `bool TryRegister(AppDb db, string username, int age)` (at the top of your code) that adds an account and saves it. It returns `false`, leaving the context clean, when the database refuses the row."
+      ],
+      "starter": [
+        "bool TryRegister(AppDb db, string username, int age)",
+        "{",
+        "    return false;",
+        "}",
+        "",
+        "class Account",
+        "{",
+        "}",
+        "",
+        "class AppDb : DbContext",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "bool TryRegister(AppDb db, string username, int age)",
+        "{",
+        "    db.Accounts.Add(new Account { Username = username, Age = age });",
+        "    try",
+        "    {",
+        "        db.SaveChanges();",
+        "        return true;",
+        "    }",
+        "    catch (DbUpdateException)",
+        "    {",
+        "        db.ChangeTracker.Clear();",
+        "        return false;",
+        "    }",
+        "}",
+        "",
+        "class Account",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Username { get; set; } = \"\";",
+        "    public int Age { get; set; }",
+        "    public string Plan { get; set; } = null!;",
+        "}",
+        "",
+        "class AppDb : DbContext",
+        "{",
+        "    public DbSet<Account> Accounts => Set<Account>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=app.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model)",
+        "    {",
+        "        model.Entity<Account>(account =>",
+        "        {",
+        "            account.HasIndex(a => a.Username).IsUnique();",
+        "            account.ToTable(t => t.HasCheckConstraint(\"CK_Accounts_Age\", \"\\\"Age\\\" >= 13\"));",
+        "            account.Property(a => a.Plan).HasDefaultValue(\"free\");",
+        "        });",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "await Dojo.TryAsync(\"registering\", async () =>",
+        "{",
+        "    using (var dojoDb = new AppDb())",
+        "    {",
+        "        var dojoSql = dojoDb.Database.GenerateCreateScript();",
+        "        Dojo.Check(\"Username has a unique index\", dojoSql.Contains(\"CREATE UNIQUE INDEX\") && dojoSql.Contains(\"(\\\"Username\\\")\"), dojoSql);",
+        "        Dojo.Check(\"the age check constraint exists\", dojoSql.Contains(\"CK_Accounts_Age\"), dojoSql);",
+        "        Dojo.Check(\"Plan defaults to free\", dojoSql.Contains(\"DEFAULT 'free'\"), dojoSql);",
+        "        dojoDb.Database.EnsureCreated();",
+        "        Dojo.Eq(\"ana (30) registers\", true, TryRegister(dojoDb, \"ana\", 30));",
+        "        Dojo.Eq(\"a second ana is refused\", false, TryRegister(dojoDb, \"ana\", 40));",
+        "        Dojo.Eq(\"a 9-year-old is refused\", false, TryRegister(dojoDb, \"kid\", 9));",
+        "        Dojo.Eq(\"ben (13) registers after the failures\", true, TryRegister(dojoDb, \"ben\", 13));",
+        "    }",
+        "    using (var dojoDb = new AppDb())",
+        "    {",
+        "        Dojo.Eq(\"two accounts are stored\", new List<string> { \"ana\", \"ben\" }, dojoDb.Accounts.OrderBy(a => a.Id).Select(a => a.Username).ToList());",
+        "        Dojo.Eq(\"the database filled in the plan\", \"free\", dojoDb.Accounts.First().Plan);",
+        "    }",
+        "});",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Catch `DbUpdateException`, then `db.ChangeTracker.Clear()` so the refused account is not retried on the next save.",
+        "`account.ToTable(t => t.HasCheckConstraint(\"CK_Accounts_Age\", \"\\\"Age\\\" >= 13\"))`",
+        "If `Plan` has a C# default like `\"\"`, EF Core sends that instead of letting the database default apply: use `= null!`."
+      ]
+    }
+  ]
+}

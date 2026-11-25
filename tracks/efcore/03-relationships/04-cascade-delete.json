@@ -1,0 +1,330 @@
+{
+  "title": "Deleting related data",
+  "summary": "What happens to dependents when the principal goes: cascade, set null, and restrict.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Delete an author, and then?",
+      "body": [
+        "Delete an author who still has books, and the foreign keys in `Books` point at nothing. The database will not allow that, so something must give. EF Core picks a **delete behaviour** per relationship:",
+        "",
+        "| Behaviour | What happens to the books | Default for |",
+        "|---|---|---|",
+        "| `Cascade` | deleted too | **required** relationships (`int AuthorId`) |",
+        "| `ClientSetNull` / `SetNull` | kept, foreign key set to `NULL` | **optional** relationships (`int? ShelfId`) |",
+        "| `Restrict` / `NoAction` | the delete fails | none: you ask for it |",
+        "",
+        "The defaults follow the meaning: a book cannot exist without its author (required), so it goes with them. A book can exist without a shelf (optional), so it just stops being on one."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new LibraryDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    var shelf = new Shelf { Label = \"A1\" };",
+        "    seed.Authors.Add(new Author { Name = \"Herbert\", Books = [new() { Title = \"Dune\", Shelf = shelf }, new() { Title = \"Children of Dune\", Shelf = shelf }] });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using (var db = new LibraryDb())",
+        "    {",
+        "        var herbert = db.Authors.Include(a => a.Books).Single();",
+        "        db.Authors.Remove(herbert);",
+        "        Console.WriteLine(db.SaveChanges());",
+        "    }",
+        "    using (var db = new LibraryDb())",
+        "        Console.WriteLine(db.Books.Count() + \" \" + db.Shelves.Count());",
+        "",
+        "    class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "    public int? ShelfId { get; set; }",
+        "    public Shelf? Shelf { get; set; }",
+        "}",
+        "",
+        "class Shelf",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Label { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    public DbSet<Shelf> Shelves => Set<Shelf>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": [
+        "3",
+        "0 1"
+      ],
+      "explain": "`AuthorId` is required, so the delete cascades: one author and two books, 3 rows. The shelf is the principal of a different relationship; deleting books never deletes their shelf."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new LibraryDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    var shelf = new Shelf { Label = \"A1\" };",
+        "    seed.Authors.Add(new Author { Name = \"Herbert\", Books = [new() { Title = \"Dune\", Shelf = shelf }, new() { Title = \"Children of Dune\", Shelf = shelf }] });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using (var db = new LibraryDb())",
+        "    {",
+        "        var shelf = db.Shelves.Include(s => s.Books).Single();",
+        "        db.Shelves.Remove(shelf);",
+        "        db.SaveChanges();",
+        "    }",
+        "    using (var db = new LibraryDb())",
+        "        Console.WriteLine(db.Books.Count() + \" \" + db.Books.Count(b => b.ShelfId == null));",
+        "",
+        "    class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "    public int? ShelfId { get; set; }",
+        "    public Shelf? Shelf { get; set; }",
+        "}",
+        "",
+        "class Shelf",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Label { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    public DbSet<Shelf> Shelves => Set<Shelf>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": "2 2",
+      "explain": "`ShelfId` is optional, so removing the shelf keeps both books and sets their `ShelfId` to `NULL`. EF Core did it with two `UPDATE`s before the `DELETE`, because the books were loaded."
+    },
+    {
+      "type": "learn",
+      "title": "Choosing the behaviour",
+      "body": [
+        "Override the default in `OnModelCreating`:",
+        "",
+        "```csharp",
+        "model.Entity<Book>()",
+        "    .HasOne(b => b.Author)",
+        "    .WithMany(a => a.Books)",
+        "    .OnDelete(DeleteBehavior.Restrict);",
+        "```",
+        "",
+        "Now deleting an author who still has books fails with a `DbUpdateException` (a foreign key constraint), and your code must deal with the books first. That is often right for **valuable** data: you do not want one click on \"delete customer\" to wipe ten years of invoices.",
+        "",
+        "> **Tip:** `ClientSetNull` (the optional default) only nulls the keys of dependents the context has **loaded**; `SetNull` also tells the database to do it, so it works for rows you never loaded. Cascade behaves the same way: `Cascade` is written into the table as `ON DELETE CASCADE`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An `Invoice` has a required `CustomerId`. Accounting must keep invoices for seven years even if a customer is removed. What should you do?",
+      "options": [
+        "Set `OnDelete(DeleteBehavior.Restrict)` and archive customers instead of deleting them",
+        "Keep the default cascade",
+        "Make `CustomerId` a string",
+        "Delete the invoices by hand before the customer"
+      ],
+      "answer": 0,
+      "explain": "The default cascade would delete the invoices with the customer. Restrict makes accidental deletion impossible; the usual design is a soft delete (an `IsArchived` flag) for the customer."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which delete behaviour fits?",
+      "buckets": [
+        "Cascade",
+        "Set null",
+        "Restrict"
+      ],
+      "items": [
+        [
+          "Order lines when their order is deleted",
+          0
+        ],
+        [
+          "A user's sessions when the user is deleted",
+          0
+        ],
+        [
+          "Posts when their (optional) category is deleted",
+          1
+        ],
+        [
+          "Employees when their (optional) manager leaves",
+          1
+        ],
+        [
+          "Invoices when a customer is deleted",
+          2
+        ],
+        [
+          "Payments when an account is deleted",
+          2
+        ]
+      ],
+      "explain": "Cascade for parts that mean nothing alone, set null for optional links, restrict for records you must keep."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make deleting a `Customer` that still has orders fail.",
+      "code": [
+        "model.Entity<Order>()",
+        "    .__1__(o => o.Customer)",
+        "    .__2__(c => c.Orders)",
+        "    .OnDelete(DeleteBehavior.__3__);"
+      ],
+      "blanks": [
+        "HasOne",
+        "WithMany",
+        "Restrict"
+      ],
+      "bank": [
+        "HasMany",
+        "WithOne",
+        "Cascade",
+        "SetNull"
+      ],
+      "explain": "Configure from the dependent: an order `HasOne` customer, a customer `WithMany` orders, then choose `Restrict`."
+    },
+    {
+      "type": "code",
+      "title": "Safe deletes",
+      "prompt": [
+        "The tests give you `Customer` (`Id`, `Name`, `List<Order> Orders`) and `Order` (`Id`, `int Total`, `int CustomerId`, `Customer Customer`, `List<OrderLine> Lines`), and `OrderLine` (`Id`, `string Product`, `int OrderId`, `Order Order`).",
+        "",
+        "Write `ShopDb` (`Data Source=shop.db`, sets `Customers`, `Orders`, `Lines`) with these rules:",
+        "",
+        "- deleting an **order** deletes its lines (the default for a required key: nothing to write),",
+        "- deleting a **customer** who has orders **fails** (`Restrict`).",
+        "",
+        "Then write `bool TryDeleteCustomer(ShopDb db, int id)` (at the top) that deletes the customer and returns `true`, or returns `false` (leaving the context clean) if the database refuses."
+      ],
+      "starter": [
+        "bool TryDeleteCustomer(ShopDb db, int id)",
+        "{",
+        "    return false;",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "bool TryDeleteCustomer(ShopDb db, int id)",
+        "{",
+        "    var customer = db.Customers.Find(id);",
+        "    if (customer is null) return false;",
+        "    db.Customers.Remove(customer);",
+        "    try",
+        "    {",
+        "        db.SaveChanges();",
+        "        return true;",
+        "    }",
+        "    catch (DbUpdateException)",
+        "    {",
+        "        db.ChangeTracker.Clear();",
+        "        return false;",
+        "    }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Customer> Customers => Set<Customer>();",
+        "    public DbSet<Order> Orders => Set<Order>();",
+        "    public DbSet<OrderLine> Lines => Set<OrderLine>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model)",
+        "        => model.Entity<Order>().HasOne(o => o.Customer).WithMany(c => c.Orders).OnDelete(DeleteBehavior.Restrict);",
+        "}"
+      ],
+      "template": [
+        "await Dojo.TryAsync(\"deleting\", async () =>",
+        "{",
+        "    using (var dojoDb = new ShopDb())",
+        "    {",
+        "        dojoDb.Database.EnsureCreated();",
+        "        dojoDb.Customers.Add(new Customer { Name = \"Ana\", Orders = [new() { Total = 10, Lines = [new() { Product = \"pen\" }, new() { Product = \"ink\" }] }] });",
+        "        dojoDb.Customers.Add(new Customer { Name = \"Ben\" });",
+        "        dojoDb.SaveChanges();",
+        "    }",
+        "    using (var dojoDb = new ShopDb())",
+        "    {",
+        "        Dojo.Eq(\"Ana has an order: refused\", false, TryDeleteCustomer(dojoDb, 1));",
+        "        Dojo.Eq(\"Ben has none: deleted\", true, TryDeleteCustomer(dojoDb, 2));",
+        "    }",
+        "    using (var dojoDb = new ShopDb())",
+        "    {",
+        "        Dojo.Eq(\"Ana is still there\", 1, dojoDb.Customers.Count());",
+        "        dojoDb.Orders.Remove(dojoDb.Orders.Single());",
+        "        dojoDb.SaveChanges();",
+        "        Dojo.Eq(\"deleting the order removed its lines\", 0, dojoDb.Lines.Count());",
+        "        Dojo.Eq(\"now Ana can go\", true, TryDeleteCustomer(dojoDb, 1));",
+        "    }",
+        "});",
+        "{{CODE}}",
+        "class Customer",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Order> Orders { get; set; } = [];",
+        "}",
+        "",
+        "class Order",
+        "{",
+        "    public int Id { get; set; }",
+        "    public int Total { get; set; }",
+        "    public int CustomerId { get; set; }",
+        "    public Customer Customer { get; set; } = null!;",
+        "    public List<OrderLine> Lines { get; set; } = [];",
+        "}",
+        "",
+        "class OrderLine",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Product { get; set; } = \"\";",
+        "    public int OrderId { get; set; }",
+        "    public Order Order { get; set; } = null!;",
+        "}"
+      ],
+      "hints": [
+        "`model.Entity<Order>().HasOne(o => o.Customer).WithMany(c => c.Orders).OnDelete(DeleteBehavior.Restrict);`",
+        "On a refused save the customer is still marked Deleted in the context: `db.ChangeTracker.Clear()`."
+      ]
+    }
+  ]
+}

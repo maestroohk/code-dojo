@@ -1,0 +1,279 @@
+{
+  "title": "Data annotations and the Fluent API",
+  "summary": "Two ways to configure the same model, when to use each, and IEntityTypeConfiguration.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two ways to say the same thing",
+      "body": [
+        "**Data annotations** are attributes on the entity class. **The Fluent API** is code in the context's `OnModelCreating`. They configure the same model:",
+        "",
+        "```csharp",
+        "// annotations",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    [MaxLength(200)] public string Title { get; set; } = \"\";",
+        "    [Column(\"published\")] public int Year { get; set; }",
+        "}",
+        "```",
+        "",
+        "```csharp",
+        "// Fluent API",
+        "protected override void OnModelCreating(ModelBuilder model)",
+        "{",
+        "    model.Entity<Book>(book =>",
+        "    {",
+        "        book.Property(b => b.Title).HasMaxLength(200);",
+        "        book.Property(b => b.Year).HasColumnName(\"published\");",
+        "    });",
+        "}",
+        "```",
+        "",
+        "Annotations sit next to the property and read well, but they only cover the common cases and they put database details into your domain class. The Fluent API can express **everything** (composite indexes, check constraints, conversions, relationships in detail) and keeps the entity a plain class.",
+        "",
+        "When both configure the same thing, **the Fluent API wins**: EF Core applies conventions, then annotations, then `OnModelCreating`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each annotation to its Fluent API twin.",
+      "pairs": [
+        [
+          "`[Key]`",
+          "`.HasKey(b => b.Isbn)`"
+        ],
+        [
+          "`[MaxLength(50)]`",
+          "`.Property(b => b.Title).HasMaxLength(50)`"
+        ],
+        [
+          "`[Required]`",
+          "`.Property(b => b.Title).IsRequired()`"
+        ],
+        [
+          "`[Table(\"tbl_books\")]`",
+          "`.ToTable(\"tbl_books\")`"
+        ],
+        [
+          "`[NotMapped]`",
+          "`.Ignore(b => b.Rating)`"
+        ]
+      ],
+      "explain": "Every annotation has a Fluent API equivalent. The reverse is not true: many Fluent options have no attribute."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using var db = new LibraryDb();",
+        "var title = db.Model.FindEntityType(typeof(Book))!.FindProperty(\"Title\")!;",
+        "Console.WriteLine(title.GetMaxLength());",
+        "Console.WriteLine(title.GetColumnName());",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    [MaxLength(50)] [Column(\"name\")] public string Title { get; set; } = \"\";",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model)",
+        "        => model.Entity<Book>().Property(b => b.Title).HasMaxLength(120);",
+        "}"
+      ],
+      "answer": [
+        "120",
+        "name"
+      ],
+      "explain": "The annotation set 50, then `OnModelCreating` set 120: the Fluent API is applied last, so it wins. The column name came only from the annotation, so it stays `name`. `db.Model` is the model EF Core built, and you can inspect it like this."
+    },
+    {
+      "type": "learn",
+      "title": "Keeping OnModelCreating tidy",
+      "body": [
+        "One `OnModelCreating` for fifty entities becomes a wall of code. Move each entity's configuration into its own class with `IEntityTypeConfiguration<T>`:",
+        "",
+        "```csharp",
+        "class BookConfig : IEntityTypeConfiguration<Book>",
+        "{",
+        "    public void Configure(EntityTypeBuilder<Book> book)",
+        "    {",
+        "        book.ToTable(\"Catalogue\");",
+        "        book.Property(b => b.Title).HasMaxLength(200);",
+        "        book.HasIndex(b => b.Title);",
+        "    }",
+        "}",
+        "```",
+        "",
+        "and apply it:",
+        "",
+        "```csharp",
+        "protected override void OnModelCreating(ModelBuilder model)",
+        "    => model.ApplyConfiguration(new BookConfig());",
+        "```",
+        "",
+        "In a real project, `model.ApplyConfigurationsFromAssembly(typeof(LibraryDb).Assembly)` finds every configuration class at once."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the configuration class.",
+      "code": [
+        "class MemberConfig : __1__<Member>",
+        "{",
+        "    public void Configure(__2__<Member> member)",
+        "    {",
+        "        member.ToTable(\"Members\");",
+        "        member.Property(m => m.Name).__3__(80);",
+        "    }",
+        "}"
+      ],
+      "blanks": [
+        "IEntityTypeConfiguration",
+        "EntityTypeBuilder",
+        "HasMaxLength"
+      ],
+      "bank": [
+        "DbContext",
+        "ModelBuilder",
+        "MaxLength",
+        "IConfiguration"
+      ],
+      "explain": "The interface is `IEntityTypeConfiguration<T>`, its one method receives an `EntityTypeBuilder<T>`, and lengths are set with `HasMaxLength`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your entities live in a domain project that must not depend on EF Core. How do you configure them?",
+      "options": [
+        "With the Fluent API (or IEntityTypeConfiguration classes) in the data project",
+        "With data annotations on the entities",
+        "You cannot: EF Core requires attributes",
+        "By renaming the properties to match the conventions"
+      ],
+      "answer": 0,
+      "explain": "The Fluent API lives with the context, so the entity classes stay plain C# with no EF Core references. That is a common reason teams prefer it. (A few annotations like `[MaxLength]` come from `System.ComponentModel.DataAnnotations`, not EF Core, but the EF-specific ones like `[Index]` do not.)"
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using var db = new LibraryDb();",
+        "var sql = db.Database.GenerateCreateScript();",
+        "Console.WriteLine(sql.Contains(\"CREATE TABLE \\\"Catalogue\\\"\"));",
+        "Console.WriteLine(sql.Contains(\"\\\"Rating\\\"\"));",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Rating { get; set; }",
+        "}",
+        "",
+        "class BookConfig : IEntityTypeConfiguration<Book>",
+        "{",
+        "    public void Configure(EntityTypeBuilder<Book> book)",
+        "    {",
+        "        book.ToTable(\"Catalogue\");",
+        "        book.Ignore(b => b.Rating);",
+        "    }",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model) => model.ApplyConfiguration(new BookConfig());",
+        "}"
+      ],
+      "answer": [
+        "True",
+        "False"
+      ],
+      "explain": "`ToTable` renames the table from the `DbSet` name to `Catalogue`, and `Ignore` keeps `Rating` out of the database, just like `[NotMapped]`."
+    },
+    {
+      "type": "code",
+      "title": "Configure it fluently",
+      "prompt": [
+        "The tests give you this entity, with **no** attributes:",
+        "",
+        "```csharp",
+        "class Member",
+        "{",
+        "    public int Number { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public string? Email { get; set; }",
+        "    public int VisitCount { get; set; }",
+        "}",
+        "```",
+        "",
+        "Write `MemberConfig : IEntityTypeConfiguration<Member>` so that:",
+        "",
+        "- the table is called `LibraryMembers`,",
+        "- `Number` is the primary key,",
+        "- `Name` has a maximum length of 80,",
+        "- `Email` is **required** even though it is `string?`,",
+        "- `VisitCount` is not stored.",
+        "",
+        "The tests apply your class in their context's `OnModelCreating`."
+      ],
+      "starter": [
+        "class MemberConfig : IEntityTypeConfiguration<Member>",
+        "{",
+        "    public void Configure(EntityTypeBuilder<Member> member)",
+        "    {",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class MemberConfig : IEntityTypeConfiguration<Member>",
+        "{",
+        "    public void Configure(EntityTypeBuilder<Member> member)",
+        "    {",
+        "        member.ToTable(\"LibraryMembers\");",
+        "        member.HasKey(m => m.Number);",
+        "        member.Property(m => m.Name).HasMaxLength(80);",
+        "        member.Property(m => m.Email).IsRequired();",
+        "        member.Ignore(m => m.VisitCount);",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "await Dojo.TryAsync(\"the configuration\", async () =>",
+        "{",
+        "    using var dojoDb = new ClubDb();",
+        "    var dojoSql = dojoDb.Database.GenerateCreateScript();",
+        "    Dojo.Check(\"the table is LibraryMembers\", dojoSql.Contains(\"CREATE TABLE \\\"LibraryMembers\\\"\"), dojoSql);",
+        "    Dojo.Check(\"Number is the primary key\", dojoSql.Contains(\"\\\"Number\\\" INTEGER NOT NULL CONSTRAINT \\\"PK_LibraryMembers\\\" PRIMARY KEY\"), dojoSql);",
+        "    Dojo.Check(\"Email is required\", dojoSql.Contains(\"\\\"Email\\\" TEXT NOT NULL\"), dojoSql);",
+        "    Dojo.Check(\"VisitCount is not stored\", !dojoSql.Contains(\"VisitCount\"), dojoSql);",
+        "    Dojo.Eq(\"Name has a maximum length of 80\", 80, dojoDb.Model.FindEntityType(typeof(Member))?.FindProperty(\"Name\")?.GetMaxLength());",
+        "});",
+        "{{CODE}}",
+        "class Member",
+        "{",
+        "    public int Number { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public string? Email { get; set; }",
+        "    public int VisitCount { get; set; }",
+        "}",
+        "",
+        "class ClubDb : DbContext",
+        "{",
+        "    public DbSet<Member> Members => Set<Member>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=club.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model) => model.ApplyConfiguration(new MemberConfig());",
+        "}"
+      ],
+      "hints": [
+        "`member.HasKey(m => m.Number)`",
+        "`member.Property(m => m.Email).IsRequired()` and `member.Ignore(m => m.VisitCount)`"
+      ]
+    }
+  ]
+}

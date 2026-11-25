@@ -1,0 +1,324 @@
+{
+  "title": "LINQ to SQL, and projections",
+  "summary": "Why some LINQ becomes SQL, and why selecting only what you need beats loading entities.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Expression trees",
+      "body": [
+        "`db.Books.Where(b => b.Year > 1950)` looks like LINQ over a list, but it is not. `db.Books` is an `IQueryable<Book>`, and on an `IQueryable` the lambda is not compiled into code: it is captured as an **expression tree**, a data structure that describes `b.Year > 1950`.",
+        "",
+        "When you finally run the query, EF Core walks that tree and **translates** it into SQL for the provider. That is why:",
+        "",
+        "- the work happens in the database (filtering a million rows there, not in your process),",
+        "- you can only use things EF Core knows how to translate: properties, operators, many `string` and `Math` methods, `Contains` on a list... but not your own methods,",
+        "- a mistake can compile fine and fail only when the query runs.",
+        "",
+        "The same lambda on a `List<Book>` is ordinary compiled code. **Where the query starts decides where it runs.**"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is `db.Books.Where(b => b.Pages > 300)` before you enumerate it?",
+      "options": [
+        "A description of a query (an expression tree) that has not run yet",
+        "A list of the books with more than 300 pages",
+        "A SQL string",
+        "A compiled delegate that EF Core calls for each row"
+      ],
+      "answer": 0,
+      "explain": "It is an `IQueryable<Book>` holding an expression tree. Nothing ran. `ToList()`, `First()`, `Count()` or a `foreach` will translate it to SQL and run it."
+    },
+    {
+      "type": "learn",
+      "title": "Projections",
+      "body": [
+        "Loading entities reads **every column** and **tracks** every object, ready for `SaveChanges`. For a screen that shows titles and author names, that is wasted work. Say what you need with `Select`:",
+        "",
+        "```csharp",
+        "var rows = db.Books",
+        "    .Where(b => b.Year > 1950)",
+        "    .Select(b => new { b.Title, Author = b.Author.Name })",
+        "    .ToList();",
+        "```",
+        "",
+        "```text",
+        "SELECT \"b\".\"Title\", \"a\".\"Name\" AS \"Author\"",
+        "FROM \"Books\" AS \"b\"",
+        "INNER JOIN \"Authors\" AS \"a\" ON \"b\".\"AuthorId\" = \"a\".\"Id\"",
+        "WHERE \"b\".\"Year\" > 1950",
+        "```",
+        "",
+        "Three wins:",
+        "",
+        "- **Fewer columns** cross the wire: two, not every column of two tables.",
+        "- **No `Include` needed**: navigating to `b.Author.Name` inside `Select` makes EF Core write the join.",
+        "- **No tracking**: the results are not entities, so the context keeps no snapshots of them.",
+        "",
+        "Project into an anonymous type, a record (`new BookRow(b.Title, b.Author.Name)`), or a single value (`Select(b => b.Title)`)."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using var db = new LibraryDb();",
+        "    var query = db.Books.Select(b => new { b.Title, Author = b.Author.Name });",
+        "    var sql = query.ToQueryString();",
+        "    Console.WriteLine(sql.Contains(\"\\\"Pages\\\"\"));",
+        "    Console.WriteLine(sql.Contains(\"JOIN\"));",
+        "",
+        "    class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public string Country { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "    public int Pages { get; set; }",
+        "    public string Genre { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": [
+        "False",
+        "True"
+      ],
+      "explain": "Only the projected columns are selected, so `Pages` never leaves the database. Reaching for `b.Author.Name` makes EF Core join `Authors` for you."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new LibraryDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    var leGuin = new Author { Name = \"Le Guin\", Country = \"US\" };",
+        "    var herbert = new Author { Name = \"Herbert\", Country = \"US\" };",
+        "    var austen = new Author { Name = \"Austen\", Country = \"UK\" };",
+        "    seed.Books.AddRange(",
+        "        new Book { Title = \"Earthsea\", Year = 1968, Pages = 183, Genre = \"Fantasy\", Author = leGuin },",
+        "        new Book { Title = \"The Dispossessed\", Year = 1974, Pages = 387, Genre = \"SciFi\", Author = leGuin },",
+        "        new Book { Title = \"Dune\", Year = 1965, Pages = 412, Genre = \"SciFi\", Author = herbert },",
+        "        new Book { Title = \"Emma\", Year = 1815, Pages = 474, Genre = \"Classic\", Author = austen },",
+        "        new Book { Title = \"Persuasion\", Year = 1817, Pages = 249, Genre = \"Classic\", Author = austen });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using var db = new LibraryDb();",
+        "    var entities = db.Books.Include(b => b.Author).ToList();",
+        "    Console.WriteLine(db.ChangeTracker.Entries().Count());",
+        "    db.ChangeTracker.Clear();",
+        "    var rows = db.Books.Select(b => new { b.Title, b.Author.Name }).ToList();",
+        "    Console.WriteLine(db.ChangeTracker.Entries().Count());",
+        "",
+        "    class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public string Country { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "    public int Pages { get; set; }",
+        "    public string Genre { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": [
+        "8",
+        "0"
+      ],
+      "explain": "Loading entities tracks every one of them: five books and three authors. A projection returns plain values the context does not track at all."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Project each author into a summary: the name and how many books they wrote.",
+      "code": [
+        "var summaries = db.Authors",
+        "    .__1__(a => new AuthorSummary(a.Name, a.Books.__2__()))",
+        "    .__3__();",
+        "",
+        "record AuthorSummary(string Name, int Books);"
+      ],
+      "blanks": [
+        "Select",
+        "Count",
+        "ToList"
+      ],
+      "bank": [
+        "Include",
+        "Sum",
+        "Where",
+        "Load"
+      ],
+      "explain": "`Select` builds the record, `a.Books.Count()` becomes a `COUNT(*)` subquery, and `ToList` runs it. No `Include`: the books themselves are never loaded."
+    },
+    {
+      "type": "sort",
+      "prompt": "Load entities, or project?",
+      "buckets": [
+        "Load entities",
+        "Project with Select"
+      ],
+      "items": [
+        [
+          "Change a book's title and save",
+          0
+        ],
+        [
+          "Delete the books of an author you just loaded",
+          0
+        ],
+        [
+          "Show a list of titles and author names",
+          1
+        ],
+        [
+          "Return JSON for a search results page",
+          1
+        ],
+        [
+          "Count books per genre for a chart",
+          1
+        ]
+      ],
+      "explain": "Load (tracked) entities when you will change them. For anything read-only, project the fields you need: less data, no tracking cost, and the shape you want."
+    },
+    {
+      "type": "code",
+      "title": "A catalogue page",
+      "prompt": [
+        "The tests give you this model:",
+        "",
+        "```csharp",
+        "class Author { int Id; string Name; string Country; List<Book> Books; }",
+        "class Book   { int Id; string Title; int Year; int Pages; string Genre; int AuthorId; Author Author; }",
+        "```",
+        "",
+        "The tests fill it with five books: Earthsea (Le Guin, 1968, 183 pages, Fantasy), The Dispossessed (Le Guin, 1974, 387, SciFi), Dune (Herbert, 1965, 412, SciFi), Emma (Austen, 1815, 474, Classic) and Persuasion (Austen, 1817, 249, Classic). Le Guin and Herbert are from the US, Austen from the UK.",
+        "",
+        "Write `List<CatalogueRow> Catalogue(LibraryDb db, int minPages)` returning books with at least `minPages` pages, ordered by `Title`, **projected** into",
+        "",
+        "```csharp",
+        "record CatalogueRow(string Title, string Author, int Year);",
+        "```",
+        "",
+        "Declare the record yourself (at the bottom). Do not use `Include` and do not load entities: the tests check that the SQL selects only those three columns."
+      ],
+      "starter": [
+        "List<CatalogueRow> Catalogue(LibraryDb db, int minPages)",
+        "{",
+        "    return [];",
+        "}",
+        "",
+        "record CatalogueRow(string Title, string Author, int Year);"
+      ],
+      "solution": [
+        "List<CatalogueRow> Catalogue(LibraryDb db, int minPages) =>",
+        "    db.Books",
+        "        .Where(b => b.Pages >= minPages)",
+        "        .OrderBy(b => b.Title)",
+        "        .Select(b => new CatalogueRow(b.Title, b.Author.Name, b.Year))",
+        "        .ToList();",
+        "",
+        "record CatalogueRow(string Title, string Author, int Year);"
+      ],
+      "template": [
+        "static void DojoSeed()",
+        "{",
+        "    using var seed = new LibraryDb();",
+        "    seed.Database.EnsureDeleted();",
+        "    seed.Database.EnsureCreated();",
+        "    var leGuin = new Author { Name = \"Le Guin\", Country = \"US\" };",
+        "    var herbert = new Author { Name = \"Herbert\", Country = \"US\" };",
+        "    var austen = new Author { Name = \"Austen\", Country = \"UK\" };",
+        "    seed.Books.AddRange(",
+        "        new Book { Title = \"Earthsea\", Year = 1968, Pages = 183, Genre = \"Fantasy\", Author = leGuin },",
+        "        new Book { Title = \"The Dispossessed\", Year = 1974, Pages = 387, Genre = \"SciFi\", Author = leGuin },",
+        "        new Book { Title = \"Dune\", Year = 1965, Pages = 412, Genre = \"SciFi\", Author = herbert },",
+        "        new Book { Title = \"Emma\", Year = 1815, Pages = 474, Genre = \"Classic\", Author = austen },",
+        "        new Book { Title = \"Persuasion\", Year = 1817, Pages = 249, Genre = \"Classic\", Author = austen });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    await Dojo.TryAsync(\"the queries\", async () =>",
+        "    {",
+        "        DojoSeed();",
+        "        using var dojoDb = new LibraryDb();",
+        "        var dojoRows = Catalogue(dojoDb, 400);",
+        "        Dojo.Eq(\"books with 400+ pages\", new List<string> { \"Dune Herbert 1965\", \"Emma Austen 1815\" }, dojoRows.Select(r => $\"{r.Title} {r.Author} {r.Year}\").ToList());",
+        "        Dojo.Check(\"selects only the columns it needs\", !LibraryDb.LastSql.Contains(\"\\\"Pages\\\", \") && !LibraryDb.LastSql.Contains(\"\\\"Genre\\\"\"), LibraryDb.LastSql);",
+        "        Dojo.Eq(\"tracks nothing\", 0, dojoDb.ChangeTracker.Entries().Count());",
+        "        Dojo.Eq(\"all books for 0\", 5, Catalogue(dojoDb, 0).Count);",
+        "    });",
+        "{{CODE}}",
+        "class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public string Country { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "    public int Pages { get; set; }",
+        "    public string Genre { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public static int Commands;",
+        "    public static string LastSql = \"\";",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=catalogue.db\").LogTo((id, level) => id == RelationalEventId.CommandExecuted, e => { Commands++; LastSql = ((CommandExecutedEventData)e).Command.CommandText; });",
+        "}"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\.Include\\s*\\(",
+          "message": "Projects instead of using Include"
+        }
+      ],
+      "hints": [
+        "`Select(b => new CatalogueRow(b.Title, b.Author.Name, b.Year))`",
+        "Filter and sort before the `Select`."
+      ]
+    }
+  ]
+}

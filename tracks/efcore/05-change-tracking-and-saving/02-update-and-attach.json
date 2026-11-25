@@ -1,0 +1,307 @@
+{
+  "title": "Disconnected entities: Update and Attach",
+  "summary": "Saving objects that came from outside the context, like a web request body.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "When the context did not load it",
+      "body": [
+        "In a web API, the object you save often did not come from a query. A client sends JSON, and ASP.NET Core turns it into a **new** `Item` object. A fresh context (one per request) has never seen it: it is **detached**. You must tell the context what it is.",
+        "",
+        "**`db.Update(item)`** says \"this exists; save **all** its values\". The entity becomes `Modified` with every property marked changed:",
+        "",
+        "```sql",
+        "UPDATE \"Items\" SET \"Name\" = @p0, \"PriceCents\" = @p1, \"Stock\" = @p2 WHERE \"Id\" = @p3",
+        "```",
+        "",
+        "**`db.Attach(item)`** says \"this exists and is **unchanged**\". Nothing is saved until you change something *after* attaching; then only those properties are sent:",
+        "",
+        "```csharp",
+        "var item = new Item { Id = 3 };      // just the key",
+        "db.Attach(item);",
+        "item.Stock = 0;                       // now only Stock is Modified",
+        "db.SaveChanges();                     // UPDATE \"Items\" SET \"Stock\" = @p0 WHERE \"Id\" = @p1",
+        "```",
+        "",
+        "(An entity with no key value set, like `Id = 0`, is treated as new: `Update` and `Attach` mark it `Added`.)"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new ShopDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Items.AddRange(new Item { Name = \"pen\", Stock = 10, PriceCents = 150 }, new Item { Name = \"ink\", Stock = 0, PriceCents = 400 },",
+        "                        new Item { Name = \"pad\", Stock = 3, PriceCents = 250 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using (var db = new ShopDb())",
+        "    {",
+        "        var fromClient = new Item { Id = 1, Name = \"pen\", Stock = 4, PriceCents = 150 };",
+        "        db.Update(fromClient);",
+        "        Console.WriteLine(db.Entry(fromClient).State);",
+        "        Console.WriteLine(db.Entry(fromClient).Properties.Count(p => p.IsModified));",
+        "        db.SaveChanges();",
+        "    }",
+        "    using (var db = new ShopDb())",
+        "    {",
+        "        var stub = new Item { Id = 3 };",
+        "        db.Attach(stub);",
+        "        Console.WriteLine(db.Entry(stub).State);",
+        "        stub.Stock = 99;",
+        "        Console.WriteLine(string.Join(\",\", db.Entry(stub).Properties.Where(p => p.IsModified).Select(p => p.Metadata.Name)));",
+        "        db.SaveChanges();",
+        "    }",
+        "    using (var db = new ShopDb())",
+        "        Console.WriteLine(string.Join(\" \", db.Items.OrderBy(i => i.Id).Select(i => i.Name + \":\" + i.Stock)));",
+        "",
+        "    class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "}"
+      ],
+      "answer": [
+        "Modified",
+        "3",
+        "Unchanged",
+        "Stock",
+        "pen:4 ink:0 pad:99"
+      ],
+      "explain": "`Update` marks every non-key property modified (Name, Stock, PriceCents). `Attach` starts `Unchanged`; only the property changed afterwards is sent. The stub's `Name` was empty, but because it was never marked modified, the stored name `pad` is kept."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A client sends `{ \"id\": 3, \"stock\": 7 }` with no name or price. Your code deserialises it into an `Item` and calls `db.Update(item); db.SaveChanges();`. What happens?",
+      "options": [
+        "The row's Name and PriceCents are overwritten with an empty string and 0",
+        "Only Stock is updated",
+        "Nothing: Update needs a loaded entity",
+        "EF Core throws because Name is missing"
+      ],
+      "answer": 0,
+      "explain": "`Update` sends **every** property. The missing ones are just their C# defaults on the object, and those overwrite the stored values. For partial updates, load the entity (or attach a stub) and set only what the client sent."
+    },
+    {
+      "type": "learn",
+      "title": "The safe pattern for an edit",
+      "body": [
+        "For an API's `PUT /items/{id}` the clearest and safest pattern is: **load, copy, save.**",
+        "",
+        "```csharp",
+        "var item = db.Items.Find(id);",
+        "if (item is null) return Results.NotFound();",
+        "item.Name = dto.Name;",
+        "item.PriceCents = dto.PriceCents;      // only the fields this endpoint may change",
+        "db.SaveChanges();                      // UPDATE of the columns that really changed",
+        "```",
+        "",
+        "It costs one `SELECT`, and in return:",
+        "",
+        "- a missing row is a clean 404, not an exception,",
+        "- fields the client must not change (like `Stock`, or an owner id) cannot be overwritten by a malicious body,",
+        "- unchanged values are not written at all.",
+        "",
+        "`Update` and `Attach` shine when you **trust** the whole object (it came from your own code), or when saving that `SELECT` really matters."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which approach fits?",
+      "buckets": [
+        "Load, copy, save",
+        "`Update(entity)`",
+        "`Attach` a stub, set one property"
+      ],
+      "items": [
+        [
+          "A PUT endpoint that may change only Name and Price",
+          0
+        ],
+        [
+          "An edit form where some fields are read-only",
+          0
+        ],
+        [
+          "Saving a complete object your own code built and keeps in a cache",
+          1
+        ],
+        [
+          "Marking item 42 as discontinued without reading it first",
+          2
+        ],
+        [
+          "Bumping the view count of a known post id",
+          2
+        ]
+      ],
+      "explain": "Load-copy-save is the default for input from outside. `Update` writes everything, so only use it for objects you trust completely. A stub plus `Attach` updates one column with no `SELECT`."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange a PATCH that sets only the price of item `id`, without loading it first.",
+      "lines": [
+        "var stub = new Item { Id = id };",
+        "db.Items.Attach(stub);",
+        "stub.PriceCents = newPrice;",
+        "db.SaveChanges();"
+      ],
+      "explain": "Attach first, so the context records the stub as `Unchanged`; then the change to `PriceCents` is detected as the only modification. Setting the price before attaching would not mark it modified."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new ShopDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Items.AddRange(new Item { Name = \"pen\", Stock = 10, PriceCents = 150 }, new Item { Name = \"ink\", Stock = 0, PriceCents = 400 },",
+        "                        new Item { Name = \"pad\", Stock = 3, PriceCents = 250 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using (var db = new ShopDb())",
+        "    {",
+        "        var stub = new Item { Id = 2, PriceCents = 999 };",
+        "        db.Items.Attach(stub);",
+        "        Console.WriteLine(db.SaveChanges());",
+        "    }",
+        "    using (var db = new ShopDb())",
+        "        Console.WriteLine(db.Items.Find(2)!.PriceCents);",
+        "",
+        "    class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "}"
+      ],
+      "answer": [
+        "0",
+        "400"
+      ],
+      "explain": "The price was set **before** `Attach`, so it is part of what the context believes is the unchanged, stored state. Nothing is modified, nothing is saved: the order of those lines matters."
+    },
+    {
+      "type": "code",
+      "title": "A safe edit",
+      "prompt": [
+        "The tests give you `ShopDb` with `Items` (`Id`, `Name`, `Stock`, `PriceCents`), and this request type:",
+        "",
+        "```csharp",
+        "record ItemEdit(int Id, string Name, int PriceCents, int Stock);",
+        "```",
+        "",
+        "Write:",
+        "",
+        "- `bool Edit(ShopDb db, ItemEdit edit)`: the **load, copy, save** pattern. Copy only `Name` and `PriceCents` (stock is managed elsewhere and must be ignored). Return `false` for an unknown id.",
+        "- `void Discontinue(ShopDb db, int id)`: set `Stock` to 0 for that item **without loading it**: attach a stub, change `Stock`, save. Only the `Stock` column may be written."
+      ],
+      "starter": [
+        "bool Edit(ShopDb db, ItemEdit edit)",
+        "{",
+        "    return false;",
+        "}",
+        "",
+        "void Discontinue(ShopDb db, int id)",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "bool Edit(ShopDb db, ItemEdit edit)",
+        "{",
+        "    var item = db.Items.Find(edit.Id);",
+        "    if (item is null) return false;",
+        "    item.Name = edit.Name;",
+        "    item.PriceCents = edit.PriceCents;",
+        "    db.SaveChanges();",
+        "    return true;",
+        "}",
+        "",
+        "void Discontinue(ShopDb db, int id)",
+        "{",
+        "    var stub = new Item { Id = id, Stock = -1 };",
+        "    db.Items.Attach(stub);",
+        "    stub.Stock = 0;",
+        "    db.SaveChanges();",
+        "}"
+      ],
+      "template": [
+        "using (var seed = new ShopDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Items.AddRange(new Item { Name = \"pen\", Stock = 10, PriceCents = 150 }, new Item { Name = \"ink\", Stock = 0, PriceCents = 400 },",
+        "                        new Item { Name = \"pad\", Stock = 3, PriceCents = 250 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    await Dojo.TryAsync(\"editing\", async () =>",
+        "    {",
+        "        using (var dojoDb = new ShopDb())",
+        "        {",
+        "            Dojo.Eq(\"Edit(1) returns true\", true, Edit(dojoDb, new ItemEdit(1, \"fountain pen\", 900, 9999)));",
+        "            Dojo.Eq(\"Edit(42) returns false\", false, Edit(dojoDb, new ItemEdit(42, \"x\", 1, 1)));",
+        "        }",
+        "        using (var dojoDb = new ShopDb())",
+        "        {",
+        "            var dojoPen = dojoDb.Items.Find(1)!;",
+        "            Dojo.Eq(\"name and price were copied\", \"fountain pen 900\", dojoPen.Name + \" \" + dojoPen.PriceCents);",
+        "            Dojo.Eq(\"stock was ignored\", 10, dojoPen.Stock);",
+        "        }",
+        "        using (var dojoDb = new ShopDb())",
+        "        {",
+        "            var dojoSql = new List<string>();",
+        "            ShopDb.OnCommand = s => dojoSql.Add(s);",
+        "            Discontinue(dojoDb, 3);",
+        "            ShopDb.OnCommand = null;",
+        "            Dojo.Eq(\"Discontinue runs one command\", 1, dojoSql.Count);",
+        "            Dojo.Check(\"...an UPDATE of Stock only, without a SELECT\", dojoSql.Count == 1 && dojoSql[0].StartsWith(\"UPDATE\") && dojoSql[0].Contains(\"\\\"Stock\\\"\") && !dojoSql[0].Contains(\"\\\"Name\\\"\") && !dojoSql[0].Contains(\"PriceCents\"), string.Join(\" | \", dojoSql));",
+        "        }",
+        "        using (var dojoDb = new ShopDb())",
+        "            Dojo.Eq(\"pad is discontinued but keeps its name\", \"pad 0\", dojoDb.Items.Where(i => i.Id == 3).Select(i => i.Name + \" \" + i.Stock).Single());",
+        "    });",
+        "{{CODE}}",
+        "record ItemEdit(int Id, string Name, int PriceCents, int Stock);",
+        "",
+        "class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public static Action<string>? OnCommand;",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\")",
+        "        .LogTo((id, level) => id == RelationalEventId.CommandExecuted, e => OnCommand?.Invoke(((CommandExecutedEventData)e).Command.CommandText));",
+        "}"
+      ],
+      "hints": [
+        "`db.Items.Find(edit.Id)` then copy two properties.",
+        "For the stub, the value of `Stock` before `Attach` must differ from 0, or setting it to 0 is not a change: `new Item { Id = id, Stock = -1 }`."
+      ]
+    }
+  ]
+}

@@ -4,6 +4,8 @@ A local, gamified learning center. Topics are added as the need arises; today th
 
 - **C#**, from `Console.WriteLine` to expression trees, plus real projects (a REST API, a console data tool).
 - **Certificates & PKI**: keys, signatures, certificate chains, trust stores, and why TLS says no.
+- **Databases with EF Core**: DbContext, modelling, relationships, querying, change tracking, migrations and
+  performance, run for real against SQLite, plus a Library API project (ASP.NET Core + EF Core).
 
 Alongside the courses:
 

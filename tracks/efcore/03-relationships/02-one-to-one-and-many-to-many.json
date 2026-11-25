@@ -1,0 +1,292 @@
+{
+  "title": "One-to-one and many-to-many",
+  "summary": "A user and their profile; books and tags with skip navigations; and a join entity when the link has data of its own.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One-to-one",
+      "body": [
+        "Each user has at most one profile, and each profile belongs to one user:",
+        "",
+        "```csharp",
+        "class User",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Email { get; set; } = \"\";",
+        "    public Profile? Profile { get; set; }          // optional: a user may not have one yet",
+        "}",
+        "",
+        "class Profile",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Bio { get; set; } = \"\";",
+        "    public int UserId { get; set; }                // the foreign key lives here",
+        "    public User User { get; set; } = null!;",
+        "}",
+        "```",
+        "",
+        "With a reference navigation on both sides, EF Core cannot tell which one is the dependent **unless** one side has the foreign key property. `Profile.UserId` settles it: `Profile` is the dependent. EF Core also gives `UserId` a **unique** index, because two profiles must not point at the same user.",
+        "",
+        "Fluent API spelling: `model.Entity<User>().HasOne(u => u.Profile).WithOne(p => p.User).HasForeignKey<Profile>(p => p.UserId);`"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using var db = new AppDb();",
+        "var sql = db.Database.GenerateCreateScript();",
+        "Console.WriteLine(sql.Contains(\"CREATE UNIQUE INDEX \\\"IX_Profiles_UserId\\\"\"));",
+        "Console.WriteLine(sql.Contains(\"\\\"ProfileId\\\"\"));",
+        "",
+        "class User",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Email { get; set; } = \"\";",
+        "    public Profile? Profile { get; set; }",
+        "}",
+        "",
+        "class Profile",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Bio { get; set; } = \"\";",
+        "    public int UserId { get; set; }",
+        "    public User User { get; set; } = null!;",
+        "}",
+        "",
+        "class AppDb : DbContext",
+        "{",
+        "    public DbSet<User> Users => Set<User>();",
+        "    public DbSet<Profile> Profiles => Set<Profile>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=app.db\");",
+        "}"
+      ],
+      "answer": [
+        "True",
+        "False"
+      ],
+      "explain": "Only the dependent table (`Profiles`) gets a foreign key column, and it is uniquely indexed: one profile per user. `Users` has no `ProfileId` column at all; `User.Profile` is found by looking up `Profiles.UserId`."
+    },
+    {
+      "type": "learn",
+      "title": "Many-to-many",
+      "body": [
+        "A book has many tags; a tag is on many books. Neither table can hold the other's key: a third **join table** holds pairs. Give both sides a collection, and EF Core creates the join table for you:",
+        "",
+        "```csharp",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public List<Tag> Tags { get; set; } = [];",
+        "}",
+        "",
+        "class Tag",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "```",
+        "",
+        "The join table is `BookTag` with columns `BooksId` and `TagsId`, a composite primary key over both. You never see it in C#: `book.Tags.Add(scifi)` inserts a `BookTag` row on save. These collections are called **skip navigations**, because they skip over the join table."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using (var db = new LibraryDb())",
+        "{",
+        "    db.Database.EnsureCreated();",
+        "    var scifi = new Tag { Name = \"sci-fi\" };",
+        "    var classic = new Tag { Name = \"classic\" };",
+        "    db.Books.Add(new Book { Title = \"Dune\", Tags = [scifi, classic] });",
+        "    db.Books.Add(new Book { Title = \"Emma\", Tags = [classic] });",
+        "    db.SaveChanges();",
+        "}",
+        "using (var db = new LibraryDb())",
+        "{",
+        "    Console.WriteLine(db.Tags.Where(t => t.Name == \"classic\").Select(t => t.Books.Count).Single());",
+        "    Console.WriteLine(db.Set<Dictionary<string, object>>(\"BookTag\").Count());",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public List<Tag> Tags { get; set; } = [];",
+        "}",
+        "",
+        "class Tag",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    public DbSet<Tag> Tags => Set<Tag>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": [
+        "2",
+        "3"
+      ],
+      "explain": "Two books carry `classic`. The hidden join table holds one row per link: Dune with sci-fi, Dune with classic, Emma with classic. (`Set<Dictionary<string, object>>(\"BookTag\")` is how you reach the join entity EF Core made for you; you will rarely need it.)"
+    },
+    {
+      "type": "learn",
+      "title": "When the link has data: a join entity",
+      "body": [
+        "A member borrows many books, and a book is borrowed by many members. But a loan also has **data of its own**: when it was borrowed, when it is due. Skip navigations have nowhere to put that. Make the join an entity:",
+        "",
+        "```csharp",
+        "class Loan",
+        "{",
+        "    public int Id { get; set; }",
+        "    public int MemberId { get; set; }",
+        "    public Member Member { get; set; } = null!;",
+        "    public int BookId { get; set; }",
+        "    public Book Book { get; set; } = null!;",
+        "    public DateOnly Due { get; set; }",
+        "}",
+        "```",
+        "",
+        "That is simply two one-to-many relationships: a member has many loans, a book has many loans. Use skip navigations for a plain link, and an explicit join entity the moment the link needs a date, a quantity, a role, or a history (the same book borrowed twice by one member)."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Skip navigations, or an explicit join entity?",
+      "buckets": [
+        "Skip navigations (plain link)",
+        "Join entity (the link has data)"
+      ],
+      "items": [
+        [
+          "Books and their tags",
+          0
+        ],
+        [
+          "Students and the clubs they belong to",
+          0
+        ],
+        [
+          "Orders and products, with a quantity per product",
+          1
+        ],
+        [
+          "Actors and films, with the role each actor played",
+          1
+        ],
+        [
+          "Members and books they borrowed, with due dates",
+          1
+        ]
+      ],
+      "explain": "If you can describe the link with only the two ids, skip navigations do. As soon as there is something to say *about* the link, it is an entity."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What primary key does EF Core give the `BookTag` join table it creates?",
+      "options": [
+        "A composite key of `(BooksId, TagsId)`",
+        "A generated `Id` column",
+        "None: join tables have no key",
+        "`TagsId` alone"
+      ],
+      "answer": 0,
+      "explain": "The pair is the identity of a link, and the composite key also stops the same tag being attached to the same book twice."
+    },
+    {
+      "type": "code",
+      "title": "Students and courses",
+      "prompt": [
+        "Model students and courses with **skip navigations**:",
+        "",
+        "- `Student`: `int Id`, `string Name`, `List<Course> Courses`",
+        "- `Course`: `int Id`, `string Title`, `List<Student> Students`",
+        "- `SchoolDb`: `DbSet<Student> Students`, `DbSet<Course> Courses`, `Data Source=school.db`",
+        "",
+        "Then write `void Enrol(SchoolDb db, int studentId, int courseId)` (at the top) that links an existing student to an existing course and saves. Enrolling twice must not fail: do nothing if the student is already in the course."
+      ],
+      "starter": [
+        "void Enrol(SchoolDb db, int studentId, int courseId)",
+        "{",
+        "}",
+        "",
+        "class Student",
+        "{",
+        "}",
+        "",
+        "class Course",
+        "{",
+        "}",
+        "",
+        "class SchoolDb : DbContext",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "void Enrol(SchoolDb db, int studentId, int courseId)",
+        "{",
+        "    var student = db.Students.Include(s => s.Courses).Single(s => s.Id == studentId);",
+        "    if (student.Courses.Any(c => c.Id == courseId)) return;",
+        "    student.Courses.Add(db.Courses.Single(c => c.Id == courseId));",
+        "    db.SaveChanges();",
+        "}",
+        "",
+        "class Student",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Course> Courses { get; set; } = [];",
+        "}",
+        "",
+        "class Course",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public List<Student> Students { get; set; } = [];",
+        "}",
+        "",
+        "class SchoolDb : DbContext",
+        "{",
+        "    public DbSet<Student> Students => Set<Student>();",
+        "    public DbSet<Course> Courses => Set<Course>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=school.db\");",
+        "}"
+      ],
+      "template": [
+        "await Dojo.TryAsync(\"enrolment\", async () =>",
+        "{",
+        "    using (var dojoDb = new SchoolDb())",
+        "    {",
+        "        dojoDb.Database.EnsureCreated();",
+        "        dojoDb.Students.AddRange(new Student { Name = \"Ana\" }, new Student { Name = \"Ben\" });",
+        "        dojoDb.Courses.AddRange(new Course { Title = \"Maths\" }, new Course { Title = \"Art\" });",
+        "        dojoDb.SaveChanges();",
+        "    }",
+        "    using (var dojoDb = new SchoolDb()) { Enrol(dojoDb, 1, 1); Enrol(dojoDb, 1, 2); Enrol(dojoDb, 2, 1); }",
+        "    using (var dojoDb = new SchoolDb()) { Enrol(dojoDb, 1, 1); }",
+        "    using (var dojoDb = new SchoolDb())",
+        "    {",
+        "        Dojo.Eq(\"Ana takes Maths and Art\", new List<string> { \"Art\", \"Maths\" }, dojoDb.Students.Where(s => s.Id == 1).SelectMany(s => s.Courses).Select(c => c.Title).OrderBy(t => t).ToList());",
+        "        Dojo.Eq(\"Maths has two students\", 2, dojoDb.Courses.Where(c => c.Title == \"Maths\").Select(c => c.Students.Count).Single());",
+        "        Dojo.Eq(\"enrolling twice adds no extra link\", 3, dojoDb.Set<Dictionary<string, object>>(\"CourseStudent\").Count());",
+        "    }",
+        "});",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Load the student **with** their courses (`Include(s => s.Courses)`), so you can check whether the course is already there.",
+        "Then `student.Courses.Add(course)` and `SaveChanges`."
+      ]
+    }
+  ]
+}

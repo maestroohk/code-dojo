@@ -1,0 +1,248 @@
+{
+  "title": "Seeing the SQL",
+  "summary": "ToQueryString and LogTo show you exactly what EF Core sends to the database.",
+  "minutes": 11,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Never fly blind",
+      "body": [
+        "EF Core writes SQL for you, but it is still SQL, and it still runs on a real database. Good EF Core developers look at it all the time. Two tools:",
+        "",
+        "**`ToQueryString()`** turns a query into its SQL *without running it*:",
+        "",
+        "```csharp",
+        "var query = db.Books.Where(b => b.Year < 1950).OrderBy(b => b.Title);",
+        "Console.WriteLine(query.ToQueryString());",
+        "```",
+        "",
+        "```text",
+        "SELECT \"b\".\"Id\", \"b\".\"Title\", \"b\".\"Year\"",
+        "FROM \"Books\" AS \"b\"",
+        "WHERE \"b\".\"Year\" < 1950",
+        "ORDER BY \"b\".\"Title\"",
+        "```",
+        "",
+        "The lambda parameter `b` became the table alias `\"b\"`. `Where` became `WHERE` and `OrderBy` became `ORDER BY`. Nothing happens in C#: the database does the filtering and the sorting."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What is the last line this prints?",
+      "code": [
+        "    using var db = new LibraryDb();",
+        "    var query = db.Books.Where(b => b.Year > 2000).OrderByDescending(b => b.Year);",
+        "    Console.WriteLine(query.ToQueryString().Split('\\n').Last());",
+        "",
+        "    class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options)",
+        "        => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": "ORDER BY \"b\".\"Year\" DESC",
+      "explain": "`OrderByDescending` becomes `ORDER BY ... DESC`, the last clause of the statement. There was no `EnsureCreated`: `ToQueryString` never touches the database."
+    },
+    {
+      "type": "learn",
+      "title": "Logging every command",
+      "body": [
+        "`ToQueryString` shows one query. To see **everything** a piece of code sends (inserts and updates too), turn on logging in `OnConfiguring`.",
+        "",
+        "The simplest form prints every log message EF Core produces:",
+        "",
+        "```csharp",
+        "options.UseSqlite(\"Data Source=library.db\").LogTo(Console.WriteLine);",
+        "```",
+        "",
+        "That is noisy, and each line includes a timing like `(3ms)` that changes on every run. In this course we use the overload that takes a **filter** and an **event**, and print only the SQL of each command that ran:",
+        "",
+        "```csharp",
+        "options.UseSqlite(\"Data Source=library.db\")",
+        "    .LogTo((id, level) => id == RelationalEventId.CommandExecuted,",
+        "           e => Console.WriteLine(\"SQL> \" + ((CommandExecutedEventData)e).Command.CommandText.ReplaceLineEndings(\" \")));",
+        "```",
+        "",
+        "`RelationalEventId.CommandExecuted` fires once per SQL command, after it runs. The event data carries the `DbCommand`, whose `CommandText` is the SQL."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "This context logs every command as a line starting with `SQL>`. `Dojo.Capture` swallows what creating the database logs. What does the program print?",
+      "code": [
+        "    using var db = new LibraryDb();",
+        "    Dojo.Capture(() => db.Database.EnsureCreated());",
+        "    db.Books.Add(new Book { Title = \"Dune\", Year = 1965 });",
+        "    db.SaveChanges();",
+        "    var titles = db.Books.Where(b => b.Year > 1900).Select(b => b.Title).ToList();",
+        "    Console.WriteLine(titles.Count);",
+        "",
+        "    class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options",
+        "        .UseSqlite(\"Data Source=library.db\")",
+        "        .LogTo((id, level) => id == RelationalEventId.CommandExecuted,",
+        "               e => Console.WriteLine(\"SQL> \" + ((CommandExecutedEventData)e).Command.CommandText.ReplaceLineEndings(\" \")));",
+        "}"
+      ],
+      "answer": [
+        "SQL> INSERT INTO \"Books\" (\"Title\", \"Year\") VALUES (@p0, @p1) RETURNING \"Id\";",
+        "SQL> SELECT \"b\".\"Title\" FROM \"Books\" AS \"b\" WHERE \"b\".\"Year\" > 1900",
+        "1"
+      ],
+      "explain": "`EnsureCreated` sends commands too (`CREATE TABLE ...`), but `Dojo.Capture` hid them. What is left is the `INSERT`, with `RETURNING \"Id\"` so the generated key comes back, and the `SELECT`. Values travel as parameters (`@p0`, `@p1`), never pasted into the SQL. `Select(b => b.Title)` means only the `Title` column is read."
+    },
+    {
+      "type": "sort",
+      "prompt": "Does the line send SQL to the database?",
+      "buckets": [
+        "Sends SQL",
+        "Sends nothing"
+      ],
+      "items": [
+        [
+          "`var list = db.Books.ToList();`",
+          0
+        ],
+        [
+          "`var n = db.Books.Count();`",
+          0
+        ],
+        [
+          "`db.SaveChanges();` after an `Add`",
+          0
+        ],
+        [
+          "`var q = db.Books.Where(b => b.Year > 1900);`",
+          1
+        ],
+        [
+          "`db.Books.Add(book);`",
+          1
+        ],
+        [
+          "`var sql = q.ToQueryString();`",
+          1
+        ]
+      ],
+      "explain": "Queries run when they are enumerated or aggregated, and changes go out on `SaveChanges`. Building a query, tracking a new object and translating to text all stay in memory."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which of these sends a command to the database?",
+      "options": [
+        "`db.Books.Where(b => b.Year > 1900).ToList()`",
+        "`db.Books.Where(b => b.Year > 1900)` on its own",
+        "`db.Books.Add(book)`",
+        "`query.ToQueryString()`"
+      ],
+      "answer": 0,
+      "explain": "A query runs when you *enumerate* it: `ToList`, `First`, `Count`, a `foreach`. Building it with `Where` only describes it. `Add` only tracks, and `ToQueryString` only translates."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the LINQ to the SQL it becomes.",
+      "pairs": [
+        [
+          "`.Where(b => b.Year < 1950)`",
+          "`WHERE \"b\".\"Year\" < 1950`"
+        ],
+        [
+          "`.OrderBy(b => b.Title)`",
+          "`ORDER BY \"b\".\"Title\"`"
+        ],
+        [
+          "`.Select(b => b.Title)`",
+          "`SELECT \"b\".\"Title\"`"
+        ],
+        [
+          "`.Count()`",
+          "`SELECT COUNT(*)`"
+        ],
+        [
+          "`.Take(5)`",
+          "`LIMIT @p`"
+        ]
+      ],
+      "explain": "Each operator maps to a clause. `Take` becomes `LIMIT` with a parameter, so the same SQL is reused for any page size."
+    },
+    {
+      "type": "code",
+      "title": "Show the query",
+      "prompt": [
+        "The tests give you the `LibraryDb` from this lesson (`Books` with `Id`, `Title`, `Year`). Write",
+        "",
+        "`IQueryable<Book> Modern(LibraryDb db)`",
+        "",
+        "returning books published in or after 2000, ordered by `Title`. Return the **query**, not a list: the tests call `ToQueryString()` on it to check that the filtering and sorting happen in SQL, then run it."
+      ],
+      "starter": [
+        "IQueryable<Book> Modern(LibraryDb db)",
+        "{",
+        "    return db.Books;",
+        "}"
+      ],
+      "solution": [
+        "IQueryable<Book> Modern(LibraryDb db) =>",
+        "    db.Books.Where(b => b.Year >= 2000).OrderBy(b => b.Title);"
+      ],
+      "template": [
+        "await Dojo.TryAsync(\"the query\", async () =>",
+        "{",
+        "    using var dojoDb = new LibraryDb();",
+        "    dojoDb.Database.EnsureCreated();",
+        "    dojoDb.Books.AddRange(new Book { Title = \"Wolf Hall\", Year = 2009 }, new Book { Title = \"Emma\", Year = 1815 },",
+        "        new Book { Title = \"Atonement\", Year = 2001 }, new Book { Title = \"Y2K\", Year = 2000 });",
+        "    dojoDb.SaveChanges();",
+        "    var dojoSql = Modern(dojoDb).ToQueryString();",
+        "    Dojo.Check(\"filters in SQL (a WHERE clause)\", dojoSql.Contains(\"WHERE\"), dojoSql);",
+        "    Dojo.Check(\"sorts in SQL (ORDER BY Title)\", dojoSql.Contains(\"ORDER BY \\\"b\\\".\\\"Title\\\"\"), dojoSql);",
+        "    Dojo.Eq(\"returns the right books\", new List<string> { \"Atonement\", \"Wolf Hall\", \"Y2K\" }, Modern(dojoDb).Select(b => b.Title).ToList());",
+        "});",
+        "{{CODE}}",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options)",
+        "        => options.UseSqlite(\"Data Source=modern.db\");",
+        "}"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\.(ToList|AsEnumerable|ToArray)\\s*\\(",
+          "message": "Returns a query, not a list"
+        }
+      ],
+      "hints": [
+        "`Where` then `OrderBy`, straight on `db.Books`.",
+        "`db.Books.Where(...)` already is an `IQueryable<Book>`."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,294 @@
+{
+  "title": "Concurrency conflicts",
+  "summary": "Two people edit the same row: concurrency tokens, DbUpdateConcurrencyException, and deciding who wins.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Lost updates",
+      "body": [
+        "Ana and Ben open the same document. Ana saves a change. A minute later Ben saves his, built from the version **he** loaded. By default the last save simply wins, and Ana's change is silently gone: a **lost update**.",
+        "",
+        "The usual cure is **optimistic concurrency**: do not lock anything, but detect the conflict when saving. Mark a property as a **concurrency token**:",
+        "",
+        "```csharp",
+        "class Document",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Body { get; set; } = \"\";",
+        "    [ConcurrencyCheck] public int Version { get; set; }",
+        "}",
+        "```",
+        "",
+        "Now every `UPDATE` and `DELETE` also checks that the token still has the value that was loaded:",
+        "",
+        "```sql",
+        "UPDATE \"Documents\" SET \"Body\" = @p0, \"Version\" = @p1",
+        "WHERE \"Id\" = @p2 AND \"Version\" = @p3",
+        "```",
+        "",
+        "If someone changed the row in between, the `WHERE` matches **0 rows**, and EF Core throws `DbUpdateConcurrencyException` instead of overwriting.",
+        "",
+        "Each save must change the token, so the next writer notices. SQL Server can do that for you with a `rowversion` column (`[Timestamp]`); with SQLite, you bump it yourself (`doc.Version++`)."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new DocsDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Documents.Add(new Document { Title = \"Plan\", Body = \"v1\", Version = 1 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using var ana = new DocsDb();",
+        "    using var ben = new DocsDb();",
+        "    var anaDoc = ana.Documents.Single();",
+        "    var benDoc = ben.Documents.Single();",
+        "",
+        "    anaDoc.Body = \"Ana's edit\";",
+        "    anaDoc.Version++;",
+        "    ana.SaveChanges();",
+        "",
+        "    benDoc.Body = \"Ben's edit\";",
+        "    benDoc.Version++;",
+        "    try { ben.SaveChanges(); Console.WriteLine(\"Ben saved\"); }",
+        "    catch (DbUpdateConcurrencyException) { Console.WriteLine(\"conflict\"); }",
+        "",
+        "    using var check = new DocsDb();",
+        "    Console.WriteLine(check.Documents.Single().Body);",
+        "",
+        "    class Document",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public string Body { get; set; } = \"\";",
+        "    [ConcurrencyCheck] public int Version { get; set; }",
+        "}",
+        "",
+        "class DocsDb : DbContext",
+        "{",
+        "    public DbSet<Document> Documents => Set<Document>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=docs.db\");",
+        "}"
+      ],
+      "answer": [
+        "conflict",
+        "Ana's edit"
+      ],
+      "explain": "Both loaded version 1. Ana's save moved the row to version 2. Ben's `UPDATE ... WHERE Version = 1` matched nothing, so EF Core threw rather than overwrite Ana's work."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Without a concurrency token, what happens in the same story?",
+      "options": [
+        "Ben's save succeeds and Ana's edit is lost",
+        "Ben's save fails",
+        "Both edits are merged",
+        "The database locks the row until Ana closes the document"
+      ],
+      "answer": 0,
+      "explain": "The `UPDATE` then filters only by `Id`, so it always matches. The last writer wins and nobody is told."
+    },
+    {
+      "type": "learn",
+      "title": "Resolving a conflict",
+      "body": [
+        "Catching `DbUpdateConcurrencyException` is only the start. Its `Entries` tell you which entities collided, and you choose a policy:",
+        "",
+        "- **Database wins.** Throw away the local change and reload: `entry.Reload();` Then show the user the new version.",
+        "- **Client wins.** Overwrite anyway: take the current database values as the new \"original\" values, so the token check passes, and save again:",
+        "",
+        "  ```csharp",
+        "  var entry = e.Entries.Single();",
+        "  var current = entry.GetDatabaseValues()!;",
+        "  entry.OriginalValues.SetValues(current);   // \"I have seen the latest version\"",
+        "  db.SaveChanges();                          // now overwrites it",
+        "  ```",
+        "",
+        "- **Merge** field by field, or **ask the user**. In a web API the usual answer is: return `409 Conflict` and let the client reload.",
+        "",
+        "`GetDatabaseValues()` runs a query for the row as it is now (`null` if someone deleted it)."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new DocsDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Documents.Add(new Document { Title = \"Plan\", Body = \"v1\", Version = 1 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using var ana = new DocsDb();",
+        "    using var ben = new DocsDb();",
+        "    var anaDoc = ana.Documents.Single();",
+        "    var benDoc = ben.Documents.Single();",
+        "    anaDoc.Title = \"Plan B\"; anaDoc.Version++; ana.SaveChanges();",
+        "",
+        "    benDoc.Body = \"v2\"; benDoc.Version++;",
+        "    try { ben.SaveChanges(); }",
+        "    catch (DbUpdateConcurrencyException e)",
+        "    {",
+        "        var entry = e.Entries.Single();",
+        "        entry.Reload();",
+        "        Console.WriteLine($\"{benDoc.Title} {benDoc.Body} {benDoc.Version} {entry.State}\");",
+        "    }",
+        "",
+        "    class Document",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public string Body { get; set; } = \"\";",
+        "    [ConcurrencyCheck] public int Version { get; set; }",
+        "}",
+        "",
+        "class DocsDb : DbContext",
+        "{",
+        "    public DbSet<Document> Documents => Set<Document>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=docs.db\");",
+        "}"
+      ],
+      "answer": "Plan B v1 2 Unchanged",
+      "explain": "\"Database wins\": `Reload` replaces Ben's values with the current row (Ana's title, the original body, version 2) and marks the entity `Unchanged`. Ben's edit is discarded; he can now redo it on the latest version."
+    },
+    {
+      "type": "sort",
+      "prompt": "Sort the code into the three policies.",
+      "buckets": [
+        "Database wins",
+        "Client wins",
+        "Tell the caller"
+      ],
+      "items": [
+        [
+          "`entry.Reload();`",
+          0
+        ],
+        [
+          "`entry.OriginalValues.SetValues(entry.GetDatabaseValues()!); db.SaveChanges();`",
+          1
+        ],
+        [
+          "`return Results.Conflict(\"Reload and try again\");`",
+          2
+        ]
+      ],
+      "explain": "Reload keeps the database's version, resetting the originals forces yours through, and in an API the client often decides."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make `Stock` a concurrency token with the Fluent API.",
+      "code": [
+        "model.Entity<Item>()",
+        "    .__1__(i => i.Stock)",
+        "    .__2__();"
+      ],
+      "blanks": [
+        "Property",
+        "IsConcurrencyToken"
+      ],
+      "bank": [
+        "HasKey",
+        "IsRowVersion",
+        "IsRequired",
+        "HasIndex"
+      ],
+      "explain": "`IsConcurrencyToken()` is the Fluent API twin of `[ConcurrencyCheck]`. (`IsRowVersion()` is for database-generated row versions like SQL Server's `rowversion`.)"
+    },
+    {
+      "type": "code",
+      "title": "Edit with a version",
+      "prompt": [
+        "The tests give you `DocsDb` and `Document` (`Id`, `Title`, `Body`, `[ConcurrencyCheck] int Version`). An API receives edits that carry the version the user started from:",
+        "",
+        "```csharp",
+        "record DocEdit(int Id, string Body, int Version);",
+        "```",
+        "",
+        "Write `string Save(DocsDb db, DocEdit edit)` returning:",
+        "",
+        "- `\"saved v{n}\"` with the new version number when it worked,",
+        "- `\"missing\"` if there is no such document,",
+        "- `\"conflict\"` if the document changed since that version (whether you notice before saving or the database refuses the save).",
+        "",
+        "Load the document, set `Body`, set its **original** `Version` to the one the user had (`db.Entry(doc).Property(d => d.Version).OriginalValue = edit.Version`), bump `Version`, and save. Catch `DbUpdateConcurrencyException`."
+      ],
+      "starter": [
+        "string Save(DocsDb db, DocEdit edit)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Save(DocsDb db, DocEdit edit)",
+        "{",
+        "    var doc = db.Documents.Find(edit.Id);",
+        "    if (doc is null) return \"missing\";",
+        "    db.Entry(doc).Property(d => d.Version).OriginalValue = edit.Version;",
+        "    doc.Body = edit.Body;",
+        "    doc.Version = edit.Version + 1;",
+        "    try",
+        "    {",
+        "        db.SaveChanges();",
+        "        return $\"saved v{doc.Version}\";",
+        "    }",
+        "    catch (DbUpdateConcurrencyException)",
+        "    {",
+        "        db.ChangeTracker.Clear();",
+        "        return \"conflict\";",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "using (var seed = new DocsDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Documents.Add(new Document { Title = \"Plan\", Body = \"v1\", Version = 1 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    await Dojo.TryAsync(\"saving with versions\", async () =>",
+        "    {",
+        "        using (var dojoDb = new DocsDb()) Dojo.Eq(\"Ana edits v1\", \"saved v2\", Save(dojoDb, new DocEdit(1, \"Ana's\", 1)));",
+        "        using (var dojoDb = new DocsDb()) Dojo.Eq(\"Ben, still on v1, conflicts\", \"conflict\", Save(dojoDb, new DocEdit(1, \"Ben's\", 1)));",
+        "        using (var dojoDb = new DocsDb()) Dojo.Eq(\"Ben reloads and edits v2\", \"saved v3\", Save(dojoDb, new DocEdit(1, \"Ben's\", 2)));",
+        "        using (var dojoDb = new DocsDb()) Dojo.Eq(\"an unknown document\", \"missing\", Save(dojoDb, new DocEdit(9, \"x\", 1)));",
+        "        using (var dojoDb = new DocsDb()) Dojo.Eq(\"the stored body\", \"Ben's v3\", dojoDb.Documents.Select(d => d.Body + \" v\" + d.Version).Single());",
+        "        using (var dojoA = new DocsDb())",
+        "        using (var dojoB = new DocsDb())",
+        "        {",
+        "            var dojoLoaded = dojoA.Documents.Single();",
+        "            var dojoRacer = dojoB.Documents.Single();",
+        "            dojoRacer.Body = \"racer\"; dojoRacer.Version++; dojoB.SaveChanges();",
+        "            Dojo.Eq(\"a change that lands after loading but before saving is caught\", \"conflict\", Save(dojoA, new DocEdit(1, \"late\", 3)));",
+        "        }",
+        "    });",
+        "{{CODE}}",
+        "    record DocEdit(int Id, string Body, int Version);",
+        "",
+        "    class Document",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public string Body { get; set; } = \"\";",
+        "    [ConcurrencyCheck] public int Version { get; set; }",
+        "}",
+        "",
+        "class DocsDb : DbContext",
+        "{",
+        "    public DbSet<Document> Documents => Set<Document>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=docs.db\");",
+        "}"
+      ],
+      "hints": [
+        "Setting `OriginalValue` makes the `WHERE \"Version\" = @p` use the user's version, not the one you just loaded.",
+        "Wrap `SaveChanges` in `try`/`catch (DbUpdateConcurrencyException)`."
+      ]
+    }
+  ]
+}

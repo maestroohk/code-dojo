@@ -1,0 +1,350 @@
+{
+  "title": "Raw SQL, AsNoTracking and compiled queries",
+  "summary": "FromSql without SQL injection, read-only queries without tracking, and queries compiled once.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Raw SQL, safely",
+      "body": [
+        "Sometimes you need SQL that LINQ cannot express. `FromSql` runs your SQL and maps the rows to entities, and you can keep composing LINQ on top:",
+        "",
+        "```csharp",
+        "var year = 1970;",
+        "var old = db.Books",
+        "    .FromSql($\"SELECT * FROM Books WHERE Year < {year}\")",
+        "    .OrderBy(b => b.Title)",
+        "    .ToList();",
+        "```",
+        "",
+        "It **looks** like string interpolation, but `FromSql` takes a `FormattableString`: `{year}` becomes a **parameter** (`@p0`), not text pasted into the SQL. That is what protects you from **SQL injection**.",
+        "",
+        "`FromSqlRaw` takes a plain string. Never build it by concatenating input:",
+        "",
+        "```csharp",
+        "db.Books.FromSqlRaw(\"SELECT * FROM Books WHERE Title = '\" + input + \"'\");   // DANGER",
+        "```",
+        "",
+        "With `input = \"x' OR '1'='1\"`, that returns every book; with worse input, it can drop tables. If you must use `FromSqlRaw`, pass values as parameters: `FromSqlRaw(\"... WHERE Title = {0}\", input)`.",
+        "",
+        "For scalar results there is `db.Database.SqlQuery<int>($\"SELECT ...\")`, and for commands `db.Database.ExecuteSql($\"UPDATE ...\")`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print? (The \"title\" is a classic injection attempt.)",
+      "code": [
+        "    using (var seed = new LibraryDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    var leGuin = new Author { Name = \"Le Guin\", Country = \"US\" };",
+        "    var herbert = new Author { Name = \"Herbert\", Country = \"US\" };",
+        "    var austen = new Author { Name = \"Austen\", Country = \"UK\" };",
+        "    seed.Books.AddRange(",
+        "        new Book { Title = \"Earthsea\", Year = 1968, Pages = 183, Genre = \"Fantasy\", Author = leGuin },",
+        "        new Book { Title = \"The Dispossessed\", Year = 1974, Pages = 387, Genre = \"SciFi\", Author = leGuin },",
+        "        new Book { Title = \"Dune\", Year = 1965, Pages = 412, Genre = \"SciFi\", Author = herbert },",
+        "        new Book { Title = \"Emma\", Year = 1815, Pages = 474, Genre = \"Classic\", Author = austen },",
+        "        new Book { Title = \"Persuasion\", Year = 1817, Pages = 249, Genre = \"Classic\", Author = austen });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using var db = new LibraryDb();",
+        "    var input = \"x' OR '1'='1\";",
+        "    var safe = db.Books.FromSql($\"SELECT * FROM Books WHERE Title = {input}\").Count();",
+        "    var unsafeCount = db.Books.FromSqlRaw(\"SELECT * FROM Books WHERE Title = '\" + input + \"'\").Count();",
+        "    Console.WriteLine(safe);",
+        "    Console.WriteLine(unsafeCount);",
+        "",
+        "    class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public string Country { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "    public int Pages { get; set; }",
+        "    public string Genre { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": [
+        "0",
+        "5"
+      ],
+      "explain": "With `FromSql`, the whole input is one parameter value: no book is titled `x' OR '1'='1`. Concatenated into the SQL, the quote closes the string and `OR '1'='1'` matches every row."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which call is safe with untrusted `name`?",
+      "options": [
+        "`db.Users.FromSql($\"SELECT * FROM Users WHERE Name = {name}\")`",
+        "`db.Users.FromSqlRaw($\"SELECT * FROM Users WHERE Name = '{name}'\")`",
+        "`db.Users.FromSqlRaw(\"SELECT * FROM Users WHERE Name = '\" + name + \"'\")`",
+        "`db.Database.ExecuteSqlRaw(\"DELETE FROM Users WHERE Name = '\" + name + \"'\")`"
+      ],
+      "answer": 0,
+      "explain": "Only `FromSql` (and `ExecuteSql`, `SqlQuery`) turn interpolation holes into parameters. An interpolated string passed to `FromSqlRaw` is already a finished `string`: the value is pasted in."
+    },
+    {
+      "type": "learn",
+      "title": "AsNoTracking",
+      "body": [
+        "Every entity a query returns is **tracked**: the context keeps it and a snapshot of its original values, so `SaveChanges` can find changes. That costs memory and time, and you pay it even if you never save.",
+        "",
+        "For read-only queries, opt out:",
+        "",
+        "```csharp",
+        "var books = db.Books.AsNoTracking().Where(b => b.Year > 1950).ToList();",
+        "```",
+        "",
+        "The entities are ordinary objects. Changing them and calling `SaveChanges` does nothing, because the context does not know them.",
+        "",
+        "Rule of thumb: **tracking for the entities you will change, `AsNoTracking` (or a projection) for everything else.** You can make no-tracking the default for a context with `options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new LibraryDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    var leGuin = new Author { Name = \"Le Guin\", Country = \"US\" };",
+        "    var herbert = new Author { Name = \"Herbert\", Country = \"US\" };",
+        "    var austen = new Author { Name = \"Austen\", Country = \"UK\" };",
+        "    seed.Books.AddRange(",
+        "        new Book { Title = \"Earthsea\", Year = 1968, Pages = 183, Genre = \"Fantasy\", Author = leGuin },",
+        "        new Book { Title = \"The Dispossessed\", Year = 1974, Pages = 387, Genre = \"SciFi\", Author = leGuin },",
+        "        new Book { Title = \"Dune\", Year = 1965, Pages = 412, Genre = \"SciFi\", Author = herbert },",
+        "        new Book { Title = \"Emma\", Year = 1815, Pages = 474, Genre = \"Classic\", Author = austen },",
+        "        new Book { Title = \"Persuasion\", Year = 1817, Pages = 249, Genre = \"Classic\", Author = austen });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using (var db = new LibraryDb())",
+        "    {",
+        "        var dune = db.Books.AsNoTracking().Single(b => b.Title == \"Dune\");",
+        "        dune.Pages = 999;",
+        "        Console.WriteLine(db.SaveChanges());",
+        "        Console.WriteLine(db.ChangeTracker.Entries().Count());",
+        "        var emma = db.Books.Single(b => b.Title == \"Emma\");",
+        "        emma.Pages = 500;",
+        "        Console.WriteLine(db.SaveChanges());",
+        "    }",
+        "    using (var db = new LibraryDb())",
+        "        Console.WriteLine(string.Join(\" \", db.Books.Where(b => b.Title == \"Dune\" || b.Title == \"Emma\").OrderBy(b => b.Title).Select(b => b.Pages)));",
+        "",
+        "    class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public string Country { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "    public int Pages { get; set; }",
+        "    public string Genre { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": [
+        "0",
+        "0",
+        "1",
+        "412 500"
+      ],
+      "explain": "The no-tracking `dune` is unknown to the context, so its change is never saved. The tracked `emma` is, so her change is saved: 1 row."
+    },
+    {
+      "type": "learn",
+      "title": "Compiled queries",
+      "body": [
+        "Before running a LINQ query, EF Core must turn the expression tree into SQL. It caches the result, but it still has to look the query up in that cache each time. For a query that runs thousands of times per second, you can do that work **once**:",
+        "",
+        "```csharp",
+        "static readonly Func<LibraryDb, int, Book?> ById =",
+        "    EF.CompileQuery((LibraryDb db, int id) => db.Books.FirstOrDefault(b => b.Id == id));",
+        "",
+        "var book = ById(db, 3);",
+        "```",
+        "",
+        "For a query returning many rows, the compiled delegate returns an `IEnumerable<T>`; there is also `EF.CompileAsyncQuery`.",
+        "",
+        "The gain is real but small (microseconds per call). Use compiled queries for the **hottest** paths after measuring, not everywhere: they cannot be composed further and they are harder to read."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the tool to the job.",
+      "pairs": [
+        [
+          "`FromSql($\"...{x}\")`",
+          "Hand-written SQL with safe parameters"
+        ],
+        [
+          "`AsNoTracking()`",
+          "Read-only entities without tracking cost"
+        ],
+        [
+          "`EF.CompileQuery(...)`",
+          "Translate a hot query once, reuse the delegate"
+        ],
+        [
+          "`Database.ExecuteSql($\"...\")`",
+          "Run a SQL command that returns no rows"
+        ],
+        [
+          "`Select(b => new { ... })`",
+          "Read only the columns you need"
+        ]
+      ],
+      "explain": "Each removes a different cost: injection risk, tracking, translation, round trips of whole entities."
+    },
+    {
+      "type": "code",
+      "title": "A fast, safe lookup",
+      "prompt": [
+        "The usual model again:",
+        "",
+        "```csharp",
+        "class Author { int Id; string Name; string Country; List<Book> Books; }",
+        "class Book   { int Id; string Title; int Year; int Pages; string Genre; int AuthorId; Author Author; }",
+        "```",
+        "",
+        "The tests fill it with five books: Earthsea (Le Guin, 1968, 183 pages, Fantasy), The Dispossessed (Le Guin, 1974, 387, SciFi), Dune (Herbert, 1965, 412, SciFi), Emma (Austen, 1815, 474, Classic) and Persuasion (Austen, 1817, 249, Classic). Le Guin and Herbert are from the US, Austen from the UK.",
+        "",
+        "Write:",
+        "",
+        "1. `static readonly Func<LibraryDb, string, IEnumerable<string>> TitlesByGenre`, a **compiled query** returning the titles of a genre ordered by title. Put it in a `static class Queries`.",
+        "2. `List<Book> ByRawTitle(LibraryDb db, string title)` (at the top) that finds books by exact title using **`FromSql`** with the title as a parameter, without tracking the results."
+      ],
+      "starter": [
+        "List<Book> ByRawTitle(LibraryDb db, string title)",
+        "{",
+        "    return [];",
+        "}",
+        "",
+        "static class Queries",
+        "{",
+        "    public static readonly Func<LibraryDb, string, IEnumerable<string>> TitlesByGenre = (db, genre) => [];",
+        "}"
+      ],
+      "solution": [
+        "List<Book> ByRawTitle(LibraryDb db, string title) =>",
+        "    db.Books.FromSql($\"SELECT * FROM Books WHERE Title = {title}\").AsNoTracking().ToList();",
+        "",
+        "static class Queries",
+        "{",
+        "    public static readonly Func<LibraryDb, string, IEnumerable<string>> TitlesByGenre =",
+        "        EF.CompileQuery((LibraryDb db, string genre) => db.Books.Where(b => b.Genre == genre).OrderBy(b => b.Title).Select(b => b.Title));",
+        "}"
+      ],
+      "template": [
+        "static void DojoSeed()",
+        "{",
+        "    using var seed = new LibraryDb();",
+        "    seed.Database.EnsureDeleted();",
+        "    seed.Database.EnsureCreated();",
+        "    var leGuin = new Author { Name = \"Le Guin\", Country = \"US\" };",
+        "    var herbert = new Author { Name = \"Herbert\", Country = \"US\" };",
+        "    var austen = new Author { Name = \"Austen\", Country = \"UK\" };",
+        "    seed.Books.AddRange(",
+        "        new Book { Title = \"Earthsea\", Year = 1968, Pages = 183, Genre = \"Fantasy\", Author = leGuin },",
+        "        new Book { Title = \"The Dispossessed\", Year = 1974, Pages = 387, Genre = \"SciFi\", Author = leGuin },",
+        "        new Book { Title = \"Dune\", Year = 1965, Pages = 412, Genre = \"SciFi\", Author = herbert },",
+        "        new Book { Title = \"Emma\", Year = 1815, Pages = 474, Genre = \"Classic\", Author = austen },",
+        "        new Book { Title = \"Persuasion\", Year = 1817, Pages = 249, Genre = \"Classic\", Author = austen });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    await Dojo.TryAsync(\"the queries\", async () =>",
+        "    {",
+        "        DojoSeed();",
+        "        using var dojoDb = new LibraryDb();",
+        "        Dojo.Eq(\"TitlesByGenre(SciFi)\", new List<string> { \"Dune\", \"The Dispossessed\" }, Queries.TitlesByGenre(dojoDb, \"SciFi\").ToList());",
+        "        Dojo.Eq(\"TitlesByGenre(Classic)\", new List<string> { \"Emma\", \"Persuasion\" }, Queries.TitlesByGenre(dojoDb, \"Classic\").ToList());",
+        "        Dojo.Eq(\"ByRawTitle(Dune)\", 1, ByRawTitle(dojoDb, \"Dune\").Count);",
+        "        Dojo.Check(\"the title is a parameter\", LibraryDb.LastSql.Contains(\"@p0\") || LibraryDb.LastSql.Contains(\"@title\"), LibraryDb.LastSql);",
+        "        Dojo.Eq(\"an injection attempt finds nothing\", 0, ByRawTitle(dojoDb, \"x' OR '1'='1\").Count);",
+        "        Dojo.Eq(\"nothing is tracked\", 0, dojoDb.ChangeTracker.Entries().Count());",
+        "    });",
+        "{{CODE}}",
+        "class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public string Country { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "    public int Pages { get; set; }",
+        "    public string Genre { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public static int Commands;",
+        "    public static string LastSql = \"\";",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=fast.db\").LogTo((id, level) => id == RelationalEventId.CommandExecuted, e => { Commands++; LastSql = ((CommandExecutedEventData)e).Command.CommandText; });",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "EF\\s*\\.\\s*CompileQuery",
+          "message": "Uses EF.CompileQuery"
+        },
+        {
+          "pattern": "\\.FromSql\\s*\\(",
+          "message": "Uses FromSql"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "FromSqlRaw",
+          "message": "Does not use FromSqlRaw"
+        }
+      ],
+      "hints": [
+        "`EF.CompileQuery((LibraryDb db, string genre) => db.Books.Where(...).OrderBy(...).Select(b => b.Title))`",
+        "`db.Books.FromSql($\"SELECT * FROM Books WHERE Title = {title}\").AsNoTracking().ToList()`"
+      ]
+    }
+  ]
+}

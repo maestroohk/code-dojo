@@ -1,0 +1,251 @@
+{
+  "title": "DbContext in ASP.NET Core",
+  "summary": "AddDbContext, the scoped lifetime, constructor options, and a minimal API backed by SQLite.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Registering the context",
+      "body": [
+        "In an ASP.NET Core app you do not `new` the context. You **register** it with dependency injection, and endpoints ask for it:",
+        "",
+        "```csharp",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddDbContext<NotesDb>(options => options.UseSqlite(\"Data Source=notes.db\"));",
+        "var app = builder.Build();",
+        "",
+        "app.MapGet(\"/notes\", (NotesDb db) => db.Notes.AsNoTracking().ToList());",
+        "```",
+        "",
+        "The context then takes its configuration through its **constructor** instead of `OnConfiguring`:",
+        "",
+        "```csharp",
+        "class NotesDb(DbContextOptions<NotesDb> options) : DbContext(options)",
+        "{",
+        "    public DbSet<Note> Notes => Set<Note>();",
+        "}",
+        "```",
+        "",
+        "That is what makes the same context usable with SQLite in tests and SQL Server in production: the **app** decides the provider, not the context."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Scoped: one context per request",
+      "body": [
+        "`AddDbContext` registers the context as **scoped**: ASP.NET Core creates one per HTTP request, gives the same instance to everything in that request, and disposes it when the request ends.",
+        "",
+        "That fits how a context works:",
+        "",
+        "- It is **not thread-safe**. Two requests must never share one.",
+        "- It is meant to be **short-lived**: its change tracker grows with everything it has loaded. A context that lives for the whole app would hold every entity it ever saw.",
+        "- A unit of work maps naturally onto a request: load, change, `SaveChanges`, done.",
+        "",
+        "So never register it as a singleton, never store it in a static field, and never inject it into a singleton service. For background work, create a scope (`app.Services.CreateScope()`) or use `IDbContextFactory<T>` (`AddDbContextFactory`) to make short-lived contexts on demand."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A singleton `CacheWarmer` service takes `NotesDb` in its constructor. What goes wrong?",
+      "options": [
+        "ASP.NET Core refuses (a singleton cannot depend on a scoped service), and if forced, one context would be shared by every request and thread",
+        "Nothing: the context is created once and reused safely",
+        "Each request gets a fresh context anyway",
+        "The context reconnects to the database on every call"
+      ],
+      "answer": 0,
+      "explain": "In development, scope validation throws on start: *Cannot consume scoped service from singleton*. A context captured by a singleton lives forever and is used from many threads at once. Inject `IDbContextFactory<NotesDb>` instead and create a context per job."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the registration to its lifetime or use.",
+      "pairs": [
+        [
+          "`AddDbContext<T>`",
+          "Scoped: one context per request"
+        ],
+        [
+          "`AddDbContextPool<T>`",
+          "Scoped, but instances are reset and reused for speed"
+        ],
+        [
+          "`AddDbContextFactory<T>`",
+          "Singleton factory that makes contexts on demand"
+        ],
+        [
+          "`app.Services.CreateScope()`",
+          "Your own scope, e.g. to migrate at start-up"
+        ]
+      ],
+      "explain": "All of them give each unit of work its own context. Pooling saves the cost of building a context per request; the factory is for code outside a request."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the start of `Program.cs` so the database exists before the app serves requests.",
+      "lines": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddDbContext<NotesDb>(o => o.UseSqlite(\"Data Source=notes.db\"));",
+        "var app = builder.Build();",
+        "using (var scope = app.Services.CreateScope())",
+        "    scope.ServiceProvider.GetRequiredService<NotesDb>().Database.EnsureCreated();",
+        "app.Run();"
+      ],
+      "explain": "Services are registered before `Build`. After it, a scope gives you a context to create (or migrate) the database, and only then does `app.Run()` start serving."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete a context that receives its options from dependency injection.",
+      "code": [
+        "class NotesDb(__1__<NotesDb> options) : DbContext(__2__)",
+        "{",
+        "    public DbSet<Note> Notes => __3__<Note>();",
+        "}"
+      ],
+      "blanks": [
+        "DbContextOptions",
+        "options",
+        "Set"
+      ],
+      "bank": [
+        "DbContextOptionsBuilder",
+        "IServiceProvider",
+        "new()",
+        "DbSet"
+      ],
+      "explain": "The constructor takes `DbContextOptions<NotesDb>` and passes it to the base `DbContext`. `Set<Note>()` returns the table."
+    },
+    {
+      "type": "predict",
+      "prompt": "This program uses a context factory. What does it print?",
+      "code": [
+        "var services = new ServiceCollection();",
+        "services.AddDbContextFactory<NotesDb>(o => o.UseSqlite(\"Data Source=notes.db\"));",
+        "using var provider = services.BuildServiceProvider();",
+        "var factory = provider.GetRequiredService<IDbContextFactory<NotesDb>>();",
+        "",
+        "using (var db = factory.CreateDbContext()) { db.Database.EnsureCreated(); db.Notes.Add(new Note { Text = \"a\" }); db.SaveChanges(); }",
+        "using var one = factory.CreateDbContext();",
+        "using var two = factory.CreateDbContext();",
+        "Console.WriteLine(ReferenceEquals(one, two));",
+        "Console.WriteLine(one.Notes.Count() + two.Notes.Count());",
+        "",
+        "class Note",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Text { get; set; } = \"\";",
+        "}",
+        "",
+        "class NotesDb(DbContextOptions<NotesDb> options) : DbContext(options)",
+        "{",
+        "    public DbSet<Note> Notes => Set<Note>();",
+        "}"
+      ],
+      "answer": [
+        "False",
+        "2"
+      ],
+      "explain": "Each `CreateDbContext()` returns a new, independent context over the same database. Each counts the one note: 1 + 1."
+    },
+    {
+      "type": "code",
+      "title": "A notes API",
+      "prompt": [
+        "Build a small web API backed by SQLite. **Run checks** starts your server and calls it.",
+        "",
+        "- Register `NotesDb` with `AddDbContext` and `Data Source=notes.db`, and create the database at start-up (in a scope).",
+        "- `Note`: `int Id`, `string Text`. `NotesDb` takes `DbContextOptions<NotesDb>` in its constructor.",
+        "- `GET /notes`: all notes ordered by id (no tracking).",
+        "- `GET /notes/{id}`: one note, or 404.",
+        "- `POST /notes` with `{ \"text\": \"...\" }`: save it, answer **201 Created** with the note (`Results.Created($\"/notes/{note.Id}\", note)`).",
+        "- `DELETE /notes/{id}`: 204, or 404 if there is no such note.",
+        "",
+        "Your types go after `app.Run();`."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.Run();",
+        "",
+        "class Note",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Text { get; set; } = \"\";",
+        "}"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddDbContext<NotesDb>(o => o.UseSqlite(\"Data Source=notes.db\"));",
+        "var app = builder.Build();",
+        "",
+        "using (var scope = app.Services.CreateScope())",
+        "    scope.ServiceProvider.GetRequiredService<NotesDb>().Database.EnsureCreated();",
+        "",
+        "app.MapGet(\"/notes\", (NotesDb db) => db.Notes.AsNoTracking().OrderBy(n => n.Id).ToList());",
+        "",
+        "app.MapGet(\"/notes/{id:int}\", async (int id, NotesDb db) =>",
+        "    await db.Notes.FindAsync(id) is { } note ? Results.Ok(note) : Results.NotFound());",
+        "",
+        "app.MapPost(\"/notes\", async (Note note, NotesDb db) =>",
+        "{",
+        "    db.Notes.Add(note);",
+        "    await db.SaveChangesAsync();",
+        "    return Results.Created($\"/notes/{note.Id}\", note);",
+        "});",
+        "",
+        "app.MapDelete(\"/notes/{id:int}\", async (int id, NotesDb db) =>",
+        "{",
+        "    var note = await db.Notes.FindAsync(id);",
+        "    if (note is null) return Results.NotFound();",
+        "    db.Notes.Remove(note);",
+        "    await db.SaveChangesAsync();",
+        "    return Results.NoContent();",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "class Note",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Text { get; set; } = \"\";",
+        "}",
+        "",
+        "class NotesDb(DbContextOptions<NotesDb> options) : DbContext(options)",
+        "{",
+        "    public DbSet<Note> Notes => Set<Note>();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"the API\", async () =>",
+        "        {",
+        "            var dojoA = await http.PostAsJsonAsync(\"/notes\", new { text = \"buy milk\" });",
+        "            DojoWeb.Status(\"POST /notes responds 201\", 201, dojoA);",
+        "            Dojo.Eq(\"the first note gets id 1\", \"1\", DojoWeb.Prop(await DojoWeb.Json(dojoA), \"id\"));",
+        "            await http.PostAsJsonAsync(\"/notes\", new { text = \"call mum\" });",
+        "            var dojoList = await DojoWeb.Json(await http.GetAsync(\"/notes\"));",
+        "            Dojo.Eq(\"GET /notes lists both, in order\", \"buy milk|call mum\",",
+        "                dojoList.ValueKind == JsonValueKind.Array ? string.Join(\"|\", dojoList.EnumerateArray().Select(n => DojoWeb.Prop(n, \"text\"))) : \"(not an array)\");",
+        "            DojoWeb.Status(\"GET /notes/2 responds 200\", 200, await http.GetAsync(\"/notes/2\"));",
+        "            DojoWeb.Status(\"GET /notes/9 responds 404\", 404, await http.GetAsync(\"/notes/9\"));",
+        "            DojoWeb.Status(\"DELETE /notes/1 responds 204\", 204, await http.DeleteAsync(\"/notes/1\"));",
+        "            DojoWeb.Status(\"DELETE /notes/1 again responds 404\", 404, await http.DeleteAsync(\"/notes/1\"));",
+        "            var dojoAfter = await DojoWeb.Json(await http.GetAsync(\"/notes\"));",
+        "            Dojo.Eq(\"one note is left\", 1, dojoAfter.ValueKind == JsonValueKind.Array ? dojoAfter.GetArrayLength() : -1);",
+        "        });",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "`builder.Services.AddDbContext<NotesDb>(o => o.UseSqlite(\"Data Source=notes.db\"));` before `Build()`.",
+        "Endpoints take the context as a parameter: `(int id, NotesDb db) => ...`.",
+        "`await db.Notes.FindAsync(id) is { } note ? Results.Ok(note) : Results.NotFound()`"
+      ],
+      "framework": "web+efcore"
+    }
+  ]
+}

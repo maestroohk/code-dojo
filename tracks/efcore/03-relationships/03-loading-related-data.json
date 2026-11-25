@@ -1,0 +1,325 @@
+{
+  "title": "Loading related data",
+  "summary": "Include and ThenInclude, filtered includes, explicit loading, and why lazy loading is risky.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Eager loading with Include",
+      "body": [
+        "A query loads only the entity you asked for. To bring related data **in the same query**, ask for it with `Include`:",
+        "",
+        "```csharp",
+        "var authors = db.Authors.Include(a => a.Books).ToList();",
+        "foreach (var a in authors)",
+        "    Console.WriteLine($\"{a.Name}: {a.Books.Count}\");",
+        "```",
+        "",
+        "The SQL joins the two tables:",
+        "",
+        "```text",
+        "SELECT \"a\".\"Id\", \"a\".\"Name\", \"b\".\"Id\", \"b\".\"AuthorId\", \"b\".\"Title\"",
+        "FROM \"Authors\" AS \"a\"",
+        "LEFT JOIN \"Books\" AS \"b\" ON \"a\".\"Id\" = \"b\".\"AuthorId\"",
+        "ORDER BY \"a\".\"Id\"",
+        "```",
+        "",
+        "This is **eager loading**: you say up front what you will need. Go deeper with `ThenInclude`:",
+        "",
+        "```csharp",
+        "db.Authors.Include(a => a.Books).ThenInclude(b => b.Reviews)",
+        "```",
+        "",
+        "and filter or sort the included collection right inside `Include` (a **filtered include**):",
+        "",
+        "```csharp",
+        "db.Authors.Include(a => a.Books.Where(b => b.Year > 1970).OrderBy(b => b.Title))",
+        "```"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new LibraryDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Authors.Add(new Author { Name = \"Le Guin\", Books = [new() { Title = \"Earthsea\" }, new() { Title = \"The Dispossessed\" }] });",
+        "    seed.Authors.Add(new Author { Name = \"Herbert\", Books = [new() { Title = \"Dune\" }] });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using (var db = new LibraryDb())",
+        "        Console.WriteLine(db.Authors.OrderBy(a => a.Id).First().Books.Count);",
+        "    using (var db = new LibraryDb())",
+        "        Console.WriteLine(db.Authors.Include(a => a.Books).OrderBy(a => a.Id).First().Books.Count);",
+        "",
+        "    class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": [
+        "0",
+        "2"
+      ],
+      "explain": "Without `Include`, `Books` is just the empty list the class starts with: nothing was loaded. With it, both of Le Guin's books arrive in the same query."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the query: authors, with their books, with each book's reviews, ordered by author name.",
+      "lines": [
+        "var authors = db.Authors",
+        "    .Include(a => a.Books)",
+        "    .ThenInclude(b => b.Reviews)",
+        "    .OrderBy(a => a.Name)",
+        "    .ToList();"
+      ],
+      "explain": "`ThenInclude` continues from the navigation just included, so it must follow its `Include`. Sorting comes before running the query with `ToList`.",
+      "also": [
+        [
+          "var authors = db.Authors",
+          "    .OrderBy(a => a.Name)",
+          "    .Include(a => a.Books)",
+          "    .ThenInclude(b => b.Reviews)",
+          "    .ToList();"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Explicit loading",
+      "body": [
+        "Sometimes you only discover later that you need related data, and only for some entities. **Explicit loading** fetches a navigation of an entity you already have:",
+        "",
+        "```csharp",
+        "var author = db.Authors.Single(a => a.Name == \"Le Guin\");",
+        "if (wantBooks)",
+        "    db.Entry(author).Collection(a => a.Books).Load();       // one more query",
+        "db.Entry(book).Reference(b => b.Author).Load();             // for a reference navigation",
+        "```",
+        "",
+        "You can also query a navigation without loading it all:",
+        "",
+        "```csharp",
+        "var count = db.Entry(author).Collection(a => a.Books).Query().Count();   // SELECT COUNT(*)",
+        "```"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new LibraryDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Authors.Add(new Author { Name = \"Le Guin\", Books = [new() { Title = \"Earthsea\" }, new() { Title = \"The Dispossessed\" }] });",
+        "    seed.Authors.Add(new Author { Name = \"Herbert\", Books = [new() { Title = \"Dune\" }] });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using var db = new LibraryDb();",
+        "    var dune = db.Books.Single(b => b.Title == \"Dune\");",
+        "    Console.WriteLine(dune.Author is null);",
+        "    db.Entry(dune).Reference(b => b.Author).Load();",
+        "    Console.WriteLine(dune.Author.Name);",
+        "    var leGuin = db.Authors.Single(a => a.Name == \"Le Guin\");",
+        "    Console.WriteLine(db.Entry(leGuin).Collection(a => a.Books).Query().Count());",
+        "    Console.WriteLine(leGuin.Books.Count);",
+        "",
+        "    class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "}"
+      ],
+      "answer": [
+        "True",
+        "Herbert",
+        "2",
+        "0"
+      ],
+      "explain": "`Load` fills the navigation. `Query().Count()` only counts in the database, so `leGuin.Books` stays empty: nothing was loaded into it."
+    },
+    {
+      "type": "learn",
+      "title": "Lazy loading, and why it is risky",
+      "body": [
+        "**Lazy loading** loads a navigation automatically the first time you touch it. It needs the `Microsoft.EntityFrameworkCore.Proxies` package, `options.UseLazyLoadingProxies()`, and `virtual` navigations:",
+        "",
+        "```csharp",
+        "foreach (var author in db.Authors.ToList())         // 1 query",
+        "    Console.WriteLine(author.Books.Count);          // + 1 query per author, silently",
+        "```",
+        "",
+        "It looks convenient, and that is the danger:",
+        "",
+        "- **Hidden queries.** Nothing in the code says \"database\". A loop over 500 authors runs 501 queries: the **N+1 problem** (module 7).",
+        "- **Surprises after the context is gone.** Touch a navigation after the context is disposed (in a JSON serializer, say) and it throws, or serializing walks your whole database.",
+        "- **Hard to review.** You cannot see what a method costs by reading it.",
+        "",
+        "Most teams leave lazy loading off and use `Include` or projections (module 4). This course does not ship the proxies package; you will see the same N+1 effect with explicit code instead."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A page shows 50 orders with the customer name of each. Lazy loading is on, and the code loops over `db.Orders.Take(50).ToList()` reading `order.Customer.Name`. How many queries run?",
+      "options": [
+        "Up to 51: one for the orders, one per order for its customer",
+        "1",
+        "2: one for orders, one for all customers",
+        "50"
+      ],
+      "answer": 0,
+      "explain": "Each first touch of `order.Customer` triggers its own query (the same customer is only loaded once, so it is *up to* 51). `Include(o => o.Customer)` would make it one query."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each loading strategy to its description.",
+      "pairs": [
+        [
+          "Eager loading",
+          "`Include` in the query: related data comes in the same round trip"
+        ],
+        [
+          "Explicit loading",
+          "`Entry(x).Collection(...).Load()`: you ask later, on purpose"
+        ],
+        [
+          "Lazy loading",
+          "Touching the navigation runs a query behind your back"
+        ],
+        [
+          "Projection",
+          "`Select` only the related fields you need into a new shape"
+        ]
+      ],
+      "explain": "Eager and explicit loading make every query visible in your code; lazy loading hides them. Projections, coming in module 4, are often the best of all."
+    },
+    {
+      "type": "code",
+      "title": "A reading report",
+      "prompt": [
+        "The tests give you the model below. Write `List<string> Report(LibraryDb db)` that returns, for every author **ordered by name**, a line like",
+        "",
+        "```text",
+        "Le Guin: Earthsea (2), The Dispossessed (0)",
+        "```",
+        "",
+        "listing the author's books ordered by title, each with its number of reviews. An author without books prints `Name:` with nothing after the colon. Load the data with **one** query using `Include` and `ThenInclude`.",
+        "",
+        "```csharp",
+        "class Author { public int Id; public string Name; public List<Book> Books; }",
+        "class Book   { public int Id; public string Title; public int AuthorId; public Author Author; public List<Review> Reviews; }",
+        "class Review { public int Id; public int Stars; public int BookId; public Book Book; }",
+        "```"
+      ],
+      "starter": [
+        "List<string> Report(LibraryDb db)",
+        "{",
+        "    return [];",
+        "}"
+      ],
+      "solution": [
+        "List<string> Report(LibraryDb db) =>",
+        "    db.Authors",
+        "        .Include(a => a.Books.OrderBy(b => b.Title))",
+        "        .ThenInclude(b => b.Reviews)",
+        "        .OrderBy(a => a.Name)",
+        "        .ToList()",
+        "        .Select(a => $\"{a.Name}:\" + (a.Books.Count == 0 ? \"\" : \" \" + string.Join(\", \", a.Books.Select(b => $\"{b.Title} ({b.Reviews.Count})\"))))",
+        "        .ToList();"
+      ],
+      "template": [
+        "await Dojo.TryAsync(\"the report\", async () =>",
+        "{",
+        "    using (var dojoDb = new LibraryDb())",
+        "    {",
+        "        dojoDb.Database.EnsureCreated();",
+        "        dojoDb.Authors.Add(new Author { Name = \"Le Guin\", Books = [new() { Title = \"The Dispossessed\" }, new() { Title = \"Earthsea\", Reviews = [new() { Stars = 5 }, new() { Stars = 4 }] }] });",
+        "        dojoDb.Authors.Add(new Author { Name = \"Austen\" });",
+        "        dojoDb.Authors.Add(new Author { Name = \"Herbert\", Books = [new() { Title = \"Dune\", Reviews = [new() { Stars = 5 }] }] });",
+        "        dojoDb.SaveChanges();",
+        "    }",
+        "    using (var dojoDb = new LibraryDb())",
+        "    {",
+        "        LibraryDb.Commands = 0;",
+        "        var dojoLines = Report(dojoDb);",
+        "        Dojo.Eq(\"the report\", new List<string> { \"Austen:\", \"Herbert: Dune (1)\", \"Le Guin: Earthsea (2), The Dispossessed (0)\" }, dojoLines);",
+        "        Dojo.Eq(\"one query\", 1, LibraryDb.Commands);",
+        "    }",
+        "});",
+        "{{CODE}}",
+        "class Author",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Book> Books { get; set; } = [];",
+        "}",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int AuthorId { get; set; }",
+        "    public Author Author { get; set; } = null!;",
+        "    public List<Review> Reviews { get; set; } = [];",
+        "}",
+        "",
+        "class Review",
+        "{",
+        "    public int Id { get; set; }",
+        "    public int Stars { get; set; }",
+        "    public int BookId { get; set; }",
+        "    public Book Book { get; set; } = null!;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public static int Commands;",
+        "    public DbSet<Author> Authors => Set<Author>();",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=report.db\")",
+        "        .LogTo((id, level) => id == RelationalEventId.CommandExecuted, e => Commands++);",
+        "}"
+      ],
+      "hints": [
+        "`Include(a => a.Books.OrderBy(b => b.Title)).ThenInclude(b => b.Reviews)` loads everything at once.",
+        "After `ToList()`, build the strings in memory with `Select` and `string.Join`."
+      ]
+    }
+  ]
+}

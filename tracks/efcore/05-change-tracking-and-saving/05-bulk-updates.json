@@ -1,0 +1,264 @@
+{
+  "title": "Bulk updates and deletes",
+  "summary": "ExecuteUpdate and ExecuteDelete change many rows with one statement, without loading them.",
+  "minutes": 11,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Set-based changes",
+      "body": [
+        "Raising every price by 10% the tracked way loads every item, changes each in memory, and sends one `UPDATE` per row. For 100,000 items that is 100,000 objects and statements.",
+        "",
+        "**`ExecuteUpdate`** and **`ExecuteDelete`** (EF Core 7+) turn a LINQ query into **one** SQL statement that runs immediately:",
+        "",
+        "```csharp",
+        "var changed = db.Items",
+        "    .Where(i => i.Stock == 0)",
+        "    .ExecuteUpdate(s => s.SetProperty(i => i.PriceCents, i => i.PriceCents * 110 / 100));",
+        "",
+        "var removed = db.Items.Where(i => i.Name.StartsWith(\"old-\")).ExecuteDelete();",
+        "```",
+        "",
+        "```text",
+        "UPDATE \"Items\" AS \"i\" SET \"PriceCents\" = \"i\".\"PriceCents\" * 110 / 100 WHERE \"i\".\"Stock\" = 0",
+        "DELETE FROM \"Items\" AS \"i\" WHERE \"i\".\"Name\" LIKE 'old-%'",
+        "```",
+        "",
+        "Both return the number of rows affected. Chain `SetProperty` calls to set several columns."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print? The context logs commands as `SQL> ...`; the seeding is hidden.",
+      "code": [
+        "    using (var seed = new ShopDb())",
+        "{",
+        "    Dojo.Capture(() => seed.Database.EnsureCreated());",
+        "    seed.Items.AddRange(new Item { Name = \"pen\", Stock = 10, PriceCents = 150 }, new Item { Name = \"ink\", Stock = 0, PriceCents = 400 },",
+        "                        new Item { Name = \"pad\", Stock = 3, PriceCents = 250 });",
+        "    Dojo.Capture(() => seed.SaveChanges());",
+        "}",
+        "",
+        "    using var db = new ShopDb();",
+        "    var n = db.Items.Where(i => i.Stock < 5).ExecuteUpdate(s => s.SetProperty(i => i.Stock, i => i.Stock + 10));",
+        "    Console.WriteLine(n);",
+        "",
+        "    class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\").LogTo((id, level) => id == RelationalEventId.CommandExecuted, e => Console.WriteLine(\"SQL> \" + ((CommandExecutedEventData)e).Command.CommandText.ReplaceLineEndings(\" \")));",
+        "}"
+      ],
+      "answer": [
+        "SQL> UPDATE \"Items\" AS \"i\" SET \"Stock\" = \"i\".\"Stock\" + 10 WHERE \"i\".\"Stock\" < 5",
+        "2"
+      ],
+      "explain": "One statement, no `SELECT`: ink and pad matched, so 2 rows changed. Nothing was loaded or tracked."
+    },
+    {
+      "type": "learn",
+      "title": "What they skip",
+      "body": [
+        "Bulk operations go **straight to the database**. That is their speed, and their trap:",
+        "",
+        "- **The change tracker is not involved.** Entities you already loaded keep their old values in memory. Reload them, or do bulk work in a fresh context.",
+        "- **No `SaveChanges` needed, and none of its logic runs**: no concurrency token checks, no `SaveChanges` overrides, no events.",
+        "- **They run immediately**, not at the next save. Group them with other work in a transaction (`BeginTransaction`) when they must succeed or fail together.",
+        "- `ExecuteDelete` relies on the **database's** cascade rules, not on EF Core deleting loaded dependents for you."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using (var seed = new ShopDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Items.AddRange(new Item { Name = \"pen\", Stock = 10, PriceCents = 150 }, new Item { Name = \"ink\", Stock = 0, PriceCents = 400 },",
+        "                        new Item { Name = \"pad\", Stock = 3, PriceCents = 250 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using var db = new ShopDb();",
+        "    var pen = db.Items.Single(i => i.Name == \"pen\");",
+        "    db.Items.Where(i => i.Name == \"pen\").ExecuteUpdate(s => s.SetProperty(i => i.Stock, 0));",
+        "    Console.WriteLine(pen.Stock);",
+        "    Console.WriteLine(db.Items.Where(i => i.Name == \"pen\").Select(i => i.Stock).Single());",
+        "    db.Entry(pen).Reload();",
+        "    Console.WriteLine(pen.Stock);",
+        "",
+        "    class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "}"
+      ],
+      "answer": [
+        "10",
+        "0",
+        "0"
+      ],
+      "explain": "`ExecuteUpdate` changed the row, but the tracked `pen` object in memory still says 10. A projection reads the database (0). `Reload` refreshes the entity."
+    },
+    {
+      "type": "sort",
+      "prompt": "Tracked SaveChanges, or a bulk Execute method?",
+      "buckets": [
+        "Load and SaveChanges",
+        "ExecuteUpdate / ExecuteDelete"
+      ],
+      "items": [
+        [
+          "Mark every order older than a year as archived",
+          1
+        ],
+        [
+          "Delete all expired sessions",
+          1
+        ],
+        [
+          "Rename one product from an edit form",
+          0
+        ],
+        [
+          "Update a document protected by a concurrency token",
+          0
+        ],
+        [
+          "Run per-entity validation logic before saving",
+          0
+        ]
+      ],
+      "explain": "Bulk methods are for set-based changes where no per-entity logic must run. Edits that need validation, tokens or business rules on each entity go through the tracker."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does `ExecuteDelete` not need `SaveChanges`?",
+      "options": [
+        "It runs its SQL `DELETE` immediately, bypassing the change tracker",
+        "It marks entities Deleted and saves them automatically",
+        "It only deletes entities already loaded",
+        "It does need it; nothing happens without SaveChanges"
+      ],
+      "answer": 0,
+      "explain": "The Execute methods are commands, not tracked changes. That is also why they ignore what the context has loaded."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`db.Items.Where(i => i.Stock == 0).ExecuteDelete()` returns 3. What does the 3 mean?",
+      "options": [
+        "Three rows were deleted by the single DELETE statement",
+        "Three entities are now marked Deleted, waiting for SaveChanges",
+        "Three queries were run",
+        "The statement will be retried three times"
+      ],
+      "answer": 0,
+      "explain": "Like `SaveChanges`, the Execute methods return the number of rows affected. The delete has already happened in the database; nothing is pending in the context."
+    },
+    {
+      "type": "code",
+      "title": "Spring cleaning",
+      "prompt": [
+        "The tests give you `ShopDb` with `Items` (`Id`, `Name`, `Stock`, `PriceCents`). Write `(int Discounted, int Removed) Clean(ShopDb db)` that, **in one transaction**:",
+        "",
+        "1. halves the price (integer division) of every item with more than 5 in stock, using `ExecuteUpdate`,",
+        "2. deletes every item with no stock, using `ExecuteDelete`,",
+        "3. commits and returns both counts.",
+        "",
+        "No entity may be loaded: the tests count the commands."
+      ],
+      "starter": [
+        "(int Discounted, int Removed) Clean(ShopDb db)",
+        "{",
+        "    return (0, 0);",
+        "}"
+      ],
+      "solution": [
+        "(int Discounted, int Removed) Clean(ShopDb db)",
+        "{",
+        "    using var tx = db.Database.BeginTransaction();",
+        "    var discounted = db.Items.Where(i => i.Stock > 5)",
+        "        .ExecuteUpdate(s => s.SetProperty(i => i.PriceCents, i => i.PriceCents / 2));",
+        "    var removed = db.Items.Where(i => i.Stock == 0).ExecuteDelete();",
+        "    tx.Commit();",
+        "    return (discounted, removed);",
+        "}"
+      ],
+      "template": [
+        "using (var seed = new ShopDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Items.AddRange(new Item { Name = \"pen\", Stock = 10, PriceCents = 150 }, new Item { Name = \"ink\", Stock = 0, PriceCents = 400 },",
+        "                        new Item { Name = \"pad\", Stock = 3, PriceCents = 250 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    await Dojo.TryAsync(\"cleaning\", async () =>",
+        "    {",
+        "        using (var dojoDb = new ShopDb())",
+        "        {",
+        "            var dojoSql = new List<string>();",
+        "            ShopDb.OnCommand = s => dojoSql.Add(s);",
+        "            var dojoResult = Clean(dojoDb);",
+        "            ShopDb.OnCommand = null;",
+        "            Dojo.Eq(\"one discounted, one removed\", (1, 1), dojoResult);",
+        "            Dojo.Check(\"no SELECT was run\", !dojoSql.Any(s => s.TrimStart().StartsWith(\"SELECT\")), string.Join(\" | \", dojoSql));",
+        "            Dojo.Eq(\"nothing is tracked\", 0, dojoDb.ChangeTracker.Entries().Count());",
+        "        }",
+        "        using (var dojoDb = new ShopDb())",
+        "            Dojo.Eq(\"what is left\", \"pad 250, pen 75\", string.Join(\", \", dojoDb.Items.OrderBy(i => i.Name).Select(i => i.Name + \" \" + i.PriceCents)));",
+        "    });",
+        "{{CODE}}",
+        "class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public static Action<string>? OnCommand;",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\")",
+        "        .LogTo((id, level) => id == RelationalEventId.CommandExecuted, e => OnCommand?.Invoke(((CommandExecutedEventData)e).Command.CommandText));",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "ExecuteUpdate",
+          "message": "Uses ExecuteUpdate"
+        },
+        {
+          "pattern": "ExecuteDelete",
+          "message": "Uses ExecuteDelete"
+        },
+        {
+          "pattern": "BeginTransaction",
+          "message": "Uses a transaction"
+        }
+      ],
+      "hints": [
+        "`s.SetProperty(i => i.PriceCents, i => i.PriceCents / 2)`",
+        "`using var tx = db.Database.BeginTransaction();` ... `tx.Commit();`"
+      ]
+    }
+  ]
+}

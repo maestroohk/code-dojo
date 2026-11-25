@@ -1,0 +1,318 @@
+{
+  "title": "Enums, value conversions and owned types",
+  "summary": "Store enums as text, map your own types with converters, and keep small value objects inside their owner's table.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Enums",
+      "body": [
+        "An enum property maps to an integer column by default:",
+        "",
+        "```csharp",
+        "enum Genre { Fiction, Science, History }",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public Genre Genre { get; set; }      // \"Genre\" INTEGER NOT NULL: 0, 1, 2",
+        "}",
+        "```",
+        "",
+        "Integers are compact, but a row holding `1` means nothing to someone reading the table, and **reordering the enum silently changes the meaning of every stored row**. Storing the name is often safer:",
+        "",
+        "```csharp",
+        "model.Entity<Book>().Property(b => b.Genre).HasConversion<string>();   // \"Science\"",
+        "```",
+        "",
+        "Queries still work in C# terms: `db.Books.Where(b => b.Genre == Genre.Science)` becomes `WHERE \"b\".\"Genre\" = 'Science'`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using var db = new LibraryDb();",
+        "db.Database.EnsureCreated();",
+        "db.Books.Add(new Book { Title = \"Cosmos\", Genre = Genre.Science });",
+        "db.SaveChanges();",
+        "",
+        "var conn = db.Database.GetDbConnection();",
+        "conn.Open();",
+        "using var cmd = conn.CreateCommand();",
+        "cmd.CommandText = \"SELECT Genre, Shelf FROM Books\";",
+        "using var reader = cmd.ExecuteReader();",
+        "reader.Read();",
+        "Console.WriteLine(reader.GetValue(0));",
+        "Console.WriteLine(reader.GetValue(1));",
+        "",
+        "enum Genre { Fiction, Science, History }",
+        "enum Shelf { Top, Middle, Bottom }",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public Genre Genre { get; set; }",
+        "    public Shelf Shelf { get; set; } = Shelf.Bottom;",
+        "}",
+        "",
+        "class LibraryDb : DbContext",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=library.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model)",
+        "        => model.Entity<Book>().Property(b => b.Genre).HasConversion<string>();",
+        "}"
+      ],
+      "answer": [
+        "Science",
+        "2"
+      ],
+      "explain": "The program reads the raw row with plain ADO.NET, under EF Core. `Genre` has a string conversion, so the column holds its name. `Shelf` has none, so it holds the number: `Bottom` is the third value, `2`."
+    },
+    {
+      "type": "learn",
+      "title": "Value conversions",
+      "body": [
+        "`HasConversion` works for any type: give it two expressions, *to the database* and *back*.",
+        "",
+        "```csharp",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public List<string> Tags { get; set; } = [];",
+        "}",
+        "",
+        "model.Entity<Book>().Property(b => b.Tags).HasConversion(",
+        "    tags => string.Join(',', tags),                                       // to the column",
+        "    text => text.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList());   // back to C#",
+        "```",
+        "",
+        "The column is a single `TEXT` holding `\"space,classic\"`. Good uses: a strongly typed id (`record struct BookId(int Value)`), a unit (`Distance` stored in metres), a flag set.",
+        "",
+        "The catch: the database only sees the converted value. `Where(b => b.Tags.Contains(\"space\"))` cannot be translated, because SQL does not know your comma format. Convert values you **store and compare whole**, not values you need to search inside."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Store a `TimeSpan` as a number of whole minutes.",
+      "code": [
+        "model.Entity<Film>().Property(f => f.Length).__1__(",
+        "    span => (int)span.__2__,",
+        "    minutes => TimeSpan.__3__(minutes));"
+      ],
+      "blanks": [
+        "HasConversion",
+        "TotalMinutes",
+        "FromMinutes"
+      ],
+      "bank": [
+        "HasColumnType",
+        "Minutes",
+        "Parse",
+        "ToString"
+      ],
+      "explain": "`HasConversion` takes the two directions. `TotalMinutes` is the whole length in minutes (`Minutes` is only the minutes *part*, 0 to 59), and `TimeSpan.FromMinutes` turns the number back."
+    },
+    {
+      "type": "learn",
+      "title": "Owned types",
+      "body": [
+        "Some classes have no identity of their own. An `Address` belongs to a customer; it is not a row anyone looks up by id. Mark it **owned**, and its properties become columns of the owner's table:",
+        "",
+        "```csharp",
+        "[Owned]",
+        "class Address",
+        "{",
+        "    public string Street { get; set; } = \"\";",
+        "    public string City { get; set; } = \"\";",
+        "}",
+        "",
+        "class Customer",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public Address Home { get; set; } = new();",
+        "}",
+        "```",
+        "",
+        "The `Customers` table gets `Home_Street` and `Home_City`. Loading a customer always loads its address; there is no `DbSet<Address>`. Owned types are how EF Core models **value objects** from domain-driven design.",
+        "",
+        "The Fluent API spelling is `model.Entity<Customer>().OwnsOne(c => c.Home);`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using var db = new ShopDb();",
+        "var sql = db.Database.GenerateCreateScript();",
+        "Console.WriteLine(sql.Contains(\"\\\"Home_City\\\"\"));",
+        "Console.WriteLine(sql.Contains(\"\\\"Work_City\\\"\"));",
+        "Console.WriteLine(sql.Contains(\"CREATE TABLE \\\"Address\\\"\"));",
+        "",
+        "[Owned]",
+        "class Address",
+        "{",
+        "    public string Street { get; set; } = \"\";",
+        "    public string City { get; set; } = \"\";",
+        "}",
+        "",
+        "class Customer",
+        "{",
+        "    public int Id { get; set; }",
+        "    public Address Home { get; set; } = new();",
+        "    public Address Work { get; set; } = new();",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Customer> Customers => Set<Customer>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "}"
+      ],
+      "answer": [
+        "True",
+        "True",
+        "False"
+      ],
+      "explain": "Each owned property gets its own set of columns, prefixed with the property name. No table is created for `Address` itself."
+    },
+    {
+      "type": "sort",
+      "prompt": "Owned type, or an entity of its own?",
+      "buckets": [
+        "Owned type",
+        "Entity with its own table"
+      ],
+      "items": [
+        [
+          "A customer's shipping address",
+          0
+        ],
+        [
+          "A price: amount plus currency",
+          0
+        ],
+        [
+          "A GPS position: latitude and longitude",
+          0
+        ],
+        [
+          "An author, shared by many books",
+          1
+        ],
+        [
+          "A library branch that members visit",
+          1
+        ],
+        [
+          "A product category you can rename for all products",
+          1
+        ]
+      ],
+      "explain": "A value with no identity, owned by exactly one thing, is an owned type. Something shared, looked up, or changed in one place for many owners needs its own table and key."
+    },
+    {
+      "type": "code",
+      "title": "A film catalogue",
+      "prompt": [
+        "Write a `Film` entity and a `CinemaDb` context (`Data Source=films.db`, `DbSet<Film> Films`):",
+        "",
+        "- `int Id`, `string Title`",
+        "- `Rating Rating`, where `enum Rating { U, PG, Twelve, Fifteen, Eighteen }` is stored **as text**",
+        "- `TimeSpan Length`, stored as an integer number of **minutes**",
+        "- `Money Price`, an **owned** type with `int Amount` (in cents) and `string Currency`",
+        "",
+        "Configure it with the Fluent API in `OnModelCreating` (or `[Owned]` for `Money`, your choice). Declare the enum and `Money` too."
+      ],
+      "starter": [
+        "enum Rating { U, PG, Twelve, Fifteen, Eighteen }",
+        "",
+        "class Money",
+        "{",
+        "}",
+        "",
+        "class Film",
+        "{",
+        "}",
+        "",
+        "class CinemaDb : DbContext",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "enum Rating { U, PG, Twelve, Fifteen, Eighteen }",
+        "",
+        "[Owned]",
+        "class Money",
+        "{",
+        "    public int Amount { get; set; }",
+        "    public string Currency { get; set; } = \"\";",
+        "}",
+        "",
+        "class Film",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public Rating Rating { get; set; }",
+        "    public TimeSpan Length { get; set; }",
+        "    public Money Price { get; set; } = new();",
+        "}",
+        "",
+        "class CinemaDb : DbContext",
+        "{",
+        "    public DbSet<Film> Films => Set<Film>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=films.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model)",
+        "    {",
+        "        model.Entity<Film>(film =>",
+        "        {",
+        "            film.Property(f => f.Rating).HasConversion<string>();",
+        "            film.Property(f => f.Length).HasConversion(span => (int)span.TotalMinutes, minutes => TimeSpan.FromMinutes(minutes));",
+        "        });",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "await Dojo.TryAsync(\"the catalogue\", async () =>",
+        "{",
+        "    using (var dojoDb = new CinemaDb())",
+        "    {",
+        "        dojoDb.Database.EnsureCreated();",
+        "        dojoDb.Films.Add(new Film { Title = \"Alien\", Rating = Rating.Fifteen, Length = TimeSpan.FromMinutes(117), Price = new Money { Amount = 450, Currency = \"EUR\" } });",
+        "        dojoDb.Films.Add(new Film { Title = \"Up\", Rating = Rating.U, Length = TimeSpan.FromMinutes(96), Price = new Money { Amount = 300, Currency = \"EUR\" } });",
+        "        dojoDb.SaveChanges();",
+        "    }",
+        "    using (var dojoDb = new CinemaDb())",
+        "    {",
+        "        var dojoConn = dojoDb.Database.GetDbConnection();",
+        "        dojoConn.Open();",
+        "        using var dojoCmd = dojoConn.CreateCommand();",
+        "        dojoCmd.CommandText = \"SELECT * FROM Films WHERE Id = 1\";",
+        "        using var dojoRow = dojoCmd.ExecuteReader();",
+        "        dojoRow.Read();",
+        "        object? Col(string name) { for (var i = 0; i < dojoRow.FieldCount; i++) if (dojoRow.GetName(i) == name) return dojoRow.GetValue(i); return null; }",
+        "        Dojo.Eq(\"Rating is stored as text\", \"Fifteen\", Col(\"Rating\")?.ToString());",
+        "        Dojo.Eq(\"Length is stored as minutes\", \"117\", Col(\"Length\")?.ToString());",
+        "        Dojo.Eq(\"Price lives in the Films table (Price_Amount)\", \"450\", Col(\"Price_Amount\")?.ToString());",
+        "        Dojo.Eq(\"Price_Currency\", \"EUR\", Col(\"Price_Currency\")?.ToString());",
+        "    }",
+        "    using (var dojoDb = new CinemaDb())",
+        "    {",
+        "        var dojoUp = dojoDb.Films.Single(f => f.Rating == Rating.U);",
+        "        Dojo.Eq(\"reads back the enum and the length\", \"Up 01:36:00\", dojoUp.Title + \" \" + dojoUp.Length);",
+        "        Dojo.Eq(\"reads back the owned price\", 300, dojoUp.Price.Amount);",
+        "    }",
+        "});",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "`film.Property(f => f.Rating).HasConversion<string>()`",
+        "`HasConversion(span => (int)span.TotalMinutes, minutes => TimeSpan.FromMinutes(minutes))`",
+        "`[Owned]` on `Money` is all an owned type needs."
+      ]
+    }
+  ]
+}

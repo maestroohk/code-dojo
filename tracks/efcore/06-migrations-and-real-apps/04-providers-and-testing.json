@@ -1,0 +1,248 @@
+{
+  "title": "Providers, connection strings and testing",
+  "summary": "One model, many databases; connection strings from configuration; and fast, honest tests with SQLite in memory.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Providers",
+      "body": [
+        "The **provider** is the package that speaks one database. Your model and queries stay the same; registration changes:",
+        "",
+        "| Database | Package | Registration |",
+        "|---|---|---|",
+        "| SQLite | `Microsoft.EntityFrameworkCore.Sqlite` | `options.UseSqlite(cs)` |",
+        "| SQL Server / Azure SQL | `Microsoft.EntityFrameworkCore.SqlServer` | `options.UseSqlServer(cs)` |",
+        "| PostgreSQL | `Npgsql.EntityFrameworkCore.PostgreSQL` | `options.UseNpgsql(cs)` |",
+        "",
+        "\"The same\" has limits. Providers differ in SQL dialect (`LIMIT` against `TOP`/`OFFSET FETCH`), types (`decimal` is stored as text in SQLite and cannot be sorted there; SQL Server has `decimal(18,2)`), case sensitivity of string comparisons, and features (`rowversion` exists only in SQL Server). Migrations are **provider-specific**: generate them for the database you deploy to.",
+        "",
+        "Connection strings do not belong in code. Put them in configuration (`appsettings.json`, environment variables, a secret store) and read them:",
+        "",
+        "```csharp",
+        "builder.Services.AddDbContext<ShopDb>(o =>",
+        "    o.UseSqlServer(builder.Configuration.GetConnectionString(\"Shop\")));",
+        "```",
+        "",
+        "which reads `ConnectionStrings:Shop` (or the environment variable `ConnectionStrings__Shop`)."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each connection string to its provider.",
+      "pairs": [
+        [
+          "`Data Source=shop.db`",
+          "SQLite"
+        ],
+        [
+          "`Server=.;Database=Shop;Trusted_Connection=True;TrustServerCertificate=True`",
+          "SQL Server"
+        ],
+        [
+          "`Host=localhost;Database=shop;Username=app;Password=...`",
+          "PostgreSQL (Npgsql)"
+        ],
+        [
+          "`Data Source=:memory:`",
+          "SQLite, in memory"
+        ]
+      ],
+      "explain": "Each provider has its own connection string format. `:memory:` is SQLite's special name for a database that lives only as long as its connection."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Where should a production SQL Server password go?",
+      "options": [
+        "In a secret store or environment variable read through configuration",
+        "In `appsettings.json`, committed with the code",
+        "As a constant in the DbContext",
+        "In the migration files"
+      ],
+      "answer": 0,
+      "explain": "Configuration lets each environment supply its own connection string, and secrets stay out of source control. `GetConnectionString(\"Shop\")` does not care where the value came from."
+    },
+    {
+      "type": "learn",
+      "title": "Testing with SQLite in memory",
+      "body": [
+        "Tests that touch the database should be **fast**, **isolated** (each test gets an empty database) and **honest** (real SQL, real constraints). SQLite in memory gives all three:",
+        "",
+        "```csharp",
+        "using var connection = new SqliteConnection(\"Data Source=:memory:\");",
+        "connection.Open();                                       // the database lives while this is open",
+        "",
+        "var options = new DbContextOptionsBuilder<ShopDb>().UseSqlite(connection).Options;",
+        "using (var db = new ShopDb(options)) db.Database.EnsureCreated();",
+        "```",
+        "",
+        "Then every context made from those `options` shares the same in-memory database, which vanishes when the connection closes.",
+        "",
+        "Why keep the connection open yourself? With `UseSqlite(\"Data Source=:memory:\")`, EF Core opens and closes the connection around each command, and **each new connection is a brand-new, empty database**.",
+        "",
+        "EF Core also has an `InMemory` provider, but it is not relational: no SQL, no constraints, no transactions. Tests pass there that fail on a real database. Microsoft recommends against it for testing; prefer SQLite, or the real database in a container for the final word."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using (var db = new ShopDb(new DbContextOptionsBuilder<ShopDb>().UseSqlite(\"Data Source=:memory:\").Options))",
+        "{",
+        "    db.Database.EnsureCreated();",
+        "    try { Console.WriteLine(db.Items.Count()); }",
+        "    catch (SqliteException) { Console.WriteLine(\"no such table\"); }",
+        "}",
+        "",
+        "using var connection = new SqliteConnection(\"Data Source=:memory:\");",
+        "connection.Open();",
+        "var options = new DbContextOptionsBuilder<ShopDb>().UseSqlite(connection).Options;",
+        "using (var db = new ShopDb(options)) { db.Database.EnsureCreated(); db.Items.Add(new Item { Name = \"pen\" }); db.SaveChanges(); }",
+        "using (var db = new ShopDb(options)) Console.WriteLine(db.Items.Count());",
+        "",
+        "class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "}",
+        "",
+        "class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options)",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "}"
+      ],
+      "answer": [
+        "no such table",
+        "1"
+      ],
+      "explain": "With a connection string, `EnsureCreated` creates the tables on one connection, which then closes and takes the database with it; the query opens a new, empty one. Holding one open connection keeps a single database alive for every context built on it."
+    },
+    {
+      "type": "sort",
+      "prompt": "Sort the test setups.",
+      "buckets": [
+        "Honest and fast",
+        "Misleading"
+      ],
+      "items": [
+        [
+          "SQLite in memory with one open connection per test",
+          0
+        ],
+        [
+          "The real database engine in a container, created per test run",
+          0
+        ],
+        [
+          "The EF Core InMemory provider, to test a unique index",
+          1
+        ],
+        [
+          "One shared database file that every test writes to",
+          1
+        ],
+        [
+          "Mocking `DbSet<T>` to return a fixed list",
+          1
+        ]
+      ],
+      "explain": "Tests should run the real translation and constraints and start from a known state. InMemory and mocks skip SQL entirely; a shared file leaks state between tests."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In production the environment variable `ConnectionStrings__Shop` is set. What does `builder.Configuration.GetConnectionString(\"Shop\")` return?",
+      "options": [
+        "That variable's value: `__` maps to the `:` in `ConnectionStrings:Shop`",
+        "The value from appsettings.json, because files win over environment variables",
+        "null: environment variables are not configuration",
+        "The literal text `ConnectionStrings__Shop`"
+      ],
+      "answer": 0,
+      "explain": "ASP.NET Core layers configuration sources, and environment variables override `appsettings.json`. A double underscore stands for the section separator, so each environment can supply its own connection string without code changes."
+    },
+    {
+      "type": "code",
+      "title": "A test helper",
+      "prompt": [
+        "Write a reusable test fixture for a `ShopDb` that takes `DbContextOptions<ShopDb>`:",
+        "",
+        "```csharp",
+        "class TestDatabase : IDisposable",
+        "{",
+        "    public TestDatabase() { ... }          // open an in-memory SQLite connection, create the schema",
+        "    public ShopDb NewContext() { ... }     // a fresh context on the same database",
+        "    public void Dispose() { ... }          // close the connection: the database disappears",
+        "}",
+        "```",
+        "",
+        "The tests use two `TestDatabase` instances and check they do not see each other's data, and that the unique index on `Item.Sku` (configured by the tests' `ShopDb`) is enforced."
+      ],
+      "starter": [
+        "class TestDatabase : IDisposable",
+        "{",
+        "    public TestDatabase()",
+        "    {",
+        "    }",
+        "",
+        "    public ShopDb NewContext() => throw new NotImplementedException();",
+        "",
+        "    public void Dispose()",
+        "    {",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class TestDatabase : IDisposable",
+        "{",
+        "    readonly SqliteConnection _connection;",
+        "    readonly DbContextOptions<ShopDb> _options;",
+        "",
+        "    public TestDatabase()",
+        "    {",
+        "        _connection = new SqliteConnection(\"Data Source=:memory:\");",
+        "        _connection.Open();",
+        "        _options = new DbContextOptionsBuilder<ShopDb>().UseSqlite(_connection).Options;",
+        "        using var db = NewContext();",
+        "        db.Database.EnsureCreated();",
+        "    }",
+        "",
+        "    public ShopDb NewContext() => new(_options);",
+        "",
+        "    public void Dispose() => _connection.Dispose();",
+        "}"
+      ],
+      "template": [
+        "await Dojo.TryAsync(\"the fixture\", async () =>",
+        "{",
+        "    using var dojoA = new TestDatabase();",
+        "    using var dojoB = new TestDatabase();",
+        "    using (var dojoDb = dojoA.NewContext()) { dojoDb.Items.Add(new Item { Sku = \"P-1\" }); dojoDb.SaveChanges(); }",
+        "    using (var dojoDb = dojoA.NewContext()) Dojo.Eq(\"a second context sees the saved item\", 1, dojoDb.Items.Count());",
+        "    using (var dojoDb = dojoB.NewContext()) Dojo.Eq(\"another TestDatabase is empty\", 0, dojoDb.Items.Count());",
+        "    using (var dojoDb = dojoA.NewContext())",
+        "    {",
+        "        dojoDb.Items.Add(new Item { Sku = \"P-1\" });",
+        "        Dojo.Throws<DbUpdateException>(\"the unique index is enforced\", () => dojoDb.SaveChanges());",
+        "    }",
+        "    Dojo.Check(\"no database file was written\", !Directory.GetFiles(\".\", \"*.db\").Any(), string.Join(\", \", Directory.GetFiles(\".\", \"*.db\")));",
+        "});",
+        "{{CODE}}",
+        "class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Sku { get; set; } = \"\";",
+        "}",
+        "",
+        "class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options)",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnModelCreating(ModelBuilder model) => model.Entity<Item>().HasIndex(i => i.Sku).IsUnique();",
+        "}"
+      ],
+      "hints": [
+        "Keep the open `SqliteConnection` in a field; build the options once with `UseSqlite(connection)`.",
+        "Create the schema in the constructor with a context from `NewContext()`."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,216 @@
+{
+  "title": "Stage 1: A model and a context",
+  "summary": "Books in a SQLite database behind GET and POST endpoints, with a DbContext from dependency injection.",
+  "minutes": 25,
+  "prereqs": [
+    "efcore/01-first-context/01-what-an-orm-is",
+    "efcore/06-migrations-and-real-apps/03-dbcontext-in-aspnet-core",
+    "csharp/p01-tasks-api/03-creating"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The brief",
+      "body": [
+        "A neighbourhood library wants an API for its front desk: books, authors, members and loans. You will build it over six stages, each tested by real HTTP requests against your running server, with the data in a real SQLite database.",
+        "",
+        "Stage 1 is the foundation:",
+        "",
+        "- a `Book` entity and a `LibraryDb` context that receives its options through its constructor,",
+        "- `AddDbContext` with `Data Source=library.db`, and the database created at start-up,",
+        "- three endpoints: list books, get one, add one (with validation and a unique ISBN).",
+        "",
+        "Each check starts your program in a fresh folder, so the database is always empty at first: the first book created gets id 1."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does `LibraryDb` take `DbContextOptions<LibraryDb>` in its constructor instead of calling `UseSqlite` in `OnConfiguring`?",
+      "options": [
+        "So the app (or a test) decides the provider and connection string, and DI can create the context per request",
+        "Because `OnConfiguring` does not work in ASP.NET Core",
+        "It makes queries faster",
+        "Because SQLite requires it"
+      ],
+      "answer": 0,
+      "explain": "`AddDbContext` builds the options and passes them in. The same context class then works with SQLite in a test and SQL Server in production."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the registration and the start-up creation of the database.",
+      "code": [
+        "builder.Services.__1__<LibraryDb>(o => o.UseSqlite(\"Data Source=library.db\"));",
+        "var app = builder.Build();",
+        "",
+        "using (var scope = app.Services.__2__())",
+        "    scope.ServiceProvider.GetRequiredService<LibraryDb>().Database.__3__();"
+      ],
+      "blanks": [
+        "AddDbContext",
+        "CreateScope",
+        "EnsureCreated"
+      ],
+      "bank": [
+        "AddSingleton",
+        "GetService",
+        "Migrate",
+        "BeginScope"
+      ],
+      "explain": "The context is scoped, so outside a request you need your own scope to get one. `EnsureCreated` makes the tables (a real deployment would use migrations, module 6)."
+    },
+    {
+      "type": "sort",
+      "prompt": "Where should each rule live?",
+      "buckets": [
+        "Check in the endpoint (friendly 400/409)",
+        "Database constraint (last line of defence)",
+        "Both"
+      ],
+      "items": [
+        [
+          "The title must not be blank",
+          0
+        ],
+        [
+          "The ISBN is 13 characters",
+          0
+        ],
+        [
+          "No two books share an ISBN",
+          2
+        ],
+        [
+          "Every row has a primary key",
+          1
+        ]
+      ],
+      "explain": "Checking in the endpoint gives the client a clear error. A unique index makes the duplicate impossible even if two requests race past the check at the same moment."
+    },
+    {
+      "type": "code",
+      "title": "Books",
+      "prompt": [
+        "Write the whole program. **Run checks** starts your server and calls it.",
+        "",
+        "```text",
+        "POST /books   { \"title\": \"Dune\", \"isbn\": \"9780441013593\", \"year\": 1965 }",
+        "201 Created   Location: /books/1",
+        "              { \"id\": 1, \"title\": \"Dune\", \"isbn\": \"9780441013593\", \"year\": 1965 }",
+        "```",
+        "",
+        "- `Book`: `int Id`, `string Title` (max 200), `string Isbn` (**unique index**), `int Year`.",
+        "- `LibraryDb(DbContextOptions<LibraryDb> options)` with `DbSet<Book> Books`; register it with `AddDbContext` and `Data Source=library.db`; create the database at start-up.",
+        "- `GET /books`: every book, ordered by id, read without tracking.",
+        "- `GET /books/{id}`: the book, or `404`.",
+        "- `POST /books` with a `record NewBook(string? Title, string? Isbn, int Year)`:",
+        "  - `400` if the title is blank or the ISBN is not exactly 13 characters,",
+        "  - `409 Conflict` if a book with that ISBN exists,",
+        "  - otherwise trim the title, save, and answer `201` with a `Location` of `/books/{id}` and the book.",
+        "",
+        "Types go after `app.Run();`."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.Run();"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddDbContext<LibraryDb>(o => o.UseSqlite(\"Data Source=library.db\"));",
+        "var app = builder.Build();",
+        "",
+        "using (var scope = app.Services.CreateScope())",
+        "    scope.ServiceProvider.GetRequiredService<LibraryDb>().Database.EnsureCreated();",
+        "",
+        "app.MapGet(\"/books\", (LibraryDb db) =>",
+        "    db.Books.AsNoTracking().OrderBy(b => b.Id).ToList());",
+        "",
+        "app.MapGet(\"/books/{id:int}\", async (int id, LibraryDb db) =>",
+        "    await db.Books.FindAsync(id) is { } book ? Results.Ok(book) : Results.NotFound());",
+        "",
+        "app.MapPost(\"/books\", async (NewBook input, LibraryDb db) =>",
+        "{",
+        "    if (string.IsNullOrWhiteSpace(input.Title) || input.Isbn is not { Length: 13 })",
+        "        return Results.BadRequest(new { error = \"a title and a 13-character isbn are required\" });",
+        "    if (await db.Books.AnyAsync(b => b.Isbn == input.Isbn))",
+        "        return Results.Conflict(new { error = \"a book with this isbn exists\" });",
+        "    var book = new Book { Title = input.Title.Trim(), Isbn = input.Isbn, Year = input.Year };",
+        "    db.Books.Add(book);",
+        "    await db.SaveChangesAsync();",
+        "    return Results.Created($\"/books/{book.Id}\", book);",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "record NewBook(string? Title, string? Isbn, int Year);",
+        "",
+        "class Book",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public string Isbn { get; set; } = \"\";",
+        "    public int Year { get; set; }",
+        "}",
+        "",
+        "class LibraryDb(DbContextOptions<LibraryDb> options) : DbContext(options)",
+        "{",
+        "    public DbSet<Book> Books => Set<Book>();",
+        "",
+        "    protected override void OnModelCreating(ModelBuilder model)",
+        "    {",
+        "        model.Entity<Book>(book =>",
+        "        {",
+        "            book.Property(b => b.Title).HasMaxLength(200);",
+        "            book.HasIndex(b => b.Isbn).IsUnique();",
+        "        });",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"books\", async () =>",
+        "        {",
+        "            var dojoA = await Post(http, \"/books\", new { title = \"  Dune \", isbn = \"9780441013593\", year = 1965 });",
+        "            DojoWeb.Status(\"POST /books responds 201\", 201, dojoA);",
+        "            Dojo.Eq(\"Location is /books/1\", \"/books/1\", dojoA.Headers.Location?.OriginalString);",
+        "            var dojoJson = await DojoWeb.Json(dojoA);",
+        "            Dojo.Eq(\"the title is trimmed\", \"Dune\", DojoWeb.Prop(dojoJson, \"title\"));",
+        "            DojoWeb.Status(\"a second book: 201\", 201, await Post(http, \"/books\", new { title = \"Emma\", isbn = \"9780547773742\", year = 1815 }));",
+        "            DojoWeb.Status(\"a 10-character isbn: 400\", 400, await Post(http, \"/books\", new { title = \"X\", isbn = \"0441013597\", year = 1 }));",
+        "            DojoWeb.Status(\"no title: 400\", 400, await Post(http, \"/books\", new { isbn = \"9780061054884\", year = 1 }));",
+        "            DojoWeb.Status(\"a duplicate isbn: 409\", 409, await Post(http, \"/books\", new { title = \"Dune again\", isbn = \"9780441013593\", year = 1 }));",
+        "            var dojoList = await DojoWeb.Json(await http.GetAsync(\"/books\"));",
+        "            Dojo.Eq(\"GET /books lists them by id\", \"Dune|Emma\", Each(dojoList, \"title\"));",
+        "            var dojoOne = await http.GetAsync(\"/books/2\");",
+        "            DojoWeb.Status(\"GET /books/2 responds 200\", 200, dojoOne);",
+        "            Dojo.Eq(\"...with its isbn\", \"9780547773742\", DojoWeb.Prop(await DojoWeb.Json(dojoOne), \"isbn\"));",
+        "            DojoWeb.Status(\"GET /books/9 responds 404\", 404, await http.GetAsync(\"/books/9\"));",
+        "        });",
+        "    }",
+        "",
+        "    static async Task<HttpResponseMessage> Post(HttpClient http, string url, object body) => await http.PostAsJsonAsync(url, body);",
+        "    static async Task<string?> Id(HttpResponseMessage r) => DojoWeb.Prop(await DojoWeb.Json(r), \"id\");",
+        "    static string Each(JsonElement json, string prop) =>",
+        "        json.ValueKind == JsonValueKind.Array ? string.Join(\"|\", json.EnumerateArray().Select(x => DojoWeb.Prop(x, prop))) : \"(not an array)\";",
+        "    static JsonElement Field(JsonElement json, string name)",
+        "    {",
+        "        if (json.ValueKind != JsonValueKind.Object) return default;",
+        "        foreach (var p in json.EnumerateObject()) if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)) return p.Value;",
+        "        return default;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Copy the registration and the `CreateScope` block from the fill-the-gap step.",
+        "`input.Isbn is not { Length: 13 }` is true for null and for any other length.",
+        "`Results.Created($\"/books/{book.Id}\", book)` after `SaveChangesAsync` (the id is set by then)."
+      ],
+      "framework": "web+efcore"
+    }
+  ]
+}

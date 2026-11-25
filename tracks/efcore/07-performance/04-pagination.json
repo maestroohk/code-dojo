@@ -1,0 +1,271 @@
+{
+  "title": "Pagination done right",
+  "summary": "Offset paging, why it slows down and drifts, and keyset (seek) paging.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Offset paging and its costs",
+      "body": [
+        "`Skip(n).Take(20)` is offset paging: `LIMIT 20 OFFSET n`. It is simple and supports \"jump to page 37\". But:",
+        "",
+        "- **Deep pages are slow.** To return rows 10,001 to 10,020 the database still has to walk past the first 10,000. Page 500 costs 500 times page 1.",
+        "- **Pages drift.** If a new post is inserted at the top while you read, every row shifts down by one: page 2 repeats the last post of page 1. If one is deleted, you skip one.",
+        "",
+        "**Keyset paging** (also called *seek* paging) remembers where the last page **ended** and asks for what comes after:",
+        "",
+        "```csharp",
+        "var next = db.Posts",
+        "    .OrderBy(p => p.Id)",
+        "    .Where(p => p.Id > lastId)       // instead of Skip",
+        "    .Take(20)",
+        "    .ToList();",
+        "```",
+        "",
+        "With an index on the sort column, every page is a seek straight to `lastId`: page 500 is as fast as page 1, and inserts above do not shift what comes next."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Two posts arrive while a reader is between page 1 and page 2. What does this print?",
+      "code": [
+        "    using var db = new FeedDb();",
+        "    db.Database.EnsureCreated();",
+        "    for (var i = 1; i <= 6; i++) db.Posts.Add(new Post { Title = \"P\" + i, Score = 0 });",
+        "    db.SaveChanges();",
+        "",
+        "    var page1 = db.Posts.OrderByDescending(p => p.Id).Take(3).Select(p => p.Title).ToList();",
+        "    db.Posts.AddRange(new Post { Title = \"P7\" }, new Post { Title = \"P8\" });",
+        "    db.SaveChanges();",
+        "",
+        "    var offset = db.Posts.OrderByDescending(p => p.Id).Skip(3).Take(3).Select(p => p.Title).ToList();",
+        "    var lastId = 4;",
+        "    var keyset = db.Posts.OrderByDescending(p => p.Id).Where(p => p.Id < lastId).Take(3).Select(p => p.Title).ToList();",
+        "    Console.WriteLine(string.Join(\",\", page1));",
+        "    Console.WriteLine(string.Join(\",\", offset));",
+        "    Console.WriteLine(string.Join(\",\", keyset));",
+        "",
+        "    class Post",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Score { get; set; }",
+        "}",
+        "",
+        "class FeedDb : DbContext",
+        "{",
+        "    public DbSet<Post> Posts => Set<Post>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=feed.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model) => model.Entity<Post>().HasIndex(p => new { p.Score, p.Id });",
+        "}"
+      ],
+      "answer": [
+        "P6,P5,P4",
+        "P5,P4,P3",
+        "P3,P2,P1"
+      ],
+      "explain": "Newest first, page 1 is P6, P5, P4. Two new posts push everything down, so offset page 2 repeats P5 and P4. Keyset paging asks for \"older than P4\" and continues exactly where the reader left off."
+    },
+    {
+      "type": "learn",
+      "title": "Keyset on a non-unique column",
+      "body": [
+        "Sorting by a column that is **not unique**, like `Score`, needs a tie-breaker, or rows with equal scores could be skipped or repeated. Sort by `(Score, Id)` and seek past **both**:",
+        "",
+        "```csharp",
+        "var page = db.Posts",
+        "    .OrderBy(p => p.Score).ThenBy(p => p.Id)",
+        "    .Where(p => p.Score > lastScore || (p.Score == lastScore && p.Id > lastId))",
+        "    .Take(pageSize)",
+        "    .ToList();",
+        "```",
+        "",
+        "The client receives the last row's `(Score, Id)` as an opaque **cursor** (often base64 in the response: `\"next\": \"NTo3\"`) and sends it back for the next page. An index on `(Score, Id)` makes each page a seek.",
+        "",
+        "The trade-off: keyset paging cannot jump to \"page 37\", only go next (and previous, by flipping the comparison). That is exactly what infinite scrolling and APIs need; numbered pages over a small table can stay with offsets."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print? (Scores: P1=5, P2=9, P3=5, P4=2, P5=9, P6=7, P7=5, P8=1.)",
+      "code": [
+        "    using (var seed = new FeedDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    var scores = new[] { 5, 9, 5, 2, 9, 7, 5, 1 };",
+        "    for (var i = 0; i < scores.Length; i++) seed.Posts.Add(new Post { Title = \"P\" + (i + 1), Score = scores[i] });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    using var db = new FeedDb();",
+        "    var lastScore = 5;",
+        "    var lastId = 3;",
+        "    var page = db.Posts",
+        "        .OrderBy(p => p.Score).ThenBy(p => p.Id)",
+        "        .Where(p => p.Score > lastScore || (p.Score == lastScore && p.Id > lastId))",
+        "        .Take(3)",
+        "        .Select(p => p.Title)",
+        "        .ToList();",
+        "    Console.WriteLine(string.Join(\",\", page));",
+        "",
+        "    class Post",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Score { get; set; }",
+        "}",
+        "",
+        "class FeedDb : DbContext",
+        "{",
+        "    public DbSet<Post> Posts => Set<Post>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=feed.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model) => model.Entity<Post>().HasIndex(p => new { p.Score, p.Id });",
+        "}"
+      ],
+      "answer": "P7,P6,P2",
+      "explain": "In `(Score, Id)` order the posts are P8(1), P4(2), P1(5,1), P3(5,3), P7(5,7), P6(7), P2(9,2), P5(9,5). After the cursor (5, 3) come P7, P6 and P2."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why must keyset paging over `Score` also compare `Id`?",
+      "options": [
+        "Several posts can share a score; without the tie-breaker the page boundary is ambiguous, so rows are skipped or repeated",
+        "SQLite cannot sort by integers",
+        "`Id` makes the query use less memory",
+        "It is only needed for descending order"
+      ],
+      "answer": 0,
+      "explain": "The cursor must identify one exact position in a total order. `(Score, Id)` is unique because `Id` is."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the paging style to its property.",
+      "pairs": [
+        [
+          "`Skip(n).Take(k)`",
+          "Can jump to any page number, slows down on deep pages"
+        ],
+        [
+          "`Where(p => p.Id > last).Take(k)`",
+          "Constant speed with an index, no drift on inserts"
+        ],
+        [
+          "`OrderBy(p => p.Score).ThenBy(p => p.Id)`",
+          "A total order: required for stable pages"
+        ],
+        [
+          "Index on `(Score, Id)`",
+          "Lets each keyset page start with a seek"
+        ]
+      ],
+      "explain": "Keyset paging needs a total order and an index that matches it; offset paging needs only a total order but pays for every skipped row."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A product owner wants numbered page links (1, 2, 3 ... 40) on a small admin table of 800 rows. Which paging fits?",
+      "options": [
+        "Offset paging: it can jump to any page, and 800 rows are cheap to skip",
+        "Keyset paging: it is always better",
+        "No paging: send all 800 rows",
+        "Keyset paging with a random cursor"
+      ],
+      "answer": 0,
+      "explain": "Keyset paging cannot jump to page 37 without walking the pages before it. For small tables and numbered pages, offsets are fine; for large feeds, APIs and infinite scrolling, use keysets."
+    },
+    {
+      "type": "code",
+      "title": "Keyset paging",
+      "prompt": [
+        "The tests give you `FeedDb` with `Posts` (`Id`, `Title`, `Score`) and an index on `(Score, Id)`. Write",
+        "",
+        "```csharp",
+        "record FeedPage(List<string> Titles, int? NextScore, int? NextId);",
+        "FeedPage Feed(FeedDb db, int pageSize, int? afterScore, int? afterId)",
+        "```",
+        "",
+        "returning posts ordered by **score descending, then id descending** (best first; for equal scores, the newest first). With no cursor (`afterScore` null), start at the top. `NextScore`/`NextId` are the last post's values when the page is full, or `null` when there is nothing more (a page shorter than `pageSize`, or exactly the last rows: fetch one extra row to find out).",
+        "",
+        "Do not use `Skip`."
+      ],
+      "starter": [
+        "FeedPage Feed(FeedDb db, int pageSize, int? afterScore, int? afterId)",
+        "{",
+        "    return new FeedPage([], null, null);",
+        "}",
+        "",
+        "record FeedPage(List<string> Titles, int? NextScore, int? NextId);"
+      ],
+      "solution": [
+        "FeedPage Feed(FeedDb db, int pageSize, int? afterScore, int? afterId)",
+        "{",
+        "    IQueryable<Post> query = db.Posts;",
+        "    if (afterScore is int s && afterId is int id)",
+        "        query = query.Where(p => p.Score < s || (p.Score == s && p.Id < id));",
+        "    var rows = query",
+        "        .OrderByDescending(p => p.Score).ThenByDescending(p => p.Id)",
+        "        .Take(pageSize + 1)",
+        "        .Select(p => new { p.Title, p.Score, p.Id })",
+        "        .ToList();",
+        "    var page = rows.Take(pageSize).ToList();",
+        "    var more = rows.Count > pageSize;",
+        "    return new FeedPage(page.Select(r => r.Title).ToList(), more ? page[^1].Score : null, more ? page[^1].Id : null);",
+        "}",
+        "",
+        "record FeedPage(List<string> Titles, int? NextScore, int? NextId);"
+      ],
+      "template": [
+        "using (var seed = new FeedDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    var scores = new[] { 5, 9, 5, 2, 9, 7, 5, 1 };",
+        "    for (var i = 0; i < scores.Length; i++) seed.Posts.Add(new Post { Title = \"P\" + (i + 1), Score = scores[i] });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    await Dojo.TryAsync(\"the feed\", async () =>",
+        "    {",
+        "        using var dojoDb = new FeedDb();",
+        "        var dojoAll = new List<string>();",
+        "        int? dojoScore = null, dojoId = null;",
+        "        var dojoPages = 0;",
+        "        do",
+        "        {",
+        "            var dojoPage = Feed(dojoDb, 3, dojoScore, dojoId);",
+        "            dojoAll.AddRange(dojoPage.Titles);",
+        "            (dojoScore, dojoId) = (dojoPage.NextScore, dojoPage.NextId);",
+        "            dojoPages++;",
+        "        } while (dojoScore is not null && dojoPages < 10);",
+        "        Dojo.Eq(\"walking every page gives each post once, best first\", new List<string> { \"P5\", \"P2\", \"P6\", \"P7\", \"P3\", \"P1\", \"P4\", \"P8\" }, dojoAll);",
+        "        Dojo.Eq(\"in three pages\", 3, dojoPages);",
+        "        var dojoFirst = Feed(dojoDb, 3, null, null);",
+        "        Dojo.Eq(\"the first page's cursor is its last post\", \"7 6\", $\"{dojoFirst.NextScore} {dojoFirst.NextId}\");",
+        "        Dojo.Eq(\"a page that ends exactly at the end has no cursor\", \"P4,P8 \", string.Join(\",\", Feed(dojoDb, 2, 5, 1).Titles) + \" \" + Feed(dojoDb, 2, 5, 1).NextScore);",
+        "    });",
+        "{{CODE}}",
+        "class Post",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Title { get; set; } = \"\";",
+        "    public int Score { get; set; }",
+        "}",
+        "",
+        "class FeedDb : DbContext",
+        "{",
+        "    public DbSet<Post> Posts => Set<Post>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=feed.db\");",
+        "    protected override void OnModelCreating(ModelBuilder model) => model.Entity<Post>().HasIndex(p => new { p.Score, p.Id });",
+        "}"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\.Skip\\s*\\(",
+          "message": "Does not use Skip"
+        }
+      ],
+      "hints": [
+        "Descending order means \"after\" is *smaller*: `p.Score < s || (p.Score == s && p.Id < id)`.",
+        "`Take(pageSize + 1)`: if you got the extra row, there is a next page; return only `pageSize` titles."
+      ]
+    }
+  ]
+}

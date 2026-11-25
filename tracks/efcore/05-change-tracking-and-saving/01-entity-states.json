@@ -1,0 +1,277 @@
+{
+  "title": "Entity states",
+  "summary": "Added, Unchanged, Modified, Deleted and Detached: how the context decides what SaveChanges does.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The change tracker",
+      "body": [
+        "Every entity the context knows has a **state**:",
+        "",
+        "| State | Meaning | `SaveChanges` sends |",
+        "|---|---|---|",
+        "| `Added` | new, not in the database yet | `INSERT` |",
+        "| `Unchanged` | loaded, nothing changed | nothing |",
+        "| `Modified` | loaded, then a property changed | `UPDATE` of the changed columns |",
+        "| `Deleted` | marked for removal | `DELETE` |",
+        "| `Detached` | the context does not know it | nothing |",
+        "",
+        "When a query returns an entity, the context stores it as `Unchanged` along with a **snapshot** of its original values. At `SaveChanges` it compares each tracked entity with its snapshot (*DetectChanges*) to find what is `Modified`, and after saving, everything becomes `Unchanged` again (deleted ones become `Detached`).",
+        "",
+        "Read the state with `db.Entry(entity).State`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "    using var db = new ShopDb();",
+        "    db.Database.EnsureCreated();",
+        "    var pen = new Item { Name = \"pen\", Stock = 10 };",
+        "    Console.WriteLine(db.Entry(pen).State);",
+        "    db.Items.Add(pen);",
+        "    Console.WriteLine(db.Entry(pen).State);",
+        "    db.SaveChanges();",
+        "    Console.WriteLine(db.Entry(pen).State);",
+        "    pen.Stock = 9;",
+        "    Console.WriteLine(db.Entry(pen).State);",
+        "    db.Items.Remove(pen);",
+        "    Console.WriteLine(db.Entry(pen).State);",
+        "    db.SaveChanges();",
+        "    Console.WriteLine(db.Entry(pen).State);",
+        "",
+        "    class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "}"
+      ],
+      "answer": [
+        "Detached",
+        "Added",
+        "Unchanged",
+        "Modified",
+        "Deleted",
+        "Detached"
+      ],
+      "explain": "A new object is unknown (`Detached`) until `Add`. Saving turns `Added` into `Unchanged`. Changing a property makes it `Modified` (`Entry` runs change detection when you ask). `Remove` marks it `Deleted`, and after the `DELETE` the context forgets it."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each action to the state it leaves the entity in.",
+      "pairs": [
+        [
+          "`db.Items.Add(item)`",
+          "Added"
+        ],
+        [
+          "Loaded by a query, untouched",
+          "Unchanged"
+        ],
+        [
+          "Loaded, then `item.Stock = 0`",
+          "Modified"
+        ],
+        [
+          "`db.Items.Remove(item)` on a loaded item",
+          "Deleted"
+        ],
+        [
+          "`new Item()` never given to the context",
+          "Detached"
+        ]
+      ],
+      "explain": "The state is the context's plan for that entity at the next `SaveChanges`."
+    },
+    {
+      "type": "learn",
+      "title": "Only what changed",
+      "body": [
+        "For a `Modified` entity EF Core knows **which** properties changed, and the `UPDATE` sets only those:",
+        "",
+        "```csharp",
+        "var pen = db.Items.Single(i => i.Name == \"pen\");",
+        "pen.Stock = 9;",
+        "db.SaveChanges();",
+        "```",
+        "",
+        "```text",
+        "UPDATE \"Items\" SET \"Stock\" = @p0",
+        "WHERE \"Id\" = @p1",
+        "RETURNING 1;",
+        "```",
+        "",
+        "Setting a property to the value it already has is not a change: no `UPDATE` at all. You can inspect it yourself:",
+        "",
+        "```csharp",
+        "db.Entry(pen).Property(i => i.Stock).IsModified        // true",
+        "db.Entry(pen).Property(i => i.Stock).OriginalValue     // 10",
+        "db.ChangeTracker.DebugView.LongView                    // everything the context tracks",
+        "```"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "This context logs each command as `SQL> ...`. What does the program print? (Seeding is hidden.)",
+      "code": [
+        "    using (var seed = new ShopDb())",
+        "{",
+        "    Dojo.Capture(() => seed.Database.EnsureCreated());",
+        "    seed.Items.AddRange(new Item { Name = \"pen\", Stock = 10, PriceCents = 150 }, new Item { Name = \"ink\", Stock = 0, PriceCents = 400 },",
+        "                        new Item { Name = \"pad\", Stock = 3, PriceCents = 250 });",
+        "    Dojo.Capture(() => seed.SaveChanges());",
+        "}",
+        "",
+        "    using var db = new ShopDb();",
+        "    Item item = null!;",
+        "    Dojo.Capture(() => item = db.Items.Single(i => i.Name == \"pen\"));   // hides the SELECT",
+        "    item.Stock = 10;",
+        "    Console.WriteLine(db.SaveChanges());",
+        "    item.PriceCents = 175;",
+        "    Console.WriteLine(db.SaveChanges());",
+        "",
+        "    class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\").LogTo((id, level) => id == RelationalEventId.CommandExecuted, e => Console.WriteLine(\"SQL> \" + ((CommandExecutedEventData)e).Command.CommandText.ReplaceLineEndings(\" \")));",
+        "}"
+      ],
+      "answer": [
+        "0",
+        "SQL> UPDATE \"Items\" SET \"PriceCents\" = @p0 WHERE \"Id\" = @p1 RETURNING 1;",
+        "1"
+      ],
+      "explain": "Setting `Stock` to 10, the value it already had, changes nothing: `SaveChanges` sends no command and returns 0. Changing the price sends an `UPDATE` of only that column.",
+      "hints": [
+        "Is `Stock = 10` a change if the stock was already 10?"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Mark a loaded book as changed, check which property changed, and read its old value.",
+      "code": [
+        "var book = db.Books.Single(b => b.Id == 1);",
+        "book.Title = \"Dune (2nd ed.)\";",
+        "var state = db.__1__(book).State;",
+        "var changed = db.Entry(book).Property(b => b.Title).__2__;",
+        "var before = db.Entry(book).Property(b => b.Title).__3__;"
+      ],
+      "blanks": [
+        "Entry",
+        "IsModified",
+        "OriginalValue"
+      ],
+      "bank": [
+        "Attach",
+        "CurrentValue",
+        "Changed",
+        "State"
+      ],
+      "explain": "`db.Entry(x)` is the door to everything the tracker knows about an entity: its state, and each property's current and original value."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You load 10,000 rows with a tracking query just to show them on a page, then call `SaveChanges` at the end of the request out of habit. What does tracking cost you?",
+      "options": [
+        "Memory for 10,000 entities plus their snapshots, and a DetectChanges pass over all of them in SaveChanges",
+        "Nothing: tracking is free until you change something",
+        "One extra query per row",
+        "A table lock for the duration of the request"
+      ],
+      "answer": 0,
+      "explain": "Tracking keeps a snapshot of every entity and compares them all on `SaveChanges`. For read-only data, use `AsNoTracking()` or a projection, as in module 4."
+    },
+    {
+      "type": "code",
+      "title": "Restock report",
+      "prompt": [
+        "The tests give you `ShopDb` with `Items` (`Id`, `Name`, `Stock`, `PriceCents`). Write",
+        "",
+        "`List<string> Restock(ShopDb db, int amount)`",
+        "",
+        "that loads every item with `Stock` under 5, adds `amount` to its stock, and **before saving** returns a description of what will happen, one line per item ordered by name: `\"ink: Stock 0 -> 5\"` (use the tracker's original and current values). Then save, so the changes reach the database.",
+        "",
+        "Items not under 5 must stay `Unchanged`: do not touch them."
+      ],
+      "starter": [
+        "List<string> Restock(ShopDb db, int amount)",
+        "{",
+        "    var lines = new List<string>();",
+        "    return lines;",
+        "}"
+      ],
+      "solution": [
+        "List<string> Restock(ShopDb db, int amount)",
+        "{",
+        "    var low = db.Items.Where(i => i.Stock < 5).OrderBy(i => i.Name).ToList();",
+        "    foreach (var item in low) item.Stock += amount;",
+        "",
+        "    var lines = low.Select(i =>",
+        "    {",
+        "        var stock = db.Entry(i).Property(x => x.Stock);",
+        "        return $\"{i.Name}: Stock {stock.OriginalValue} -> {stock.CurrentValue}\";",
+        "    }).ToList();",
+        "",
+        "    db.SaveChanges();",
+        "    return lines;",
+        "}"
+      ],
+      "template": [
+        "using (var seed = new ShopDb())",
+        "{",
+        "    seed.Database.EnsureCreated();",
+        "    seed.Items.AddRange(new Item { Name = \"pen\", Stock = 10, PriceCents = 150 }, new Item { Name = \"ink\", Stock = 0, PriceCents = 400 },",
+        "                        new Item { Name = \"pad\", Stock = 3, PriceCents = 250 });",
+        "    seed.SaveChanges();",
+        "}",
+        "",
+        "    await Dojo.TryAsync(\"restocking\", async () =>",
+        "    {",
+        "        using (var dojoDb = new ShopDb())",
+        "        {",
+        "            var dojoLines = Restock(dojoDb, 5);",
+        "            Dojo.Eq(\"describes the changes\", new List<string> { \"ink: Stock 0 -> 5\", \"pad: Stock 3 -> 8\" }, dojoLines);",
+        "            Dojo.Eq(\"everything tracked is Unchanged after saving\", 0, dojoDb.ChangeTracker.Entries().Count(e => e.State != EntityState.Unchanged));",
+        "        }",
+        "        using (var dojoDb = new ShopDb())",
+        "            Dojo.Eq(\"the database has the new stock\", \"ink 5, pad 8, pen 10\", string.Join(\", \", dojoDb.Items.OrderBy(i => i.Name).Select(i => i.Name + \" \" + i.Stock)));",
+        "    });",
+        "{{CODE}}",
+        "class Item",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int Stock { get; set; }",
+        "    public int PriceCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Item> Items => Set<Item>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "}"
+      ],
+      "hints": [
+        "`db.Entry(item).Property(x => x.Stock).OriginalValue` is the value loaded from the database.",
+        "Build the lines before `SaveChanges`: after saving, the original value becomes the new one."
+      ]
+    }
+  ]
+}
