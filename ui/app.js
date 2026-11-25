@@ -8,6 +8,7 @@ import { blueprint } from './blueprint.js';
 import { pkiLab } from './lab-pki.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
+import { subnetTrainer } from './lab-subnet.js';
 import { workbench } from './workbench.js';
 import { netLabs } from './netlabs.js';
 
@@ -90,6 +91,8 @@ function stars(n, max = 3) {
 const LABS = [
   { id: 'pki', icon: '🔐', title: 'Certificate chain lab', category: 'Security',
     text: 'Build roots, intermediates and server certificates like blocks, wire up who signs whom, and watch real chain validation succeed or fail. Eight fix-it challenges.' },
+  { id: 'subnet', icon: '⧖', title: 'Subnetting trainer', category: 'Networking',
+    text: 'Endless subnetting questions (network, broadcast, host ranges, masks, splitting blocks) with a bit-by-bit breakdown after every answer, until it is automatic.' },
   { id: 'code', icon: '▶', title: 'Code in motion', category: 'Foundations',
     text: 'Step through any program line by line, forwards and backwards: watch loops count, variables change, arrays get sorted and recursive calls stack up.' },
   { id: 'linq', icon: '⇶', title: 'LINQ in motion', category: 'C#',
@@ -270,6 +273,14 @@ function labsView(id) {
   if (!lab) return notFound();
   if (id === 'linq') return linqLab(lab);
   if (id === 'code') return codeLab(lab);
+  if (id === 'subnet') {
+    const host = h('div');
+    page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'),
+      h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`),
+        h('p.muted', 'Type the answer and press Enter. After each one you see the address and mask bit by bit: blue bits name the network, the rest name the host.'))),
+      host);
+    return subnetTrainer(host);
+  }
   const host = h('div.lab-host');
   page('labs',
     h('a.back-link', { href: '#/labs' }, '← All labs'),
