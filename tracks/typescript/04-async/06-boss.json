@@ -1,0 +1,147 @@
+{
+  "title": "Boss: Job Runner",
+  "summary": "Promises, async/await, parallel limits, timeouts and error handling together.",
+  "minutes": 18,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The job",
+      "body": "A background job runner takes a list of async jobs and runs them with care: some jobs fail, some are slow, and the server can only handle a few at a time. Delays in the tests are a few milliseconds; slow losers are 2 seconds and are never waited for."
+    },
+    {
+      "type": "code",
+      "title": "Run all, report all",
+      "prompt": "Write `runAll(jobs)` where each job is `() => Promise<string>`. Start every job at once and return a report array, in job order, of `\"ok: <value>\"` or `\"failed: <message>\"`.",
+      "starter": [
+        "type Job = () => Promise<string>;",
+        "",
+        "async function runAll(jobs: Job[]): Promise<string[]> {",
+        "  return [];",
+        "}"
+      ],
+      "solution": [
+        "type Job = () => Promise<string>;",
+        "",
+        "async function runAll(jobs: Job[]): Promise<string[]> {",
+        "  const results = await Promise.allSettled(jobs.map(job => job()));",
+        "  return results.map(r => (r.status === \"fulfilled\" ? `ok: ${r.value}` : `failed: ${r.reason.message}`));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "const dojoW = (ms: number, v: string) => new Promise<string>(r => setTimeout(() => r(v), ms));",
+        "Dojo.eq(\"report\", [\"ok: a\", \"failed: nope\", \"ok: c\"], await runAll([",
+        "  () => dojoW(10, \"a\"),",
+        "  async () => { throw new Error(\"nope\"); },",
+        "  () => dojoW(1, \"c\"),",
+        "]));"
+      ],
+      "hints": [
+        "`Promise.allSettled(jobs.map(job => job()))`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Concurrency limit",
+      "prompt": [
+        "Write `runLimited(jobs, limit)` that runs the jobs with **at most `limit` running at once** and resolves with their values in job order. (If a job rejects, `runLimited` may reject.)",
+        "",
+        "Hint at the shape: start `limit` \"workers\"; each worker repeatedly takes the next job index until none are left."
+      ],
+      "starter": [
+        "type Job = () => Promise<string>;",
+        "",
+        "async function runLimited(jobs: Job[], limit: number): Promise<string[]> {",
+        "  return [];",
+        "}"
+      ],
+      "solution": [
+        "type Job = () => Promise<string>;",
+        "",
+        "async function runLimited(jobs: Job[], limit: number): Promise<string[]> {",
+        "  const results: string[] = new Array(jobs.length);",
+        "  let next = 0;",
+        "  async function worker() {",
+        "    while (next < jobs.length) {",
+        "      const i = next++;",
+        "      results[i] = await jobs[i]();",
+        "    }",
+        "  }",
+        "  await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker));",
+        "  return results;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "let dojoActive = 0, dojoPeak = 0;",
+        "const dojoJob = (ms: number, v: string) => async () => {",
+        "  dojoActive++; dojoPeak = Math.max(dojoPeak, dojoActive);",
+        "  await new Promise(r => setTimeout(r, ms));",
+        "  dojoActive--;",
+        "  return v;",
+        "};",
+        "const dojoJobs = [dojoJob(8, \"a\"), dojoJob(2, \"b\"), dojoJob(5, \"c\"), dojoJob(1, \"d\"), dojoJob(3, \"e\")];",
+        "Dojo.eq(\"values in job order\", [\"a\", \"b\", \"c\", \"d\", \"e\"], await runLimited(dojoJobs, 2));",
+        "Dojo.eq(\"never more than 2 at once\", 2, dojoPeak);",
+        "dojoPeak = 0;",
+        "Dojo.eq(\"limit larger than jobs\", [\"x\"], await runLimited([dojoJob(1, \"x\")], 10));"
+      ],
+      "hints": [
+        "Share a `next` index between workers; JavaScript's single thread makes `next++` safe.",
+        "`await Promise.all(Array.from({ length: limit }, worker))`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Deadline per job",
+      "prompt": "Write `runWithDeadline(jobs, ms)` that runs all jobs at once, gives each one `ms` milliseconds, and returns a report in job order: `\"ok: <value>\"`, `\"failed: <message>\"`, or `\"timeout\"`. Clear every timer you start.",
+      "starter": [
+        "type Job = () => Promise<string>;",
+        "",
+        "async function runWithDeadline(jobs: Job[], ms: number): Promise<string[]> {",
+        "  return [];",
+        "}"
+      ],
+      "solution": [
+        "type Job = () => Promise<string>;",
+        "",
+        "function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {",
+        "  let id: ReturnType<typeof setTimeout> | undefined;",
+        "  const timer = new Promise<never>((_, reject) => {",
+        "    id = setTimeout(() => reject(new Error(\"timeout\")), ms);",
+        "  });",
+        "  return Promise.race([p, timer]).finally(() => clearTimeout(id));",
+        "}",
+        "",
+        "async function runWithDeadline(jobs: Job[], ms: number): Promise<string[]> {",
+        "  return Promise.all(",
+        "    jobs.map(async job => {",
+        "      try {",
+        "        return `ok: ${await withTimeout(job(), ms)}`;",
+        "      } catch (e) {",
+        "        const message = (e as Error).message;",
+        "        return message === \"timeout\" ? \"timeout\" : `failed: ${message}`;",
+        "      }",
+        "    }),",
+        "  );",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "const dojoW = (ms: number, v: string) => new Promise<string>(r => setTimeout(() => r(v), ms));",
+        "const dojoT0 = performance.now();",
+        "Dojo.eq(\"report\", [\"ok: fast\", \"timeout\", \"failed: bad\"], await runWithDeadline([",
+        "  () => dojoW(1, \"fast\"),",
+        "  () => dojoW(2000, \"slow\"),",
+        "  async () => { throw new Error(\"bad\"); },",
+        "], 30));",
+        "Dojo.check(\"does not wait for the slow job\", performance.now() - dojoT0 < 1500, \"runWithDeadline waited for the slow job to finish\");"
+      ],
+      "hints": [
+        "Reuse `withTimeout` from the previous lesson.",
+        "Map each job to an async function with its own try/catch, then `Promise.all`."
+      ]
+    }
+  ]
+}
