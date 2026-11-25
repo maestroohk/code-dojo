@@ -106,7 +106,7 @@ const CODE_PRESETS = [
     code: ['var a = 3;', 'var b = 7;', 'var temp = a;', 'a = b;', 'b = temp;', 'Console.WriteLine($"{a} {b}");'] },
   { title: 'Bubble sort', group: 'Algorithms', point: 'Each pass bubbles the largest remaining value to the end. Watch the boxes swap.',
     code: ['int[] a = { 5, 2, 4, 1, 3 };', 'for (var pass = 0; pass < a.Length - 1; pass++)', '{', '    for (var j = 0; j < a.Length - 1 - pass; j++)', '    {', '        if (a[j] > a[j + 1])', '            (a[j], a[j + 1]) = (a[j + 1], a[j]);', '    }', '}', 'Console.WriteLine(string.Join(", ", a));'] },
-  { title: 'Binary search', group: 'Algorithms', point: 'Every step halves the range lo..hi. 16 items need at most 5 looks.',
+  { title: 'Binary search', group: 'Algorithms', point: 'Every step halves the range lo..hi: 10 items need at most 4 looks, a million need 20.',
     code: ['int[] a = { 2, 5, 8, 12, 16, 23, 38, 41, 56, 72 };', 'var target = 41;', 'var lo = 0;', 'var hi = a.Length - 1;', 'var found = -1;', 'while (lo <= hi)', '{', '    var mid = (lo + hi) / 2;', '    if (a[mid] == target) { found = mid; break; }', '    if (a[mid] < target) lo = mid + 1;', '    else hi = mid - 1;', '}', 'Console.WriteLine($"found at {found}");'] },
   { title: 'Recursion: factorial', group: 'Functions', point: 'Each call waits for the one it made. Watch the call stack grow to the base case, then unwind.',
     code: ['Console.WriteLine(Factorial(4));', '', 'int Factorial(int n)', '{', '    if (n <= 1) return 1;', '    var rest = Factorial(n - 1);', '    return n * rest;', '}'] },
@@ -171,8 +171,10 @@ function home() {
         h('p.muted', 'Topics are courses with exercises. Labs are sandboxes where you build and break things. Projects are real apps you grow stage by stage and can run in the Workbench.')),
       resume && h('a.btn.primary.big', { href: `#/lesson/${resume.key}`, onclick: () => sessionStorage.setItem('track', recent.id) },
         `Continue ${recent.title}`)),
-    h('h2.section-title', 'Topics'),
-    h('div.catalog', sorted.map(t => {
+    // Topics grouped by category, in the order their first topic appears.
+    [...new Set(sorted.map(t => t.category || 'Topics'))].map(cat => [
+      h('h2.section-title', cat),
+      h('div.catalog', sorted.filter(t => (t.category || 'Topics') === cat).map(t => {
       const prog = game.trackProgress(t);
       const next = game.nextLesson(t);
       const projects = game.projectModules(t).length;
@@ -188,7 +190,7 @@ function home() {
             h('span', `${prog.done}/${prog.total} lessons`)),
           h('div.bar', h('div.bar-fill', { style: { width: `${(prog.done / Math.max(1, prog.total)) * 100}%` } })),
           next && h('div.small.topic-next', `Next: ${next.lesson.title}`)));
-    })),
+      }))]),
     h('h2.section-title', 'Labs'),
     h('div.catalog', LABS.map(l => h('a.topic-card.lab', { href: `#/labs/${l.id}` },
       h('div.topic-icon', l.icon),
