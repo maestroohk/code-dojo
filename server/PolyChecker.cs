@@ -15,12 +15,12 @@ public static partial class PolyChecker
 
     // Each prelude is ONE line, so it shifts the learner's code down by exactly one.
     const string PythonPrelude =
-        "exec(\"import sys as _s, io as _io\\nclass Dojo:\\n" +
-        "    @staticmethod\\n    def _report(name, ok, detail):\\n        _s.stdout.flush(); _s.__stdout__.write('\\\\x1e' + ('PASS' if ok else 'FAIL') + '\\\\x1f' + str(name) + '\\\\x1f' + str(detail).replace('\\\\n', '\\\\\\\\n') + '\\\\n'); _s.__stdout__.flush()\\n" +
+        "exec(\"import sys as _dojo_sys, io as _dojo_io\\nclass Dojo:\\n" +
+        "    @staticmethod\\n    def _report(name, ok, detail):\\n        _dojo_sys.stdout.flush(); _dojo_sys.__stdout__.write('\\\\x1e' + ('PASS' if ok else 'FAIL') + '\\\\x1f' + str(name) + '\\\\x1f' + str(detail).replace('\\\\n', '\\\\\\\\n') + '\\\\n'); _dojo_sys.__stdout__.flush()\\n" +
         "    @staticmethod\\n    def eq(name, expected, actual):\\n        ok = expected == actual\\n        Dojo._report(name, ok, '' if ok else 'expected ' + repr(expected) + ' but got ' + repr(actual))\\n" +
         "    @staticmethod\\n    def check(name, ok, detail=''):\\n        Dojo._report(name, bool(ok), '' if ok else detail)\\n" +
         "    @staticmethod\\n    def throws(name, exc, fn):\\n        try:\\n            fn()\\n        except exc:\\n            Dojo._report(name, True, ''); return\\n        except Exception as e:\\n            Dojo._report(name, False, 'expected ' + exc.__name__ + ' but got ' + type(e).__name__ + ': ' + str(e)); return\\n        Dojo._report(name, False, 'expected ' + exc.__name__ + ' but nothing was raised')\\n" +
-        "    @staticmethod\\n    def capture(fn):\\n        old = _s.stdout; buf = _io.StringIO(); _s.stdout = buf\\n        try:\\n            fn()\\n        finally:\\n            _s.stdout = old\\n        return buf.getvalue()\\n\", globals())";
+        "    @staticmethod\\n    def capture(fn):\\n        old = _dojo_sys.stdout; buf = _dojo_io.StringIO(); _dojo_sys.stdout = buf\\n        try:\\n            fn()\\n        finally:\\n            _dojo_sys.stdout = old\\n        return buf.getvalue()\\n\", globals())";
 
     const string JsPrelude =
         "var Dojo = (() => { const rep = (n, ok, d) => process.stdout.write('\\x1e' + (ok ? 'PASS' : 'FAIL') + '\\x1f' + n + '\\x1f' + String(d).replace(/\\n/g, '\\\\n') + '\\n'); " +

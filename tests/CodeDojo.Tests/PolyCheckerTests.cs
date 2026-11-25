@@ -27,6 +27,16 @@ public class PolyCheckerTests
     }
 
     [Fact]
+    public async Task Learner_names_cannot_clash_with_the_helpers()
+    {
+        if (Langs.Find("python") is null) return;
+        // _s and _io used to be the helpers' own names for sys and io; a learner variable replaced them.
+        var step = Step("""{ "type": "code", "template": ["{{CODE}}", "Dojo.eq('sum', 6, _s)", "Dojo.eq('io', 'ok', _io)"] }""");
+        var r = await PolyChecker.Check(Langs, step, "_s = 1 + 2 + 3\n_io = 'ok'", "python");
+        Assert.True(r.Passed, Why(r));
+    }
+
+    [Fact]
     public async Task Python_stdin_tests_compare_output()
     {
         if (Langs.Find("python") is null) return;
