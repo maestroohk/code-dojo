@@ -1,0 +1,258 @@
+{
+  "title": "HMAC, and why hash(key + message) is not a MAC",
+  "summary": "Concatenation ambiguity and length extension break the naive keyed hash; HMAC fixes both. Build HMAC by hand, then sign webhooks.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The tempting mistake",
+      "body": [
+        "To prove a message came from someone who knows a secret, it is tempting to send `SHA256(secret + message)`. Two things break it.",
+        "",
+        "**Ambiguity.** `\"ab\" + \"cd\"` and `\"abc\" + \"d\"` are the same bytes. Without a boundary, different (key, message) pairs collide on purpose.",
+        "",
+        "**Length extension.** SHA-256, SHA-512, SHA-1 and MD5 are *Merkle-Damgard* hashes: the digest **is** the internal state after the last block. An attacker who knows `SHA256(secret + msg)` and the length of the secret can load that state and keep hashing, producing a valid digest for",
+        "",
+        "```text",
+        "secret + msg + <padding> + \"&admin=true\"",
+        "```",
+        "",
+        "**without knowing the secret**. Flickr's API signatures fell to exactly this in 2009. (SHA-3 and SHA-512/256 are not vulnerable, but the standard answer is simpler: use HMAC.)"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] Naive(string key, string msg) => SHA256.HashData(Encoding.UTF8.GetBytes(key + msg));",
+        "",
+        "Console.WriteLine(Naive(\"ab\", \"cd\").SequenceEqual(Naive(\"abc\", \"d\")));",
+        "Console.WriteLine(HMACSHA256.HashData(\"ab\"u8.ToArray(), \"cd\"u8.ToArray())",
+        "    .SequenceEqual(HMACSHA256.HashData(\"abc\"u8.ToArray(), \"d\"u8.ToArray())));"
+      ],
+      "answer": [
+        "True",
+        "False"
+      ],
+      "explain": "The naive construction hashes identical bytes, so two different key/message pairs share a tag. HMAC treats the key separately, so they do not."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In a length-extension attack on `SHA256(secret + msg)`, what does the attacker need?",
+      "options": [
+        "The tag, the original message, and the secret's length (which they can guess by trying)",
+        "The secret itself",
+        "A SHA-256 collision",
+        "Access to the server's memory"
+      ],
+      "answer": 0,
+      "explain": "The digest is the hash's internal state, so the attacker can continue from it. Only the secret's length matters, for computing the padding, and trying 1 to 64 is cheap."
+    },
+    {
+      "type": "learn",
+      "title": "HMAC",
+      "body": [
+        "**HMAC** (RFC 2104) wraps the hash twice with the key mixed in at both ends:",
+        "",
+        "```text",
+        "HMAC(K, m) = H( (K' xor opad) || H( (K' xor ipad) || m ) )",
+        "```",
+        "",
+        "where `K'` is the key padded with zeros to the hash's block size (64 bytes for SHA-256; a longer key is hashed first), `ipad` is 64 bytes of `0x36` and `opad` is 64 bytes of `0x5c`. The outer hash hides the inner state, so length extension is impossible, and the key and message never mix ambiguously.",
+        "",
+        "In .NET it is one call:",
+        "",
+        "```csharp",
+        "byte[] tag = HMACSHA256.HashData(key, message);    // 32 bytes",
+        "```",
+        "",
+        "Use a random key of at least 32 bytes. HMAC stays secure even with SHA-1 or MD5 inside (collisions do not hurt it), but use SHA-256 anyway."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Can an attacker extend this tag without the key?",
+      "buckets": [
+        "Vulnerable to length extension",
+        "Not vulnerable"
+      ],
+      "items": [
+        [
+          "`SHA256(key + msg)`",
+          0
+        ],
+        [
+          "`HMACSHA256(key, msg)`",
+          1
+        ],
+        [
+          "`SHA512(key + msg)`",
+          0
+        ],
+        [
+          "`MD5(key + msg)`",
+          0
+        ],
+        [
+          "`HMACSHA512(key, msg)`",
+          1
+        ],
+        [
+          "`SHA3_256(key + msg)`",
+          1
+        ]
+      ],
+      "explain": "Merkle-Damgard hashes (MD5, SHA-1, SHA-256, SHA-512) expose their state. SHA-3 is built differently, but HMAC is the construction everyone recognises and reviews."
+    },
+    {
+      "type": "code",
+      "title": "HMAC by hand",
+      "prompt": [
+        "Build HMAC-SHA256 from `SHA256.HashData` and check it against the real thing. Write `byte[] MyHmac(byte[] key, byte[] message)`:",
+        "",
+        "1. If the key is longer than 64 bytes, replace it with `SHA256.HashData(key)`.",
+        "2. Copy it into a 64-byte array (the rest stays zero): that is `K'`.",
+        "3. `inner = SHA256(K' xor 0x36... || message)`.",
+        "4. return `SHA256(K' xor 0x5c... || inner)`.",
+        "",
+        "The tests compare your output with `HMACSHA256.HashData` for short, empty, 64-byte and long keys."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] MyHmac(byte[] key, byte[] message)",
+        "{",
+        "    const int BlockSize = 64;",
+        "    return Array.Empty<byte>();",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] MyHmac(byte[] key, byte[] message)",
+        "{",
+        "    const int BlockSize = 64;",
+        "    if (key.Length > BlockSize) key = SHA256.HashData(key);",
+        "    var k = new byte[BlockSize];",
+        "    key.CopyTo(k, 0);",
+        "",
+        "    var innerInput = new byte[BlockSize + message.Length];",
+        "    var outerKey = new byte[BlockSize];",
+        "    for (int i = 0; i < BlockSize; i++)",
+        "    {",
+        "        innerInput[i] = (byte)(k[i] ^ 0x36);",
+        "        outerKey[i] = (byte)(k[i] ^ 0x5c);",
+        "    }",
+        "    message.CopyTo(innerInput, BlockSize);",
+        "    byte[] inner = SHA256.HashData(innerInput);",
+        "",
+        "    return SHA256.HashData(outerKey.Concat(inner).ToArray());",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "byte[] dojoMsg = \"The quick brown fox jumps over the lazy dog\"u8.ToArray();",
+        "foreach (var (dojoName, dojoKey) in new[] {",
+        "    (\"the key \\\"key\\\"\", \"key\"u8.ToArray()),",
+        "    (\"an empty key\", Array.Empty<byte>()),",
+        "    (\"a 64-byte key\", Enumerable.Range(0, 64).Select(i => (byte)i).ToArray()),",
+        "    (\"a 100-byte key (hashed first)\", Enumerable.Range(0, 100).Select(i => (byte)(i * 7)).ToArray()) })",
+        "{",
+        "    Dojo.Eq($\"matches HMACSHA256 with {dojoName}\", Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(dojoKey, dojoMsg)), Convert.ToHexStringLower(MyHmac(dojoKey, dojoMsg)));",
+        "}",
+        "Dojo.Eq(\"works on an empty message\", Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(\"k\"u8.ToArray(), Array.Empty<byte>())), Convert.ToHexStringLower(MyHmac(\"k\"u8.ToArray(), Array.Empty<byte>())));"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bHMAC",
+          "message": "Builds HMAC from SHA256 instead of calling HMACSHA256"
+        }
+      ],
+      "hints": [
+        "`ipad` and `opad` are applied byte by byte: `(byte)(k[i] ^ 0x36)` and `(byte)(k[i] ^ 0x5c)`.",
+        "The outer hash input is the 64-byte outer key followed by the 32-byte inner digest: `outerKey.Concat(inner).ToArray()`."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the steps a webhook receiver takes, from the request arriving to trusting its content.",
+      "lines": [
+        "Read the raw body bytes exactly as received",
+        "Compute HMAC-SHA256 of those bytes with the shared secret",
+        "Decode the signature header from hex into bytes",
+        "Compare the two tags in constant time",
+        "Only now parse the JSON and act on it"
+      ],
+      "explain": "Sign and verify the *raw* bytes: re-serialising parsed JSON can change whitespace or key order and break the tag. And never act on content before it is verified."
+    },
+    {
+      "type": "code",
+      "title": "Sign and verify webhooks",
+      "prompt": [
+        "Your service sends webhooks signed with a shared secret. To stop an attacker replaying an old message later, the signature covers a timestamp too.",
+        "",
+        "- `string Sign(byte[] secret, long timestamp, string body)`: lowercase hex HMAC-SHA256 of the UTF-8 bytes of `$\"{timestamp}.{body}\"`.",
+        "- `bool Verify(byte[] secret, long timestamp, string body, string signatureHex, long now)`: `false` if the timestamp is more than 300 seconds away from `now` in either direction, or if the signature is not valid hex; otherwise recompute and compare with `CryptographicOperations.FixedTimeEquals` on the **bytes** (the next lesson explains why)."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "string Sign(byte[] secret, long timestamp, string body)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "bool Verify(byte[] secret, long timestamp, string body, string signatureHex, long now)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] Tag(byte[] secret, long timestamp, string body) =>",
+        "    HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes($\"{timestamp}.{body}\"));",
+        "",
+        "string Sign(byte[] secret, long timestamp, string body) =>",
+        "    Convert.ToHexStringLower(Tag(secret, timestamp, body));",
+        "",
+        "bool Verify(byte[] secret, long timestamp, string body, string signatureHex, long now)",
+        "{",
+        "    if (Math.Abs(now - timestamp) > 300) return false;",
+        "    byte[] given;",
+        "    try { given = Convert.FromHexString(signatureHex); }",
+        "    catch (FormatException) { return false; }",
+        "    return CryptographicOperations.FixedTimeEquals(given, Tag(secret, timestamp, body));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSecret = \"whsec_dojo\"u8.ToArray();",
+        "var dojoBody = \"{\\\"event\\\":\\\"paid\\\",\\\"amount\\\":10}\";",
+        "var dojoSig = Sign(dojoSecret, 1700000000, dojoBody);",
+        "Dojo.Eq(\"Sign covers timestamp and body\", Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(dojoSecret, System.Text.Encoding.UTF8.GetBytes(\"1700000000.\" + dojoBody))), dojoSig);",
+        "Dojo.Check(\"a fresh, correct signature verifies\", Verify(dojoSecret, 1700000000, dojoBody, dojoSig, 1700000100), \"rejected a valid webhook\");",
+        "Dojo.Check(\"a changed amount is rejected\", !Verify(dojoSecret, 1700000000, dojoBody.Replace(\"10\", \"1000\"), dojoSig, 1700000100), \"accepted a changed body\");",
+        "Dojo.Check(\"a changed timestamp is rejected\", !Verify(dojoSecret, 1700000050, dojoBody, dojoSig, 1700000100), \"accepted a moved timestamp\");",
+        "Dojo.Check(\"a replay 10 minutes later is rejected\", !Verify(dojoSecret, 1700000000, dojoBody, dojoSig, 1700000600), \"accepted an old webhook\");",
+        "Dojo.Check(\"the wrong secret is rejected\", !Verify(\"other\"u8.ToArray(), 1700000000, dojoBody, dojoSig, 1700000000), \"accepted another secret\");",
+        "Dojo.Check(\"garbage signatures are rejected\", !Verify(dojoSecret, 1700000000, dojoBody, \"not-hex!\", 1700000000), \"accepted garbage or threw\");"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares with CryptographicOperations.FixedTimeEquals"
+        }
+      ],
+      "hints": [
+        "Put the HMAC in a helper that both methods call.",
+        "`Convert.FromHexString` throws `FormatException` on bad input: catch it and return false."
+      ]
+    }
+  ]
+}

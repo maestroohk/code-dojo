@@ -1,0 +1,258 @@
+{
+  "title": "Key sizes and forward secrecy",
+  "summary": "Compare algorithms by security level, choose sizes that will last, and design so a stolen key cannot unlock the past.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Security levels",
+      "body": [
+        "A **security level** of *n* bits means the best known attack costs about 2^n operations. Different algorithms reach a level with very different key sizes (NIST SP 800-57):",
+        "",
+        "| Security level | Symmetric | RSA / DH modulus | Elliptic curve | Hash (collisions) |",
+        "|---|---|---|---|---|",
+        "| 80 (broken today) | | RSA-1024 | P-160 | SHA-1 |",
+        "| 112 (OK until 2030) | 3DES | RSA-2048 | P-224 | SHA-224 |",
+        "| **128** | **AES-128** | **RSA-3072** | **P-256** | **SHA-256** |",
+        "| 192 | AES-192 | RSA-7680 | P-384 | SHA-384 |",
+        "| 256 | AES-256 | RSA-15360 | P-521 | SHA-512 |",
+        "",
+        "Two patterns: an elliptic-curve key needs about **twice** the bits of its security level, and RSA grows much faster than linearly, which is why the world moved to ECC. A hash gives collision resistance of **half** its output size.",
+        "",
+        "A system is only as strong as its weakest piece: AES-256 data whose key is wrapped with RSA-1024 has 80-bit security."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each to an algorithm at roughly the same security level.",
+      "pairs": [
+        [
+          "AES-128",
+          "P-256"
+        ],
+        [
+          "RSA-2048",
+          "112 bits"
+        ],
+        [
+          "P-384",
+          "AES-192"
+        ],
+        [
+          "RSA-15360",
+          "AES-256"
+        ],
+        [
+          "RSA-1024",
+          "SHA-1 collisions (80 bits, broken)"
+        ]
+      ],
+      "explain": "Read across a row of the table. RSA-2048 is still common, but it sits one notch below the 128-bit level."
+    },
+    {
+      "type": "predict",
+      "prompt": "Compare key and signature sizes. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "using var rsa = RSA.Create(2048);",
+        "using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "byte[] data = new byte[10];",
+        "Console.WriteLine($\"{rsa.ExportParameters(false).Modulus!.Length} {ec.ExportParameters(false).Q.X!.Length}\");",
+        "Console.WriteLine($\"{rsa.SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pss).Length} {ec.SignData(data, HashAlgorithmName.SHA256).Length}\");"
+      ],
+      "answer": [
+        "256 32",
+        "256 64"
+      ],
+      "explain": "An RSA-2048 modulus is 256 bytes against a 32-byte coordinate for P-256, which is *stronger*. Signatures follow: 256 bytes against 64."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A system encrypts files with AES-256-GCM, wraps the file keys with RSA-2048-OAEP, and signs with P-256 ECDSA. What is its overall security level for confidentiality?",
+      "options": [
+        "About 112 bits, set by RSA-2048, the weakest link protecting the keys",
+        "256 bits, from AES-256",
+        "128 bits, from P-256",
+        "368 bits, the sum"
+      ],
+      "answer": 0,
+      "explain": "Break the RSA wrap and you have every AES key. Upgrading AES to 256 bits does not help while the key wrap stays at 112."
+    },
+    {
+      "type": "learn",
+      "title": "Forward secrecy",
+      "body": [
+        "Suppose an attacker records all your encrypted traffic today and steals the server's long-term private key next year. Can they read the recordings?",
+        "",
+        "- **RSA key transport** (old TLS): the client RSA-encrypted the session key to the server's long-term key. Stolen key = every recorded session decrypted. **No forward secrecy.**",
+        "- **Ephemeral ECDH (ECDHE)**: each session makes fresh key pairs, derives the session key, then **deletes** the ephemeral private keys. The long-term key only *signs* the handshake. Stealing it later lets an attacker impersonate the server in future, but the past session keys are gone forever. **Forward secrecy.**",
+        "",
+        "TLS 1.3 removed RSA key transport entirely: every handshake is ephemeral. The same idea is why Signal ratchets keys per message, and why \"harvest now, decrypt later\" is a worry for anything *without* forward secrecy (module 6)."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "If the long-term private key is stolen next year, can recorded traffic from today be decrypted?",
+      "buckets": [
+        "Forward secret: past traffic stays safe",
+        "Not forward secret: past traffic exposed"
+      ],
+      "items": [
+        [
+          "TLS 1.3 with ECDHE",
+          0
+        ],
+        [
+          "TLS 1.2 with the RSA key-exchange cipher suites",
+          1
+        ],
+        [
+          "Files encrypted to a recipient's long-term RSA public key",
+          1
+        ],
+        [
+          "Signal-style messaging with per-message ratchets",
+          0
+        ],
+        [
+          "Ephemeral-ECDH hybrid encryption to a long-term recipient key",
+          1
+        ],
+        [
+          "Fresh ECDH key pairs on both sides, deleted after each session",
+          0
+        ]
+      ],
+      "explain": "Careful with the fifth: the *sender's* key is ephemeral, but the recipient's long-term key can still derive the secret. Forward secrecy needs **both** sides ephemeral, with long-term keys only used to authenticate."
+    },
+    {
+      "type": "code",
+      "title": "A forward-secret handshake",
+      "prompt": [
+        "Write `(byte[] ClientKey, byte[] ServerKey) Handshake()` that simulates one session:",
+        "",
+        "- create a **fresh** P-256 `ECDiffieHellman` for the client and for the server *inside the method* (with `using`, so they are disposed when it returns, like deleted ephemeral keys);",
+        "- each side derives `HKDF.DeriveKey(SHA256, raw, 32, null, UTF-8 \"session\")` from the other's public key;",
+        "- return both keys.",
+        "",
+        "The tests check the two sides agree, keys are 32 bytes, and two sessions never share a key, so compromising one session says nothing about another."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "(byte[] ClientKey, byte[] ServerKey) Handshake()",
+        "{",
+        "    return (Array.Empty<byte>(), Array.Empty<byte>());",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "(byte[] ClientKey, byte[] ServerKey) Handshake()",
+        "{",
+        "    using var client = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "    using var server = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "    byte[] info = Encoding.UTF8.GetBytes(\"session\");",
+        "    byte[] clientKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, client.DeriveRawSecretAgreement(server.PublicKey), 32, null, info);",
+        "    byte[] serverKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, server.DeriveRawSecretAgreement(client.PublicKey), 32, null, info);",
+        "    return (clientKey, serverKey);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var (dojoC1, dojoS1) = Handshake();",
+        "var (dojoC2, dojoS2) = Handshake();",
+        "Dojo.Eq(\"keys are 32 bytes\", 32, dojoC1.Length);",
+        "Dojo.Check(\"client and server agree\", dojoC1.SequenceEqual(dojoS1), \"the two sides derived different keys\");",
+        "Dojo.Check(\"client and server agree in session 2\", dojoC2.SequenceEqual(dojoS2), \"the two sides derived different keys\");",
+        "Dojo.Check(\"two sessions have different keys\", !dojoC1.SequenceEqual(dojoC2), \"the same key came out twice: are the key pairs fresh?\");"
+      ],
+      "require": [
+        {
+          "pattern": "using\\s+var",
+          "message": "Disposes the ephemeral keys with using"
+        }
+      ],
+      "hints": [
+        "Create both key pairs inside `Handshake` with `using var ... = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A key-size policy",
+      "prompt": [
+        "Turn the table into code that a build check or a config validator could call.",
+        "",
+        "`int SecurityBits(string algorithm, int keyBits)`:",
+        "- `\"AES\"`: `keyBits` itself.",
+        "- `\"RSA\"`: 256 if `keyBits >= 15360`, 192 if `>= 7680`, 128 if `>= 3072`, 112 if `>= 2048`, 80 if `>= 1024`, else 0.",
+        "- `\"EC\"`: `Math.Min(keyBits / 2, 256)` (so P-521 counts as 256).",
+        "- anything else: throw `ArgumentException`.",
+        "",
+        "`string Verdict(string algorithm, int keyBits)`: `\"weak\"` below 112 bits, `\"legacy\"` from 112 to 127, `\"good\"` from 128."
+      ],
+      "starter": [
+        "int SecurityBits(string algorithm, int keyBits)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "string Verdict(string algorithm, int keyBits)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "int SecurityBits(string algorithm, int keyBits)",
+        "{",
+        "    switch (algorithm)",
+        "    {",
+        "        case \"AES\":",
+        "            return keyBits;",
+        "        case \"RSA\":",
+        "            if (keyBits >= 15360) return 256;",
+        "            if (keyBits >= 7680) return 192;",
+        "            if (keyBits >= 3072) return 128;",
+        "            if (keyBits >= 2048) return 112;",
+        "            if (keyBits >= 1024) return 80;",
+        "            return 0;",
+        "        case \"EC\":",
+        "            return Math.Min(keyBits / 2, 256);",
+        "        default:",
+        "            throw new ArgumentException($\"Unknown algorithm {algorithm}\");",
+        "    }",
+        "}",
+        "",
+        "string Verdict(string algorithm, int keyBits)",
+        "{",
+        "    int bits = SecurityBits(algorithm, keyBits);",
+        "    if (bits < 112) return \"weak\";",
+        "    if (bits < 128) return \"legacy\";",
+        "    return \"good\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"AES-128\", 128, SecurityBits(\"AES\", 128));",
+        "Dojo.Eq(\"RSA-2048\", 112, SecurityBits(\"RSA\", 2048));",
+        "Dojo.Eq(\"RSA-3072\", 128, SecurityBits(\"RSA\", 3072));",
+        "Dojo.Eq(\"RSA-4096 still counts as 128\", 128, SecurityBits(\"RSA\", 4096));",
+        "Dojo.Eq(\"RSA-512\", 0, SecurityBits(\"RSA\", 512));",
+        "Dojo.Eq(\"EC P-384\", 192, SecurityBits(\"EC\", 384));",
+        "Dojo.Eq(\"EC P-521 is capped at 256\", 256, SecurityBits(\"EC\", 521));",
+        "Dojo.Eq(\"Verdict RSA-1024\", \"weak\", Verdict(\"RSA\", 1024));",
+        "Dojo.Eq(\"Verdict RSA-2048\", \"legacy\", Verdict(\"RSA\", 2048));",
+        "Dojo.Eq(\"Verdict EC-256\", \"good\", Verdict(\"EC\", 256));",
+        "Dojo.Eq(\"Verdict AES-256\", \"good\", Verdict(\"AES\", 256));",
+        "Dojo.Throws<ArgumentException>(\"unknown algorithm\", () => SecurityBits(\"DES\", 56));"
+      ],
+      "hints": [
+        "Check the RSA thresholds from the largest down so the first match wins.",
+        "`Verdict` just calls `SecurityBits` and compares with 112 and 128."
+      ]
+    }
+  ]
+}

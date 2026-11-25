@@ -1,0 +1,223 @@
+{
+  "title": "Downgrade attacks and crypto agility",
+  "summary": "Attackers push both sides onto the weakest option they share. Refuse weak options, and design stored data so algorithms can be replaced.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Downgrade attacks",
+      "body": [
+        "When two parties **negotiate** (which TLS version, which cipher suite, which key size), an attacker in the middle can edit the offers so both sides settle on the **weakest** option they both still support, then break that.",
+        "",
+        "- **POODLE** (2014): browsers retried failed connections with SSL 3.0, so an attacker forced failures and then broke SSL 3.0's CBC padding.",
+        "- **FREAK** and **Logjam** (2015): servers that still accepted 1990s \"export-grade\" 512-bit RSA or Diffie-Hellman could be tricked into using them.",
+        "",
+        "Two defences, both built into TLS 1.3: **remove weak options entirely** (it has no export ciphers, no CBC, no RSA key exchange), and **authenticate the negotiation** (the server signs a hash of the whole handshake transcript, so edited offers are detected)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A server supports TLS 1.3 and TLS 1.2 and, \"for old clients\", SSL 3.0. What does keeping SSL 3.0 do to its *modern* clients?",
+      "options": [
+        "Exposes them too: an attacker can make the connection fall back to SSL 3.0 and attack that",
+        "Nothing: modern clients always use TLS 1.3",
+        "It makes them faster",
+        "It only affects clients that request SSL 3.0 themselves"
+      ],
+      "answer": 0,
+      "explain": "A protocol is as strong as the weakest option an attacker can force. Supporting a broken option is supporting it for everyone."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each attack or defence to what it involves.",
+      "pairs": [
+        [
+          "POODLE",
+          "A forced fallback to SSL 3.0 and its CBC padding"
+        ],
+        [
+          "FREAK",
+          "Export-grade 512-bit RSA"
+        ],
+        [
+          "Logjam",
+          "Export-grade 512-bit Diffie-Hellman"
+        ],
+        [
+          "TLS 1.3 transcript signature",
+          "Detecting edited offers after the fact"
+        ]
+      ],
+      "explain": "All three attacks relied on servers keeping a weak option \"just in case\"."
+    },
+    {
+      "type": "code",
+      "title": "Negotiate without falling back",
+      "prompt": "Write `string? Negotiate(string[] clientOffers, string[] serverPreference)` that returns the **first** entry of `serverPreference` (strongest first) that the client also offers, but **never** one of `SSL3`, `TLS1.0` or `TLS1.1`, even if both sides list it. Return `null` when nothing acceptable is left: refusing to connect is the correct outcome, not falling back.",
+      "starter": [
+        "string? Negotiate(string[] clientOffers, string[] serverPreference)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "string? Negotiate(string[] clientOffers, string[] serverPreference)",
+        "{",
+        "    string[] forbidden = { \"SSL3\", \"TLS1.0\", \"TLS1.1\" };",
+        "    foreach (var option in serverPreference)",
+        "        if (!forbidden.Contains(option) && clientOffers.Contains(option))",
+        "            return option;",
+        "    return null;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "string[] dojoServer = { \"TLS1.3\", \"TLS1.2\", \"TLS1.0\", \"SSL3\" };",
+        "Dojo.Eq(\"both support 1.3\", \"TLS1.3\", Negotiate(new[] { \"TLS1.2\", \"TLS1.3\" }, dojoServer));",
+        "Dojo.Eq(\"server preference wins over client order\", \"TLS1.3\", Negotiate(new[] { \"TLS1.3\", \"TLS1.2\" }, dojoServer));",
+        "Dojo.Eq(\"an old client gets 1.2\", \"TLS1.2\", Negotiate(new[] { \"TLS1.2\", \"TLS1.0\" }, dojoServer));",
+        "Dojo.Eq(\"an attacker who strips everything but SSL3 gets nothing\", (string?)null, Negotiate(new[] { \"SSL3\" }, dojoServer));",
+        "Dojo.Eq(\"TLS1.0 is refused even when both list it\", (string?)null, Negotiate(new[] { \"TLS1.0\", \"TLS1.1\" }, dojoServer));"
+      ],
+      "hints": [
+        "Loop over `serverPreference`, not the client's list: the server decides the order.",
+        "Skip anything in the forbidden list before checking the client's offers."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Crypto agility: label everything",
+      "body": [
+        "Algorithms age: MD5, SHA-1, DES, RC4 and 1024-bit RSA were all standard once. **Crypto agility** means you can replace an algorithm without a flag day, and it starts with **storing which algorithm made each value**:",
+        "",
+        "```text",
+        "v1$5e884898da2804...                       legacy: unsalted SHA-256 (bad)",
+        "v2$600000$9f86d081...$0c1b2a...            PBKDF2-SHA256, iterations, salt, hash",
+        "```",
+        "",
+        "The reader dispatches on the label; the writer always uses the newest version; and old values are upgraded **when they are next used** (on login you have the password, so you can rehash it). The key-id prefixes from module 5 and the `alg` and `kid` headers of a JWT are the same idea. Data without a label can only be migrated by guessing."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var stored = \"v2$600000$9f86d081$0c1b2a3d\";",
+        "var parts = stored.Split('$');",
+        "Console.WriteLine($\"{parts[0]} {int.Parse(parts[1]) / 1000}k {parts.Length}\");"
+      ],
+      "answer": "v2 600k 4",
+      "explain": "The label says which algorithm, the next field its cost, then salt and hash. Everything a future version of your code needs to verify (or upgrade) the value is in the value."
+    },
+    {
+      "type": "order",
+      "prompt": "Order the steps to replace an algorithm in a live system.",
+      "lines": [
+        "Add the new algorithm with its own version label, keeping the old one for reading",
+        "Write all new values with the new version",
+        "Upgrade old values as they are used (rehash on login, rewrap on read)",
+        "Run a background job for values nobody touches",
+        "Remove the old algorithm once no stored value uses it"
+      ],
+      "also": [
+        [
+          "Add the new algorithm with its own version label, keeping the old one for reading",
+          "Write all new values with the new version",
+          "Run a background job for values nobody touches",
+          "Upgrade old values as they are used (rehash on login, rewrap on read)",
+          "Remove the old algorithm once no stored value uses it"
+        ]
+      ],
+      "explain": "Read support first, then write, then migrate, and delete last. Lazy upgrades and the background job can run in either order."
+    },
+    {
+      "type": "code",
+      "title": "Versioned password hashes with upgrade on login",
+      "prompt": [
+        "Support two stored formats:",
+        "",
+        "- `v1$<hex SHA-256 of the password>`: legacy, still readable.",
+        "- `v2$<iterations>$<hex salt>$<hex hash>`: PBKDF2-SHA256, 32-byte hash.",
+        "",
+        "Write `string HashV2(string password, byte[] salt, int iterations)` and `bool Verify(string stored, string password, out bool needsUpgrade)`. `needsUpgrade` is `true` when the password is correct **and** the value is v1 or uses fewer than `CurrentIterations`. Compare with `FixedTimeEquals`. Unknown labels return `false`.",
+        "",
+        "`CurrentIterations` is tiny so the tests run fast; production PBKDF2-SHA256 uses about 600,000."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "const int CurrentIterations = 2_000;   // production: about 600,000",
+        "",
+        "string HashV2(string password, byte[] salt, int iterations)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "bool Verify(string stored, string password, out bool needsUpgrade)",
+        "{",
+        "    needsUpgrade = false;",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "const int CurrentIterations = 2_000;   // production: about 600,000",
+        "",
+        "string HashV2(string password, byte[] salt, int iterations)",
+        "{",
+        "    var hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32);",
+        "    return $\"v2${iterations}${Convert.ToHexStringLower(salt)}${Convert.ToHexStringLower(hash)}\";",
+        "}",
+        "",
+        "bool Verify(string stored, string password, out bool needsUpgrade)",
+        "{",
+        "    needsUpgrade = false;",
+        "    var parts = stored.Split('$');",
+        "    bool ok;",
+        "    if (parts[0] == \"v1\" && parts.Length == 2)",
+        "    {",
+        "        ok = CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(password)), Convert.FromHexString(parts[1]));",
+        "        needsUpgrade = ok;",
+        "        return ok;",
+        "    }",
+        "    if (parts[0] == \"v2\" && parts.Length == 4)",
+        "    {",
+        "        int iterations = int.Parse(parts[1]);",
+        "        var hash = Rfc2898DeriveBytes.Pbkdf2(password, Convert.FromHexString(parts[2]), iterations, HashAlgorithmName.SHA256, 32);",
+        "        ok = CryptographicOperations.FixedTimeEquals(hash, Convert.FromHexString(parts[3]));",
+        "        needsUpgrade = ok && iterations < CurrentIterations;",
+        "        return ok;",
+        "    }",
+        "    return false;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSalt = Enumerable.Range(1, 16).Select(i => (byte)i).ToArray();",
+        "var dojoV2 = HashV2(\"correct horse\", dojoSalt, CurrentIterations);",
+        "Dojo.Check(\"HashV2 writes the v2 format\", dojoV2.StartsWith(\"v2$2000$0102030405060708090a0b0c0d0e0f10$\") && dojoV2.Length == 3 + 5 + 33 + 64, dojoV2);",
+        "Dojo.Check(\"a current v2 hash verifies with no upgrade\", Verify(dojoV2, \"correct horse\", out var dojoU1) && !dojoU1, $\"upgrade={dojoU1}\");",
+        "Dojo.Check(\"a wrong password fails\", !Verify(dojoV2, \"wrong horse\", out var dojoU2) && !dojoU2, \"accepted a wrong password\");",
+        "var dojoV1 = \"v1$\" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(\"correct horse\")));",
+        "Dojo.Check(\"a legacy v1 hash verifies and asks for an upgrade\", Verify(dojoV1, \"correct horse\", out var dojoU3) && dojoU3, $\"upgrade={dojoU3}\");",
+        "Dojo.Check(\"a wrong password on v1 asks for nothing\", !Verify(dojoV1, \"nope\", out var dojoU4) && !dojoU4, \"wrong result\");",
+        "var dojoWeak = HashV2(\"correct horse\", dojoSalt, 1_000);",
+        "Dojo.Check(\"too few iterations asks for an upgrade\", Verify(dojoWeak, \"correct horse\", out var dojoU5) && dojoU5, $\"upgrade={dojoU5}\");",
+        "Dojo.Check(\"an unknown label is refused\", !Verify(\"v9$abc\", \"correct horse\", out _), \"accepted v9\");"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares with FixedTimeEquals"
+        }
+      ],
+      "hints": [
+        "Split on `$` and switch on `parts[0]`.",
+        "`Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32)` computes the v2 hash."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,293 @@
+{
+  "title": "CTR mode and the nonce-reuse catastrophe",
+  "summary": "Build CTR from raw AES, then break it exactly like a reused one-time pad when a nonce repeats.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "CTR: AES as a keystream generator",
+      "body": [
+        "**CTR** (counter) mode never encrypts the message with AES at all. It encrypts a **counter block** (a nonce plus a block counter) to make keystream, and XORs the message with it:",
+        "",
+        "```text",
+        "keystream block i = AES(key, nonce || i)",
+        "ciphertext        = plaintext ^ keystream",
+        "```",
+        "",
+        "So CTR is a stream cipher: no padding, ciphertext exactly as long as plaintext, any block can be decrypted on its own, and decryption is the same operation as encryption. Step through it below: watch `counterBlock` change in its last byte, and each keystream block get used for 16 message bytes.",
+        "",
+        "The price: if the same **key and nonce** are ever used twice, the keystream repeats, and you are back to a reused one-time pad."
+      ],
+      "trace": {
+        "code": [
+          "using System.Security.Cryptography;",
+          "",
+          "using var aes = Aes.Create();",
+          "aes.Key = new byte[16];                    // fixed for the demo only",
+          "byte[] message = System.Text.Encoding.ASCII.GetBytes(\"CTR turns AES into a stream\");",
+          "var cipher = new byte[message.Length];",
+          "var counterBlock = new byte[16];           // 8-byte nonce (zeros) + 8-byte counter",
+          "for (int block = 0; block * 16 < message.Length; block++)",
+          "{",
+          "    counterBlock[15] = (byte)block;",
+          "    byte[] keystream = aes.EncryptEcb(counterBlock, PaddingMode.None);",
+          "    int start = block * 16;",
+          "    int end = Math.Min(message.Length, start + 16);",
+          "    for (int i = start; i < end; i++)",
+          "        cipher[i] = (byte)(message[i] ^ keystream[i - start]);",
+          "}",
+          "Console.WriteLine(cipher.Length);"
+        ]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does CTR mode need no padding?",
+      "options": [
+        "The keystream is XORed byte by byte, so the last keystream block is simply cut short",
+        "AES pads automatically",
+        "CTR only accepts multiples of 16 bytes",
+        "The counter absorbs the extra bytes"
+      ],
+      "answer": 0,
+      "explain": "Only the counter blocks go through AES, and they are always 16 bytes. The message is XORed with as much keystream as it needs."
+    },
+    {
+      "type": "code",
+      "title": "Build CTR from raw AES",
+      "prompt": [
+        "Write `byte[] Ctr(byte[] key, byte[] nonce, byte[] data)` where `nonce` is 8 bytes. The counter block for block `i` (starting at 0) is the 8-byte nonce followed by `i` as an 8-byte **big-endian** number (`BinaryPrimitives.WriteUInt64BigEndian`). XOR `data` with the keystream; the last keystream block may be used only partly.",
+        "",
+        "Because XOR undoes itself, the same function decrypts. The tests check the keystream against raw AES on the counter blocks you were told to build."
+      ],
+      "starter": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] Ctr(byte[] key, byte[] nonce, byte[] data)",
+        "{",
+        "    return data;",
+        "}"
+      ],
+      "solution": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] Ctr(byte[] key, byte[] nonce, byte[] data)",
+        "{",
+        "    using var aes = Aes.Create();",
+        "    aes.Key = key;",
+        "    var output = new byte[data.Length];",
+        "    var counterBlock = new byte[16];",
+        "    nonce.CopyTo(counterBlock, 0);",
+        "    for (int start = 0, i = 0; start < data.Length; start += 16, i++)",
+        "    {",
+        "        BinaryPrimitives.WriteUInt64BigEndian(counterBlock.AsSpan(8), (ulong)i);",
+        "        byte[] keystream = aes.EncryptEcb(counterBlock, PaddingMode.None);",
+        "        for (int j = start; j < Math.Min(data.Length, start + 16); j++)",
+        "            output[j] = (byte)(data[j] ^ keystream[j - start]);",
+        "    }",
+        "    return output;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKey = Enumerable.Range(1, 16).Select(i => (byte)i).ToArray();",
+        "var dojoNonce = new byte[] { 0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 1 };",
+        "using var dojoAes = System.Security.Cryptography.Aes.Create();",
+        "dojoAes.Key = dojoKey;",
+        "byte[] DojoBlock(int i) { var b = new byte[16]; dojoNonce.CopyTo(b, 0); b[15] = (byte)i; return dojoAes.EncryptEcb(b, System.Security.Cryptography.PaddingMode.None); }",
+        "var dojoZeros = Ctr(dojoKey, dojoNonce, new byte[40]);",
+        "Dojo.Eq(\"keystream block 0 is AES(nonce || 0)\", Convert.ToHexStringLower(DojoBlock(0)), Convert.ToHexStringLower(dojoZeros[0..16]));",
+        "Dojo.Eq(\"keystream block 1 is AES(nonce || 1)\", Convert.ToHexStringLower(DojoBlock(1)), Convert.ToHexStringLower(dojoZeros[16..32]));",
+        "Dojo.Eq(\"a partial last block uses the start of AES(nonce || 2)\", Convert.ToHexStringLower(DojoBlock(2)[..8]), Convert.ToHexStringLower(dojoZeros[32..40]));",
+        "var dojoMsg = System.Text.Encoding.ASCII.GetBytes(\"no padding needed, any length works\");",
+        "var dojoC = Ctr(dojoKey, dojoNonce, dojoMsg);",
+        "Dojo.Eq(\"ciphertext is as long as the message\", dojoMsg.Length, dojoC.Length);",
+        "Dojo.Eq(\"Ctr twice gives the message back\", dojoMsg, Ctr(dojoKey, dojoNonce, dojoC));"
+      ],
+      "hints": [
+        "Copy the nonce into bytes 0-7 of a 16-byte counter block, then write the counter into bytes 8-15 with `BinaryPrimitives.WriteUInt64BigEndian(counterBlock.AsSpan(8), (ulong)i)`.",
+        "XOR `data[j]` with `keystream[j - start]` for `j` from `start` to `Math.Min(data.Length, start + 16)`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "One repeated nonce breaks everything",
+      "body": [
+        "GCM, the mode you will use most, is CTR plus an authentication tag. So all of this applies to AES-GCM too.",
+        "",
+        "Encrypt two messages with the same key **and the same nonce**: the keystream `K` is identical, and",
+        "",
+        "```text",
+        "c1 ^ c2 = (p1 ^ K) ^ (p2 ^ K) = p1 ^ p2",
+        "```",
+        "",
+        "That is module 1's reused one-time pad, exactly. Anyone who knows (or guesses) one message reads the other. With GCM it is even worse: the repeat also leaks the internal authentication key, letting an attacker **forge** valid tags for messages of their choice.",
+        "",
+        "How nonces are chosen safely:",
+        "",
+        "- a **counter** stored with the key, incremented for every message and never reset (best when you can keep state), or",
+        "- 12 **random** bytes per message, which is safe for up to about 2³² messages per key; beyond that, rotate the key."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Two messages are sealed with AES-GCM under the same key and the **same nonce**. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = new byte[32], nonce = new byte[12];       // the bug: a fixed nonce",
+        "using var gcm = new AesGcm(key, tagSizeInBytes: 16);",
+        "byte[] Seal(string text)",
+        "{",
+        "    byte[] p = Encoding.ASCII.GetBytes(text), c = new byte[p.Length], tag = new byte[16];",
+        "    gcm.Encrypt(nonce, p, c, tag);",
+        "    return c;",
+        "}",
+        "byte[] p1 = Encoding.ASCII.GetBytes(\"attack at dawn\"), p2 = Encoding.ASCII.GetBytes(\"attack at dusk\");",
+        "byte[] c1 = Seal(\"attack at dawn\"), c2 = Seal(\"attack at dusk\");",
+        "var cx = c1.Zip(c2, (a, b) => (byte)(a ^ b)).ToArray();",
+        "var px = p1.Zip(p2, (a, b) => (byte)(a ^ b)).ToArray();",
+        "Console.WriteLine(cx.SequenceEqual(px));",
+        "Console.WriteLine(cx.Count(b => b == 0));"
+      ],
+      "answer": [
+        "True",
+        "11"
+      ],
+      "explain": "The ciphertexts XOR to exactly the plaintexts' XOR, and the 11 zero bytes show precisely where the two messages agree (`attack at d`). No key needed."
+    },
+    {
+      "type": "sort",
+      "prompt": "Is each nonce strategy safe for AES-GCM with a long-lived key?",
+      "buckets": [
+        "Safe",
+        "Catastrophic"
+      ],
+      "items": [
+        [
+          "a 64-bit counter persisted with the key, never reset",
+          0
+        ],
+        [
+          "12 random bytes from RandomNumberGenerator for each message",
+          0
+        ],
+        [
+          "a constant nonce compiled into the app",
+          1
+        ],
+        [
+          "the current Unix time in seconds",
+          1
+        ],
+        [
+          "a counter kept in memory that restarts at 1 when the service restarts",
+          1
+        ],
+        [
+          "a fixed nonce, but a brand-new random key for every single message",
+          0
+        ]
+      ],
+      "explain": "The rule is about the (key, nonce) pair: it must never repeat. Timestamps repeat within a second or across machines, and in-memory counters repeat after a restart. A fresh key per message makes any nonce unique for that key."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Besides revealing `p1 ^ p2`, what extra damage does a repeated nonce do in AES-GCM specifically?",
+      "options": [
+        "It leaks the authentication subkey, so the attacker can forge tags",
+        "It reveals the AES key directly",
+        "It makes the ciphertext longer",
+        "Nothing extra; GCM is immune"
+      ],
+      "answer": 0,
+      "explain": "GCM's tag is computed with a subkey `H`. Two messages under one nonce give the attacker equations they can solve for `H`, and with `H` they can make tags for any ciphertext."
+    },
+    {
+      "type": "code",
+      "title": "Read a message you were never given the key for",
+      "prompt": [
+        "An app sealed two 32-byte messages with AES-GCM and reused its nonce. You captured both ciphertexts (tags removed, hex in the starter) and you know the first message, because it was a transfer you made yourself.",
+        "",
+        "Print the second message."
+      ],
+      "starter": [
+        "using System.Text;",
+        "",
+        "byte[] c1 = Convert.FromHexString(\"2cb62eb7c3a60f808df14cc18e643d84d3520b2f1c998ff522ad456110ef7aad\");",
+        "byte[] c2 = Convert.FromHexString(\"37be29bc80fb1fd3d2b56cb4b53769dbc7065960539884ed6ebc192341b42be2\");",
+        "byte[] p1 = Encoding.ASCII.GetBytes(\"wire 5000 EUR to account 12-3456\");"
+      ],
+      "solution": [
+        "using System.Text;",
+        "",
+        "byte[] c1 = Convert.FromHexString(\"2cb62eb7c3a60f808df14cc18e643d84d3520b2f1c998ff522ad456110ef7aad\");",
+        "byte[] c2 = Convert.FromHexString(\"37be29bc80fb1fd3d2b56cb4b53769dbc7065960539884ed6ebc192341b42be2\");",
+        "byte[] p1 = Encoding.ASCII.GetBytes(\"wire 5000 EUR to account 12-3456\");",
+        "",
+        "var p2 = new byte[c2.Length];",
+        "for (int i = 0; i < p2.Length; i++)",
+        "    p2[i] = (byte)(c1[i] ^ c2[i] ^ p1[i]);",
+        "Console.WriteLine(Encoding.ASCII.GetString(p2));"
+      ],
+      "tests": [
+        {
+          "expect": "launch code is 0451, tell nobody"
+        }
+      ],
+      "hints": [
+        "The keystream is the same for both, so `c1 ^ c2 = p1 ^ p2`.",
+        "`p2[i] = c1[i] ^ c2[i] ^ p1[i]`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the fixed nonce",
+      "prompt": [
+        "This helper hands out the nonce for every AES-GCM encryption, and it always returns zeros. Fix `byte[] NextNonce()` so each call returns a fresh 12-byte nonce from a counter: 4 zero bytes, then the counter as an 8-byte **big-endian** number. The first call returns counter 1, so `000000000000000000000001`.",
+        "",
+        "(In a real system the counter is persisted with the key so a restart never reuses a value. Here it lives in the `counter` variable.)"
+      ],
+      "starter": [
+        "using System.Buffers.Binary;",
+        "",
+        "ulong counter = 0;",
+        "",
+        "byte[] NextNonce()",
+        "{",
+        "    return new byte[12];",
+        "}"
+      ],
+      "solution": [
+        "using System.Buffers.Binary;",
+        "",
+        "ulong counter = 0;",
+        "",
+        "byte[] NextNonce()",
+        "{",
+        "    counter++;",
+        "    var nonce = new byte[12];",
+        "    BinaryPrimitives.WriteUInt64BigEndian(nonce.AsSpan(4), counter);",
+        "    return nonce;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"first nonce\", \"000000000000000000000001\", Convert.ToHexStringLower(NextNonce()));",
+        "Dojo.Eq(\"second nonce\", \"000000000000000000000002\", Convert.ToHexStringLower(NextNonce()));",
+        "var dojoMany = Enumerable.Range(0, 1000).Select(_ => Convert.ToHexStringLower(NextNonce())).ToList();",
+        "Dojo.Eq(\"1000 more nonces are all different\", 1000, dojoMany.Distinct().Count());",
+        "Dojo.Eq(\"nonce 1002 is counter 0x3ea\", \"0000000000000000000003ea\", dojoMany[^1]);",
+        "Dojo.Check(\"every nonce is 12 bytes\", dojoMany.All(n => n.Length == 24), \"a nonce was not 12 bytes\");"
+      ],
+      "hints": [
+        "Increment `counter` first, so the first nonce is 1.",
+        "`BinaryPrimitives.WriteUInt64BigEndian(nonce.AsSpan(4), counter)` writes bytes 4 to 11."
+      ]
+    }
+  ]
+}

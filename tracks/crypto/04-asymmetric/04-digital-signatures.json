@@ -1,0 +1,275 @@
+{
+  "title": "Digital signatures in code",
+  "summary": "Sign with ECDSA and RSA-PSS, verify with only the public key, and know exactly when a MAC is the better tool.",
+  "minutes": 14,
+  "prereqs": [
+    "pki/01-foundations/01-keys-and-signatures"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Sign with private, verify with public",
+      "body": [
+        "The *Certificates & PKI* topic explains what a valid signature proves (integrity, and possession of the private key) and what it does not (who owns the key). Here is the code.",
+        "",
+        "```csharp",
+        "using var signer = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "byte[] sig = signer.SignData(data, HashAlgorithmName.SHA256);            // 64 bytes",
+        "bool ok = verifier.VerifyData(data, sig, HashAlgorithmName.SHA256);     // public key only",
+        "```",
+        "",
+        "`SignData` hashes the data and signs the hash. **ECDSA and RSA-PSS signatures are randomized**: signing the same data twice gives two different signatures, and both verify. So you never compare signatures with each other; you *verify* them.",
+        "",
+        "ECDSA's randomness is critical: if the per-signature random number `k` ever repeats, the private key falls out with simple algebra. Sony's PlayStation 3 used a constant `k` in 2010 and lost its master signing key. .NET generates `k` correctly for you."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+        "byte[] data = Encoding.UTF8.GetBytes(\"release 1.4.2\");",
+        "byte[] s1 = key.SignData(data, HashAlgorithmName.SHA256);",
+        "byte[] s2 = key.SignData(data, HashAlgorithmName.SHA256);",
+        "Console.WriteLine($\"{s1.Length} {s1.SequenceEqual(s2)}\");",
+        "Console.WriteLine($\"{key.VerifyData(data, s1, HashAlgorithmName.SHA256)} {key.VerifyData(data, s2, HashAlgorithmName.SHA256)}\");"
+      ],
+      "answer": [
+        "64 False",
+        "True True"
+      ],
+      "explain": "A P-256 signature is two 32-byte numbers (r, s). Two signatures of the same data differ, yet both verify. Comparing signatures for equality would wrongly reject the second."
+    },
+    {
+      "type": "learn",
+      "title": "MAC or signature?",
+      "body": [
+        "| | HMAC | Signature (ECDSA, RSA-PSS) |",
+        "|---|---|---|",
+        "| Keys | one shared secret | private signs, public verifies |",
+        "| Who can verify | only key holders | anyone with the public key |",
+        "| Who can forge | **every** verifier (they hold the same key) | only the private-key holder |",
+        "| Non-repudiation | no | yes |",
+        "| Speed | very fast | slower (ECDSA ~ thousands/s; RSA verify fast, sign slow) |",
+        "| Size | 32 bytes | 64 (P-256) or 256 (RSA-2048) bytes |",
+        "",
+        "Rule of thumb: if the signer and every verifier are **you** (your servers, your cookies, your internal tokens), an HMAC is simpler and faster. If verifiers are **other people** who must not be able to forge (software updates, public APIs, JWTs consumed by third parties, documents), use a signature."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "MAC or signature?",
+      "buckets": [
+        "HMAC",
+        "Digital signature"
+      ],
+      "items": [
+        [
+          "Your own server signs and later checks its session cookies",
+          0
+        ],
+        [
+          "A vendor signs installers that millions of users verify",
+          1
+        ],
+        [
+          "An identity provider issues JWTs that many unrelated APIs validate",
+          1
+        ],
+        [
+          "Two internal services that share a key authenticate requests",
+          0
+        ],
+        [
+          "A bank needs proof a customer approved a transfer",
+          1
+        ],
+        [
+          "A webhook provider and one customer share a secret per endpoint",
+          0
+        ]
+      ],
+      "explain": "Ask who verifies and whether a verifier could be tempted to forge. Shared keys mean every verifier is also a potential forger."
+    },
+    {
+      "type": "learn",
+      "title": "RSA signature paddings",
+      "body": [
+        "RSA signs too, with its own paddings:",
+        "",
+        "- **PSS** (`RSASignaturePadding.Pss`): randomized, with a security proof. Prefer it for new designs (`PS256` in JWT).",
+        "- **PKCS#1 v1.5** (`RSASignaturePadding.Pkcs1`): deterministic, still considered secure for *signatures* and used everywhere (`RS256` in JWT, most certificates). Unlike v1.5 *encryption*, it has no practical attack when verified properly.",
+        "",
+        "```csharp",
+        "byte[] sig = rsa.SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);",
+        "bool ok = rsa.VerifyData(data, sig, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);",
+        "```",
+        "",
+        "The *Authentication & JWT* topic's lesson **RS256 and ES256** uses exactly these calls to sign tokens."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the code so it prints `True False`.",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var rsa = RSA.Create(2048);",
+        "byte[] doc = Encoding.UTF8.GetBytes(\"I owe Bob 10 EUR\");",
+        "byte[] sig = rsa.__1__(doc, HashAlgorithmName.SHA256, RSASignaturePadding.__3__);",
+        "bool ok = rsa.__2__(doc, sig, HashAlgorithmName.SHA256, RSASignaturePadding.__3__);",
+        "bool forged = rsa.__2__(Encoding.UTF8.GetBytes(\"I owe Bob 1000 EUR\"), sig, HashAlgorithmName.SHA256, RSASignaturePadding.__3__);",
+        "Console.WriteLine($\"{ok} {forged}\");"
+      ],
+      "blanks": [
+        "SignData",
+        "VerifyData",
+        "Pss"
+      ],
+      "bank": [
+        "Encrypt",
+        "OaepSHA256",
+        "SignHash"
+      ],
+      "explain": "`SignData` and `VerifyData` hash for you. A changed amount gives a different hash, so verification fails."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A developer verifies an ECDSA signature by re-signing the received data with the public key and comparing the two signatures. What is wrong?",
+      "options": [
+        "Everything: you cannot sign with a public key, and ECDSA signatures differ every time anyway; call VerifyData",
+        "Nothing, it is a valid shortcut",
+        "It works for RSA-PSS but not ECDSA",
+        "It only needs a constant-time comparison"
+      ],
+      "answer": 0,
+      "explain": "Verification is its own operation. Signing needs the private key, and randomized signatures never match byte for byte."
+    },
+    {
+      "type": "code",
+      "title": "Sign and verify a release",
+      "prompt": [
+        "Write:",
+        "",
+        "- `byte[] SignRelease(ECDsa key, string manifest)`: ECDSA over the UTF-8 bytes with SHA-256.",
+        "- `bool VerifyRelease(byte[] publicKey, string manifest, byte[] signature)`: import `publicKey` (SubjectPublicKeyInfo bytes) into a fresh `ECDsa` and verify. The verifier never sees the private key.",
+        "",
+        "The tests check a good signature, an edited manifest, a signature from the wrong key, and a damaged signature."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] SignRelease(ECDsa key, string manifest)",
+        "{",
+        "    return Array.Empty<byte>();",
+        "}",
+        "",
+        "bool VerifyRelease(byte[] publicKey, string manifest, byte[] signature)",
+        "{",
+        "    return true;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] SignRelease(ECDsa key, string manifest)",
+        "{",
+        "    return key.SignData(Encoding.UTF8.GetBytes(manifest), HashAlgorithmName.SHA256);",
+        "}",
+        "",
+        "bool VerifyRelease(byte[] publicKey, string manifest, byte[] signature)",
+        "{",
+        "    using var verifier = ECDsa.Create();",
+        "    verifier.ImportSubjectPublicKeyInfo(publicKey, out _);",
+        "    return verifier.VerifyData(Encoding.UTF8.GetBytes(manifest), signature, HashAlgorithmName.SHA256);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoCurve = System.Security.Cryptography.ECCurve.NamedCurves.nistP256;",
+        "using var dojoVendor = System.Security.Cryptography.ECDsa.Create(dojoCurve);",
+        "using var dojoMallory = System.Security.Cryptography.ECDsa.Create(dojoCurve);",
+        "var dojoPub = dojoVendor.ExportSubjectPublicKeyInfo();",
+        "var dojoManifest = \"app.exe sha256=9f2c...e1 version=1.4.2\";",
+        "var dojoSig = SignRelease(dojoVendor, dojoManifest);",
+        "Dojo.Eq(\"a P-256 signature is 64 bytes\", 64, dojoSig.Length);",
+        "Dojo.Check(\"the vendor's signature verifies\", VerifyRelease(dojoPub, dojoManifest, dojoSig), \"VerifyRelease rejected a good signature\");",
+        "Dojo.Check(\"an edited manifest fails\", !VerifyRelease(dojoPub, dojoManifest.Replace(\"1.4.2\", \"1.4.3\"), dojoSig), \"accepted an edited manifest\");",
+        "Dojo.Check(\"Mallory's signature fails\", !VerifyRelease(dojoPub, dojoManifest, SignRelease(dojoMallory, dojoManifest)), \"accepted a signature from another key\");",
+        "var dojoBad = (byte[])dojoSig.Clone();",
+        "dojoBad[10] ^= 1;",
+        "Dojo.Check(\"a damaged signature fails\", !VerifyRelease(dojoPub, dojoManifest, dojoBad), \"accepted a damaged signature\");"
+      ],
+      "hints": [
+        "`key.SignData(Encoding.UTF8.GetBytes(manifest), HashAlgorithmName.SHA256)`.",
+        "`using var verifier = ECDsa.Create(); verifier.ImportSubjectPublicKeyInfo(publicKey, out _);` then `VerifyData`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Sign a contract with RSA-PSS",
+      "prompt": [
+        "Write a program that creates one RSA-2048 key, signs the contract text `\"Alice sells Bob 1 bike for 100 EUR\"` with **PSS** and SHA-256, and prints exactly:",
+        "",
+        "```text",
+        "signature: 256 bytes",
+        "original verifies: True",
+        "altered verifies: False",
+        "pss signatures repeat: False",
+        "wrong padding verifies: False",
+        "```",
+        "",
+        "- *altered*: verify the same signature against `\"Alice sells Bob 1 bike for 10 EUR\"`.",
+        "- *repeat*: sign the original again and compare the two signatures byte for byte.",
+        "- *wrong padding*: verify the original PSS signature with `RSASignaturePadding.Pkcs1` (padding is part of the algorithm)."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var rsa = RSA.Create(2048);",
+        "byte[] contract = Encoding.UTF8.GetBytes(\"Alice sells Bob 1 bike for 100 EUR\");"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var rsa = RSA.Create(2048);",
+        "byte[] contract = Encoding.UTF8.GetBytes(\"Alice sells Bob 1 bike for 100 EUR\");",
+        "var sha = HashAlgorithmName.SHA256;",
+        "",
+        "byte[] sig = rsa.SignData(contract, sha, RSASignaturePadding.Pss);",
+        "Console.WriteLine($\"signature: {sig.Length} bytes\");",
+        "Console.WriteLine($\"original verifies: {rsa.VerifyData(contract, sig, sha, RSASignaturePadding.Pss)}\");",
+        "",
+        "byte[] altered = Encoding.UTF8.GetBytes(\"Alice sells Bob 1 bike for 10 EUR\");",
+        "Console.WriteLine($\"altered verifies: {rsa.VerifyData(altered, sig, sha, RSASignaturePadding.Pss)}\");",
+        "",
+        "byte[] again = rsa.SignData(contract, sha, RSASignaturePadding.Pss);",
+        "Console.WriteLine($\"pss signatures repeat: {sig.SequenceEqual(again)}\");",
+        "Console.WriteLine($\"wrong padding verifies: {rsa.VerifyData(contract, sig, sha, RSASignaturePadding.Pkcs1)}\");"
+      ],
+      "tests": [
+        {
+          "expect": [
+            "signature: 256 bytes",
+            "original verifies: True",
+            "altered verifies: False",
+            "pss signatures repeat: False",
+            "wrong padding verifies: False"
+          ]
+        }
+      ],
+      "hints": [
+        "`rsa.SignData(contract, HashAlgorithmName.SHA256, RSASignaturePadding.Pss)`.",
+        "`VerifyData` returns `false` (it does not throw) for a bad signature."
+      ]
+    }
+  ]
+}

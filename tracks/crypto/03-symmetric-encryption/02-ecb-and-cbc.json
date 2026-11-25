@@ -1,0 +1,313 @@
+{
+  "title": "ECB leaks, CBC chains",
+  "summary": "See ECB give away patterns byte by byte, then build CBC with an IV and PKCS#7 padding.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "ECB: each block on its own",
+      "body": [
+        "  **ECB** (Electronic Codebook) is the obvious mode: split the message into 16-byte blocks and encrypt each one separately with raw AES.",
+        "",
+        "  ```text",
+        "  P1 ──AES──▶ C1     P2 ──AES──▶ C2     P3 ──AES──▶ C3",
+        "  ```",
+        "",
+        "  Because AES is deterministic, **equal plaintext blocks give equal ciphertext blocks**. The famous picture is the \"ECB penguin\": a bitmap encrypted with ECB still shows the penguin, because every patch of one colour encrypts to the same bytes. In data it is just as bad: equal records, equal fields, a repeated header, all visible without the key.",
+        "",
+        "  ECB is never the right mode for data. It exists in the API because it is the raw primitive other modes are built from.",
+        "",
+        "",
+        "> **Fixed values for the exercises only.** The keys, IVs and nonces here are constants so the output is the same every run. Real code takes keys from `RandomNumberGenerator` or a key vault and never repeats a nonce with the same key."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A 48-byte message is block A, block A again, then block B. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var aes = Aes.Create();",
+        "aes.Key = new byte[16];                    // fixed for the demo",
+        "byte[] msg = Encoding.ASCII.GetBytes(\"PAY ALICE $100.0PAY ALICE $100.0PAY MALLORY $999\");",
+        "byte[] c = aes.EncryptEcb(msg, PaddingMode.None);",
+        "Console.WriteLine(c[0..16].SequenceEqual(c[16..32]));",
+        "Console.WriteLine(c[0..16].SequenceEqual(c[32..48]));"
+      ],
+      "answer": [
+        "True",
+        "False"
+      ],
+      "explain": "Blocks 1 and 2 were equal in the plaintext, so they are equal in the ciphertext. An attacker sees the repetition, and could even cut and paste whole blocks to reorder a message."
+    },
+    {
+      "type": "code",
+      "title": "Detect ECB",
+      "prompt": [
+        "ECB is detectable from the ciphertext alone: look for repeated 16-byte blocks.",
+        "",
+        "Write `int RepeatedBlocks(byte[] cipher)` that splits `cipher` into 16-byte blocks and returns how many blocks are a repeat of an **earlier** block (three equal blocks count as 2 repeats). Assume the length is a multiple of 16."
+      ],
+      "starter": [
+        "int RepeatedBlocks(byte[] cipher)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int RepeatedBlocks(byte[] cipher)",
+        "{",
+        "    var seen = new HashSet<string>();",
+        "    int repeats = 0;",
+        "    for (int i = 0; i < cipher.Length; i += 16)",
+        "    {",
+        "        string block = Convert.ToHexString(cipher, i, 16);",
+        "        if (!seen.Add(block)) repeats++;",
+        "    }",
+        "    return repeats;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "using var dojoAes = System.Security.Cryptography.Aes.Create();",
+        "dojoAes.Key = new byte[16];",
+        "var dojoMsg = System.Text.Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat(\"YELLOW SUBMARINE\", 3)) + \"0123456789abcdef\");",
+        "var dojoEcb = dojoAes.EncryptEcb(dojoMsg, System.Security.Cryptography.PaddingMode.None);",
+        "Dojo.Eq(\"ECB of 3 equal blocks + 1 other has 2 repeats\", 2, RepeatedBlocks(dojoEcb));",
+        "var dojoCbc = dojoAes.EncryptCbc(dojoMsg, new byte[16], System.Security.Cryptography.PaddingMode.None);",
+        "Dojo.Eq(\"CBC of the same message has none\", 0, RepeatedBlocks(dojoCbc));",
+        "Dojo.Eq(\"no blocks, no repeats\", 0, RepeatedBlocks(Array.Empty<byte>()));"
+      ],
+      "hints": [
+        "Turn each block into a string with `Convert.ToHexString(cipher, i, 16)` and keep a `HashSet<string>`.",
+        "`HashSet.Add` returns false when the item was already there."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "CBC: chain the blocks",
+      "body": [
+        "**CBC** (Cipher Block Chaining) XORs each plaintext block with the **previous ciphertext block** before encrypting it. The first block is XORed with an **IV** (initialisation vector), 16 bytes that must be **random and unpredictable for every message** and are sent in the clear next to the ciphertext.",
+        "",
+        "```text",
+        "C1 = AES(P1 ^ IV)     C2 = AES(P2 ^ C1)     C3 = AES(P3 ^ C2)",
+        "```",
+        "",
+        "Equal blocks now encrypt differently, and the same message encrypted twice (with two IVs) looks unrelated.",
+        "",
+        "CBC still only handles whole blocks, so it uses **PKCS#7 padding**: add `n` bytes each of value `n` to reach a multiple of 16. If the message already fills its last block, a whole extra block of sixteen `0x10` bytes is added, so padding can always be removed unambiguously.",
+        "",
+        "```csharp",
+        "byte[] c = aes.EncryptCbc(plain, iv, PaddingMode.PKCS7);",
+        "byte[] p = aes.DecryptCbc(c, iv, PaddingMode.PKCS7);",
+        "```"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "using var aes = Aes.Create();",
+        "aes.Key = new byte[16];",
+        "byte[] iv = new byte[16];                  // fixed for the demo only",
+        "foreach (int n in new[] { 0, 15, 16, 20 })",
+        "    Console.Write(aes.EncryptCbc(new byte[n], iv, PaddingMode.PKCS7).Length + \" \");"
+      ],
+      "answer": "16 16 32 32",
+      "explain": "Padding always adds 1 to 16 bytes: 0 bytes becomes one block of padding, 15 gets 1 byte, 16 gets a full extra block, 20 rounds up to 32."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the CBC round trip.",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var aes = Aes.Create();",
+        "aes.Key = new byte[32];",
+        "byte[] iv = RandomNumberGenerator.GetBytes(__1__);",
+        "byte[] c = aes.__2__(Encoding.UTF8.GetBytes(\"hello\"), iv, PaddingMode.__3__);",
+        "byte[] p = aes.DecryptCbc(c, __4__, PaddingMode.PKCS7);",
+        "Console.WriteLine(Encoding.UTF8.GetString(p));"
+      ],
+      "blanks": [
+        "16",
+        "EncryptCbc",
+        "PKCS7",
+        "iv"
+      ],
+      "bank": [
+        "32",
+        "EncryptEcb",
+        "None",
+        "aes.Key"
+      ],
+      "explain": "The IV is one block (16 bytes) whatever the key size, and decryption needs the same IV, which is why it is stored next to the ciphertext."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A system uses AES-CBC with a key from a vault, but the IV is hard-coded to 16 zero bytes. What leaks?",
+      "options": [
+        "Whether two messages are equal, or start with the same blocks",
+        "The key",
+        "Nothing, since the IV is not secret anyway",
+        "Only the message length"
+      ],
+      "answer": 0,
+      "explain": "With a fixed IV, CBC becomes deterministic again: equal messages give equal ciphertexts, and equal prefixes give equal leading blocks. The IV is not secret, but it must be fresh and unpredictable."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the body of a hand-written CBC encryption loop for one block.",
+      "lines": [
+        "byte[] mixed = Xor(block, previous);",
+        "byte[] c = AesBlock(key, mixed);",
+        "output.AddRange(c);",
+        "previous = c;"
+      ],
+      "also": [
+        [
+          "byte[] mixed = Xor(block, previous);",
+          "byte[] c = AesBlock(key, mixed);",
+          "previous = c;",
+          "output.AddRange(c);"
+        ]
+      ],
+      "explain": "XOR with the previous ciphertext block (the IV the first time), encrypt, emit, and remember the result for the next block."
+    },
+    {
+      "type": "code",
+      "title": "CBC by hand",
+      "prompt": [
+        "Write `byte[] CbcEncrypt(byte[] key, byte[] iv, byte[] plain)` using only raw AES on single blocks (`EncryptEcb` with `PaddingMode.None`) and XOR. Assume `plain.Length` is a multiple of 16 (no padding yet).",
+        "",
+        "The tests compare your output byte for byte with .NET's own `EncryptCbc(plain, iv, PaddingMode.None)`, so your chaining must be exactly right."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] CbcEncrypt(byte[] key, byte[] iv, byte[] plain)",
+        "{",
+        "    return plain;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] CbcEncrypt(byte[] key, byte[] iv, byte[] plain)",
+        "{",
+        "    using var aes = Aes.Create();",
+        "    aes.Key = key;",
+        "    var output = new byte[plain.Length];",
+        "    byte[] previous = iv;",
+        "    for (int i = 0; i < plain.Length; i += 16)",
+        "    {",
+        "        var mixed = new byte[16];",
+        "        for (int j = 0; j < 16; j++)",
+        "            mixed[j] = (byte)(plain[i + j] ^ previous[j]);",
+        "        byte[] c = aes.EncryptEcb(mixed, PaddingMode.None);",
+        "        c.CopyTo(output, i);",
+        "        previous = c;",
+        "    }",
+        "    return output;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKey = Enumerable.Range(0, 16).Select(i => (byte)(i * 7)).ToArray();",
+        "var dojoIv = Enumerable.Range(0, 16).Select(i => (byte)(255 - i)).ToArray();",
+        "var dojoPlain = System.Text.Encoding.ASCII.GetBytes(\"same block here!same block here!and a third one..\");",
+        "dojoPlain = dojoPlain[..48];",
+        "using var dojoAes = System.Security.Cryptography.Aes.Create();",
+        "dojoAes.Key = dojoKey;",
+        "var dojoExpected = dojoAes.EncryptCbc(dojoPlain, dojoIv, System.Security.Cryptography.PaddingMode.None);",
+        "var dojoMine = CbcEncrypt(dojoKey, dojoIv, dojoPlain);",
+        "Dojo.Eq(\"matches .NET's EncryptCbc\", Convert.ToHexStringLower(dojoExpected), Convert.ToHexStringLower(dojoMine));",
+        "Dojo.Check(\"equal plaintext blocks now encrypt differently\", !dojoMine[0..16].SequenceEqual(dojoMine[16..32]), \"blocks 1 and 2 are equal\");",
+        "Dojo.Eq(\"one block works too\", Convert.ToHexStringLower(dojoAes.EncryptCbc(new byte[16], dojoIv, System.Security.Cryptography.PaddingMode.None)), Convert.ToHexStringLower(CbcEncrypt(dojoKey, dojoIv, new byte[16])));"
+      ],
+      "forbid": [
+        {
+          "pattern": "EncryptCbc",
+          "message": "Does not call EncryptCbc"
+        }
+      ],
+      "hints": [
+        "Keep a `previous` array that starts as the IV.",
+        "For each block: XOR with `previous`, `EncryptEcb(mixed, PaddingMode.None)`, copy into the output, then `previous = c`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "PKCS#7 padding by hand",
+      "prompt": [
+        "Write `byte[] Pad(byte[] data)` and `byte[] Unpad(byte[] data)` for 16-byte blocks:",
+        "",
+        "- `Pad` adds `n = 16 - data.Length % 16` bytes, each of value `n` (so 1 to 16 bytes, never 0).",
+        "- `Unpad` reads the last byte `n`, checks that `n` is 1 to 16, that the data is a non-empty multiple of 16, and that the last `n` bytes all equal `n`; otherwise it throws `CryptographicException`. Then it returns the data without them.",
+        "",
+        "That \"is the padding valid?\" check is exactly what a padding oracle attack abuses, as you will see in lesson 5."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] Pad(byte[] data)",
+        "{",
+        "    return data;",
+        "}",
+        "",
+        "byte[] Unpad(byte[] data)",
+        "{",
+        "    return data;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] Pad(byte[] data)",
+        "{",
+        "    int n = 16 - data.Length % 16;",
+        "    var result = new byte[data.Length + n];",
+        "    data.CopyTo(result, 0);",
+        "    for (int i = data.Length; i < result.Length; i++)",
+        "        result[i] = (byte)n;",
+        "    return result;",
+        "}",
+        "",
+        "byte[] Unpad(byte[] data)",
+        "{",
+        "    if (data.Length == 0 || data.Length % 16 != 0) throw new CryptographicException(\"Bad length.\");",
+        "    int n = data[^1];",
+        "    if (n < 1 || n > 16) throw new CryptographicException(\"Bad padding.\");",
+        "    for (int i = data.Length - n; i < data.Length; i++)",
+        "        if (data[i] != n) throw new CryptographicException(\"Bad padding.\");",
+        "    return data[..^n];",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"Pad(5 bytes) adds eleven 0x0b\", \"01020304050b0b0b0b0b0b0b0b0b0b0b\", Convert.ToHexStringLower(Pad(new byte[] { 1, 2, 3, 4, 5 })));",
+        "Dojo.Eq(\"Pad(16 bytes) adds a whole block\", 32, Pad(new byte[16]).Length);",
+        "Dojo.Eq(\"the extra block is sixteen 0x10\", Enumerable.Repeat((byte)16, 16).ToArray(), Pad(new byte[16])[16..]);",
+        "Dojo.Eq(\"Pad(empty) is one block of 0x10\", 16, Pad(Array.Empty<byte>()).Length);",
+        "using var dojoAes = System.Security.Cryptography.Aes.Create();",
+        "dojoAes.Key = new byte[16];",
+        "var dojoData = System.Text.Encoding.ASCII.GetBytes(\"twenty bytes of data\");",
+        "Dojo.Eq(\"same padding as .NET's PKCS7\", Convert.ToHexStringLower(dojoAes.EncryptCbc(dojoData, new byte[16], System.Security.Cryptography.PaddingMode.PKCS7)),",
+        "    Convert.ToHexStringLower(dojoAes.EncryptCbc(Pad(dojoData), new byte[16], System.Security.Cryptography.PaddingMode.None)));",
+        "Dojo.Eq(\"Unpad(Pad(x)) is x\", dojoData, Unpad(Pad(dojoData)));",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"last byte 0 is rejected\", () => Unpad(new byte[16]));",
+        "var dojoBad = Pad(new byte[] { 1, 2, 3 }); dojoBad[14] = 9;",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"inconsistent padding bytes are rejected\", () => Unpad(dojoBad));",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"a length that is not a multiple of 16 is rejected\", () => Unpad(new byte[] { 1 }));"
+      ],
+      "hints": [
+        "`int n = 16 - data.Length % 16;` is always between 1 and 16.",
+        "In `Unpad`, `data[^1]` is the last byte and `data[..^n]` drops the last `n`."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,306 @@
+{
+  "title": "Hybrid encryption",
+  "summary": "Public-key crypto wraps a fresh AES key; AES-GCM carries the data. Build it with RSA-OAEP and with ephemeral ECDH.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Asymmetric for keys, symmetric for data",
+      "body": [
+        "Asymmetric encryption is slow and size-limited; symmetric encryption is fast but needs a shared key. **Hybrid encryption** uses each for what it is good at:",
+        "",
+        "1. Generate a fresh random **content key** (32 bytes) for this one message.",
+        "2. Encrypt the message with **AES-GCM** under that key.",
+        "3. Encrypt (*wrap*) the content key to the recipient's **public key**.",
+        "4. Send: wrapped key + nonce + tag + ciphertext.",
+        "",
+        "The recipient unwraps the content key with their private key, then decrypts. Every real system works like this: PGP and S/MIME email, age, JWE tokens, cloud KMS envelope encryption (module 5), and TLS, where ECDH plays the wrapping role.",
+        "",
+        "The modern name is **KEM/DEM**: a *key encapsulation mechanism* plus a *data encapsulation mechanism*. Post-quantum ML-KEM (module 6) slots into the KEM role."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why not just RSA-encrypt a 10 MB file in 190-byte chunks?",
+      "options": [
+        "It is very slow, makes the output larger, and chunks could be reordered or dropped undetected; one AES-GCM pass under a wrapped key is fast and authenticates the whole file",
+        "RSA cannot encrypt binary data",
+        "It would be secure and fine",
+        "Chunks would leak the private key"
+      ],
+      "answer": 0,
+      "explain": "Over 55,000 RSA operations versus one fast AES pass, and nothing ties the chunks together. Hybrid encryption fixes speed, size and integrity at once."
+    },
+    {
+      "type": "sort",
+      "prompt": "In an RSA-OAEP + AES-GCM hybrid message, what may travel in the open and what must stay secret?",
+      "buckets": [
+        "Sent in the open",
+        "Never leaves its owner"
+      ],
+      "items": [
+        [
+          "the wrapped (RSA-encrypted) content key",
+          0
+        ],
+        [
+          "the GCM nonce",
+          0
+        ],
+        [
+          "the GCM tag",
+          0
+        ],
+        [
+          "the ciphertext",
+          0
+        ],
+        [
+          "the plain content key",
+          1
+        ],
+        [
+          "the recipient's private key",
+          1
+        ]
+      ],
+      "explain": "Everything in the package is safe to send. The content key only exists in plain form inside the sender and the recipient, briefly."
+    },
+    {
+      "type": "learn",
+      "title": "Hybrid with RSA-OAEP",
+      "body": [
+        "A simple, fixed layout makes parsing trivial:",
+        "",
+        "```text",
+        "[ wrapped key: 256 ][ nonce: 12 ][ tag: 16 ][ ciphertext: n ]",
+        "```",
+        "",
+        "```csharp",
+        "byte[] contentKey = RandomNumberGenerator.GetBytes(32);",
+        "byte[] nonce = RandomNumberGenerator.GetBytes(12);",
+        "var cipher = new byte[message.Length];",
+        "var tag = new byte[16];",
+        "using (var gcm = new AesGcm(contentKey, 16))",
+        "    gcm.Encrypt(nonce, message, cipher, tag);",
+        "byte[] wrapped = recipient.Encrypt(contentKey, RSAEncryptionPadding.OaepSHA256);",
+        "byte[] package = [.. wrapped, .. nonce, .. tag, .. cipher];",
+        "```",
+        "",
+        "A fresh key per message means a nonce can never repeat under it, so a random (or even fixed) nonce is safe here. That is a nice side effect of hybrid encryption."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A 1000-byte message is sealed with the layout above and a 2048-bit RSA key. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "using var rsa = RSA.Create(2048);",
+        "byte[] message = new byte[1000];",
+        "byte[] key = RandomNumberGenerator.GetBytes(32);",
+        "byte[] nonce = RandomNumberGenerator.GetBytes(12);",
+        "var cipher = new byte[message.Length];",
+        "var tag = new byte[16];",
+        "using (var gcm = new AesGcm(key, 16)) gcm.Encrypt(nonce, message, cipher, tag);",
+        "byte[] wrapped = rsa.Encrypt(key, RSAEncryptionPadding.OaepSHA256);",
+        "byte[] package = [.. wrapped, .. nonce, .. tag, .. cipher];",
+        "Console.WriteLine($\"{wrapped.Length} {cipher.Length} {package.Length}\");"
+      ],
+      "answer": "256 1000 1284",
+      "explain": "GCM ciphertext is exactly as long as the plaintext. The overhead is fixed: 256 + 12 + 16 = 284 bytes, whether the message is 1 byte or 1 GB."
+    },
+    {
+      "type": "code",
+      "title": "Seal and open with RSA",
+      "prompt": [
+        "Write `byte[] Seal(RSA recipient, byte[] message)` and `byte[] Open(RSA recipient, byte[] package)` with the layout `[wrapped 256][nonce 12][tag 16][ciphertext]`, OAEP-SHA256 for the key and AES-GCM with a 16-byte tag for the data.",
+        "",
+        "`Open` must let `AesGcm.Decrypt` throw when anything was tampered with (it throws `AuthenticationTagMismatchException`, a `CryptographicException`). Never return unverified plaintext."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] Seal(RSA recipient, byte[] message)",
+        "{",
+        "    return message;",
+        "}",
+        "",
+        "byte[] Open(RSA recipient, byte[] package)",
+        "{",
+        "    return package;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] Seal(RSA recipient, byte[] message)",
+        "{",
+        "    byte[] contentKey = RandomNumberGenerator.GetBytes(32);",
+        "    byte[] nonce = RandomNumberGenerator.GetBytes(12);",
+        "    var cipher = new byte[message.Length];",
+        "    var tag = new byte[16];",
+        "    using (var gcm = new AesGcm(contentKey, 16))",
+        "        gcm.Encrypt(nonce, message, cipher, tag);",
+        "    byte[] wrapped = recipient.Encrypt(contentKey, RSAEncryptionPadding.OaepSHA256);",
+        "    return [.. wrapped, .. nonce, .. tag, .. cipher];",
+        "}",
+        "",
+        "byte[] Open(RSA recipient, byte[] package)",
+        "{",
+        "    byte[] wrapped = package[..256];",
+        "    byte[] nonce = package[256..268];",
+        "    byte[] tag = package[268..284];",
+        "    byte[] cipher = package[284..];",
+        "    byte[] contentKey = recipient.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA256);",
+        "    var plain = new byte[cipher.Length];",
+        "    using var gcm = new AesGcm(contentKey, 16);",
+        "    gcm.Decrypt(nonce, cipher, tag, plain);",
+        "    return plain;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "using var dojoRsa = System.Security.Cryptography.RSA.Create(2048);",
+        "var dojoMsg = System.Text.Encoding.UTF8.GetBytes(\"quarterly numbers: confidential\");",
+        "var dojoPkg = Seal(dojoRsa, dojoMsg);",
+        "Dojo.Eq(\"the package is 284 bytes plus the message\", 284 + dojoMsg.Length, dojoPkg.Length);",
+        "Dojo.Eq(\"Open returns the message\", dojoMsg, Open(dojoRsa, dojoPkg));",
+        "Dojo.Check(\"two seals of the same message differ\", !Seal(dojoRsa, dojoMsg).SequenceEqual(dojoPkg), \"Seal is deterministic: is the key or nonce fixed?\");",
+        "var dojoBig = new byte[100_000];",
+        "Dojo.Eq(\"a 100 KB message works (far over RSA's limit)\", 100_000, Open(dojoRsa, Seal(dojoRsa, dojoBig)).Length);",
+        "var dojoBad = (byte[])dojoPkg.Clone();",
+        "dojoBad[^1] ^= 1;",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"a flipped ciphertext bit is rejected\", () => Open(dojoRsa, dojoBad));",
+        "var dojoBadTag = (byte[])dojoPkg.Clone();",
+        "dojoBadTag[270] ^= 1;",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"a flipped tag bit is rejected\", () => Open(dojoRsa, dojoBadTag));"
+      ],
+      "hints": [
+        "Ranges slice arrays: `package[..256]`, `package[256..268]`, `package[268..284]`, `package[284..]`.",
+        "`new AesGcm(key, 16)` then `Encrypt(nonce, plaintext, ciphertext, tag)` and `Decrypt(nonce, ciphertext, tag, plaintext)`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Hybrid with ephemeral ECDH",
+      "body": [
+        "ECDH cannot encrypt a key directly, but it can **agree** on one. The sender makes a brand-new **ephemeral** key pair for every message:",
+        "",
+        "```text",
+        "sender:    eph = new P-256 key pair",
+        "           shared = eph.DeriveRawSecretAgreement(recipientPublic)",
+        "           key = HKDF(shared, info: label)",
+        "           package = [ eph public key: 91 ][ nonce: 12 ][ tag: 16 ][ ciphertext ]",
+        "recipient: import eph public key from the package",
+        "           shared = recipientPrivate.DeriveRawSecretAgreement(ephPublic)   // the same secret",
+        "           key = HKDF(shared, info: label) -> decrypt",
+        "```",
+        "",
+        "The ephemeral private key is thrown away right after sealing, so not even the sender can open the package later. This scheme is called **ECIES**; it is what *age*, HPKE (RFC 9180) and many messaging apps do."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the recipient's side of opening an ephemeral-ECDH package.",
+      "lines": [
+        "Read the first 91 bytes and import them as the ephemeral public key",
+        "Derive the raw shared secret with your private key and that public key",
+        "Run HKDF with the same label the sender used to get the AES key",
+        "Decrypt with AES-GCM, letting a tag mismatch throw"
+      ],
+      "explain": "The recipient rebuilds exactly the key the sender used, from public data plus their own private key."
+    },
+    {
+      "type": "mcq",
+      "prompt": "With ephemeral-ECDH hybrid encryption, what does the sender need from the recipient ahead of time?",
+      "options": [
+        "Only the recipient's public key",
+        "A shared password",
+        "The recipient's private key",
+        "Nothing at all, not even a public key"
+      ],
+      "answer": 0,
+      "explain": "That is the whole point of public-key crypto: publish one public key and anyone can send you sealed messages."
+    },
+    {
+      "type": "code",
+      "title": "Seal and open with ephemeral ECDH",
+      "prompt": [
+        "Write `byte[] Seal(ECDiffieHellmanPublicKey recipient, byte[] message)` and `byte[] Open(ECDiffieHellman recipient, byte[] package)`:",
+        "",
+        "- layout `[eph public key 91][nonce 12][tag 16][ciphertext]`, the ephemeral key as `ExportSubjectPublicKeyInfo()`;",
+        "- AES key = `HKDF.DeriveKey(SHA256, shared, 32, null, UTF-8 \"dojo-ecies-v1\")`;",
+        "- a new ephemeral P-256 key pair for **every** `Seal`."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] Seal(ECDiffieHellmanPublicKey recipient, byte[] message)",
+        "{",
+        "    return message;",
+        "}",
+        "",
+        "byte[] Open(ECDiffieHellman recipient, byte[] package)",
+        "{",
+        "    return package;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] Label = Encoding.UTF8.GetBytes(\"dojo-ecies-v1\");",
+        "",
+        "byte[] Seal(ECDiffieHellmanPublicKey recipient, byte[] message)",
+        "{",
+        "    using var eph = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "    byte[] shared = eph.DeriveRawSecretAgreement(recipient);",
+        "    byte[] key = HKDF.DeriveKey(HashAlgorithmName.SHA256, shared, 32, null, Label);",
+        "    byte[] nonce = RandomNumberGenerator.GetBytes(12);",
+        "    var cipher = new byte[message.Length];",
+        "    var tag = new byte[16];",
+        "    using (var gcm = new AesGcm(key, 16))",
+        "        gcm.Encrypt(nonce, message, cipher, tag);",
+        "    return [.. eph.ExportSubjectPublicKeyInfo(), .. nonce, .. tag, .. cipher];",
+        "}",
+        "",
+        "byte[] Open(ECDiffieHellman recipient, byte[] package)",
+        "{",
+        "    using var eph = ECDiffieHellman.Create();",
+        "    eph.ImportSubjectPublicKeyInfo(package.AsSpan(0, 91), out _);",
+        "    byte[] shared = recipient.DeriveRawSecretAgreement(eph.PublicKey);",
+        "    byte[] key = HKDF.DeriveKey(HashAlgorithmName.SHA256, shared, 32, null, Label);",
+        "    byte[] nonce = package[91..103];",
+        "    byte[] tag = package[103..119];",
+        "    byte[] cipher = package[119..];",
+        "    var plain = new byte[cipher.Length];",
+        "    using var gcm = new AesGcm(key, 16);",
+        "    gcm.Decrypt(nonce, cipher, tag, plain);",
+        "    return plain;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoCurve = System.Security.Cryptography.ECCurve.NamedCurves.nistP256;",
+        "using var dojoBob = System.Security.Cryptography.ECDiffieHellman.Create(dojoCurve);",
+        "using var dojoEve = System.Security.Cryptography.ECDiffieHellman.Create(dojoCurve);",
+        "var dojoMsg = System.Text.Encoding.UTF8.GetBytes(\"the vault code is 4-8-15-16\");",
+        "var dojoPkg = Seal(dojoBob.PublicKey, dojoMsg);",
+        "Dojo.Eq(\"the package is 119 bytes plus the message\", 119 + dojoMsg.Length, dojoPkg.Length);",
+        "Dojo.Eq(\"Bob opens it\", dojoMsg, Open(dojoBob, dojoPkg));",
+        "Dojo.Check(\"each seal uses a fresh ephemeral key\", !Seal(dojoBob.PublicKey, dojoMsg)[..91].SequenceEqual(dojoPkg[..91]), \"the ephemeral public key repeated\");",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"Eve's private key cannot open it\", () => Open(dojoEve, dojoPkg));",
+        "var dojoBad = (byte[])dojoPkg.Clone();",
+        "dojoBad[^1] ^= 1;",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"a flipped ciphertext bit is rejected\", () => Open(dojoBob, dojoBad));",
+        "Dojo.Eq(\"an empty message works\", 0, Open(dojoBob, Seal(dojoBob.PublicKey, Array.Empty<byte>())).Length);"
+      ],
+      "hints": [
+        "`using var eph = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);` inside `Seal`.",
+        "In `Open`: `eph.ImportSubjectPublicKeyInfo(package.AsSpan(0, 91), out _)`, then `recipient.DeriveRawSecretAgreement(eph.PublicKey)`."
+      ]
+    }
+  ]
+}

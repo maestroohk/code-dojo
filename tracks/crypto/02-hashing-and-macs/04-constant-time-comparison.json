@@ -1,0 +1,250 @@
+{
+  "title": "Constant-time comparison",
+  "summary": "An ordinary equality check leaks how much of a secret you guessed right. Measure the leak, then close it.",
+  "minutes": 10,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Equality that leaks",
+      "body": [
+        "`==` on strings, `SequenceEqual` and a hand-written loop all **stop at the first difference**. That is efficient, and it is a leak: comparing a guess that is right in its first 5 bytes takes a little longer than one that is wrong in byte 1.",
+        "",
+        "An attacker who can time many requests (over a network, the noise averages out) recovers a MAC or API key **one byte at a time**: try all 256 values of byte 1, keep the slowest, move on. That is at most 256 × 32 = 8,192 guesses for a 32-byte tag instead of 2^256.",
+        "",
+        "The trace counts how many bytes an early-exit comparison looks at for three guesses. The count is the leak."
+      ],
+      "trace": {
+        "code": [
+          "byte[] secret = { 7, 3, 9, 1 };",
+          "int Steps(byte[] guess)",
+          "{",
+          "    int steps = 0;",
+          "    for (int i = 0; i < secret.Length; i++)",
+          "    {",
+          "        steps++;",
+          "        if (guess[i] != secret[i]) break;",
+          "    }",
+          "    return steps;",
+          "}",
+          "int wrongFirst = Steps(new byte[] { 0, 0, 0, 0 });",
+          "int rightFirst = Steps(new byte[] { 7, 0, 0, 0 });",
+          "int rightThree = Steps(new byte[] { 7, 3, 9, 0 });",
+          "Console.WriteLine($\"{wrongFirst} {rightFirst} {rightThree}\");"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "This early-exit comparison counts the bytes it examines. What does it print?",
+      "code": [
+        "byte[] secret = { 5, 5, 5, 5, 5, 5 };",
+        "int Examined(byte[] guess)",
+        "{",
+        "    int n = 0;",
+        "    for (int i = 0; i < secret.Length; i++) { n++; if (guess[i] != secret[i]) return n; }",
+        "    return n;",
+        "}",
+        "Console.WriteLine(Examined(new byte[] { 1, 5, 5, 5, 5, 5 }));",
+        "Console.WriteLine(Examined(new byte[] { 5, 5, 5, 1, 1, 1 }));",
+        "Console.WriteLine(Examined(new byte[] { 5, 5, 5, 5, 5, 5 }));"
+      ],
+      "answer": [
+        "1",
+        "4",
+        "6"
+      ],
+      "explain": "The work done tells the attacker how many leading bytes are right. Time is a side channel that reports exactly this number."
+    },
+    {
+      "type": "learn",
+      "title": "FixedTimeEquals",
+      "body": [
+        "The fix is to always look at **every** byte and combine the differences, so the time depends only on the length:",
+        "",
+        "```csharp",
+        "int diff = 0;",
+        "for (int i = 0; i < a.Length; i++)",
+        "    diff |= a[i] ^ b[i];       // stays 0 only if every byte matches",
+        "return diff == 0;",
+        "```",
+        "",
+        ".NET ships it, written so the JIT cannot optimise it back into an early exit:",
+        "",
+        "```csharp",
+        "bool ok = CryptographicOperations.FixedTimeEquals(expectedTag, givenTag);",
+        "```",
+        "",
+        "Lengths may differ quickly; lengths of tags are public anyway. Compare **bytes**, not hex strings (decode first), and use it for every secret-dependent check: MACs, tokens, API keys, password hashes."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the constant-time comparison.",
+      "code": [
+        "bool SameBytes(byte[] a, byte[] b)",
+        "{",
+        "    if (a.Length != b.Length) return false;",
+        "    int diff = 0;",
+        "    for (int i = 0; i < a.Length; i++)",
+        "        diff __1__ a[i] __2__ b[i];",
+        "    return diff __3__ 0;",
+        "}",
+        "Console.WriteLine(SameBytes(new byte[] { 1, 2 }, new byte[] { 1, 2 }));",
+        "Console.WriteLine(SameBytes(new byte[] { 1, 2 }, new byte[] { 1, 3 }));"
+      ],
+      "blanks": [
+        "|=",
+        "^",
+        "=="
+      ],
+      "bank": [
+        "&=",
+        "+",
+        "!=",
+        "&&"
+      ],
+      "explain": "XOR is 0 for equal bytes, and OR-ing keeps any 1 bit that ever appeared. No branch depends on the data."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] tag = Convert.FromHexString(\"a1b2c3d4\");",
+        "Console.WriteLine(CryptographicOperations.FixedTimeEquals(tag, Convert.FromHexString(\"A1B2C3D4\")));",
+        "Console.WriteLine(CryptographicOperations.FixedTimeEquals(tag, Convert.FromHexString(\"a1b2c3\")));",
+        "Console.WriteLine(\"a1b2c3d4\" == \"A1B2C3D4\");"
+      ],
+      "answer": [
+        "True",
+        "False",
+        "False"
+      ],
+      "explain": "Decoding hex first makes upper and lower case equal, as they should be. Different lengths are simply unequal. Comparing hex *strings* both leaks timing and wrongly rejects a tag in the other case."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which comparisons should be constant-time? Select all that apply.",
+      "options": [
+        "Checking an HMAC tag on an incoming webhook",
+        "Checking a presented API key against the stored one",
+        "Checking a password-reset token",
+        "Checking whether a username exists in a public member list"
+      ],
+      "answer": [
+        0,
+        1,
+        2
+      ],
+      "explain": "Anything where the attacker supplies a guess at a secret. A public list holds no secret, so its comparison leaks nothing worth having."
+    },
+    {
+      "type": "code",
+      "title": "Write FixedTimeEquals yourself",
+      "prompt": [
+        "Write `bool ConstantTimeEquals(byte[] a, byte[] b)` without any early `return` or `break` inside the loop: return `false` straight away only if the lengths differ, otherwise XOR every pair, OR it into an accumulator, and compare the accumulator with 0 at the end.",
+        "",
+        "You may not call `SequenceEqual` or `FixedTimeEquals`."
+      ],
+      "starter": [
+        "bool ConstantTimeEquals(byte[] a, byte[] b)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool ConstantTimeEquals(byte[] a, byte[] b)",
+        "{",
+        "    if (a.Length != b.Length) return false;",
+        "    int diff = 0;",
+        "    for (int i = 0; i < a.Length; i++)",
+        "        diff |= a[i] ^ b[i];",
+        "    return diff == 0;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Check(\"equal arrays\", ConstantTimeEquals(new byte[] { 1, 2, 3 }, new byte[] { 1, 2, 3 }), \"returned false\");",
+        "Dojo.Check(\"differ in the last byte\", !ConstantTimeEquals(new byte[] { 1, 2, 3 }, new byte[] { 1, 2, 4 }), \"returned true\");",
+        "Dojo.Check(\"differ in the first byte\", !ConstantTimeEquals(new byte[] { 9, 2, 3 }, new byte[] { 1, 2, 3 }), \"returned true\");",
+        "Dojo.Check(\"different lengths\", !ConstantTimeEquals(new byte[] { 1, 2 }, new byte[] { 1, 2, 3 }), \"returned true\");",
+        "Dojo.Check(\"two empty arrays\", ConstantTimeEquals(Array.Empty<byte>(), Array.Empty<byte>()), \"returned false\");",
+        "Dojo.Check(\"bits that cancel in a sum still count\", !ConstantTimeEquals(new byte[] { 1, 2 }, new byte[] { 2, 1 }), \"returned true\");"
+      ],
+      "require": [
+        {
+          "pattern": "\\|=",
+          "message": "Accumulates differences with |="
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "SequenceEqual|FixedTimeEquals",
+          "message": "Does not call SequenceEqual or FixedTimeEquals"
+        },
+        {
+          "pattern": "\\bbreak\\b",
+          "message": "Has no break"
+        }
+      ],
+      "hints": [
+        "`diff |= a[i] ^ b[i];` inside the loop.",
+        "The only early return is for different lengths."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the API key check",
+      "prompt": [
+        "This middleware compares API keys with `==` on strings, which leaks timing. The server stores only the SHA-256 of each key (so a database leak does not leak keys).",
+        "",
+        "Fix `bool IsValidKey(string presented, byte[] storedHash)`: hash the presented key's UTF-8 bytes and compare with `CryptographicOperations.FixedTimeEquals`. Hashing first also makes both sides the same length, whatever the caller sends."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "bool IsValidKey(string presented, byte[] storedHash)",
+        "{",
+        "    string presentedHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(presented)));",
+        "    return presentedHash == Convert.ToHexString(storedHash);",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "bool IsValidKey(string presented, byte[] storedHash)",
+        "{",
+        "    byte[] presentedHash = SHA256.HashData(Encoding.UTF8.GetBytes(presented));",
+        "    return CryptographicOperations.FixedTimeEquals(presentedHash, storedHash);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoStored = System.Security.Cryptography.SHA256.HashData(\"sk_live_dojo_123\"u8.ToArray());",
+        "Dojo.Check(\"the right key is accepted\", IsValidKey(\"sk_live_dojo_123\", dojoStored), \"rejected the right key\");",
+        "Dojo.Check(\"a wrong key is rejected\", !IsValidKey(\"sk_live_dojo_124\", dojoStored), \"accepted a wrong key\");",
+        "Dojo.Check(\"an empty key is rejected\", !IsValidKey(\"\", dojoStored), \"accepted an empty key\");"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Uses CryptographicOperations.FixedTimeEquals"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "==",
+          "message": "Does not compare with =="
+        }
+      ],
+      "hints": [
+        "Keep the hash as bytes instead of turning it into hex.",
+        "`CryptographicOperations.FixedTimeEquals(presentedHash, storedHash)`."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,429 @@
+{
+  "title": "The mistakes catalogue, and compliance words",
+  "summary": "The handful of mistakes behind most real crypto failures, fixed one by one, and what FIPS, PCI DSS and GDPR actually ask of you.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Seven mistakes that keep happening",
+      "body": [
+        "Almost every real-world crypto failure is one of these, not a broken algorithm:",
+        "",
+        "| Mistake | Why it fails | Fix |",
+        "|---|---|---|",
+        "| Hard-coded key | it is in the repo, the image, the history | vault or environment, fail closed |",
+        "| ECB mode | equal blocks give equal ciphertext: patterns show | AES-GCM |",
+        "| Nonce or IV reuse | GCM/CTR keystream repeats, `c1 ^ c2 = p1 ^ p2` | random 12-byte nonce or a never-repeating counter |",
+        "| Unauthenticated encryption | bits can be flipped, padding oracles | an AEAD (AES-GCM, ChaCha20-Poly1305) |",
+        "| `Random` for keys | predictable from the seed | `RandomNumberGenerator` |",
+        "| Comparing MACs with `==` | early exit leaks how much matched | `CryptographicOperations.FixedTimeEquals` |",
+        "| Homemade crypto | `SHA256(key + message)`, XOR \"encryption\" | HMAC, AEAD, a reviewed library |",
+        "",
+        "You met each one earlier in the topic. Now you fix them in code that looks like code you will meet at work."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each mistake to its fix.",
+      "pairs": [
+        [
+          "`aes.EncryptEcb(data, ...)`",
+          "AES-GCM with a unique nonce"
+        ],
+        [
+          "`static readonly byte[] Nonce = new byte[12];`",
+          "a fresh random nonce or a counter per message"
+        ],
+        [
+          "`new Random().NextBytes(key)`",
+          "`RandomNumberGenerator.GetBytes(32)`"
+        ],
+        [
+          "`computedTag == receivedTag`",
+          "`CryptographicOperations.FixedTimeEquals`"
+        ],
+        [
+          "`SHA256(secret + message)` as a signature",
+          "`HMACSHA256`"
+        ],
+        [
+          "AES-CBC with no MAC",
+          "an AEAD such as AES-GCM"
+        ]
+      ],
+      "explain": "Notice that most fixes are *less* code than the mistake: the safe API is also the simple one."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix: ECB leaks patterns",
+      "prompt": [
+        "This record encryption uses ECB mode, so two equal 16-byte blocks of plaintext produce two equal blocks of ciphertext, and nothing detects tampering.",
+        "",
+        "Rewrite `Encrypt(string text, byte[] nonce)` and `Decrypt(byte[] data)` to use **AES-GCM**, with the output laid out as nonce (12) + ciphertext + tag (16). Keep the names and the key."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = Enumerable.Range(1, 32).Select(i => (byte)i).ToArray();",
+        "",
+        "byte[] Encrypt(string text, byte[] nonce)",
+        "{",
+        "    using var aes = Aes.Create();",
+        "    aes.Key = key;",
+        "    return aes.EncryptEcb(Encoding.UTF8.GetBytes(text), PaddingMode.PKCS7);",
+        "}",
+        "",
+        "string Decrypt(byte[] data)",
+        "{",
+        "    using var aes = Aes.Create();",
+        "    aes.Key = key;",
+        "    return Encoding.UTF8.GetString(aes.DecryptEcb(data, PaddingMode.PKCS7));",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = Enumerable.Range(1, 32).Select(i => (byte)i).ToArray();",
+        "",
+        "byte[] Encrypt(string text, byte[] nonce)",
+        "{",
+        "    var plain = Encoding.UTF8.GetBytes(text);",
+        "    var box = new byte[12 + plain.Length + 16];",
+        "    nonce.CopyTo(box, 0);",
+        "    using var gcm = new AesGcm(key, 16);",
+        "    gcm.Encrypt(nonce, plain, box.AsSpan(12, plain.Length), box.AsSpan(12 + plain.Length));",
+        "    return box;",
+        "}",
+        "",
+        "string Decrypt(byte[] data)",
+        "{",
+        "    var plain = new byte[data.Length - 28];",
+        "    using var gcm = new AesGcm(key, 16);",
+        "    gcm.Decrypt(data.AsSpan(0, 12), data.AsSpan(12, plain.Length), data.AsSpan(data.Length - 16), plain);",
+        "    return Encoding.UTF8.GetString(plain);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoN = new byte[12]; dojoN[11] = 5;",
+        "var dojoText = new string('A', 32);",
+        "var dojoC = Encrypt(dojoText, dojoN);",
+        "Dojo.Eq(\"the output is nonce + ciphertext + tag\", 12 + 32 + 16, dojoC.Length);",
+        "Dojo.Check(\"two equal plaintext blocks no longer give equal ciphertext blocks\", !dojoC.AsSpan(12, 16).SequenceEqual(dojoC.AsSpan(28, 16)), \"the blocks are equal: still ECB?\");",
+        "Dojo.Eq(\"Decrypt gives the text back\", dojoText, Decrypt(dojoC));",
+        "var dojoBad = (byte[])dojoC.Clone(); dojoBad[20] ^= 0x80;",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"tampering is detected\", () => Decrypt(dojoBad));"
+      ],
+      "forbid": [
+        {
+          "pattern": "Ecb",
+          "message": "Does not use ECB"
+        }
+      ],
+      "hints": [
+        "Replace both bodies with the sealed box you have written before: `new AesGcm(key, 16)`, `Encrypt(nonce, plain, ciphertext, tag)`.",
+        "In `Decrypt`, the ciphertext is `data.AsSpan(12, data.Length - 28)`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A service encrypts every value with the same key **and the same nonce**. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = new byte[32];",
+        "byte[] nonce = new byte[12];",
+        "",
+        "byte[] Enc(string s)",
+        "{",
+        "    var p = Encoding.UTF8.GetBytes(s);",
+        "    var c = new byte[p.Length];",
+        "    using var g = new AesGcm(key, 16);",
+        "    g.Encrypt(nonce, p, c, new byte[16]);",
+        "    return c;",
+        "}",
+        "",
+        "var a = Enc(\"salary=50000\");",
+        "var b = Enc(\"salary=90000\");",
+        "Console.WriteLine(a.SequenceEqual(b));",
+        "Console.WriteLine(a.Zip(b).Count(p => p.First == p.Second));"
+      ],
+      "answer": [
+        "False",
+        "11"
+      ],
+      "explain": "With a repeated nonce the keystream repeats, so equal plaintext bytes give equal ciphertext bytes: 11 of the 12 positions match, and the attacker can see exactly where the two salaries differ. XOR the two ciphertexts and they get `p1 ^ p2`, as with a reused one-time pad."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix: a nonce used for everything",
+      "prompt": [
+        "`Seal` uses one all-zero nonce for every message. Fix it so every call uses a **new nonce**: 4 zero bytes followed by a 64-bit big-endian counter that starts at 1 for the first message and goes up by one each call. Keep the output layout (nonce + ciphertext + tag).",
+        "",
+        "A counter is safe only if it can never repeat for this key, which in a real service means persisting it, or giving each instance its own key. Random 12-byte nonces are the simpler default, safe for a few billion messages per key."
+      ],
+      "starter": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = Enumerable.Range(1, 32).Select(i => (byte)i).ToArray();",
+        "byte[] nonce = new byte[12];   // BUG: the same nonce for every message",
+        "",
+        "byte[] Seal(string text)",
+        "{",
+        "    var plain = Encoding.UTF8.GetBytes(text);",
+        "    var box = new byte[12 + plain.Length + 16];",
+        "    nonce.CopyTo(box, 0);",
+        "    using var gcm = new AesGcm(key, 16);",
+        "    gcm.Encrypt(nonce, plain, box.AsSpan(12, plain.Length), box.AsSpan(12 + plain.Length));",
+        "    return box;",
+        "}"
+      ],
+      "solution": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = Enumerable.Range(1, 32).Select(i => (byte)i).ToArray();",
+        "long counter = 0;",
+        "",
+        "byte[] Seal(string text)",
+        "{",
+        "    var nonce = new byte[12];",
+        "    BinaryPrimitives.WriteInt64BigEndian(nonce.AsSpan(4), ++counter);",
+        "    var plain = Encoding.UTF8.GetBytes(text);",
+        "    var box = new byte[12 + plain.Length + 16];",
+        "    nonce.CopyTo(box, 0);",
+        "    using var gcm = new AesGcm(key, 16);",
+        "    gcm.Encrypt(nonce, plain, box.AsSpan(12, plain.Length), box.AsSpan(12 + plain.Length));",
+        "    return box;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoA = Seal(\"same text\");",
+        "var dojoB = Seal(\"same text\");",
+        "var dojoC = Seal(\"same text\");",
+        "Dojo.Eq(\"the first nonce is counter 1\", new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, dojoA[..12]);",
+        "Dojo.Eq(\"the third nonce is counter 3\", new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 }, dojoC[..12]);",
+        "Dojo.Check(\"the same text encrypts differently each time\", !dojoA.SequenceEqual(dojoB), \"two seals were identical\");",
+        "var dojoPlain = new byte[9];",
+        "using (var dojoG = new System.Security.Cryptography.AesGcm(Enumerable.Range(1, 32).Select(i => (byte)i).ToArray(), 16))",
+        "    dojoG.Decrypt(dojoB[..12], dojoB[12..^16], dojoB[^16..], dojoPlain);",
+        "Dojo.Eq(\"each box still decrypts\", \"same text\", System.Text.Encoding.UTF8.GetString(dojoPlain));"
+      ],
+      "hints": [
+        "Make a new 12-byte array inside `Seal` on every call.",
+        "`BinaryPrimitives.WriteInt64BigEndian(nonce.AsSpan(4), ++counter)` fills the last 8 bytes."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix: comparing tags with ==",
+      "prompt": [
+        "This webhook check compares hex strings with `==`. That exits at the first different character (a timing leak), and it rejects a correct signature sent in uppercase hex.",
+        "",
+        "Rewrite `bool VerifyWebhook(byte[] secret, string body, string signatureHex)` to decode the hex (return `false` if it is not valid hex) and compare the **bytes** with `CryptographicOperations.FixedTimeEquals`."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "bool VerifyWebhook(byte[] secret, string body, string signatureHex)",
+        "{",
+        "    var expected = Convert.ToHexStringLower(HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes(body)));",
+        "    return expected == signatureHex;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "bool VerifyWebhook(byte[] secret, string body, string signatureHex)",
+        "{",
+        "    byte[] received;",
+        "    try { received = Convert.FromHexString(signatureHex); }",
+        "    catch (FormatException) { return false; }",
+        "    var expected = HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes(body));",
+        "    return CryptographicOperations.FixedTimeEquals(expected, received);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSecret = System.Text.Encoding.UTF8.GetBytes(\"whsec_test_only\");",
+        "var dojoBody = \"{\\\"event\\\":\\\"paid\\\",\\\"amount\\\":100}\";",
+        "var dojoSig = Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(dojoSecret, System.Text.Encoding.UTF8.GetBytes(dojoBody)));",
+        "Dojo.Check(\"a correct signature is accepted\", VerifyWebhook(dojoSecret, dojoBody, dojoSig), \"rejected a good signature\");",
+        "Dojo.Check(\"uppercase hex is accepted\", VerifyWebhook(dojoSecret, dojoBody, dojoSig.ToUpperInvariant()), \"rejected uppercase hex\");",
+        "Dojo.Check(\"a changed body is rejected\", !VerifyWebhook(dojoSecret, dojoBody.Replace(\"100\", \"900\"), dojoSig), \"accepted a changed body\");",
+        "Dojo.Check(\"a truncated signature is rejected\", !VerifyWebhook(dojoSecret, dojoBody, dojoSig[..32]), \"accepted half a signature\");",
+        "Dojo.Check(\"malformed hex is rejected without throwing\", !VerifyWebhook(dojoSecret, dojoBody, \"zz\"), \"accepted junk\");"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Uses CryptographicOperations.FixedTimeEquals"
+        }
+      ],
+      "hints": [
+        "`Convert.FromHexString` accepts both cases and throws `FormatException` on junk: catch it and return false.",
+        "`FixedTimeEquals` returns false for different lengths, so a truncated signature needs no special case."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Compliance words you will hear",
+      "body": [
+        "You do not need to be an auditor, but you will be asked these questions.",
+        "",
+        "- **FIPS 140-2 / 140-3**: a US standard for *cryptographic modules*. A validated module (Windows CNG, a certified OpenSSL build, an HSM) has been tested to implement approved algorithms correctly. .NET calls the operating system's crypto, so \"FIPS mode\" is about running on a validated OS module and using only approved algorithms (AES, SHA-2, HMAC, RSA, ECDSA, PBKDF2; not MD5 or ChaCha20 in older profiles). It certifies the module, not your app.",
+        "- **Encryption at rest requirements**: most policies (SOC 2, ISO 27001, HIPAA, cloud provider defaults) are satisfied by disk or database encryption, but auditors then ask the real question: *where is the key, and who can use it?*",
+        "- **PCI DSS**: card data must be unreadable wherever it is stored (strong encryption, truncation, tokenization or hashing), with documented key management: split knowledge, rotation, restricted access. Tokenization shrinks the scope.",
+        "- **GDPR**: lists encryption and pseudonymisation as appropriate safeguards. If encrypted personal data leaks and the key did not, notifying every affected person may not be required."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A manager asks whether the new service is \"FIPS compliant\" because it uses AES-GCM. What is the most accurate answer?",
+      "options": [
+        "It depends on whether the AES implementation runs in a FIPS-validated module and only approved algorithms are used; the algorithm name alone does not make it so",
+        "Yes: AES is a FIPS algorithm, so any AES code is compliant",
+        "No: FIPS forbids AES-GCM",
+        "FIPS only applies to passwords"
+      ],
+      "answer": 0,
+      "explain": "FIPS 140 validates modules. Using the BCL on a validated OS module with approved algorithms is the usual path; a hand-written AES in your own code would not count, however correct."
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe or broken?",
+      "buckets": [
+        "Safe",
+        "Broken"
+      ],
+      "items": [
+        [
+          "`RandomNumberGenerator.GetBytes(32)` for a key",
+          0
+        ],
+        [
+          "`aes.EncryptEcb(...)` for customer records",
+          1
+        ],
+        [
+          "`AesGcm` with a fresh random 12-byte nonce per message",
+          0
+        ],
+        [
+          "`SHA256.HashData(key.Concat(msg).ToArray())` as a MAC",
+          1
+        ],
+        [
+          "`CryptographicOperations.FixedTimeEquals(tag, expected)`",
+          0
+        ],
+        [
+          "A key in `appsettings.json` in git",
+          1
+        ],
+        [
+          "AES-CBC with no MAC, decrypted on every request",
+          1
+        ],
+        [
+          "`HMACSHA256.HashData(key, msg)` for webhook signatures",
+          0
+        ]
+      ],
+      "explain": "Each broken item is one row of the catalogue. The safe ones are the boring BCL calls."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix: three mistakes in one signer",
+      "prompt": [
+        "This message signer has three mistakes from the catalogue. Fix all of them, keeping the method names:",
+        "",
+        "- `byte[] NewKey()`: 32 bytes from `RandomNumberGenerator`, not `Random`.",
+        "- `string Sign(byte[] key, string message)`: lowercase hex **HMAC-SHA256** of the UTF-8 message, not SHA-256 of key-plus-message (which allows length extension, and garbles the key through `GetString`).",
+        "- `bool Verify(byte[] key, string message, string tagHex)`: fixed-time comparison of the bytes; `false` for malformed hex."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] NewKey()",
+        "{",
+        "    var key = new byte[32];",
+        "    new Random().NextBytes(key);",
+        "    return key;",
+        "}",
+        "",
+        "string Sign(byte[] key, string message) =>",
+        "    Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(key) + message)));",
+        "",
+        "bool Verify(byte[] key, string message, string tagHex) => Sign(key, message) == tagHex;"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] NewKey() => RandomNumberGenerator.GetBytes(32);",
+        "",
+        "string Sign(byte[] key, string message) =>",
+        "    Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(message)));",
+        "",
+        "bool Verify(byte[] key, string message, string tagHex)",
+        "{",
+        "    byte[] tag;",
+        "    try { tag = Convert.FromHexString(tagHex); }",
+        "    catch (FormatException) { return false; }",
+        "    return CryptographicOperations.FixedTimeEquals(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(message)), tag);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKey = Enumerable.Range(0, 32).Select(i => (byte)(i * 7)).ToArray();",
+        "var dojoExpected = Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(dojoKey, System.Text.Encoding.UTF8.GetBytes(\"ship order 42\")));",
+        "Dojo.Eq(\"Sign is HMAC-SHA256\", dojoExpected, Sign(dojoKey, \"ship order 42\"));",
+        "Dojo.Check(\"Verify accepts a good tag\", Verify(dojoKey, \"ship order 42\", dojoExpected), \"rejected a good tag\");",
+        "Dojo.Check(\"Verify rejects another message\", !Verify(dojoKey, \"ship order 43\", dojoExpected), \"accepted a forged message\");",
+        "Dojo.Check(\"Verify rejects junk without throwing\", !Verify(dojoKey, \"ship order 42\", \"not hex!\"), \"accepted junk\");",
+        "var dojoKeys = Enumerable.Range(0, 50).Select(_ => Convert.ToHexString(NewKey())).ToList();",
+        "Dojo.Check(\"keys are 32 bytes\", dojoKeys.All(k => k.Length == 64), \"wrong key length\");",
+        "Dojo.Eq(\"50 keys are all different\", 50, dojoKeys.Distinct().Count());"
+      ],
+      "require": [
+        {
+          "pattern": "HMACSHA256",
+          "message": "Uses HMACSHA256"
+        },
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares with FixedTimeEquals"
+        },
+        {
+          "pattern": "RandomNumberGenerator",
+          "message": "Uses RandomNumberGenerator"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bRandom\\b(?!NumberGenerator)",
+          "message": "Does not use System.Random"
+        }
+      ],
+      "hints": [
+        "`NewKey` is one line: `RandomNumberGenerator.GetBytes(32)`.",
+        "`Sign` passes the key bytes straight to `HMACSHA256.HashData(key, data)`; never turn key bytes into a string."
+      ]
+    }
+  ]
+}

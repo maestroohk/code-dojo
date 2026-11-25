@@ -1,0 +1,330 @@
+{
+  "title": "Stage 1: The master key",
+  "summary": "Turn a master password into a key with PBKDF2, prove a password is right without storing it, and lock and unlock the vault.",
+  "minutes": 25,
+  "prereqs": [
+    "crypto/02-hashing-and-macs/05-key-derivation",
+    "crypto/02-hashing-and-macs/04-constant-time-comparison"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What you are building",
+      "body": [
+        "Over five stages you will build a **password vault**: a console program that reads commands from standard input, one per line, keeps everything in memory, and prints one result per command. The tests feed it a script of commands and check every line it prints.",
+        "",
+        "```text",
+        "> init correct-horse",
+        "created (key-check ac911ada)",
+        "> put github ghp_secret123",
+        "stored github (13 bytes)",
+        "> get github",
+        "github: ghp_secret123",
+        "```",
+        "",
+        "By stage 5 it has envelope encryption, sharing between users, key rotation, a tamper-evident audit log and an encrypted export. Every piece is a pattern real systems use: 1Password, Bitwarden, cloud KMS and database encryption are all built from these parts.",
+        "",
+        "**Stage 1** is the root of it all: the **master key**. The vault never stores the password or the key. It stores a *key-check value* that proves a password is right."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does the vault store a key-check value instead of the master key or a plain SHA-256 of the password?",
+      "options": [
+        "Storing the key would let anyone who reads the file decrypt everything, and a fast hash of a password can be brute-forced quickly; a key-check from a slow KDF proves the password without revealing the key",
+        "Because SHA-256 output is too long to store",
+        "Because the key-check can be decrypted back into the password if the user forgets it",
+        "Because HMAC is faster than SHA-256"
+      ],
+      "answer": 0,
+      "explain": "The stored value must be useless to a thief: it reveals nothing about the key (HMAC is one-way) and checking each password guess costs a full PBKDF2 run. Password storage itself is covered in depth by the *Authentication & JWT* topic."
+    },
+    {
+      "type": "learn",
+      "title": "The spec",
+      "body": [
+        "The starter has the command loop and a `Vault` class. Implement:",
+        "",
+        "| Command | Prints |",
+        "|---|---|",
+        "| `init <password>` | `created (key-check <8 hex>)`; the vault is now **unlocked** |",
+        "| `unlock <password>` | `unlocked`, or `error: wrong password` |",
+        "| `lock` | `locked`, and the key is wiped from memory |",
+        "| `status` | `no vault`, `locked` or `unlocked` |",
+        "",
+        "The master key is **PBKDF2-HMAC-SHA256** of the password's UTF-8 bytes with the salt `\"dojo-vault-salt1\"` (UTF-8), **1,000** iterations, 32 bytes:",
+        "",
+        "```csharp",
+        "Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(password), Salt, Iterations, HashAlgorithmName.SHA256, 32)",
+        "```",
+        "",
+        "The **key-check** is `HMACSHA256(masterKey, UTF8(\"key-check\"))`. Store all 32 bytes; print only the first 4 as lowercase hex (`Convert.ToHexStringLower(value, 0, 4)`). `unlock` derives a candidate key and compares key-checks with `CryptographicOperations.FixedTimeEquals`.",
+        "",
+        "Errors, checked in this order:",
+        "- `init` when a vault exists: `error: vault already exists`; with no password: `error: missing argument`; under 8 characters: `error: password too short`",
+        "- `unlock` or `lock` before `init`: `error: no vault`",
+        "- anything else: `error: unknown command` (already in the starter)",
+        "",
+        "> **Tip:** 1,000 iterations and a fixed salt keep the tests fast and the output repeatable. A real vault uses 600,000+ iterations (or Argon2) and a **random** salt saved next to the vault file."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "PBKDF2 is deterministic: the same password, salt and iteration count always give the same key. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] Derive(string pw, string salt) =>",
+        "    Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(pw), Encoding.UTF8.GetBytes(salt), 1000, HashAlgorithmName.SHA256, 32);",
+        "",
+        "Console.WriteLine(Derive(\"correct-horse\", \"dojo-vault-salt1\").SequenceEqual(Derive(\"correct-horse\", \"dojo-vault-salt1\")));",
+        "Console.WriteLine(Derive(\"correct-horse\", \"dojo-vault-salt1\").SequenceEqual(Derive(\"correct-horse\", \"dojo-vault-salt2\")));",
+        "Console.WriteLine(Derive(\"correct-horse\", \"dojo-vault-salt1\").Length);"
+      ],
+      "answer": [
+        "True",
+        "False",
+        "32"
+      ],
+      "explain": "Determinism is what lets `unlock` re-derive the same key. The salt changes everything, which is why a real vault uses a random one: two users with the same password get unrelated keys, and precomputed tables are useless."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the body of `Unlock` (after the `no vault` check).",
+      "lines": [
+        "var candidate = DeriveKey(password);",
+        "if (!CryptographicOperations.FixedTimeEquals(KeyCheck(candidate), keyCheck))",
+        "    return \"error: wrong password\";",
+        "masterKey = candidate;",
+        "return \"unlocked\";"
+      ],
+      "explain": "Derive, check in constant time, and only then keep the key. A key that failed the check is never stored."
+    },
+    {
+      "type": "code",
+      "title": "Derive, check, lock",
+      "prompt": [
+        "Implement stage 1 as specified on the cards above (`init`, `unlock`, `lock`, `status`). Keep the command loop: it prints whatever `Run` returns.",
+        "",
+        "The tests run whole command scripts. For example, this input:",
+        "",
+        "```text",
+        "init correct-horse",
+        "lock",
+        "unlock wrong-horse",
+        "unlock correct-horse",
+        "status",
+        "```",
+        "",
+        "must print:",
+        "",
+        "```text",
+        "created (key-check ac911ada)",
+        "locked",
+        "error: wrong password",
+        "unlocked",
+        "unlocked",
+        "```"
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "var vault = new Vault();",
+        "string? line;",
+        "while ((line = Console.ReadLine()) != null)",
+        "{",
+        "    line = line.Trim();",
+        "    if (line.Length == 0) continue;",
+        "    Console.WriteLine(vault.Run(line));",
+        "}",
+        "",
+        "class Vault",
+        "{",
+        "    // Tests only: a real vault uses 600,000+ iterations and a random salt stored next to the vault.",
+        "    const int Iterations = 1_000;",
+        "    static readonly byte[] Salt = Encoding.UTF8.GetBytes(\"dojo-vault-salt1\");",
+        "",
+        "    byte[]? keyCheck;    // stored with the vault: proves a password is right without storing the key",
+        "    byte[]? masterKey;   // only in memory, only while unlocked",
+        "",
+        "    public string Run(string line)",
+        "    {",
+        "        var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);",
+        "        string Arg(int i) => i < parts.Length ? parts[i] : \"\";",
+        "        return parts[0] switch",
+        "        {",
+        "            \"init\" => Init(Arg(1)),",
+        "            \"unlock\" => Unlock(Arg(1)),",
+        "            \"lock\" => Lock(),",
+        "            \"status\" => \"TODO\",",
+        "            _ => \"error: unknown command\",",
+        "        };",
+        "    }",
+        "",
+        "    string Init(string password)",
+        "    {",
+        "        // Derive the master key with PBKDF2, store its key-check, stay unlocked.",
+        "        return \"TODO\";",
+        "    }",
+        "",
+        "    string Unlock(string password)",
+        "    {",
+        "        // Derive a candidate key and compare key-checks in constant time.",
+        "        return \"TODO\";",
+        "    }",
+        "",
+        "    string Lock()",
+        "    {",
+        "        // Wipe the key from memory.",
+        "        return \"TODO\";",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "var vault = new Vault();",
+        "string? line;",
+        "while ((line = Console.ReadLine()) != null)",
+        "{",
+        "    line = line.Trim();",
+        "    if (line.Length == 0) continue;",
+        "    Console.WriteLine(vault.Run(line));",
+        "}",
+        "",
+        "class Vault",
+        "{",
+        "    // Tests only: a real vault uses 600,000+ iterations and a random salt stored next to the vault.",
+        "    const int Iterations = 1_000;",
+        "    static readonly byte[] Salt = Encoding.UTF8.GetBytes(\"dojo-vault-salt1\");",
+        "",
+        "    byte[]? keyCheck;    // stored with the vault: proves a password is right without storing the key",
+        "    byte[]? masterKey;   // only in memory, only while unlocked",
+        "",
+        "    public string Run(string line)",
+        "    {",
+        "        var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);",
+        "        string Arg(int i) => i < parts.Length ? parts[i] : \"\";",
+        "        return parts[0] switch",
+        "        {",
+        "            \"init\" => Init(Arg(1)),",
+        "            \"unlock\" => Unlock(Arg(1)),",
+        "            \"lock\" => Lock(),",
+        "            \"status\" => keyCheck is null ? \"no vault\" : masterKey is null ? \"locked\" : \"unlocked\",",
+        "            _ => \"error: unknown command\",",
+        "        };",
+        "    }",
+        "",
+        "    static byte[] DeriveKey(string password) =>",
+        "        Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(password), Salt, Iterations, HashAlgorithmName.SHA256, 32);",
+        "",
+        "    static byte[] KeyCheck(byte[] key) => HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(\"key-check\"));",
+        "",
+        "    static string Short(byte[] value) => Convert.ToHexStringLower(value, 0, 4);",
+        "",
+        "    string Init(string password)",
+        "    {",
+        "        if (keyCheck is not null) return \"error: vault already exists\";",
+        "        if (password.Length == 0) return \"error: missing argument\";",
+        "        if (password.Length < 8) return \"error: password too short\";",
+        "        masterKey = DeriveKey(password);",
+        "        keyCheck = KeyCheck(masterKey);",
+        "        return $\"created (key-check {Short(keyCheck)})\";",
+        "    }",
+        "",
+        "    string Unlock(string password)",
+        "    {",
+        "        if (keyCheck is null) return \"error: no vault\";",
+        "        var candidate = DeriveKey(password);",
+        "        if (!CryptographicOperations.FixedTimeEquals(KeyCheck(candidate), keyCheck))",
+        "        {",
+        "            CryptographicOperations.ZeroMemory(candidate);",
+        "            return \"error: wrong password\";",
+        "        }",
+        "        masterKey = candidate;",
+        "        return \"unlocked\";",
+        "    }",
+        "",
+        "    string Lock()",
+        "    {",
+        "        if (keyCheck is null) return \"error: no vault\";",
+        "        if (masterKey is not null) CryptographicOperations.ZeroMemory(masterKey);",
+        "        masterKey = null;",
+        "        return \"locked\";",
+        "    }",
+        "}"
+      ],
+      "tests": [
+        {
+          "name": "init and status",
+          "stdin": "init correct-horse\nstatus\n",
+          "expect": [
+            "created (key-check ac911ada)",
+            "unlocked"
+          ]
+        },
+        {
+          "name": "lock, a wrong password, then the right one",
+          "stdin": "init correct-horse\nlock\nstatus\nunlock wrong-horse\nstatus\nunlock correct-horse\nstatus\n",
+          "expect": [
+            "created (key-check ac911ada)",
+            "locked",
+            "locked",
+            "error: wrong password",
+            "locked",
+            "unlocked",
+            "unlocked"
+          ]
+        },
+        {
+          "name": "errors before and after init",
+          "stdin": "status\nunlock whatever\nlock\ninit short\ninit\ninit correct-horse\ninit another-password\nfly\n",
+          "expect": [
+            "no vault",
+            "error: no vault",
+            "error: no vault",
+            "error: password too short",
+            "error: missing argument",
+            "created (key-check ac911ada)",
+            "error: vault already exists",
+            "error: unknown command"
+          ]
+        },
+        {
+          "name": "a different password gives a different key-check",
+          "stdin": "init Tr0ub4dor&3\nlock\nunlock correct-horse\nunlock Tr0ub4dor&3\n",
+          "expect": [
+            "created (key-check 57ddbab2)",
+            "locked",
+            "error: wrong password",
+            "unlocked"
+          ]
+        }
+      ],
+      "require": [
+        {
+          "pattern": "Pbkdf2",
+          "message": "Derives the key with PBKDF2"
+        },
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares key-checks in constant time"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bnew\\s+Random\\b",
+          "message": "Does not use System.Random"
+        }
+      ],
+      "hints": [
+        "Write two helpers: `static byte[] DeriveKey(string password)` and `static byte[] KeyCheck(byte[] key) => HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(\"key-check\"))`.",
+        "`status` is `keyCheck is null ? \"no vault\" : masterKey is null ? \"locked\" : \"unlocked\"`.",
+        "In `Lock`, call `CryptographicOperations.ZeroMemory(masterKey)` before setting it to null."
+      ]
+    }
+  ]
+}

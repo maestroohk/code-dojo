@@ -1,0 +1,215 @@
+{
+  "title": "Boss: red team, blue team",
+  "summary": "Estimate brute-force cost, write a constant-time comparison yourself, and stop a downgrade by authenticating the negotiation.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Both sides of the table",
+      "body": "Three jobs that combine this module: an attacker's cost calculator, a defender's constant-time primitive, and a negotiation that an attacker in the middle can no longer downgrade without being caught."
+    },
+    {
+      "type": "code",
+      "title": "Brute-force calculator",
+      "prompt": [
+        "Read lines of the form `<bits> <guessesPerSecond>` from standard input until the end (the rate may be written like `1e12`). For each, print:",
+        "",
+        "```text",
+        "<bits> bits at <rate>/s: <years> years, <verdict>",
+        "```",
+        "",
+        "where `<rate>` and `<years>` are formatted with `\"E2\"`, years is the **average** search time (`2^(bits-1) / rate`, 31,557,600 seconds per year), and the verdict is `broken` under 1 year, `weak` under 1,000,000 years, otherwise `safe`."
+      ],
+      "starter": "// Read \"<bits> <guessesPerSecond>\" lines until the end.",
+      "solution": [
+        "string? line;",
+        "while ((line = Console.ReadLine()) != null)",
+        "{",
+        "    var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "    if (parts.Length != 2) continue;",
+        "    int bits = int.Parse(parts[0]);",
+        "    double rate = double.Parse(parts[1]);",
+        "    double years = Math.Pow(2, bits - 1) / rate / 31_557_600;",
+        "    string verdict = years < 1 ? \"broken\" : years < 1_000_000 ? \"weak\" : \"safe\";",
+        "    Console.WriteLine($\"{bits} bits at {rate:E2}/s: {years:E2} years, {verdict}\");",
+        "}"
+      ],
+      "tests": [
+        {
+          "name": "DES-sized keys",
+          "stdin": "56 1e9\n56 1e12\n",
+          "expect": [
+            "56 bits at 1.00E+009/s: 1.14E+000 years, weak",
+            "56 bits at 1.00E+012/s: 1.14E-003 years, broken"
+          ]
+        },
+        {
+          "name": "a range of sizes",
+          "stdin": "40 1e9\n80 1e12\n128 1e15\n",
+          "expect": [
+            "40 bits at 1.00E+009/s: 1.74E-005 years, broken",
+            "80 bits at 1.00E+012/s: 1.92E+004 years, weak",
+            "128 bits at 1.00E+015/s: 5.39E+015 years, safe"
+          ]
+        }
+      ],
+      "hints": [
+        "`double.Parse(\"1e12\")` understands exponent notation.",
+        "`$\"{years:E2}\"` formats in scientific notation with two decimals."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Constant time, by hand",
+      "prompt": [
+        "Write `bool SafeEquals(byte[] a, byte[] b)` **without** `FixedTimeEquals` or `SequenceEqual`: return `false` at once if the lengths differ, otherwise look at every byte, accumulate `diff |= a[i] ^ b[i]`, and decide only after the loop. No `break` and no early `return` inside the loop.",
+        "",
+        "The tests compare it against the library on many inputs."
+      ],
+      "starter": [
+        "bool SafeEquals(byte[] a, byte[] b)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool SafeEquals(byte[] a, byte[] b)",
+        "{",
+        "    if (a.Length != b.Length) return false;",
+        "    int diff = 0;",
+        "    for (int i = 0; i < a.Length; i++)",
+        "        diff |= a[i] ^ b[i];",
+        "    return diff == 0;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRows = 0; var dojoBad = 0;",
+        "for (int dojoLen = 0; dojoLen <= 8; dojoLen++)",
+        "for (int dojoPos = 0; dojoPos < Math.Max(dojoLen, 1); dojoPos++)",
+        "{",
+        "    var dojoA = Enumerable.Range(0, dojoLen).Select(i => (byte)(i * 31 + dojoLen)).ToArray();",
+        "    var dojoB = (byte[])dojoA.Clone();",
+        "    if (dojoLen > 0) dojoB[dojoPos] ^= (byte)(1 << (dojoPos % 8));",
+        "    foreach (var (x, y) in new[] { (dojoA, dojoA.ToArray()), (dojoA, dojoB), (dojoA, dojoB[..Math.Max(0, dojoLen - 1)]) })",
+        "    {",
+        "        dojoRows++;",
+        "        if (SafeEquals(x, y) != System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(x, y)) dojoBad++;",
+        "    }",
+        "}",
+        "Dojo.Eq($\"agrees with FixedTimeEquals on {dojoRows} cases\", 0, dojoBad);",
+        "Dojo.Check(\"two empty arrays are equal\", SafeEquals(Array.Empty<byte>(), Array.Empty<byte>()), \"said unequal\");"
+      ],
+      "require": [
+        {
+          "pattern": "\\|=",
+          "message": "Accumulates with |="
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Does not call FixedTimeEquals"
+        },
+        {
+          "pattern": "SequenceEqual",
+          "message": "Does not call SequenceEqual"
+        },
+        {
+          "pattern": "\\bbreak\\b",
+          "message": "No break in the loop"
+        }
+      ],
+      "hints": [
+        "The only `return` before the loop is the length check.",
+        "`return diff == 0;` after the loop."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Authenticate the negotiation",
+      "prompt": [
+        "An attacker in the middle can delete `TLS1.3` from the client's offer list, and the server, seeing only `TLS1.2`, happily picks it. Detect that the way TLS 1.3 does: the server authenticates **what it saw**.",
+        "",
+        "Client and server share `key` (in TLS this comes from the handshake itself). Write:",
+        "",
+        "- `string ServerHello(byte[] key, string[] offersSeen, string[] serverPreference)`: pick the first server-preferred option in `offersSeen`, then return `\"<choice>|<tag>\"`, where tag is lowercase hex HMAC-SHA256 over the UTF-8 of `string.Join(\",\", offersSeen) + \"|\" + choice`.",
+        "- `bool ClientAccepts(byte[] key, string[] offersSent, string hello)`: recompute the tag over **the offers the client actually sent** and the choice in the hello, compare in fixed time, and also require that the choice is one the client offered.",
+        "",
+        "If no option matches, `ServerHello` returns `\"none|\"` and the client must reject it."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "string ServerHello(byte[] key, string[] offersSeen, string[] serverPreference)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "bool ClientAccepts(byte[] key, string[] offersSent, string hello)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] Transcript(byte[] key, string[] offers, string choice) =>",
+        "    HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(string.Join(\",\", offers) + \"|\" + choice));",
+        "",
+        "string ServerHello(byte[] key, string[] offersSeen, string[] serverPreference)",
+        "{",
+        "    var choice = serverPreference.FirstOrDefault(offersSeen.Contains);",
+        "    if (choice is null) return \"none|\";",
+        "    return choice + \"|\" + Convert.ToHexStringLower(Transcript(key, offersSeen, choice));",
+        "}",
+        "",
+        "bool ClientAccepts(byte[] key, string[] offersSent, string hello)",
+        "{",
+        "    var bar = hello.IndexOf('|');",
+        "    if (bar < 0) return false;",
+        "    var choice = hello[..bar];",
+        "    if (!offersSent.Contains(choice)) return false;",
+        "    byte[] tag;",
+        "    try { tag = Convert.FromHexString(hello[(bar + 1)..]); }",
+        "    catch (FormatException) { return false; }",
+        "    return CryptographicOperations.FixedTimeEquals(Transcript(key, offersSent, choice), tag);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKey = Enumerable.Repeat((byte)0x5A, 32).ToArray();",
+        "string[] dojoServer = { \"TLS1.3\", \"TLS1.2\" };",
+        "string[] dojoSent = { \"TLS1.2\", \"TLS1.3\" };",
+        "var dojoHonest = ServerHello(dojoKey, dojoSent, dojoServer);",
+        "Dojo.Check(\"the honest server picks TLS1.3\", dojoHonest.StartsWith(\"TLS1.3|\") && dojoHonest.Length == 7 + 64, dojoHonest);",
+        "Dojo.Check(\"the client accepts the honest hello\", ClientAccepts(dojoKey, dojoSent, dojoHonest), \"rejected an honest hello\");",
+        "var dojoStripped = ServerHello(dojoKey, new[] { \"TLS1.2\" }, dojoServer);",
+        "Dojo.Check(\"the server, fooled, picks TLS1.2\", dojoStripped.StartsWith(\"TLS1.2|\"), dojoStripped);",
+        "Dojo.Check(\"the client detects the stripped offer list\", !ClientAccepts(dojoKey, dojoSent, dojoStripped), \"accepted a downgrade\");",
+        "Dojo.Check(\"an edited choice is rejected\", !ClientAccepts(dojoKey, dojoSent, \"TLS1.2\" + dojoHonest[6..]), \"accepted an edited choice\");",
+        "Dojo.Check(\"a choice the client never offered is rejected\", !ClientAccepts(dojoKey, new[] { \"TLS1.3\" }, ServerHello(dojoKey, new[] { \"TLS1.3\", \"SSL3\" }, new[] { \"SSL3\" })), \"accepted SSL3\");",
+        "Dojo.Eq(\"no common option gives none|\", \"none|\", ServerHello(dojoKey, new[] { \"SSL3\" }, dojoServer));",
+        "Dojo.Check(\"the client rejects none|\", !ClientAccepts(dojoKey, dojoSent, \"none|\"), \"accepted none\");",
+        "Dojo.Check(\"garbage is rejected without throwing\", !ClientAccepts(dojoKey, dojoSent, \"TLS1.3|zz\"), \"accepted garbage\");"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares tags with FixedTimeEquals"
+        },
+        {
+          "pattern": "HMACSHA256",
+          "message": "Uses HMAC-SHA256"
+        }
+      ],
+      "hints": [
+        "Write one helper that computes the transcript tag from (offers, choice); both sides call it, with *their own* view of the offers.",
+        "Split the hello at the first `|`; the choice is before it, the hex tag after."
+      ]
+    }
+  ]
+}

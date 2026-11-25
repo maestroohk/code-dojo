@@ -1,0 +1,302 @@
+{
+  "title": "RSA: keys, padding and limits",
+  "summary": "How an RSA key pair works, why encryption needs OAEP padding, and why RSA only ever encrypts small things.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two keys, one modulus",
+      "body": [
+        "Symmetric ciphers need both sides to share a secret first. **Asymmetric** (public-key) cryptography removes that: anyone can encrypt with your **public key**, and only your **private key** decrypts.",
+        "",
+        "RSA (1977) builds the pair from two large random primes `p` and `q`:",
+        "",
+        "- the **modulus** `n = p × q` (2048 bits or more), public;",
+        "- the **public exponent** `e`, almost always 65537, public;",
+        "- the **private exponent** `d`, computed from `p` and `q`, secret.",
+        "",
+        "Encrypting is `c = m^e mod n`, decrypting is `m = c^d mod n`. Computing `d` without knowing `p` and `q` means factoring `n`, which nobody can do for 2048-bit numbers. Step through a toy version with tiny primes (61 and 53) below."
+      ],
+      "trace": {
+        "code": [
+          "using System.Numerics;",
+          "",
+          "BigInteger n = 61 * 53;       // 3233, the public modulus",
+          "BigInteger e = 17;            // public exponent",
+          "BigInteger d = 2753;          // private exponent (needs p and q to compute)",
+          "BigInteger m = 65;            // the \"message\", a number smaller than n",
+          "BigInteger c = BigInteger.ModPow(m, e, n);",
+          "BigInteger back = BigInteger.ModPow(c, d, n);",
+          "Console.WriteLine($\"{c} {back}\");"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Textbook RSA with the toy key. What does this print?",
+      "code": [
+        "using System.Numerics;",
+        "",
+        "BigInteger n = 3233, e = 17, d = 2753;",
+        "var c1 = BigInteger.ModPow(65, e, n);",
+        "var c2 = BigInteger.ModPow(65, e, n);",
+        "Console.WriteLine(c1 == c2);",
+        "Console.WriteLine(BigInteger.ModPow(c1, d, n));"
+      ],
+      "answer": [
+        "True",
+        "65"
+      ],
+      "explain": "Textbook RSA is **deterministic**: the same message always gives the same ciphertext. An attacker can guess `65`, encrypt it with the public key, and compare. Real RSA adds random padding to stop that."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is \"textbook\" RSA (just `m^e mod n`) unsafe even with a 2048-bit key?",
+      "options": [
+        "It is deterministic and malleable: guesses can be checked with the public key, and ciphertexts can be multiplied to change the plaintext",
+        "2048 bits can be factored on a laptop",
+        "The public exponent 65537 is too small to be secure",
+        "It leaks the private key in the ciphertext"
+      ],
+      "answer": 0,
+      "explain": "Anyone can encrypt, so anyone can test a guess. And `c1 × c2` decrypts to `m1 × m2`. Padding schemes add randomness and structure that defeat both."
+    },
+    {
+      "type": "learn",
+      "title": "OAEP, not PKCS#1 v1.5",
+      "body": [
+        "Two paddings exist for RSA **encryption**:",
+        "",
+        "| Padding | Status |",
+        "|---|---|",
+        "| **PKCS#1 v1.5** (`RSAEncryptionPadding.Pkcs1`) | legacy. Bleichenbacher's attack (1998) decrypts messages by watching whether a server reports \"bad padding\"; it came back as ROBOT in 2017 against major TLS stacks. Avoid for new designs. |",
+        "| **OAEP** (`RSAEncryptionPadding.OaepSHA256`) | use this. Random, with a built-in integrity check of the padding. |",
+        "",
+        "```csharp",
+        "using var rsa = RSA.Create(2048);             // new random key pair",
+        "byte[] c = rsa.Encrypt(data, RSAEncryptionPadding.OaepSHA256);",
+        "byte[] m = rsa.Decrypt(c, RSAEncryptionPadding.OaepSHA256);",
+        "```",
+        "",
+        "(Signatures have their own paddings; lesson 4 covers them. PKCS#1 v1.5 *signatures* are not broken the way v1.5 *encryption* is.)"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the round trip so it prints `True`.",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var rsa = RSA.Create(2048);",
+        "byte[] secret = Encoding.UTF8.GetBytes(\"launch code\");",
+        "byte[] c = rsa.__1__(secret, RSAEncryptionPadding.__3__);",
+        "byte[] back = rsa.__2__(c, RSAEncryptionPadding.__3__);",
+        "Console.WriteLine(back.SequenceEqual(secret));"
+      ],
+      "blanks": [
+        "Encrypt",
+        "Decrypt",
+        "OaepSHA256"
+      ],
+      "bank": [
+        "SignData",
+        "Pss",
+        "HashData"
+      ],
+      "explain": "Same padding on both sides. `Pss` is a *signature* padding and does not exist on `RSAEncryptionPadding`."
+    },
+    {
+      "type": "predict",
+      "prompt": "RSA-OAEP is randomized. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var rsa = RSA.Create(2048);",
+        "byte[] m = Encoding.UTF8.GetBytes(\"hi\");",
+        "byte[] c1 = rsa.Encrypt(m, RSAEncryptionPadding.OaepSHA256);",
+        "byte[] c2 = rsa.Encrypt(m, RSAEncryptionPadding.OaepSHA256);",
+        "Console.WriteLine(c1.Length);",
+        "Console.WriteLine(c1.SequenceEqual(c2));",
+        "Console.WriteLine(Encoding.UTF8.GetString(rsa.Decrypt(c2, RSAEncryptionPadding.OaepSHA256)));"
+      ],
+      "answer": [
+        "256",
+        "False",
+        "hi"
+      ],
+      "explain": "A ciphertext is always as long as the modulus: 2048 bits is 256 bytes, even for 2 bytes of message. OAEP's random seed makes every encryption different, yet both decrypt."
+    },
+    {
+      "type": "learn",
+      "title": "RSA encrypts small things only",
+      "body": [
+        "RSA works on one number smaller than `n`, so the message plus padding must fit in the modulus. For OAEP the limit is:",
+        "",
+        "```text",
+        "max plaintext = modulus bytes - 2 × hash bytes - 2",
+        "RSA-2048, OAEP-SHA256:  256 - 2×32 - 2 = 190 bytes",
+        "RSA-2048, OAEP-SHA1:    256 - 2×20 - 2 = 214 bytes",
+        "RSA-3072, OAEP-SHA256:  384 - 64 - 2   = 318 bytes",
+        "```",
+        "",
+        "One byte more and `Encrypt` throws `CryptographicException`. RSA is also roughly a thousand times slower than AES. So RSA never encrypts files or messages directly: it encrypts a **random AES key** (32 bytes fits easily), and AES encrypts the data. That is **hybrid encryption**, lesson 3."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each fact to its value for RSA-2048 with OAEP-SHA256.",
+      "pairs": [
+        [
+          "modulus size in bytes",
+          "256"
+        ],
+        [
+          "ciphertext size for a 1-byte message",
+          "256 bytes"
+        ],
+        [
+          "largest plaintext that fits",
+          "190 bytes"
+        ],
+        [
+          "the usual public exponent",
+          "65537"
+        ]
+      ],
+      "explain": "Ciphertext size is fixed by the modulus. The plaintext limit is the modulus minus OAEP's overhead."
+    },
+    {
+      "type": "code",
+      "title": "Will it fit?",
+      "prompt": [
+        "Write two methods:",
+        "",
+        "- `int MaxOaepPlaintext(int keyBits, int hashBytes)`: the formula from the card (`keyBits / 8 - 2 * hashBytes - 2`).",
+        "- `bool Fits(RSA rsa, byte[] data)`: actually try `rsa.Encrypt(data, RSAEncryptionPadding.OaepSHA256)`; return `true` if it works and `false` if it throws `CryptographicException`.",
+        "",
+        "The tests use a real 2048-bit key: 190 bytes must fit, 191 must not."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "int MaxOaepPlaintext(int keyBits, int hashBytes)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "bool Fits(RSA rsa, byte[] data)",
+        "{",
+        "    return true;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "int MaxOaepPlaintext(int keyBits, int hashBytes)",
+        "{",
+        "    return keyBits / 8 - 2 * hashBytes - 2;",
+        "}",
+        "",
+        "bool Fits(RSA rsa, byte[] data)",
+        "{",
+        "    try",
+        "    {",
+        "        rsa.Encrypt(data, RSAEncryptionPadding.OaepSHA256);",
+        "        return true;",
+        "    }",
+        "    catch (CryptographicException)",
+        "    {",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"MaxOaepPlaintext(2048, 32)\", 190, MaxOaepPlaintext(2048, 32));",
+        "Dojo.Eq(\"MaxOaepPlaintext(2048, 20)\", 214, MaxOaepPlaintext(2048, 20));",
+        "Dojo.Eq(\"MaxOaepPlaintext(3072, 32)\", 318, MaxOaepPlaintext(3072, 32));",
+        "using var dojoRsa = System.Security.Cryptography.RSA.Create(2048);",
+        "Dojo.Check(\"a 32-byte AES key fits\", Fits(dojoRsa, new byte[32]), \"Fits returned false for 32 bytes\");",
+        "Dojo.Check(\"190 bytes fit\", Fits(dojoRsa, new byte[190]), \"Fits returned false for 190 bytes\");",
+        "Dojo.Check(\"191 bytes do not fit\", !Fits(dojoRsa, new byte[191]), \"Fits returned true for 191 bytes\");"
+      ],
+      "hints": [
+        "`keyBits / 8` turns bits into bytes.",
+        "Wrap the `Encrypt` call in `try { ... } catch (CryptographicException) { return false; }`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Encrypt to a public key",
+      "prompt": [
+        "Bob makes a key pair and publishes only his **public key** (as `SubjectPublicKeyInfo` bytes, the standard format). Alice imports those bytes into her own `RSA` object and encrypts a message; only Bob's private key can read it.",
+        "",
+        "Write the program so it prints exactly:",
+        "",
+        "```text",
+        "public key: 294 bytes",
+        "sent 256 bytes",
+        "bob reads: meet at noon",
+        "alice can decrypt: False",
+        "```",
+        "",
+        "For the last line, Alice tries to `Decrypt` with her public-only key object: catch the `CryptographicException` and print `False` (print `True` if it somehow worked)."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var bob = RSA.Create(2048);",
+        "byte[] published = bob.ExportSubjectPublicKeyInfo();",
+        "",
+        "// Alice: import the public key, encrypt \"meet at noon\" with OAEP-SHA256.",
+        "// Bob: decrypt it.",
+        "// Alice: try to decrypt her own ciphertext."
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "using var bob = RSA.Create(2048);",
+        "byte[] published = bob.ExportSubjectPublicKeyInfo();",
+        "Console.WriteLine($\"public key: {published.Length} bytes\");",
+        "",
+        "using var alice = RSA.Create();",
+        "alice.ImportSubjectPublicKeyInfo(published, out _);",
+        "byte[] c = alice.Encrypt(Encoding.UTF8.GetBytes(\"meet at noon\"), RSAEncryptionPadding.OaepSHA256);",
+        "Console.WriteLine($\"sent {c.Length} bytes\");",
+        "",
+        "byte[] m = bob.Decrypt(c, RSAEncryptionPadding.OaepSHA256);",
+        "Console.WriteLine($\"bob reads: {Encoding.UTF8.GetString(m)}\");",
+        "",
+        "bool aliceCan;",
+        "try",
+        "{",
+        "    alice.Decrypt(c, RSAEncryptionPadding.OaepSHA256);",
+        "    aliceCan = true;",
+        "}",
+        "catch (CryptographicException)",
+        "{",
+        "    aliceCan = false;",
+        "}",
+        "Console.WriteLine($\"alice can decrypt: {aliceCan}\");"
+      ],
+      "tests": [
+        {
+          "expect": [
+            "public key: 294 bytes",
+            "sent 256 bytes",
+            "bob reads: meet at noon",
+            "alice can decrypt: False"
+          ]
+        }
+      ],
+      "hints": [
+        "`alice.ImportSubjectPublicKeyInfo(published, out _)` loads only the public half.",
+        "Decrypting needs the private exponent, which Alice's object does not have, so it throws."
+      ]
+    }
+  ]
+}

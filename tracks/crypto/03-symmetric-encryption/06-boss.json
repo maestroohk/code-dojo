@@ -1,0 +1,278 @@
+{
+  "title": "Boss: the cipher lab",
+  "summary": "Spot ECB in the wild, seek inside a CTR stream, catch a reused nonce, and seal database fields bound to their rows.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The lab",
+      "body": [
+        "Four jobs that combine the module: recognising ECB from ciphertext alone, using CTR's random access, exploiting a nonce reuse found during an audit, and building the AES-GCM field encryption you would actually ship.",
+        "",
+        "Keys and nonces are fixed or counter-based so the tests are repeatable. In production the key comes from a vault and the nonce counter is persisted."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "ECB scanner",
+      "prompt": [
+        "An audit dumped ciphertexts from several services, one hex string per line on standard input. For each line, print:",
+        "",
+        "```text",
+        "<line number>: ECB (<n> repeated blocks)      if any 16-byte block repeats an earlier one in that line",
+        "<line number>: ok                              otherwise",
+        "```",
+        "",
+        "Line numbers start at 1. Count repeats as in lesson 2 (three equal blocks are 2 repeats). Ignore empty lines (they do not get a number)."
+      ],
+      "starter": "// Read lines with Console.ReadLine() until it returns null.",
+      "solution": [
+        "int number = 0;",
+        "string? line;",
+        "while ((line = Console.ReadLine()) != null)",
+        "{",
+        "    line = line.Trim();",
+        "    if (line.Length == 0) continue;",
+        "    number++;",
+        "    byte[] data = Convert.FromHexString(line);",
+        "    var seen = new HashSet<string>();",
+        "    int repeats = 0;",
+        "    for (int i = 0; i + 16 <= data.Length; i += 16)",
+        "        if (!seen.Add(Convert.ToHexString(data, i, 16))) repeats++;",
+        "    Console.WriteLine(repeats > 0 ? $\"{number}: ECB ({repeats} repeated blocks)\" : $\"{number}: ok\");",
+        "}"
+      ],
+      "tests": [
+        {
+          "name": "one ECB line, one clean",
+          "stdin": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff0f0e0d0c0b0a09080706050403020100\n000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n",
+          "expect": [
+            "1: ECB (1 repeated blocks)",
+            "2: ok"
+          ]
+        },
+        {
+          "name": "three equal blocks, blank line skipped",
+          "stdin": "\nabababababababababababababababababababababababababababababababababababababababababababababababab\n\nffffffffffffffffffffffffffffffff\n",
+          "expect": [
+            "1: ECB (2 repeated blocks)",
+            "2: ok"
+          ]
+        }
+      ],
+      "hints": [
+        "`Convert.FromHexString(line)`, then step through 16 bytes at a time.",
+        "Keep a separate `HashSet<string>` for each line."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Seek inside a CTR stream",
+      "prompt": [
+        "CTR lets you decrypt from the middle of a large file without touching the start. Write `byte[] CtrAt(byte[] key, byte[] nonce, byte[] data, long offset)` that XORs `data` with the keystream **starting at byte `offset`** of the stream.",
+        "",
+        "Use the same counter block as lesson 3: 8-byte nonce, then the block number as an 8-byte big-endian value. Byte `offset` lives in block `offset / 16`, at position `offset % 16` inside it.",
+        "",
+        "The tests decrypt slices of a 100-byte stream at various offsets and compare with decrypting the whole thing."
+      ],
+      "starter": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] CtrAt(byte[] key, byte[] nonce, byte[] data, long offset)",
+        "{",
+        "    return data;",
+        "}"
+      ],
+      "solution": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] CtrAt(byte[] key, byte[] nonce, byte[] data, long offset)",
+        "{",
+        "    using var aes = Aes.Create();",
+        "    aes.Key = key;",
+        "    var output = new byte[data.Length];",
+        "    var counterBlock = new byte[16];",
+        "    nonce.CopyTo(counterBlock, 0);",
+        "    long block = -1;",
+        "    byte[] keystream = Array.Empty<byte>();",
+        "    for (int i = 0; i < data.Length; i++)",
+        "    {",
+        "        long position = offset + i;",
+        "        if (position / 16 != block)",
+        "        {",
+        "            block = position / 16;",
+        "            BinaryPrimitives.WriteUInt64BigEndian(counterBlock.AsSpan(8), (ulong)block);",
+        "            keystream = aes.EncryptEcb(counterBlock, PaddingMode.None);",
+        "        }",
+        "        output[i] = (byte)(data[i] ^ keystream[position % 16]);",
+        "    }",
+        "    return output;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKey = Enumerable.Range(5, 32).Select(i => (byte)i).ToArray();",
+        "var dojoNonce = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };",
+        "var dojoPlain = System.Text.Encoding.ASCII.GetBytes(string.Concat(Enumerable.Range(0, 10).Select(i => $\"record-{i:D3}|\")));",
+        "var dojoCipher = CtrAt(dojoKey, dojoNonce, dojoPlain, 0);",
+        "using var dojoAes = System.Security.Cryptography.Aes.Create();",
+        "dojoAes.Key = dojoKey;",
+        "var dojoCb = new byte[16]; dojoNonce.CopyTo(dojoCb, 0);",
+        "var dojoKs0 = dojoAes.EncryptEcb(dojoCb, System.Security.Cryptography.PaddingMode.None);",
+        "Dojo.Eq(\"offset 0, first block uses AES(nonce || 0)\", Convert.ToHexStringLower(dojoPlain.Take(16).Zip(dojoKs0, (a, b) => (byte)(a ^ b)).ToArray()), Convert.ToHexStringLower(dojoCipher[..16]));",
+        "Dojo.Eq(\"the whole stream decrypts\", System.Text.Encoding.ASCII.GetString(dojoPlain), System.Text.Encoding.ASCII.GetString(CtrAt(dojoKey, dojoNonce, dojoCipher, 0)));",
+        "foreach (var (dojoOff, dojoLen) in new[] { (11, 11), (16, 16), (37, 30), (95, 5) })",
+        "    Dojo.Eq($\"{dojoLen} bytes at offset {dojoOff}\", System.Text.Encoding.ASCII.GetString(dojoPlain, dojoOff, dojoLen),",
+        "        System.Text.Encoding.ASCII.GetString(CtrAt(dojoKey, dojoNonce, dojoCipher[dojoOff..(dojoOff + dojoLen)], dojoOff)));"
+      ],
+      "hints": [
+        "For each output byte, its stream position is `offset + i`; its block is `position / 16`.",
+        "Only re-encrypt the counter block when the block number changes, and index the keystream with `position % 16`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Find the reused nonce",
+      "prompt": [
+        "Three AES-GCM boxes (format: **nonce (12) || ciphertext || tag (16)**) came out of an audit, hex in the starter. You sent box 1 yourself, so you know its plaintext.",
+        "",
+        "Print which two boxes share a nonce, as `boxes A and B share a nonce` (A < B, numbered from 1), then the plaintext of the **other** box in that pair, recovered without the key (it is no longer than box 1's message)."
+      ],
+      "starter": [
+        "using System.Text;",
+        "",
+        "string[] boxes =",
+        "{",
+        "    \"0f1e2d3c4b5a69788796a5b4685b172f79ff285da23c6e89387abe83353671821c585b6c8b963beb0919d76e8d0e920ff1d905d6308d41cf1b3b48\",",
+        "    \"00112233445566778899aabb5fbc3f3315350fdb2d65a266631bab33bbe7184db63ce5093dbf9f16dd13fcea648daec0adc2709bebcb11\",",
+        "    \"0f1e2d3c4b5a69788796a5b47b41172f69ba3754be6873dc136ab295276f30910d580b289e9a76ef5d9807360ae1ed7d4e160eab34655b\",",
+        "};",
+        "string known = \"Quarterly numbers are attached.\";   // the plaintext of box 1"
+      ],
+      "solution": [
+        "using System.Text;",
+        "",
+        "string[] boxes =",
+        "{",
+        "    \"0f1e2d3c4b5a69788796a5b4685b172f79ff285da23c6e89387abe83353671821c585b6c8b963beb0919d76e8d0e920ff1d905d6308d41cf1b3b48\",",
+        "    \"00112233445566778899aabb5fbc3f3315350fdb2d65a266631bab33bbe7184db63ce5093dbf9f16dd13fcea648daec0adc2709bebcb11\",",
+        "    \"0f1e2d3c4b5a69788796a5b47b41172f69ba3754be6873dc136ab295276f30910d580b289e9a76ef5d9807360ae1ed7d4e160eab34655b\",",
+        "};",
+        "string known = \"Quarterly numbers are attached.\";   // the plaintext of box 1",
+        "",
+        "var raw = boxes.Select(Convert.FromHexString).ToArray();",
+        "byte[] knownBytes = Encoding.ASCII.GetBytes(known);",
+        "for (int a = 0; a < raw.Length; a++)",
+        "    for (int b = a + 1; b < raw.Length; b++)",
+        "    {",
+        "        if (!raw[a][..12].SequenceEqual(raw[b][..12])) continue;",
+        "        Console.WriteLine($\"boxes {a + 1} and {b + 1} share a nonce\");",
+        "        byte[] c1 = raw[0][12..^16];",
+        "        int other = a == 0 ? b : a;",
+        "        byte[] c2 = raw[other][12..^16];",
+        "        var p2 = new byte[c2.Length];",
+        "        for (int i = 0; i < p2.Length; i++)",
+        "            p2[i] = (byte)(c1[i] ^ c2[i] ^ knownBytes[i]);",
+        "        Console.WriteLine(Encoding.ASCII.GetString(p2));",
+        "    }"
+      ],
+      "tests": [
+        {
+          "expect": [
+            "boxes 1 and 3 share a nonce",
+            "Board meets Friday at 10am."
+          ]
+        }
+      ],
+      "hints": [
+        "Compare the first 12 bytes of each pair of boxes.",
+        "The ciphertext of a box is `raw[12..^16]`; XOR the two ciphertexts and the known plaintext, for the shorter length."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Field encryption bound to its row",
+      "prompt": [
+        "Build the field encryption for a `users` table. There is one data key (`key`, given) and a nonce counter `counter` (given, starts at 0):",
+        "",
+        "- `byte[] SealField(int userId, string column, string value)`: take the next nonce (increment `counter`, then 4 zero bytes + `counter` as 8-byte big-endian, so the first is `...0001`), encrypt the UTF-8 value with AES-GCM (16-byte tag) with associated data `$\"users:{userId}:{column}\"` in UTF-8, and return **nonce || ciphertext || tag**.",
+        "- `string OpenField(int userId, string column, byte[] box)`: decrypt with the associated data rebuilt from the arguments.",
+        "",
+        "The tests check exact bytes, that each seal uses a new nonce, and that a value copied to another user or another column refuses to decrypt."
+      ],
+      "starter": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = Enumerable.Range(0, 32).Select(i => (byte)(i * 5)).ToArray();   // in production: from a key vault",
+        "ulong counter = 0;                                                             // in production: persisted",
+        "",
+        "byte[] SealField(int userId, string column, string value)",
+        "{",
+        "    return Array.Empty<byte>();",
+        "}",
+        "",
+        "string OpenField(int userId, string column, byte[] box)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = Enumerable.Range(0, 32).Select(i => (byte)(i * 5)).ToArray();   // in production: from a key vault",
+        "ulong counter = 0;                                                             // in production: persisted",
+        "",
+        "byte[] SealField(int userId, string column, string value)",
+        "{",
+        "    counter++;",
+        "    var nonce = new byte[12];",
+        "    BinaryPrimitives.WriteUInt64BigEndian(nonce.AsSpan(4), counter);",
+        "    byte[] plain = Encoding.UTF8.GetBytes(value);",
+        "    byte[] aad = Encoding.UTF8.GetBytes($\"users:{userId}:{column}\");",
+        "    var box = new byte[12 + plain.Length + 16];",
+        "    nonce.CopyTo(box, 0);",
+        "    using var gcm = new AesGcm(key, tagSizeInBytes: 16);",
+        "    gcm.Encrypt(nonce, plain, box.AsSpan(12, plain.Length), box.AsSpan(12 + plain.Length), aad);",
+        "    return box;",
+        "}",
+        "",
+        "string OpenField(int userId, string column, byte[] box)",
+        "{",
+        "    byte[] aad = Encoding.UTF8.GetBytes($\"users:{userId}:{column}\");",
+        "    var plain = new byte[box.Length - 28];",
+        "    using var gcm = new AesGcm(key, tagSizeInBytes: 16);",
+        "    gcm.Decrypt(box.AsSpan(0, 12), box.AsSpan(12, plain.Length), box.AsSpan(box.Length - 16), plain, aad);",
+        "    return Encoding.UTF8.GetString(plain);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoBox = SealField(42, \"email\", \"ada@example.com\");",
+        "Dojo.Eq(\"the first box uses nonce 1\", \"000000000000000000000001\", Convert.ToHexStringLower(dojoBox[..12]));",
+        "var dojoEc = new byte[15]; var dojoEt = new byte[16];",
+        "using (var dojoGcm = new System.Security.Cryptography.AesGcm(Enumerable.Range(0, 32).Select(i => (byte)(i * 5)).ToArray(), 16))",
+        "    dojoGcm.Encrypt(dojoBox[..12], System.Text.Encoding.UTF8.GetBytes(\"ada@example.com\"), dojoEc, dojoEt, System.Text.Encoding.UTF8.GetBytes(\"users:42:email\"));",
+        "Dojo.Eq(\"ciphertext and tag match AES-GCM with AAD users:42:email\", Convert.ToHexStringLower(dojoEc) + Convert.ToHexStringLower(dojoEt), Convert.ToHexStringLower(dojoBox[12..]));",
+        "Dojo.Eq(\"OpenField reads it back\", \"ada@example.com\", OpenField(42, \"email\", dojoBox));",
+        "var dojoBox2 = SealField(42, \"email\", \"ada@example.com\");",
+        "Dojo.Eq(\"the second seal uses nonce 2\", \"000000000000000000000002\", Convert.ToHexStringLower(dojoBox2[..12]));",
+        "Dojo.Check(\"sealing the same value twice gives different boxes\", !dojoBox.SequenceEqual(dojoBox2), \"two boxes were identical\");",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"copied to user 43, it refuses to open\", () => OpenField(43, \"email\", dojoBox));",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"moved to another column, it refuses to open\", () => OpenField(42, \"phone\", dojoBox));",
+        "var dojoBad = (byte[])dojoBox.Clone(); dojoBad[20] ^= 4;",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"a tampered box refuses to open\", () => OpenField(42, \"email\", dojoBad));"
+      ],
+      "hints": [
+        "Nonce: `counter++`, then `BinaryPrimitives.WriteUInt64BigEndian(nonce.AsSpan(4), counter)`.",
+        "Build the same AAD string in both methods: `$\"users:{userId}:{column}\"`."
+      ]
+    }
+  ]
+}

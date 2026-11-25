@@ -1,0 +1,277 @@
+{
+  "title": "Elliptic curves and ECDH key agreement",
+  "summary": "Smaller, faster keys from elliptic curves, and how two strangers agree on a shared secret in public.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Elliptic-curve keys",
+      "body": [
+        "**Elliptic-curve cryptography (ECC)** gets the same security as RSA from much smaller keys. On the standard curve **P-256** (`ECCurve.NamedCurves.nistP256`):",
+        "",
+        "- the **private key** is a random 256-bit number `d` (32 bytes);",
+        "- the **public key** is a point `Q = d × G` on the curve, where `G` is a fixed starting point: two coordinates `X` and `Y`, 32 bytes each.",
+        "",
+        "Going from `d` to `Q` is fast; going back (the *elliptic-curve discrete logarithm*) is infeasible. A P-256 key is about as strong as RSA-3072, at a tenth of the size.",
+        "",
+        "```csharp",
+        "using var key = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "ECParameters p = key.ExportParameters(includePrivateParameters: true);",
+        "// p.D is the private number, p.Q.X and p.Q.Y the public point",
+        "```",
+        "",
+        "Other curves you will meet: P-384, and **X25519/Ed25519** (Curve25519), the modern favourites in TLS and SSH."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "using var key = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "var p = key.ExportParameters(true);",
+        "Console.WriteLine($\"{p.D!.Length} {p.Q.X!.Length} {p.Q.Y!.Length}\");",
+        "Console.WriteLine(key.ExportSubjectPublicKeyInfo().Length);"
+      ],
+      "answer": [
+        "32 32 32",
+        "91"
+      ],
+      "explain": "32-byte private number, a 64-byte point, and 91 bytes once wrapped in the standard `SubjectPublicKeyInfo` format (which also names the curve). Compare 294 bytes for an RSA-2048 public key."
+    },
+    {
+      "type": "learn",
+      "title": "Diffie-Hellman: a secret agreed in public",
+      "body": [
+        "**Diffie-Hellman (1976)** lets two people who have never met agree on a secret while an eavesdropper hears everything. The classic version uses numbers mod a prime `p` with a generator `g`:",
+        "",
+        "1. Alice picks secret `a`, sends `A = g^a mod p`.",
+        "2. Bob picks secret `b`, sends `B = g^b mod p`.",
+        "3. Alice computes `B^a`, Bob computes `A^b`. Both equal `g^(ab)`.",
+        "",
+        "The eavesdropper sees `p`, `g`, `A` and `B`, but getting `a` or `b` back is the discrete-log problem. **ECDH** is the same idea on an elliptic curve: `a × (b × G) = b × (a × G)`. Step through toy numbers below."
+      ],
+      "trace": {
+        "code": [
+          "long ModPow(long b, long e, long m)",
+          "{",
+          "    long result = 1;",
+          "    for (long i = 0; i < e; i++) result = result * b % m;",
+          "    return result;",
+          "}",
+          "",
+          "long p = 23, g = 5;",
+          "long a = 6;                     // Alice's secret",
+          "long b = 15;                    // Bob's secret",
+          "long A = ModPow(g, a, p);       // sent in public",
+          "long B = ModPow(g, b, p);       // sent in public",
+          "long aliceSecret = ModPow(B, a, p);",
+          "long bobSecret = ModPow(A, b, p);",
+          "Console.WriteLine($\"{A} {B} {aliceSecret} {bobSecret}\");"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Toy Diffie-Hellman with `p = 23`, `g = 5`, Alice's secret 6, Bob's secret 15. What does this print?",
+      "code": [
+        "using System.Numerics;",
+        "",
+        "BigInteger p = 23, g = 5;",
+        "var A = BigInteger.ModPow(g, 6, p);",
+        "var B = BigInteger.ModPow(g, 15, p);",
+        "Console.WriteLine($\"{A} {B}\");",
+        "Console.WriteLine($\"{BigInteger.ModPow(B, 6, p)} {BigInteger.ModPow(A, 15, p)}\");"
+      ],
+      "answer": [
+        "8 19",
+        "2 2"
+      ],
+      "explain": "Each side combines the other's public value with its own secret and lands on the same number, 2. The eavesdropper only ever saw 8 and 19."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An eavesdropper records a whole ECDH exchange between Alice and Bob. Then an *active* attacker, Mallory, sits in the middle of a new exchange and swaps both public keys for her own. What happens?",
+      "options": [
+        "The eavesdropper learns nothing, but Mallory ends up sharing one secret with Alice and another with Bob, and reads everything",
+        "Both attacks fail, because ECDH is secure",
+        "Both attacks succeed",
+        "Mallory's swap is detected automatically by ECDH"
+      ],
+      "answer": 0,
+      "explain": "ECDH defeats passive eavesdropping but has no idea *who* it agreed with. Real protocols sign the public keys (lesson 4) or use certificates, which is exactly what TLS does (lesson 6)."
+    },
+    {
+      "type": "learn",
+      "title": "ECDH in .NET",
+      "body": [
+        "```csharp",
+        "using var alice = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "using var bob   = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "",
+        "byte[] s1 = alice.DeriveRawSecretAgreement(bob.PublicKey);   // 32 bytes",
+        "byte[] s2 = bob.DeriveRawSecretAgreement(alice.PublicKey);   // the same 32 bytes",
+        "```",
+        "",
+        "The raw shared secret is a curve coordinate: it is not uniformly random, so **never use it directly as a key**. Feed it through a KDF (module 2):",
+        "",
+        "```csharp",
+        "byte[] key = HKDF.DeriveKey(HashAlgorithmName.SHA256, s1, 32, salt: null, info: \"my-app v1 session\"u8.ToArray());",
+        "```",
+        "",
+        "`DeriveKeyFromHash(otherKey, HashAlgorithmName.SHA256)` is a one-call alternative (SHA-256 of the secret). The `info` label binds the key to its purpose, so the same agreement can safely produce several keys."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the code so it prints `True 32`.",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "using var alice = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "using var bob = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);",
+        "byte[] raw1 = alice.__1__(bob.PublicKey);",
+        "byte[] raw2 = bob.__1__(alice.PublicKey);",
+        "byte[] k1 = HKDF.__2__(HashAlgorithmName.SHA256, raw1, 32, null, \"chat v1\"u8.ToArray());",
+        "byte[] k2 = HKDF.__2__(HashAlgorithmName.SHA256, raw2, 32, null, \"chat v1\"u8.ToArray());",
+        "Console.WriteLine($\"{k1.SequenceEqual(k2)} {k1.Length}\");"
+      ],
+      "blanks": [
+        "DeriveRawSecretAgreement",
+        "DeriveKey"
+      ],
+      "bank": [
+        "ExportParameters",
+        "Extract",
+        "SignData"
+      ],
+      "explain": "`DeriveRawSecretAgreement` gives the shared secret; `HKDF.DeriveKey` turns it into a proper key of the length you ask for."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange one ECDH exchange from start to finish.",
+      "lines": [
+        "Alice and Bob each generate a fresh key pair on the same curve",
+        "They send each other their public keys (anyone may see them)",
+        "Each combines their own private key with the other's public key",
+        "Each runs the raw shared secret through HKDF with the same label",
+        "Both now hold the same symmetric key and switch to AES-GCM"
+      ],
+      "explain": "Asymmetric math only agrees on a secret; the bulk of the traffic is always symmetric."
+    },
+    {
+      "type": "code",
+      "title": "Derive a session key",
+      "prompt": [
+        "Write `byte[] SessionKey(ECDiffieHellman mine, ECDiffieHellmanPublicKey theirs)`:",
+        "",
+        "1. `mine.DeriveRawSecretAgreement(theirs)`,",
+        "2. then `HKDF.DeriveKey` with SHA-256, 32 bytes, no salt, and info = the UTF-8 bytes of `\"dojo-session-v1\"`.",
+        "",
+        "The tests check that Alice and Bob derive the same key, that an outsider (Carol) gets a different one, and that the key is not just the raw secret."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] SessionKey(ECDiffieHellman mine, ECDiffieHellmanPublicKey theirs)",
+        "{",
+        "    return Array.Empty<byte>();",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] SessionKey(ECDiffieHellman mine, ECDiffieHellmanPublicKey theirs)",
+        "{",
+        "    byte[] raw = mine.DeriveRawSecretAgreement(theirs);",
+        "    return HKDF.DeriveKey(HashAlgorithmName.SHA256, raw, 32, null, Encoding.UTF8.GetBytes(\"dojo-session-v1\"));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoCurve = System.Security.Cryptography.ECCurve.NamedCurves.nistP256;",
+        "using var dojoAlice = System.Security.Cryptography.ECDiffieHellman.Create(dojoCurve);",
+        "using var dojoBob = System.Security.Cryptography.ECDiffieHellman.Create(dojoCurve);",
+        "using var dojoCarol = System.Security.Cryptography.ECDiffieHellman.Create(dojoCurve);",
+        "var dojoK1 = SessionKey(dojoAlice, dojoBob.PublicKey);",
+        "var dojoK2 = SessionKey(dojoBob, dojoAlice.PublicKey);",
+        "Dojo.Eq(\"the key is 32 bytes\", 32, dojoK1.Length);",
+        "Dojo.Check(\"Alice and Bob derive the same key\", dojoK1.SequenceEqual(dojoK2), \"the two sides disagree\");",
+        "Dojo.Check(\"Carol with Bob's public key gets a different key\", !SessionKey(dojoCarol, dojoBob.PublicKey).SequenceEqual(dojoK1), \"Carol derived Alice's key\");",
+        "Dojo.Check(\"the key is not the raw secret\", !dojoK1.SequenceEqual(dojoAlice.DeriveRawSecretAgreement(dojoBob.PublicKey)), \"returned the raw secret without a KDF\");",
+        "var dojoExpected = System.Security.Cryptography.HKDF.DeriveKey(System.Security.Cryptography.HashAlgorithmName.SHA256, dojoAlice.DeriveRawSecretAgreement(dojoBob.PublicKey), 32, null, System.Text.Encoding.UTF8.GetBytes(\"dojo-session-v1\"));",
+        "Dojo.Check(\"uses HKDF-SHA256 with the label dojo-session-v1\", dojoK1.SequenceEqual(dojoExpected), \"different KDF, length or label\");"
+      ],
+      "hints": [
+        "`HKDF.DeriveKey(HashAlgorithmName.SHA256, raw, 32, null, Encoding.UTF8.GetBytes(\"dojo-session-v1\"))`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Keys over the wire",
+      "prompt": [
+        "On a real network, public keys travel as bytes. Simulate it:",
+        "",
+        "1. Alice and Bob each create a P-256 `ECDiffieHellman` key.",
+        "2. Each exports `ExportSubjectPublicKeyInfo()`; that byte array is all the other side receives.",
+        "3. Each imports the other's bytes into a fresh `ECDiffieHellman` (`ImportSubjectPublicKeyInfo`) and uses its `.PublicKey` to derive a raw secret, then HKDF-SHA256 (32 bytes, info `\"wire-demo\"`).",
+        "4. Eve, who saw both public keys, uses her own key pair with Alice's public key.",
+        "",
+        "Print exactly:",
+        "",
+        "```text",
+        "on the wire: 91 + 91 bytes",
+        "alice and bob agree: True",
+        "eve agrees: False",
+        "```"
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "var curve = ECCurve.NamedCurves.nistP256;"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "var curve = ECCurve.NamedCurves.nistP256;",
+        "using var alice = ECDiffieHellman.Create(curve);",
+        "using var bob = ECDiffieHellman.Create(curve);",
+        "using var eve = ECDiffieHellman.Create(curve);",
+        "",
+        "byte[] aliceWire = alice.ExportSubjectPublicKeyInfo();",
+        "byte[] bobWire = bob.ExportSubjectPublicKeyInfo();",
+        "Console.WriteLine($\"on the wire: {aliceWire.Length} + {bobWire.Length} bytes\");",
+        "",
+        "byte[] Derive(ECDiffieHellman mine, byte[] theirWire)",
+        "{",
+        "    using var theirs = ECDiffieHellman.Create();",
+        "    theirs.ImportSubjectPublicKeyInfo(theirWire, out _);",
+        "    byte[] raw = mine.DeriveRawSecretAgreement(theirs.PublicKey);",
+        "    return HKDF.DeriveKey(HashAlgorithmName.SHA256, raw, 32, null, Encoding.UTF8.GetBytes(\"wire-demo\"));",
+        "}",
+        "",
+        "byte[] aliceKey = Derive(alice, bobWire);",
+        "byte[] bobKey = Derive(bob, aliceWire);",
+        "byte[] eveKey = Derive(eve, aliceWire);",
+        "Console.WriteLine($\"alice and bob agree: {aliceKey.SequenceEqual(bobKey)}\");",
+        "Console.WriteLine($\"eve agrees: {eveKey.SequenceEqual(aliceKey)}\");"
+      ],
+      "tests": [
+        {
+          "expect": [
+            "on the wire: 91 + 91 bytes",
+            "alice and bob agree: True",
+            "eve agrees: False"
+          ]
+        }
+      ],
+      "hints": [
+        "A local function `byte[] Derive(ECDiffieHellman mine, byte[] theirWire)` saves repeating yourself.",
+        "`using var theirs = ECDiffieHellman.Create(); theirs.ImportSubjectPublicKeyInfo(theirWire, out _);` then `mine.DeriveRawSecretAgreement(theirs.PublicKey)`."
+      ]
+    }
+  ]
+}

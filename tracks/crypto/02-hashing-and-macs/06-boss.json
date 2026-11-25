@@ -1,0 +1,288 @@
+{
+  "title": "Boss: the integrity toolkit",
+  "summary": "A webhook gate, a password-derived key store, a key ring from one secret, and tamper-evident records.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "code",
+      "title": "The webhook gate",
+      "prompt": [
+        "Write a program for a webhook gateway. The first input line is the shared secret (use its UTF-8 bytes as the HMAC key). Every following line is a delivery:",
+        "",
+        "```text",
+        "<signature hex> <body>",
+        "```",
+        "",
+        "(the body is everything after the first space). For each delivery print `accept <body>` if the signature is a valid HMAC-SHA256 of the body's UTF-8 bytes, or `reject` otherwise, including when the signature is not valid hex. Compare tags with `CryptographicOperations.FixedTimeEquals`."
+      ],
+      "starter": "// The first line is the secret; then one delivery per line until the end.",
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] secret = Encoding.UTF8.GetBytes(Console.ReadLine() ?? \"\");",
+        "string? line;",
+        "while ((line = Console.ReadLine()) != null)",
+        "{",
+        "    int space = line.IndexOf(' ');",
+        "    if (space < 0) { Console.WriteLine(\"reject\"); continue; }",
+        "    string body = line[(space + 1)..];",
+        "    byte[] given;",
+        "    try { given = Convert.FromHexString(line[..space]); }",
+        "    catch (FormatException) { Console.WriteLine(\"reject\"); continue; }",
+        "    byte[] expected = HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes(body));",
+        "    Console.WriteLine(CryptographicOperations.FixedTimeEquals(given, expected) ? $\"accept {body}\" : \"reject\");",
+        "}"
+      ],
+      "tests": [
+        {
+          "name": "a valid delivery",
+          "stdin": "whsec_dojo\n78d8c11116729ca45f140dd1d7c52fe4d9ac17b9ee1d69aae3c53a2ccbe1a8eb {\"event\":\"paid\",\"amount\":10}\n",
+          "expect": "accept {\"event\":\"paid\",\"amount\":10}"
+        },
+        {
+          "name": "a changed body and a swapped signature",
+          "stdin": "whsec_dojo\n78d8c11116729ca45f140dd1d7c52fe4d9ac17b9ee1d69aae3c53a2ccbe1a8eb {\"event\":\"paid\",\"amount\":1000}\n78d8c11116729ca45f140dd1d7c52fe4d9ac17b9ee1d69aae3c53a2ccbe1a8eb {\"event\":\"refund\",\"amount\":99}\n3ce8864d1761f8cbb2769e4980d861e7d3768cb1f3ac06e51b679f04ba48a240 {\"event\":\"refund\",\"amount\":99}\n",
+          "expect": [
+            "reject",
+            "reject",
+            "accept {\"event\":\"refund\",\"amount\":99}"
+          ]
+        },
+        {
+          "name": "the wrong secret, and garbage",
+          "stdin": "another-secret\n78d8c11116729ca45f140dd1d7c52fe4d9ac17b9ee1d69aae3c53a2ccbe1a8eb {\"event\":\"paid\",\"amount\":10}\nzz-not-hex {\"event\":\"paid\",\"amount\":10}\n",
+          "expect": [
+            "reject",
+            "reject"
+          ]
+        }
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares with FixedTimeEquals"
+        }
+      ],
+      "hints": [
+        "Split at `line.IndexOf(' ')`: the left part is the hex signature, the rest is the body.",
+        "Wrap `Convert.FromHexString` in try/catch for `FormatException`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A self-describing password hash",
+      "prompt": [
+        "Store password-derived values in one self-describing string, so the iteration count can be raised later without breaking old entries:",
+        "",
+        "```text",
+        "pbkdf2-sha256$<iterations>$<base64 salt>$<base64 32-byte hash>",
+        "```",
+        "",
+        "- `string HashPassword(string password, byte[] salt, int iterations)` builds it (real code passes a random 16-byte salt and 600,000 iterations; the tests pass fixed values and 1,000).",
+        "- `bool VerifyPassword(string password, string stored)` parses it, re-derives with the stored salt and iterations, and compares with `FixedTimeEquals`. Anything malformed (wrong prefix, wrong number of parts, a non-number, bad Base64) returns `false` rather than throwing."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "string HashPassword(string password, byte[] salt, int iterations)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "bool VerifyPassword(string password, string stored)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "string HashPassword(string password, byte[] salt, int iterations)",
+        "{",
+        "    byte[] hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32);",
+        "    return $\"pbkdf2-sha256${iterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}\";",
+        "}",
+        "",
+        "bool VerifyPassword(string password, string stored)",
+        "{",
+        "    string[] parts = stored.Split('$');",
+        "    if (parts.Length != 4 || parts[0] != \"pbkdf2-sha256\") return false;",
+        "    if (!int.TryParse(parts[1], out int iterations) || iterations < 1) return false;",
+        "    try",
+        "    {",
+        "        byte[] salt = Convert.FromBase64String(parts[2]);",
+        "        byte[] expected = Convert.FromBase64String(parts[3]);",
+        "        byte[] actual = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32);",
+        "        return CryptographicOperations.FixedTimeEquals(actual, expected);",
+        "    }",
+        "    catch (FormatException)",
+        "    {",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSalt = \"dojo-salt-16byte\"u8.ToArray();",
+        "var dojoStored = HashPassword(\"correct horse\", dojoSalt, 1000);",
+        "Dojo.Eq(\"the stored format\", \"pbkdf2-sha256$1000$ZG9qby1zYWx0LTE2Ynl0ZQ==$\" + Convert.ToBase64String(Convert.FromHexString(\"9a91c670f37ed09112419df342b8e88c9e191ae187942749ed1f1474deb0d74c\")), dojoStored);",
+        "Dojo.Check(\"the right password verifies\", VerifyPassword(\"correct horse\", dojoStored), \"rejected the right password\");",
+        "Dojo.Check(\"a wrong password fails\", !VerifyPassword(\"Correct horse\", dojoStored), \"accepted a wrong password\");",
+        "Dojo.Check(\"a lowered iteration count fails\", !VerifyPassword(\"correct horse\", dojoStored.Replace(\"$1000$\", \"$999$\")), \"accepted a tampered iteration count\");",
+        "Dojo.Check(\"an older entry with other parameters still verifies\", VerifyPassword(\"pw\", HashPassword(\"pw\", new byte[16], 500)), \"rejected a 500-iteration entry\");",
+        "Dojo.Check(\"a wrong prefix fails\", !VerifyPassword(\"correct horse\", dojoStored.Replace(\"pbkdf2-sha256\", \"md5\")), \"accepted another scheme\");",
+        "Dojo.Check(\"garbage fails without throwing\", !VerifyPassword(\"x\", \"pbkdf2-sha256$abc$!!$??\"), \"accepted garbage\");",
+        "Dojo.Check(\"bad Base64 fails without throwing\", !VerifyPassword(\"x\", \"pbkdf2-sha256$1000$!!!$???\"), \"accepted bad Base64\");"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares with FixedTimeEquals"
+        }
+      ],
+      "hints": [
+        "`stored.Split('$')` gives four parts.",
+        "`int.TryParse` for the count, and a try/catch around the Base64 decoding."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A key ring from one secret",
+      "prompt": [
+        "A service holds one 32-byte master secret and derives a separate key for each subsystem. Write a program that reads the master secret as hex on the first line, then one subsystem name per line, and prints for each:",
+        "",
+        "```text",
+        "<name> <first 8 bytes of its key, lowercase hex>",
+        "```",
+        "",
+        "Each key is HKDF-SHA256 of the master with no salt, 32 bytes, info `\"vault:\" + name`. Printing a short fingerprint (never the whole key) is how you check two machines derived the same key."
+      ],
+      "starter": "// Line 1: master secret as hex. Then one name per line.",
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] master = Convert.FromHexString(Console.ReadLine() ?? \"\");",
+        "string? name;",
+        "while ((name = Console.ReadLine()) != null)",
+        "{",
+        "    byte[] key = HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, Encoding.UTF8.GetBytes(\"vault:\" + name));",
+        "    Console.WriteLine($\"{name} {Convert.ToHexStringLower(key[..8])}\");",
+        "}"
+      ],
+      "tests": [
+        {
+          "name": "three subsystems",
+          "stdin": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\ndb\nbackup\naudit\n",
+          "expect": [
+            "db d2620f1ace96c002",
+            "backup 4b36dec6d9c21bc5",
+            "audit f146be5fd72c32d0"
+          ]
+        },
+        {
+          "name": "the same name twice gives the same key",
+          "stdin": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\ndb\ndb\n",
+          "expect": [
+            "db d2620f1ace96c002",
+            "db d2620f1ace96c002"
+          ]
+        }
+      ],
+      "require": [
+        {
+          "pattern": "HKDF\\.",
+          "message": "Uses the HKDF class"
+        }
+      ],
+      "hints": [
+        "`HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, Encoding.UTF8.GetBytes(\"vault:\" + name))`.",
+        "`key[..8]` is the first 8 bytes."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Tamper-evident records",
+      "prompt": [
+        "Seal text records so any change is detected. The seal uses a MAC key derived from a master key, never the master key itself.",
+        "",
+        "- `string Seal(byte[] master, string record)` returns `record + \".\" + tag`, where `tag` is the Base64url (no padding) of `HMACSHA256(macKey, UTF8(record))`, and `macKey = HKDF-SHA256(master, 32 bytes, no salt, info \"seal-mac\")`.",
+        "- `string? Open(byte[] master, string sealedRecord)` returns the record if the tag is valid, otherwise `null`. Records may themselves contain `.`, so split at the **last** dot. Compare with `FixedTimeEquals`, and return `null` (do not throw) for a missing dot or a tag that is not valid Base64url."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "string Seal(byte[] master, string record)",
+        "{",
+        "    return record;",
+        "}",
+        "",
+        "string? Open(byte[] master, string sealedRecord)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] MacKey(byte[] master) => HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, Encoding.UTF8.GetBytes(\"seal-mac\"));",
+        "",
+        "byte[] Tag(byte[] master, string record) => HMACSHA256.HashData(MacKey(master), Encoding.UTF8.GetBytes(record));",
+        "",
+        "string ToB64Url(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "",
+        "byte[] FromB64Url(string s)",
+        "{",
+        "    var b64 = s.Replace('-', '+').Replace('_', '/');",
+        "    while (b64.Length % 4 != 0) b64 += \"=\";",
+        "    return Convert.FromBase64String(b64);",
+        "}",
+        "",
+        "string Seal(byte[] master, string record) => record + \".\" + ToB64Url(Tag(master, record));",
+        "",
+        "string? Open(byte[] master, string sealedRecord)",
+        "{",
+        "    int dot = sealedRecord.LastIndexOf('.');",
+        "    if (dot < 0) return null;",
+        "    string record = sealedRecord[..dot];",
+        "    byte[] given;",
+        "    try { given = FromB64Url(sealedRecord[(dot + 1)..]); }",
+        "    catch (FormatException) { return null; }",
+        "    return CryptographicOperations.FixedTimeEquals(given, Tag(master, record)) ? record : null;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoMaster = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();",
+        "var dojoMacKey = System.Security.Cryptography.HKDF.DeriveKey(System.Security.Cryptography.HashAlgorithmName.SHA256, dojoMaster, 32, null, \"seal-mac\"u8.ToArray());",
+        "var dojoExpectedTag = Convert.ToBase64String(System.Security.Cryptography.HMACSHA256.HashData(dojoMacKey, \"user=ada;role=user\"u8.ToArray())).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "var dojoSealed = Seal(dojoMaster, \"user=ada;role=user\");",
+        "Dojo.Eq(\"Seal appends the Base64url tag\", \"user=ada;role=user.\" + dojoExpectedTag, dojoSealed);",
+        "Dojo.Eq(\"Open returns the record\", \"user=ada;role=user\", Open(dojoMaster, dojoSealed));",
+        "Dojo.Eq(\"a changed record is rejected\", null, Open(dojoMaster, dojoSealed.Replace(\"role=user\", \"role=admin\")));",
+        "Dojo.Eq(\"another master key is rejected\", null, Open(new byte[32], dojoSealed));",
+        "Dojo.Eq(\"records with dots work\", \"v1.2.3\", Open(dojoMaster, Seal(dojoMaster, \"v1.2.3\")));",
+        "Dojo.Eq(\"no dot is rejected\", null, Open(dojoMaster, \"nodot\"));",
+        "Dojo.Eq(\"a garbage tag is rejected\", null, Open(dojoMaster, \"x.!!!\"));"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares with FixedTimeEquals"
+        },
+        {
+          "pattern": "HKDF\\.",
+          "message": "Derives the MAC key with HKDF"
+        }
+      ],
+      "hints": [
+        "Write small helpers: `MacKey`, `Tag`, and the two Base64url conversions from module 1.",
+        "`sealedRecord.LastIndexOf('.')` finds the split point."
+      ]
+    }
+  ]
+}

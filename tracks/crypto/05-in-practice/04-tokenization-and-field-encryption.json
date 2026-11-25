@@ -1,0 +1,294 @@
+{
+  "title": "Tokenization and field-level encryption",
+  "summary": "Replace a value with a meaningless token, or encrypt one column so the database never sees it, and still find rows by it.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Tokenization is not encryption",
+      "body": [
+        "**Tokenization** replaces a sensitive value with a **random** stand-in (`tok_8f3a...`) and keeps the real value in a separate, locked-down **token vault**. The token has no mathematical relationship to the value: there is no key that turns it back, only a lookup in the vault.",
+        "",
+        "| | Tokenization | Encryption |",
+        "|---|---|---|",
+        "| Reversible by | asking the vault | anyone with the key, anywhere |",
+        "| Output | random, any format (can keep the last 4 digits) | ciphertext, longer than the input |",
+        "| Leak of the tokenised database | reveals nothing | reveals nothing *unless the key leaks too* |",
+        "",
+        "Payment systems use it so most of the company only ever handles tokens: under PCI DSS, systems that never see card numbers are largely out of scope for audit."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Tokenization or encryption?",
+      "buckets": [
+        "Tokenization",
+        "Encryption"
+      ],
+      "items": [
+        [
+          "The output is a random lookup id",
+          0
+        ],
+        [
+          "Anyone with the key can reverse it offline",
+          1
+        ],
+        [
+          "Needs a central vault to get the value back",
+          0
+        ],
+        [
+          "The output length depends on the input length",
+          1
+        ],
+        [
+          "Can keep the format, such as the last four digits",
+          0
+        ],
+        [
+          "Protects a file you email to a partner",
+          1
+        ]
+      ],
+      "explain": "Tokenization trades a key for a vault you must call. That is a feature: one tightly controlled service sees the real values."
+    },
+    {
+      "type": "code",
+      "title": "A token vault",
+      "prompt": [
+        "Write a tiny in-memory token vault as top-level code:",
+        "",
+        "- `string Tokenize(string pan)` returns `\"tok_\"` + 32 lowercase hex characters (16 random bytes). The **same** card number always gets the **same** token, so you can join on it.",
+        "- `string Detokenize(string token)` returns the card number, or throws `KeyNotFoundException` for an unknown token.",
+        "",
+        "Keep two dictionaries (value to token, token to value). The tests never print a token, since tokens are random."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "var tokenByPan = new Dictionary<string, string>();",
+        "var panByToken = new Dictionary<string, string>();",
+        "",
+        "string Tokenize(string pan)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "string Detokenize(string token)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "var tokenByPan = new Dictionary<string, string>();",
+        "var panByToken = new Dictionary<string, string>();",
+        "",
+        "string Tokenize(string pan)",
+        "{",
+        "    if (tokenByPan.TryGetValue(pan, out var existing)) return existing;",
+        "    var token = \"tok_\" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));",
+        "    tokenByPan[pan] = token;",
+        "    panByToken[token] = pan;",
+        "    return token;",
+        "}",
+        "",
+        "string Detokenize(string token) => panByToken[token];"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoT = Tokenize(\"4111111111111111\");",
+        "Dojo.Check(\"tokens look like tok_ + 32 hex\", dojoT.Length == 36 && dojoT.StartsWith(\"tok_\") && dojoT[4..].All(c => \"0123456789abcdef\".Contains(c)), dojoT);",
+        "Dojo.Check(\"the token reveals no digits of the card\", !dojoT.Contains(\"4111\"), dojoT);",
+        "Dojo.Eq(\"the same card gets the same token\", dojoT, Tokenize(\"4111111111111111\"));",
+        "Dojo.Check(\"another card gets another token\", Tokenize(\"5500000000000004\") != dojoT, \"two cards share a token\");",
+        "Dojo.Eq(\"Detokenize gives the card back\", \"4111111111111111\", Detokenize(dojoT));",
+        "Dojo.Throws<KeyNotFoundException>(\"an unknown token is refused\", () => Detokenize(\"tok_00000000000000000000000000000000\"));"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bRandom\\b(?!NumberGenerator)",
+          "message": "Does not use System.Random"
+        }
+      ],
+      "hints": [
+        "Check `tokenByPan.TryGetValue` first, so a repeated card returns its existing token.",
+        "`Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16))` gives the 32 hex characters."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Field-level encryption and searching",
+      "body": [
+        "**Field-level encryption** encrypts chosen columns (email, national id, diagnosis) in the application before they reach the database. The DBA, backups and a leaked dump see only ciphertext.",
+        "",
+        "The catch is searching. With **randomised** encryption (AES-GCM with a fresh nonce) the same email encrypts differently every time, so `WHERE email = ?` cannot work. Two options:",
+        "",
+        "- **Deterministic encryption**: the same input always gives the same ciphertext. Equality works, but it leaks which rows are equal, and frequency analysis (\"this value appears 40% of the time\") can reveal a lot.",
+        "- A **blind index**: keep randomised encryption for the value, and add a separate column holding `HMAC(indexKey, normalise(email))`. Look rows up by computing the HMAC of the search term. The index key is a **different** key from the encryption key, and the HMAC can be truncated (16 bytes) to leak even less.",
+        "",
+        "SQL Server's Always Encrypted offers both \"deterministic\" and \"randomized\" column types for exactly this reason."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = new byte[32];",
+        "byte[] email = Encoding.UTF8.GetBytes(\"ada@example.com\");",
+        "",
+        "byte[] Encrypt(byte nonceByte)",
+        "{",
+        "    var nonce = new byte[12]; nonce[11] = nonceByte;",
+        "    var c = new byte[email.Length]; var tag = new byte[16];",
+        "    using var gcm = new AesGcm(key, 16);",
+        "    gcm.Encrypt(nonce, email, c, tag);",
+        "    return c;",
+        "}",
+        "",
+        "bool randomisedEqual = Encrypt(1).SequenceEqual(Encrypt(2));",
+        "bool indexEqual = HMACSHA256.HashData(key, email).SequenceEqual(HMACSHA256.HashData(key, email));",
+        "Console.WriteLine($\"{randomisedEqual} {indexEqual}\");"
+      ],
+      "answer": "False True",
+      "explain": "Different nonces give different ciphertexts for the same email, so you cannot search them. The HMAC is deterministic, so the blind index matches every time."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why must the blind-index key be different from the field-encryption key?",
+      "options": [
+        "So that leaking or misusing one does not weaken the other; each key should have exactly one job",
+        "HMAC cannot use AES keys",
+        "The index key must be shorter",
+        "It does not matter, they can be the same"
+      ],
+      "answer": 0,
+      "explain": "One key, one purpose. Module 2's HKDF is the usual way to derive both from one master secret with different `info` labels."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the blind index: normalise the email, then HMAC it with the index key and keep the first 16 bytes.",
+      "code": [
+        "string BlindIndex(byte[] indexKey, string email)",
+        "{",
+        "    var normalised = email.__1__().__2__();",
+        "    var mac = __3__.HashData(indexKey, Encoding.UTF8.GetBytes(normalised));",
+        "    return Convert.ToHexStringLower(mac[..__4__]);",
+        "}"
+      ],
+      "blanks": [
+        "Trim",
+        "ToLowerInvariant",
+        "HMACSHA256",
+        "16"
+      ],
+      "bank": [
+        "ToUpper",
+        "SHA256",
+        "32",
+        "Aes"
+      ],
+      "explain": "Normalising first means `ADA@example.com ` and `ada@example.com` find the same row. Without a key it would be a plain hash, which anyone can compute for guessed emails."
+    },
+    {
+      "type": "code",
+      "title": "An encrypted, searchable customer table",
+      "prompt": [
+        "Build a customer table where emails are found through a blind index and names are encrypted with randomised AES-GCM. The keys and the row list are in the starter.",
+        "",
+        "- `void Add(string email, string name)`: store `(BlindIndex(email), Seal(name))` in `rows`. `BlindIndex` is lowercase hex of the first 16 bytes of HMAC-SHA256 under `indexKey` of the trimmed, lower-cased email. `Seal` is nonce + ciphertext + tag under `dataKey`, where the nonce is 4 zero bytes followed by a 64-bit big-endian counter that starts at 1 and goes up by one per encryption (`BinaryPrimitives.WriteInt64BigEndian`).",
+        "- `string? FindName(string email)`: the decrypted name of the row with that index, or `null`.",
+        "",
+        "The tests check that no row contains the email or the name in the clear."
+      ],
+      "starter": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] dataKey = Enumerable.Repeat((byte)0x11, 32).ToArray();    // in real life: from a vault",
+        "byte[] indexKey = Enumerable.Repeat((byte)0x22, 32).ToArray();   // a different key, one job each",
+        "long nonceCounter = 0;",
+        "var rows = new List<(string EmailIndex, byte[] Name)>();",
+        "",
+        "void Add(string email, string name)",
+        "{",
+        "}",
+        "",
+        "string? FindName(string email)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "using System.Buffers.Binary;",
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] dataKey = Enumerable.Repeat((byte)0x11, 32).ToArray();    // in real life: from a vault",
+        "byte[] indexKey = Enumerable.Repeat((byte)0x22, 32).ToArray();   // a different key, one job each",
+        "long nonceCounter = 0;",
+        "var rows = new List<(string EmailIndex, byte[] Name)>();",
+        "",
+        "string BlindIndex(string email)",
+        "{",
+        "    var mac = HMACSHA256.HashData(indexKey, Encoding.UTF8.GetBytes(email.Trim().ToLowerInvariant()));",
+        "    return Convert.ToHexStringLower(mac[..16]);",
+        "}",
+        "",
+        "byte[] Seal(string text)",
+        "{",
+        "    var plain = Encoding.UTF8.GetBytes(text);",
+        "    var box = new byte[12 + plain.Length + 16];",
+        "    BinaryPrimitives.WriteInt64BigEndian(box.AsSpan(4, 8), ++nonceCounter);",
+        "    using var gcm = new AesGcm(dataKey, 16);",
+        "    gcm.Encrypt(box.AsSpan(0, 12), plain, box.AsSpan(12, plain.Length), box.AsSpan(12 + plain.Length));",
+        "    return box;",
+        "}",
+        "",
+        "string Open(byte[] box)",
+        "{",
+        "    var plain = new byte[box.Length - 28];",
+        "    using var gcm = new AesGcm(dataKey, 16);",
+        "    gcm.Decrypt(box.AsSpan(0, 12), box.AsSpan(12, plain.Length), box.AsSpan(box.Length - 16), plain);",
+        "    return Encoding.UTF8.GetString(plain);",
+        "}",
+        "",
+        "void Add(string email, string name) => rows.Add((BlindIndex(email), Seal(name)));",
+        "",
+        "string? FindName(string email)",
+        "{",
+        "    var index = BlindIndex(email);",
+        "    foreach (var row in rows)",
+        "        if (row.EmailIndex == index) return Open(row.Name);",
+        "    return null;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Add(\"ada@example.com\", \"Ada Lovelace\");",
+        "Add(\"alan@example.com\", \"Alan Turing\");",
+        "Add(\"grace@example.com\", \"Ada Lovelace\");",
+        "Dojo.Eq(\"FindName finds a customer\", \"Alan Turing\", FindName(\"alan@example.com\"));",
+        "Dojo.Eq(\"the search is case- and space-insensitive\", \"Ada Lovelace\", FindName(\"  ADA@Example.com \"));",
+        "Dojo.Eq(\"an unknown email gives null\", (string?)null, FindName(\"nobody@example.com\"));",
+        "var dojoIdx = Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(Enumerable.Repeat((byte)0x22, 32).ToArray(), System.Text.Encoding.UTF8.GetBytes(\"ada@example.com\"))[..16]);",
+        "Dojo.Eq(\"the index is the truncated HMAC\", dojoIdx, rows[0].EmailIndex);",
+        "Dojo.Check(\"the first nonce is counter 1\", rows[0].Name[..12].SequenceEqual(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }), Convert.ToHexString(rows[0].Name[..12]));",
+        "Dojo.Check(\"two equal names are stored differently\", !rows[0].Name.SequenceEqual(rows[2].Name), \"randomised encryption gave equal ciphertexts\");",
+        "var dojoName = System.Text.Encoding.UTF8.GetBytes(\"Ada\");",
+        "Dojo.Check(\"no row holds a name in the clear\", rows.All(r => r.Name.AsSpan().IndexOf(dojoName) < 0), \"found plaintext in a row\");",
+        "Dojo.Check(\"no row holds an email in the clear\", rows.All(r => !r.EmailIndex.Contains(\"@\")), \"found an email in the index\");"
+      ],
+      "hints": [
+        "Write `BlindIndex`, `Seal` and `Open` as helpers first; `Add` and `FindName` are then one or two lines each.",
+        "The nonce: `BinaryPrimitives.WriteInt64BigEndian(box.AsSpan(4, 8), ++nonceCounter)` writes straight into the box, and `box.AsSpan(0, 12)` is then the nonce."
+      ]
+    }
+  ]
+}

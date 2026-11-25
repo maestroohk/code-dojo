@@ -1,0 +1,254 @@
+{
+  "title": "Randomness, open design, and not rolling your own",
+  "summary": "Keys come from a cryptographic random generator, algorithms are public, and \"don't roll your own\" has a precise meaning.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Random is not random enough",
+      "body": [
+        "`System.Random` is a **pseudo-random** generator built for games and simulations. It is fast and *repeatable*: the same seed gives the same sequence, and an attacker who sees some outputs can predict the rest.",
+        "",
+        "`RandomNumberGenerator` (in `System.Security.Cryptography`) asks the operating system's **cryptographically secure** generator, which mixes in hardware noise and is designed so that outputs reveal nothing about future ones.",
+        "",
+        "```csharp",
+        "byte[] key   = RandomNumberGenerator.GetBytes(32);          // a 256-bit key",
+        "int    index = RandomNumberGenerator.GetInt32(0, 62);       // unbiased in [0, 62)",
+        "string pin   = RandomNumberGenerator.GetString(\"0123456789\", 6);",
+        "```",
+        "",
+        "Rule: anything an attacker must not guess (keys, nonces, salts, tokens, reset codes, session ids) comes from `RandomNumberGenerator`. Never from `Random`, `Guid.NewGuid()` or the clock."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var a = new Random(42);",
+        "var b = new Random(42);",
+        "Console.WriteLine(a.Next() == b.Next());",
+        "Console.WriteLine(a.Next(1000) == b.Next(1000));"
+      ],
+      "answer": [
+        "True",
+        "True"
+      ],
+      "explain": "Same seed, same sequence, forever. That is a feature for a game replay and a disaster for a key: anyone who learns or guesses the seed (often the start time) regenerates every \"secret\"."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You need a password-reset token that is emailed to the user. Which is correct?",
+      "options": [
+        "`RandomNumberGenerator.GetBytes(32)`, Base64url-encoded",
+        "`Guid.NewGuid().ToString()`",
+        "`new Random().Next().ToString()`",
+        "SHA-256 of the user's email and the current time"
+      ],
+      "answer": 0,
+      "explain": "GUIDs are unique, not unpredictable by contract; `Random` is predictable; and a hash of guessable inputs is guessable. 32 random bytes from the OS generator cannot be guessed."
+    },
+    {
+      "type": "learn",
+      "title": "Modulo bias",
+      "body": [
+        "A common hand-rolled pattern is `bytes[i] % 10` to get a digit. A byte has 256 values, and 256 is not a multiple of 10, so the digits 0 to 5 come up **26** times in 256 and 6 to 9 only **25** times. Small, but measurable, and it adds up over many characters.",
+        "",
+        "`RandomNumberGenerator.GetInt32(0, n)` and `GetString(alphabet, length)` avoid that by throwing away values that would cause bias. Use them instead of `%` on random bytes."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "int zeros = Enumerable.Range(0, 256).Count(b => b % 10 == 0);",
+        "int nines = Enumerable.Range(0, 256).Count(b => b % 10 == 9);",
+        "Console.WriteLine($\"{zeros} {nines}\");"
+      ],
+      "answer": "26 25",
+      "explain": "Values 0, 10, ..., 250 give 26 zeros; 9, 19, ..., 249 give 25 nines. Each low digit is about 4% more likely than each high one."
+    },
+    {
+      "type": "code",
+      "title": "A token generator",
+      "prompt": [
+        "Write `string NewToken(int byteCount)` that returns `byteCount` cryptographically random bytes as **Base64url** (no padding, `-` and `_` instead of `+` and `/`).",
+        "",
+        "The tests check the length (32 bytes become 43 characters), that only URL-safe characters appear, and that 100 tokens are all different. They never print a token: random output is checked by its properties, not its value."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "string NewToken(int byteCount)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "string NewToken(int byteCount)",
+        "{",
+        "    byte[] bytes = RandomNumberGenerator.GetBytes(byteCount);",
+        "    return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"32 bytes give 43 characters\", 43, NewToken(32).Length);",
+        "Dojo.Eq(\"16 bytes give 22 characters\", 22, NewToken(16).Length);",
+        "var dojoTokens = Enumerable.Range(0, 100).Select(_ => NewToken(32)).ToList();",
+        "Dojo.Check(\"only URL-safe characters\", dojoTokens.All(t => t.All(c => char.IsAsciiLetterOrDigit(c) || c == '-' || c == '_')), \"found +, / or = in a token\");",
+        "Dojo.Eq(\"100 tokens are all different\", 100, dojoTokens.Distinct().Count());"
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bRandom\\b(?!NumberGenerator)",
+          "message": "Does not use System.Random"
+        },
+        {
+          "pattern": "Guid",
+          "message": "Does not use Guid"
+        }
+      ],
+      "hints": [
+        "`RandomNumberGenerator.GetBytes(byteCount)`.",
+        "Then the Base64url trick: `TrimEnd('=')`, `Replace('+', '-')`, `Replace('/', '_')`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Kerckhoffs's principle",
+      "body": [
+        "In 1883 Auguste Kerckhoffs wrote that a cipher must stay secure **even if everything about it except the key is public**. Claude Shannon put it as \"the enemy knows the system\".",
+        "",
+        "Why it matters to you:",
+        "",
+        "- Your code *will* leak: decompiled binaries, a public repo, an ex-employee. If secrecy depends on the algorithm, one leak breaks everything forever. If it depends on the key, you rotate the key.",
+        "- Public algorithms (AES, SHA-256, ECDSA) have survived decades of attack by the world's best cryptanalysts. A private algorithm has survived nobody.",
+        "",
+        "\"Security through obscurity\" (a secret algorithm, a hidden endpoint, a custom scrambling of bytes) can add a speed bump, but it never replaces a key."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Does each design follow Kerckhoffs's principle?",
+      "buckets": [
+        "Secure even if the design is public",
+        "Relies on the design staying secret"
+      ],
+      "items": [
+        [
+          "AES-GCM with a key from a key vault",
+          0
+        ],
+        [
+          "A homemade \"shift every byte by 7 and reverse\" scheme",
+          1
+        ],
+        [
+          "HMAC-SHA256 webhook signatures with a shared secret",
+          0
+        ],
+        [
+          "An API that is safe only because nobody knows its URL",
+          1
+        ],
+        [
+          "XOR with a fixed string compiled into the app",
+          1
+        ],
+        [
+          "Ed25519 or ECDSA signatures on releases",
+          0
+        ]
+      ],
+      "explain": "Ask: if an attacker read the source code, what would they still be missing? If the answer is \"nothing\", the design relies on obscurity."
+    },
+    {
+      "type": "learn",
+      "title": "\"Don't roll your own crypto\", precisely",
+      "body": [
+        "The phrase does **not** mean \"never write code that touches crypto\". It means, in order of preference:",
+        "",
+        "1. **Use the platform** where it exists: TLS for transport, ASP.NET Core Data Protection for cookies and tokens, a cloud key vault for keys, the password hasher your framework ships.",
+        "2. Otherwise use a **high-level, vetted construction** from the BCL: `AesGcm`, `HMACSHA256`, `Rfc2898DeriveBytes.Pbkdf2`, `HKDF`, `ECDsa`.",
+        "3. Only if neither fits, **compose** primitives yourself, following a published recipe exactly (for example encrypt-then-MAC), and get it reviewed.",
+        "4. **Never** invent an algorithm, a mode, or a protocol and ship it.",
+        "",
+        "Implementing things by hand to *learn* (as you will in this topic) is excellent. The rule is about what you put in production."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Order these approaches from **most** preferred (top) to **least** preferred for protecting data in production.",
+      "lines": [
+        "Use a platform feature (TLS, Data Protection, a key vault)",
+        "Call a vetted AEAD from the BCL, such as AesGcm",
+        "Compose primitives yourself following a published recipe, then get it reviewed",
+        "Invent a new cipher or protocol"
+      ],
+      "explain": "Every step down the list adds code that must be exactly right and that nobody else has attacked for you."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the API key generator",
+      "prompt": [
+        "This generator makes API keys from `System.Random`, seeded with the time, and uses `%`. Both are wrong: the keys are predictable from the creation time, and `%` is biased.",
+        "",
+        "Rewrite `string NewApiKey()` so it returns a 40-character key from the same alphabet using `RandomNumberGenerator` (`GetString` or `GetInt32`). Keep the name and the alphabet."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "const string Alphabet = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\";",
+        "",
+        "string NewApiKey()",
+        "{",
+        "    var rng = new Random(Environment.TickCount);",
+        "    var chars = new char[40];",
+        "    for (int i = 0; i < chars.Length; i++)",
+        "        chars[i] = Alphabet[rng.Next() % Alphabet.Length];",
+        "    return new string(chars);",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "const string Alphabet = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\";",
+        "",
+        "string NewApiKey()",
+        "{",
+        "    return RandomNumberGenerator.GetString(Alphabet, 40);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKeys = Enumerable.Range(0, 200).Select(_ => NewApiKey()).ToList();",
+        "Dojo.Check(\"every key is 40 characters\", dojoKeys.All(k => k.Length == 40), \"a key had the wrong length\");",
+        "Dojo.Check(\"only characters from the alphabet\", dojoKeys.All(k => k.All(c => Alphabet.Contains(c))), \"found a character outside the alphabet\");",
+        "Dojo.Eq(\"200 keys are all different\", 200, dojoKeys.Distinct().Count());"
+      ],
+      "require": [
+        {
+          "pattern": "RandomNumberGenerator\\.",
+          "message": "Uses RandomNumberGenerator"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bRandom\\b(?!NumberGenerator)",
+          "message": "Does not use System.Random"
+        },
+        {
+          "pattern": "%",
+          "message": "Does not use % on random numbers"
+        }
+      ],
+      "hints": [
+        "`RandomNumberGenerator.GetString(Alphabet, 40)` does the whole job.",
+        "Or loop with `Alphabet[RandomNumberGenerator.GetInt32(Alphabet.Length)]`."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,259 @@
+{
+  "title": "Envelope encryption and key hierarchies",
+  "summary": "Encrypt data with a data key, encrypt the data key with a key-encryption key, and rotate cheaply.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Keys that encrypt keys",
+      "body": [
+        "A master key in a hardware security module (HSM) or cloud KMS never leaves it, and calling it is slow and metered. You cannot send it gigabytes. **Envelope encryption** solves that with two levels:",
+        "",
+        "```text",
+        "KEK  (key-encryption key)  lives in the KMS / HSM, never leaves",
+        " └── wraps ──> DEK  (data-encryption key)  random, one per record or file",
+        "                └── encrypts ──> the data",
+        "```",
+        "",
+        "To store a record: generate a fresh random DEK, encrypt the data with it locally (fast), ask the KMS to **wrap** (encrypt) the DEK under the KEK, and store the *wrapped* DEK next to the ciphertext. To read: ask the KMS to unwrap the DEK, then decrypt locally.",
+        "",
+        "The plaintext DEK only exists in memory while you use it. Steal the database and you get ciphertext plus wrapped DEKs, which are useless without the KMS."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the steps to store a record with envelope encryption.",
+      "lines": [
+        "Generate a fresh random DEK for this record",
+        "Encrypt the record with the DEK (AES-GCM, unique nonce)",
+        "Wrap the DEK under the KEK in the KMS",
+        "Store the wrapped DEK and the ciphertext together, and forget the plaintext DEK"
+      ],
+      "also": [
+        [
+          "Generate a fresh random DEK for this record",
+          "Wrap the DEK under the KEK in the KMS",
+          "Encrypt the record with the DEK (AES-GCM, unique nonce)",
+          "Store the wrapped DEK and the ciphertext together, and forget the plaintext DEK"
+        ]
+      ],
+      "explain": "Encrypting the data and wrapping the DEK can happen in either order; both need the DEK first, and storing comes last."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is stored in the database row next to the encrypted record?",
+      "options": [
+        "The wrapped DEK and the id of the KEK that wrapped it",
+        "The plaintext DEK",
+        "The KEK",
+        "Nothing: the KMS remembers every DEK"
+      ],
+      "answer": 0,
+      "explain": "The wrapped DEK is safe to store anywhere. Storing the KEK's id (and version) tells you which key to ask for when unwrapping, which matters as soon as you rotate."
+    },
+    {
+      "type": "learn",
+      "title": "Wrapping is just encryption",
+      "body": [
+        "Wrapping a key is encrypting 32 bytes. With AES-GCM it looks like any other encryption, and the **associated data** can bind the wrapped key to the record it belongs to, so a wrapped DEK copied onto another row will not unwrap:",
+        "",
+        "```csharp",
+        "using var gcm = new AesGcm(kek, 16);",
+        "gcm.Encrypt(nonce, dek, wrapped, tag, Encoding.UTF8.GetBytes(\"customer:42\"));",
+        "```",
+        "",
+        "Cloud KMS APIs (`Encrypt`/`Decrypt` in AWS KMS, `wrapKey`/`unwrapKey` in Azure Key Vault) do exactly this on their side, with an *encryption context* playing the role of the associated data."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "How many bytes does a wrapped 32-byte DEK take, stored as nonce + ciphertext + tag?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] kek = new byte[32];",
+        "byte[] dek = RandomNumberGenerator.GetBytes(32);",
+        "byte[] nonce = new byte[12];",
+        "var wrapped = new byte[dek.Length];",
+        "var tag = new byte[16];",
+        "using var gcm = new AesGcm(kek, 16);",
+        "gcm.Encrypt(nonce, dek, wrapped, tag);",
+        "Console.WriteLine(nonce.Length + wrapped.Length + tag.Length);"
+      ],
+      "answer": "60",
+      "explain": "GCM ciphertext is the same length as the plaintext, so 12 + 32 + 16 = 60 bytes, whatever the record size. The DEK is random but its length is not."
+    },
+    {
+      "type": "code",
+      "title": "Wrap and unwrap a data key",
+      "prompt": [
+        "Write:",
+        "",
+        "- `byte[] WrapKey(byte[] kek, byte[] dek, byte[] nonce, string recordId)`: AES-GCM, returning nonce + wrapped key + tag (60 bytes for a 32-byte DEK), with the UTF-8 bytes of `recordId` as **associated data**.",
+        "- `byte[] UnwrapKey(byte[] kek, byte[] wrapped, string recordId)`: the reverse.",
+        "",
+        "The tests check that the wrong KEK or the wrong record id fails to unwrap. (They use fixed nonces; real wrapping uses a fresh random nonce each time.)"
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] WrapKey(byte[] kek, byte[] dek, byte[] nonce, string recordId)",
+        "{",
+        "    return Array.Empty<byte>();",
+        "}",
+        "",
+        "byte[] UnwrapKey(byte[] kek, byte[] wrapped, string recordId)",
+        "{",
+        "    return Array.Empty<byte>();",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] WrapKey(byte[] kek, byte[] dek, byte[] nonce, string recordId)",
+        "{",
+        "    var result = new byte[12 + dek.Length + 16];",
+        "    nonce.CopyTo(result, 0);",
+        "    using var gcm = new AesGcm(kek, 16);",
+        "    gcm.Encrypt(nonce, dek, result.AsSpan(12, dek.Length), result.AsSpan(12 + dek.Length), Encoding.UTF8.GetBytes(recordId));",
+        "    return result;",
+        "}",
+        "",
+        "byte[] UnwrapKey(byte[] kek, byte[] wrapped, string recordId)",
+        "{",
+        "    var dek = new byte[wrapped.Length - 28];",
+        "    using var gcm = new AesGcm(kek, 16);",
+        "    gcm.Decrypt(wrapped.AsSpan(0, 12), wrapped.AsSpan(12, dek.Length), wrapped.AsSpan(wrapped.Length - 16), dek, Encoding.UTF8.GetBytes(recordId));",
+        "    return dek;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKek = Enumerable.Repeat((byte)0x4B, 32).ToArray();",
+        "var dojoDek = Enumerable.Range(100, 32).Select(i => (byte)i).ToArray();",
+        "var dojoNonce = new byte[12]; dojoNonce[0] = 7;",
+        "var dojoW = WrapKey(dojoKek, dojoDek, dojoNonce, \"customer:42\");",
+        "Dojo.Eq(\"a wrapped 32-byte key is 60 bytes\", 60, dojoW.Length);",
+        "Dojo.Check(\"the wrapped key does not contain the DEK\", !dojoW.AsSpan(12, 32).SequenceEqual(dojoDek), \"the DEK is visible in the output\");",
+        "Dojo.Eq(\"UnwrapKey returns the DEK\", dojoDek, UnwrapKey(dojoKek, dojoW, \"customer:42\"));",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"the wrong KEK fails\", () => UnwrapKey(new byte[32], dojoW, \"customer:42\"));",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"moved to another record, it fails\", () => UnwrapKey(dojoKek, dojoW, \"customer:43\"));"
+      ],
+      "hints": [
+        "The last argument of `Encrypt` and `Decrypt` is the associated data: `Encoding.UTF8.GetBytes(recordId)`.",
+        "The layout is the same sealed box as before: 12-byte nonce, then the wrapped key, then the 16-byte tag."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Why the hierarchy pays off: rotation",
+      "body": [
+        "Suppose policy says the KEK must be replaced every year, or it may have leaked. Without envelopes you would decrypt and re-encrypt every byte of data. With envelopes you **rewrap**: unwrap each DEK with the old KEK, wrap it with the new one, and write back 60 bytes per record. The data ciphertext is not touched at all.",
+        "",
+        "The same trick lets a password change in a password manager finish instantly: the password protects one key, and that key protects everything else. Real hierarchies often have three levels (root key in an HSM, KEK per tenant or service, DEK per object), which also lets you destroy one tenant's data by deleting one KEK (\"crypto-shredding\")."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A table has a million records of about 4 KB each. How many times more bytes must be rewritten to re-encrypt every record than to rewrap every DEK?",
+      "code": [
+        "long records = 1_000_000;",
+        "long recordBytes = 4_096;",
+        "long wrappedDekBytes = 60;",
+        "Console.WriteLine(records * recordBytes / (records * wrappedDekBytes));"
+      ],
+      "answer": "68",
+      "explain": "4,096 / 60 is about 68 times less work, and for multi-megabyte files the ratio is in the tens of thousands. More importantly the data never has to be decrypted at all."
+    },
+    {
+      "type": "code",
+      "title": "Envelope encryption with rotation",
+      "prompt": [
+        "The tests declare `record Envelope(byte[] WrappedDek, byte[] Data);` for you. Both fields use the nonce + ciphertext + tag layout. Write:",
+        "",
+        "- `Envelope Seal(byte[] kek, byte[] dek, byte[] dekNonce, byte[] dataNonce, string text)`: encrypt `text` with the DEK, wrap the DEK with the KEK (no associated data this time).",
+        "- `string Open(byte[] kek, Envelope e)`: unwrap, then decrypt.",
+        "- `Envelope Rewrap(byte[] oldKek, byte[] newKek, byte[] newNonce, Envelope e)`: a new envelope whose DEK is wrapped under `newKek` and whose `Data` is **the same bytes** as before.",
+        "",
+        "The DEK and nonces are passed in so the tests are repeatable; in real code the DEK comes from `RandomNumberGenerator.GetBytes(32)` for every record."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "Envelope Seal(byte[] kek, byte[] dek, byte[] dekNonce, byte[] dataNonce, string text)",
+        "{",
+        "    return new Envelope(Array.Empty<byte>(), Array.Empty<byte>());",
+        "}",
+        "",
+        "string Open(byte[] kek, Envelope e)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "Envelope Rewrap(byte[] oldKek, byte[] newKek, byte[] newNonce, Envelope e)",
+        "{",
+        "    return e;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] Box(byte[] key, byte[] nonce, byte[] plain)",
+        "{",
+        "    var box = new byte[12 + plain.Length + 16];",
+        "    nonce.CopyTo(box, 0);",
+        "    using var gcm = new AesGcm(key, 16);",
+        "    gcm.Encrypt(nonce, plain, box.AsSpan(12, plain.Length), box.AsSpan(12 + plain.Length));",
+        "    return box;",
+        "}",
+        "",
+        "byte[] Unbox(byte[] key, byte[] box)",
+        "{",
+        "    var plain = new byte[box.Length - 28];",
+        "    using var gcm = new AesGcm(key, 16);",
+        "    gcm.Decrypt(box.AsSpan(0, 12), box.AsSpan(12, plain.Length), box.AsSpan(box.Length - 16), plain);",
+        "    return plain;",
+        "}",
+        "",
+        "Envelope Seal(byte[] kek, byte[] dek, byte[] dekNonce, byte[] dataNonce, string text) =>",
+        "    new Envelope(Box(kek, dekNonce, dek), Box(dek, dataNonce, Encoding.UTF8.GetBytes(text)));",
+        "",
+        "string Open(byte[] kek, Envelope e)",
+        "{",
+        "    var dek = Unbox(kek, e.WrappedDek);",
+        "    return Encoding.UTF8.GetString(Unbox(dek, e.Data));",
+        "}",
+        "",
+        "Envelope Rewrap(byte[] oldKek, byte[] newKek, byte[] newNonce, Envelope e)",
+        "{",
+        "    var dek = Unbox(oldKek, e.WrappedDek);",
+        "    return e with { WrappedDek = Box(newKek, newNonce, dek) };",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoOld = Enumerable.Repeat((byte)1, 32).ToArray();",
+        "var dojoNew = Enumerable.Repeat((byte)2, 32).ToArray();",
+        "var dojoDek = Enumerable.Range(50, 32).Select(i => (byte)i).ToArray();",
+        "byte[] DojoNonce(byte n) { var b = new byte[12]; b[11] = n; return b; }",
+        "var dojoE = Seal(dojoOld, dojoDek, DojoNonce(1), DojoNonce(2), \"IBAN GB33BUKB20201555555555\");",
+        "Dojo.Eq(\"the wrapped DEK is 60 bytes\", 60, dojoE.WrappedDek.Length);",
+        "Dojo.Eq(\"the data is nonce + 27 bytes + tag\", 12 + 27 + 16, dojoE.Data.Length);",
+        "Dojo.Eq(\"Open with the KEK gives the text back\", \"IBAN GB33BUKB20201555555555\", Open(dojoOld, dojoE));",
+        "var dojoR = Rewrap(dojoOld, dojoNew, DojoNonce(3), dojoE);",
+        "Dojo.Check(\"Rewrap leaves the data ciphertext untouched\", dojoR.Data.SequenceEqual(dojoE.Data), \"the data bytes changed\");",
+        "Dojo.Eq(\"the new KEK opens the rewrapped envelope\", \"IBAN GB33BUKB20201555555555\", Open(dojoNew, dojoR));",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"the old KEK no longer opens it\", () => Open(dojoOld, dojoR));",
+        "record Envelope(byte[] WrappedDek, byte[] Data);"
+      ],
+      "hints": [
+        "Write two helpers first: `Box(key, nonce, plain)` and `Unbox(key, box)`, the sealed box from the previous lesson.",
+        "`Rewrap` unboxes the DEK with the old KEK and returns `e with { WrappedDek = Box(newKek, newNonce, dek) }`."
+      ]
+    }
+  ]
+}

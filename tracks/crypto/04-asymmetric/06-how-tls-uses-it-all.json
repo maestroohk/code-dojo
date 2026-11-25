@@ -1,0 +1,267 @@
+{
+  "title": "How TLS uses it all",
+  "summary": "ECDHE for the key, a certificate signature for identity, HKDF for the key schedule, AEAD for the records: TLS 1.3 built from parts you know.",
+  "minutes": 15,
+  "prereqs": [
+    "networking/08-tls-and-security/01-the-handshake"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "TLS 1.3 is this whole module",
+      "body": [
+        "The *Networking & HTTP* topic walks through the TLS handshake on the wire. Here is the same handshake as a list of primitives you have now used:",
+        "",
+        "| Step | Primitive |",
+        "|---|---|",
+        "| client and server send ephemeral key shares | **ECDHE** (X25519 or P-256) |",
+        "| both derive handshake and traffic keys | **HKDF** over the shared secret and a hash of the transcript |",
+        "| server proves who it is | **certificate** (PKI) + **signature** over the transcript (ECDSA or RSA-PSS) |",
+        "| both confirm nobody tampered | **HMAC** \"Finished\" messages over the transcript |",
+        "| application data | **AEAD** records: AES-GCM or ChaCha20-Poly1305 |",
+        "",
+        "A cipher suite name such as `TLS_AES_128_GCM_SHA256` lists the AEAD and the hash for HKDF. The key exchange and signature algorithm are negotiated separately."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each TLS 1.3 job to the primitive that does it.",
+      "pairs": [
+        [
+          "agree on a secret nobody else can compute",
+          "ECDHE"
+        ],
+        [
+          "stretch that secret into separate keys for each direction",
+          "HKDF"
+        ],
+        [
+          "prove the server holds the certificate's private key",
+          "ECDSA or RSA-PSS signature"
+        ],
+        [
+          "encrypt and authenticate each record",
+          "AES-GCM or ChaCha20-Poly1305"
+        ],
+        [
+          "tie the server's public key to its domain name",
+          "X.509 certificate chain"
+        ]
+      ],
+      "explain": "No single primitive does everything; TLS is a careful combination of them."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the core of a TLS 1.3 handshake.",
+      "lines": [
+        "Client sends ClientHello with its ephemeral key share",
+        "Server replies with ServerHello and its own ephemeral key share",
+        "Both compute the ECDHE secret and derive handshake keys with HKDF",
+        "Server sends its certificate and a signature over the transcript (CertificateVerify)",
+        "Client validates the chain and the signature, then both exchange Finished MACs",
+        "Application data flows in AEAD-encrypted records"
+      ],
+      "explain": "Everything after ServerHello is already encrypted with the handshake keys, including the certificate."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Lesson 2 showed that plain ECDH falls to a man in the middle. What stops Mallory from swapping the key shares in TLS 1.3?",
+      "options": [
+        "The server signs a hash of the whole transcript, key shares included, with the key in its certificate; the client verifies it against a trusted chain",
+        "The key shares are encrypted",
+        "ECDHE is immune to man-in-the-middle attacks",
+        "The Finished message is sent first"
+      ],
+      "answer": 0,
+      "explain": "Mallory can swap shares, but then the transcript the client hashes differs from what the server signed, and Mallory cannot sign for the real server without its private key."
+    },
+    {
+      "type": "learn",
+      "title": "A transcript signature in code",
+      "body": [
+        "The idea fits in a few lines:",
+        "",
+        "```csharp",
+        "byte[] transcript = SHA256.HashData([.. clientShare, .. serverShare]);",
+        "byte[] sig = serverIdentity.SignData(transcript, HashAlgorithmName.SHA256);   // server",
+        "bool ok = trustedServerKey.VerifyData(transcript, sig, HashAlgorithmName.SHA256); // client",
+        "```",
+        "",
+        "Because the signature covers **both** key shares, changing either one breaks it. Then the session key is derived with the transcript hash as HKDF's salt, binding the key to this exact conversation. (Real TLS hashes every handshake message and adds labels, but the shape is the same.)"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Mallory swaps the server's key share for her own but cannot re-sign. What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "var curve = ECCurve.NamedCurves.nistP256;",
+        "using var serverId = ECDsa.Create(curve);",
+        "using var client = ECDiffieHellman.Create(curve);",
+        "using var server = ECDiffieHellman.Create(curve);",
+        "using var mallory = ECDiffieHellman.Create(curve);",
+        "byte[] cs = client.ExportSubjectPublicKeyInfo();",
+        "byte[] ss = server.ExportSubjectPublicKeyInfo();",
+        "byte[] sig = serverId.SignData(SHA256.HashData([.. cs, .. ss]), HashAlgorithmName.SHA256);",
+        "",
+        "byte[] seen = mallory.ExportSubjectPublicKeyInfo();   // swapped in transit",
+        "Console.WriteLine(serverId.VerifyData(SHA256.HashData([.. cs, .. ss]), sig, HashAlgorithmName.SHA256));",
+        "Console.WriteLine(serverId.VerifyData(SHA256.HashData([.. cs, .. seen]), sig, HashAlgorithmName.SHA256));"
+      ],
+      "answer": [
+        "True",
+        "False"
+      ],
+      "explain": "The signature binds the real key shares. With Mallory's share in the transcript, the client's check fails and the handshake aborts."
+    },
+    {
+      "type": "code",
+      "title": "The client's side of the handshake",
+      "prompt": [
+        "Write `byte[]? ClientFinish(ECDiffieHellman clientEph, byte[] clientShare, byte[] serverShare, byte[] serverSignature, ECDsa trustedServerKey)`:",
+        "",
+        "1. `transcript = SHA256(clientShare ++ serverShare)`.",
+        "2. If `trustedServerKey.VerifyData(transcript, serverSignature, SHA256)` fails, return `null`: **never** derive a key from an unauthenticated share.",
+        "3. Import `serverShare` (SubjectPublicKeyInfo) into an `ECDiffieHellman`, derive the raw secret with `clientEph`.",
+        "4. Return `HKDF.DeriveKey(SHA256, raw, 32, salt: transcript, info: UTF-8 \"dojo tls traffic\")`.",
+        "",
+        "The tests play an honest server and two kinds of Mallory."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[]? ClientFinish(ECDiffieHellman clientEph, byte[] clientShare, byte[] serverShare, byte[] serverSignature, ECDsa trustedServerKey)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[]? ClientFinish(ECDiffieHellman clientEph, byte[] clientShare, byte[] serverShare, byte[] serverSignature, ECDsa trustedServerKey)",
+        "{",
+        "    byte[] transcript = SHA256.HashData([.. clientShare, .. serverShare]);",
+        "    if (!trustedServerKey.VerifyData(transcript, serverSignature, HashAlgorithmName.SHA256))",
+        "        return null;",
+        "    using var server = ECDiffieHellman.Create();",
+        "    server.ImportSubjectPublicKeyInfo(serverShare, out _);",
+        "    byte[] raw = clientEph.DeriveRawSecretAgreement(server.PublicKey);",
+        "    return HKDF.DeriveKey(HashAlgorithmName.SHA256, raw, 32, transcript, Encoding.UTF8.GetBytes(\"dojo tls traffic\"));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoCurve = System.Security.Cryptography.ECCurve.NamedCurves.nistP256;",
+        "var dojoSha = System.Security.Cryptography.HashAlgorithmName.SHA256;",
+        "using var dojoServerId = System.Security.Cryptography.ECDsa.Create(dojoCurve);",
+        "using var dojoMalloryId = System.Security.Cryptography.ECDsa.Create(dojoCurve);",
+        "using var dojoClient = System.Security.Cryptography.ECDiffieHellman.Create(dojoCurve);",
+        "using var dojoServer = System.Security.Cryptography.ECDiffieHellman.Create(dojoCurve);",
+        "using var dojoMallory = System.Security.Cryptography.ECDiffieHellman.Create(dojoCurve);",
+        "byte[] dojoCs = dojoClient.ExportSubjectPublicKeyInfo();",
+        "byte[] dojoSs = dojoServer.ExportSubjectPublicKeyInfo();",
+        "byte[] dojoMs = dojoMallory.ExportSubjectPublicKeyInfo();",
+        "byte[] dojoT = System.Security.Cryptography.SHA256.HashData([.. dojoCs, .. dojoSs]);",
+        "byte[] dojoSig = dojoServerId.SignData(dojoT, dojoSha);",
+        "byte[] dojoServerKey = System.Security.Cryptography.HKDF.DeriveKey(dojoSha, dojoServer.DeriveRawSecretAgreement(dojoClient.PublicKey), 32, dojoT, System.Text.Encoding.UTF8.GetBytes(\"dojo tls traffic\"));",
+        "var dojoKey = ClientFinish(dojoClient, dojoCs, dojoSs, dojoSig, dojoServerId);",
+        "Dojo.Check(\"an honest handshake gives the server's key\", dojoKey is not null && dojoKey.SequenceEqual(dojoServerKey), \"null or a different key\");",
+        "Dojo.Check(\"Mallory's share with the old signature is rejected\", ClientFinish(dojoClient, dojoCs, dojoMs, dojoSig, dojoServerId) is null, \"accepted a swapped share\");",
+        "byte[] dojoMSig = dojoMalloryId.SignData(System.Security.Cryptography.SHA256.HashData([.. dojoCs, .. dojoMs]), dojoSha);",
+        "Dojo.Check(\"Mallory's share signed with Mallory's key is rejected\", ClientFinish(dojoClient, dojoCs, dojoMs, dojoMSig, dojoServerId) is null, \"trusted a signature from the wrong key\");"
+      ],
+      "hints": [
+        "`SHA256.HashData([.. clientShare, .. serverShare])` builds the transcript hash.",
+        "Return `null` before touching the server share if `VerifyData` is false."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Handshake, then a record",
+      "prompt": [
+        "Put it together in one program. The starter sets up the identities and key shares. Add:",
+        "",
+        "1. the server signs `transcript = SHA256(cs ++ ss)`; the client verifies it and prints `handshake verified: True`;",
+        "2. both sides derive keys (raw ECDH secret, HKDF-SHA256, 32 bytes, salt = transcript, info `\"dojo tls traffic\"`) and print `keys match: True`;",
+        "3. the client encrypts the record `GET /` with AES-GCM under its key, nonce = 12 zero bytes (record number 0: TLS builds nonces from a sequence number, so each key sees each nonce once), and the server decrypts it and prints `server got: GET /`;",
+        "4. flip one bit of the ciphertext and print `tampered record rejected: True` when the server's decrypt throws."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "var curve = ECCurve.NamedCurves.nistP256;",
+        "var sha = HashAlgorithmName.SHA256;",
+        "using var serverId = ECDsa.Create(curve);        // the key in the server's certificate",
+        "using var client = ECDiffieHellman.Create(curve);",
+        "using var server = ECDiffieHellman.Create(curve);",
+        "byte[] cs = client.ExportSubjectPublicKeyInfo();",
+        "byte[] ss = server.ExportSubjectPublicKeyInfo();"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "var curve = ECCurve.NamedCurves.nistP256;",
+        "var sha = HashAlgorithmName.SHA256;",
+        "using var serverId = ECDsa.Create(curve);        // the key in the server's certificate",
+        "using var client = ECDiffieHellman.Create(curve);",
+        "using var server = ECDiffieHellman.Create(curve);",
+        "byte[] cs = client.ExportSubjectPublicKeyInfo();",
+        "byte[] ss = server.ExportSubjectPublicKeyInfo();",
+        "",
+        "byte[] transcript = SHA256.HashData([.. cs, .. ss]);",
+        "byte[] sig = serverId.SignData(transcript, sha);",
+        "Console.WriteLine($\"handshake verified: {serverId.VerifyData(transcript, sig, sha)}\");",
+        "",
+        "byte[] info = Encoding.UTF8.GetBytes(\"dojo tls traffic\");",
+        "byte[] clientKey = HKDF.DeriveKey(sha, client.DeriveRawSecretAgreement(server.PublicKey), 32, transcript, info);",
+        "byte[] serverKey = HKDF.DeriveKey(sha, server.DeriveRawSecretAgreement(client.PublicKey), 32, transcript, info);",
+        "Console.WriteLine($\"keys match: {clientKey.SequenceEqual(serverKey)}\");",
+        "",
+        "byte[] nonce = new byte[12];",
+        "byte[] record = Encoding.UTF8.GetBytes(\"GET /\");",
+        "var cipher = new byte[record.Length];",
+        "var tag = new byte[16];",
+        "using (var gcm = new AesGcm(clientKey, 16))",
+        "    gcm.Encrypt(nonce, record, cipher, tag);",
+        "",
+        "var plain = new byte[cipher.Length];",
+        "using (var gcm = new AesGcm(serverKey, 16))",
+        "    gcm.Decrypt(nonce, cipher, tag, plain);",
+        "Console.WriteLine($\"server got: {Encoding.UTF8.GetString(plain)}\");",
+        "",
+        "cipher[0] ^= 1;",
+        "bool rejected;",
+        "try",
+        "{",
+        "    using var gcm = new AesGcm(serverKey, 16);",
+        "    gcm.Decrypt(nonce, cipher, tag, plain);",
+        "    rejected = false;",
+        "}",
+        "catch (CryptographicException)",
+        "{",
+        "    rejected = true;",
+        "}",
+        "Console.WriteLine($\"tampered record rejected: {rejected}\");"
+      ],
+      "tests": [
+        {
+          "expect": [
+            "handshake verified: True",
+            "keys match: True",
+            "server got: GET /",
+            "tampered record rejected: True"
+          ]
+        }
+      ],
+      "hints": [
+        "The client derives from `server.PublicKey`, the server from `client.PublicKey`, both with the same salt and info.",
+        "`AesGcm.Decrypt` throws `AuthenticationTagMismatchException`, which is a `CryptographicException`."
+      ]
+    }
+  ]
+}

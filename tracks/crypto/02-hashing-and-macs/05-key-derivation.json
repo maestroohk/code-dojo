@@ -1,0 +1,244 @@
+{
+  "title": "Key derivation: PBKDF2 and HKDF",
+  "summary": "Turn a password into a key with a slow, salted KDF, and split one strong secret into many independent keys with HKDF.",
+  "minutes": 15,
+  "prereqs": [
+    "auth/01-foundations/02-hashing-passwords"
+  ],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Passwords are not keys",
+      "body": [
+        "Storing passwords is covered in the *Authentication & JWT* topic (Foundations, *Hashing passwords*): slow, salted hashes such as PBKDF2, bcrypt, scrypt or Argon2, never plain SHA-256. The same tools solve a second problem here: **turning a password into an encryption key**.",
+        "",
+        "A key must be 32 unpredictable bytes. A password is short and guessable. `SHA256(password)` gives 32 bytes, but an attacker with your ciphertext can test billions of guesses per second on a GPU, because SHA-256 is fast.",
+        "",
+        "A **password-based KDF** fixes that by being deliberately **slow** (many iterations) and **salted** (a random value stored with the ciphertext, so each vault needs its own guessing run and precomputed tables are useless)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A file is encrypted with `SHA256(password)` as the AES key. The attacker has the file. What is their best attack?",
+      "options": [
+        "Guess passwords, hash each with SHA-256 and try it: billions of guesses per second",
+        "Break AES",
+        "Reverse SHA-256",
+        "Nothing works without the original password"
+      ],
+      "answer": 0,
+      "explain": "The key is only as strong as the password, and a fast hash makes guessing cheap. Slowing every guess down is the job of PBKDF2 and friends."
+    },
+    {
+      "type": "learn",
+      "title": "PBKDF2 in .NET",
+      "body": [
+        "```csharp",
+        "byte[] salt = RandomNumberGenerator.GetBytes(16);   // stored next to the ciphertext",
+        "byte[] key = Rfc2898DeriveBytes.Pbkdf2(",
+        "    password, salt, iterations: 600_000, HashAlgorithmName.SHA256, outputLength: 32);",
+        "```",
+        "",
+        "- **Iterations**: OWASP recommends **600,000** for PBKDF2-HMAC-SHA256 today. Every exercise here uses **1,000** so the tests run in milliseconds: never copy that number into real code.",
+        "- **Salt**: 16 random bytes per password, public, stored with the result. The exercises use a fixed salt so outputs are repeatable; real code generates one with `RandomNumberGenerator`.",
+        "- Same password + same salt + same iterations always gives the same key, which is how you re-derive it to decrypt.",
+        "",
+        "Argon2id is stronger against GPUs (it is memory-hard) but is not in the BCL; PBKDF2 is the BCL's answer."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] salt1 = new byte[16];",
+        "byte[] salt2 = new byte[16];",
+        "salt2[0] = 1;",
+        "byte[] k1 = Rfc2898DeriveBytes.Pbkdf2(\"hunter2\", salt1, 1000, HashAlgorithmName.SHA256, 32);",
+        "byte[] k2 = Rfc2898DeriveBytes.Pbkdf2(\"hunter2\", salt1, 1000, HashAlgorithmName.SHA256, 32);",
+        "byte[] k3 = Rfc2898DeriveBytes.Pbkdf2(\"hunter2\", salt2, 1000, HashAlgorithmName.SHA256, 32);",
+        "Console.WriteLine($\"{k1.Length} {k1.SequenceEqual(k2)} {k1.SequenceEqual(k3)}\");"
+      ],
+      "answer": "32 True False",
+      "explain": "Same inputs, same key (so you can decrypt later). A different salt gives an unrelated key, so two users with the same password get different keys."
+    },
+    {
+      "type": "code",
+      "title": "Derive a key from a password",
+      "prompt": [
+        "Write `byte[] KeyFromPassword(string password, byte[] salt)` using PBKDF2 with HMAC-SHA256, **1,000** iterations (test value; real code uses 600,000) and a 32-byte output.",
+        "",
+        "Then write `string KeyCheck(byte[] key)`: the first 4 bytes of `HMACSHA256(key, \"key-check\")` as lowercase hex. Storing a short check value lets a program tell a wrong password from corrupted data without storing the key itself."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] KeyFromPassword(string password, byte[] salt)",
+        "{",
+        "    return Array.Empty<byte>();",
+        "}",
+        "",
+        "string KeyCheck(byte[] key)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] KeyFromPassword(string password, byte[] salt) =>",
+        "    Rfc2898DeriveBytes.Pbkdf2(password, salt, 1000, HashAlgorithmName.SHA256, 32);",
+        "",
+        "string KeyCheck(byte[] key) =>",
+        "    Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(\"key-check\"))[..4]);"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSalt = \"dojo-salt-16byte\"u8.ToArray();",
+        "var dojoKey = KeyFromPassword(\"correct horse\", dojoSalt);",
+        "Dojo.Eq(\"the key for \\\"correct horse\\\"\", \"9a91c670f37ed09112419df342b8e88c9e191ae187942749ed1f1474deb0d74c\", Convert.ToHexStringLower(dojoKey));",
+        "Dojo.Eq(\"KeyCheck is 8 hex characters\", 8, KeyCheck(dojoKey).Length);",
+        "Dojo.Eq(\"KeyCheck matches HMAC(key, \\\"key-check\\\")\", Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(dojoKey, \"key-check\"u8.ToArray())[..4]), KeyCheck(dojoKey));",
+        "Dojo.Check(\"a wrong password gives a different check\", KeyCheck(KeyFromPassword(\"correct horsf\", dojoSalt)) != KeyCheck(dojoKey), \"same check for two passwords\");"
+      ],
+      "hints": [
+        "`Rfc2898DeriveBytes.Pbkdf2(password, salt, 1000, HashAlgorithmName.SHA256, 32)`.",
+        "`HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(\"key-check\"))[..4]`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "HKDF: one strong secret, many keys",
+      "body": [
+        "PBKDF2 is for **weak** inputs. When the input is already strong (an ECDH shared secret, a random master key), you do not need slowness; you need to turn it into well-formed keys, and usually **several** of them.",
+        "",
+        "**HKDF** (RFC 5869) does it in two steps:",
+        "",
+        "1. **Extract**: `prk = HMAC(salt, ikm)` concentrates the input keying material into a uniform 32-byte key.",
+        "2. **Expand**: `okm = Expand(prk, info, length)` stretches it into as many bytes as you need, bound to a context label **info**.",
+        "",
+        "```csharp",
+        "byte[] prk = HKDF.Extract(HashAlgorithmName.SHA256, ikm, salt);",
+        "byte[] encKey = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, \"enc\"u8.ToArray());",
+        "byte[] macKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, 32, salt, \"mac\"u8.ToArray()); // both steps",
+        "```",
+        "",
+        "Different `info` strings give **independent** keys: learning the MAC key tells you nothing about the encryption key. That is called **domain separation**, and it is why you never use one key for two jobs."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each input to the right way of turning it into keys.",
+      "pairs": [
+        [
+          "A user's password",
+          "PBKDF2 (or Argon2) with a salt and many iterations"
+        ],
+        [
+          "An ECDH shared secret",
+          "HKDF with a context label"
+        ],
+        [
+          "A random 32-byte master key that needs an encryption key and a MAC key",
+          "HKDF twice, with two different info strings"
+        ],
+        [
+          "A key already the right size for one single purpose",
+          "Use it directly"
+        ]
+      ],
+      "explain": "Slow KDFs protect guessable inputs; HKDF shapes and separates strong ones."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "",
+        "byte[] master = new byte[32];",
+        "byte[] enc = HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, \"enc\"u8.ToArray());",
+        "byte[] mac = HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, \"mac\"u8.ToArray());",
+        "byte[] enc2 = HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, \"enc\"u8.ToArray());",
+        "byte[] prk = HKDF.Extract(HashAlgorithmName.SHA256, master);",
+        "byte[] enc3 = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, \"enc\"u8.ToArray());",
+        "Console.WriteLine($\"{enc.SequenceEqual(mac)} {enc.SequenceEqual(enc2)} {enc.SequenceEqual(enc3)}\");"
+      ],
+      "answer": "False True True",
+      "explain": "Different info, different keys; same info, same key. And `DeriveKey` is exactly `Extract` followed by `Expand`."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the HKDF steps that turn a shared secret into an encryption key and a MAC key.",
+      "lines": [
+        "byte[] prk = HKDF.Extract(HashAlgorithmName.SHA256, sharedSecret, salt);",
+        "byte[] encKey = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, \"app v1 enc\"u8.ToArray());",
+        "byte[] macKey = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, \"app v1 mac\"u8.ToArray());",
+        "Console.WriteLine(encKey.SequenceEqual(macKey));"
+      ],
+      "also": [
+        [
+          "byte[] prk = HKDF.Extract(HashAlgorithmName.SHA256, sharedSecret, salt);",
+          "byte[] macKey = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, \"app v1 mac\"u8.ToArray());",
+          "byte[] encKey = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, \"app v1 enc\"u8.ToArray());",
+          "Console.WriteLine(encKey.SequenceEqual(macKey));"
+        ]
+      ],
+      "explain": "Extract once, expand once per purpose (in either order), and the keys come out different."
+    },
+    {
+      "type": "code",
+      "title": "Split a master key",
+      "prompt": [
+        "Write `(byte[] Enc, byte[] Mac) DeriveKeys(byte[] master, string context)` returning two 32-byte keys from HKDF-SHA256 with no salt (`null`) and these info strings (UTF-8):",
+        "",
+        "- encryption key: `\"enc:\" + context`",
+        "- MAC key: `\"mac:\" + context`",
+        "",
+        "With the master key `00 01 02 ... 1f` and context `orders`, the encryption key starts `2206fd02`. Different contexts (say, `orders` and `invoices`) must give completely different keys, so a key leaked from one feature cannot touch another."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "(byte[] Enc, byte[] Mac) DeriveKeys(byte[] master, string context)",
+        "{",
+        "    return (Array.Empty<byte>(), Array.Empty<byte>());",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "(byte[] Enc, byte[] Mac) DeriveKeys(byte[] master, string context)",
+        "{",
+        "    byte[] enc = HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, Encoding.UTF8.GetBytes(\"enc:\" + context));",
+        "    byte[] mac = HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, Encoding.UTF8.GetBytes(\"mac:\" + context));",
+        "    return (enc, mac);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoMaster = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();",
+        "var (dojoEnc, dojoMac) = DeriveKeys(dojoMaster, \"orders\");",
+        "Dojo.Eq(\"encryption key for orders\", \"2206fd02445ca5edf8958dc2d5aa37eeec2d0e70755e02222e8d8ffa1e054a53\", Convert.ToHexStringLower(dojoEnc));",
+        "Dojo.Eq(\"MAC key for orders\", Convert.ToHexStringLower(System.Security.Cryptography.HKDF.DeriveKey(System.Security.Cryptography.HashAlgorithmName.SHA256, dojoMaster, 32, null, \"mac:orders\"u8.ToArray())), Convert.ToHexStringLower(dojoMac));",
+        "Dojo.Check(\"the two keys differ\", !dojoEnc.SequenceEqual(dojoMac), \"enc and mac keys are equal\");",
+        "var (dojoEnc2, _) = DeriveKeys(dojoMaster, \"invoices\");",
+        "Dojo.Check(\"another context gives another key\", !dojoEnc.SequenceEqual(dojoEnc2), \"contexts share a key\");"
+      ],
+      "require": [
+        {
+          "pattern": "HKDF\\.",
+          "message": "Uses the HKDF class"
+        }
+      ],
+      "hints": [
+        "`HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, null, info)`.",
+        "Build each info with `Encoding.UTF8.GetBytes(\"enc:\" + context)`."
+      ]
+    }
+  ]
+}

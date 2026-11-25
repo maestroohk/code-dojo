@@ -1,0 +1,307 @@
+{
+  "title": "ChaCha20-Poly1305, encrypt-then-MAC and padding oracles",
+  "summary": "The other modern AEAD, how to compose a cipher and a MAC safely when you must, and the attack that taught everyone why.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "ChaCha20-Poly1305",
+      "body": [
+        "  **ChaCha20-Poly1305** is the other AEAD you will meet everywhere (TLS 1.3, WireGuard, SSH). ChaCha20 is a stream cipher built from additions, rotations and XORs; Poly1305 makes the tag. It is fast in plain software, so it shines on phones and chips without AES instructions, and it has no table lookups that could leak timing.",
+        "",
+        "  In .NET its API has the same shape as `AesGcm`:",
+        "",
+        "  ```csharp",
+        "  using var cc = new ChaCha20Poly1305(key);                 // key: exactly 32 bytes",
+        "  cc.Encrypt(nonce, plain, cipher, tag, associatedData);    // nonce 12 bytes, tag 16 bytes",
+        "  cc.Decrypt(nonce, cipher, tag, plain, associatedData);",
+        "  ```",
+        "",
+        "  Same rules too: a unique nonce per key, tag checked on decrypt, `AuthenticationTagMismatchException` on any change. Check `ChaCha20Poly1305.IsSupported` on platforms where the OS library might lack it.",
+        "",
+        "",
+        "> **Fixed values for the exercises only.** The keys, IVs and nonces here are constants so the output is the same every run. Real code takes keys from `RandomNumberGenerator` or a key vault and never repeats a nonce with the same key."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] key = new byte[32], nonce = new byte[12];",
+        "byte[] plain = Encoding.UTF8.GetBytes(\"hello world\");",
+        "var cipher = new byte[plain.Length];",
+        "var tag = new byte[16];",
+        "using var cc = new ChaCha20Poly1305(key);",
+        "cc.Encrypt(nonce, plain, cipher, tag);",
+        "var back = new byte[cipher.Length];",
+        "cc.Decrypt(nonce, cipher, tag, back);",
+        "Console.WriteLine($\"{cipher.Length} {tag.Length} {back.SequenceEqual(plain)}\");"
+      ],
+      "answer": "11 16 True",
+      "explain": "Like GCM, the ciphertext is as long as the plaintext and the tag is 16 bytes."
+    },
+    {
+      "type": "code",
+      "title": "Seal with ChaCha20-Poly1305",
+      "prompt": [
+        "Write `byte[] SealChaCha(byte[] key, byte[] nonce, string text)` returning **ciphertext || tag**, and `string OpenChaCha(byte[] key, byte[] nonce, byte[] sealedData)` that splits off the last 16 bytes as the tag and decrypts.",
+        "",
+        "The tests compare your bytes with .NET's own ChaCha20-Poly1305 and check that tampering throws."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] SealChaCha(byte[] key, byte[] nonce, string text)",
+        "{",
+        "    return Array.Empty<byte>();",
+        "}",
+        "",
+        "string OpenChaCha(byte[] key, byte[] nonce, byte[] sealedData)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] SealChaCha(byte[] key, byte[] nonce, string text)",
+        "{",
+        "    byte[] plain = Encoding.UTF8.GetBytes(text);",
+        "    var output = new byte[plain.Length + 16];",
+        "    using var cc = new ChaCha20Poly1305(key);",
+        "    cc.Encrypt(nonce, plain, output.AsSpan(0, plain.Length), output.AsSpan(plain.Length));",
+        "    return output;",
+        "}",
+        "",
+        "string OpenChaCha(byte[] key, byte[] nonce, byte[] sealedData)",
+        "{",
+        "    var plain = new byte[sealedData.Length - 16];",
+        "    using var cc = new ChaCha20Poly1305(key);",
+        "    cc.Decrypt(nonce, sealedData.AsSpan(0, plain.Length), sealedData.AsSpan(plain.Length), plain);",
+        "    return Encoding.UTF8.GetString(plain);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKey = Enumerable.Range(0, 32).Select(i => (byte)(200 - i)).ToArray();",
+        "var dojoNonce = Convert.FromHexString(\"000000000000000000000001\");",
+        "var dojoS = SealChaCha(dojoKey, dojoNonce, \"ship it\");",
+        "var dojoEc = new byte[7]; var dojoEt = new byte[16];",
+        "using (var dojoCc = new System.Security.Cryptography.ChaCha20Poly1305(dojoKey))",
+        "    dojoCc.Encrypt(dojoNonce, System.Text.Encoding.UTF8.GetBytes(\"ship it\"), dojoEc, dojoEt);",
+        "Dojo.Eq(\"ciphertext || tag matches ChaCha20-Poly1305\", Convert.ToHexStringLower(dojoEc) + Convert.ToHexStringLower(dojoEt), Convert.ToHexStringLower(dojoS));",
+        "Dojo.Eq(\"OpenChaCha gives the text back\", \"ship it\", OpenChaCha(dojoKey, dojoNonce, dojoS));",
+        "var dojoBad = (byte[])dojoS.Clone(); dojoBad[^1] ^= 1;",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"a changed tag is rejected\", () => OpenChaCha(dojoKey, dojoNonce, dojoBad));",
+        "Dojo.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(\"the wrong nonce is rejected\", () => OpenChaCha(dojoKey, new byte[12], dojoS));"
+      ],
+      "hints": [
+        "`new ChaCha20Poly1305(key)` then `Encrypt(nonce, plain, cipherSpan, tagSpan)`.",
+        "Split with spans: `sealedData.AsSpan(0, n)` and `sealedData.AsSpan(n)` where `n = sealedData.Length - 16`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Before AEAD: cipher plus MAC",
+      "body": [
+        "Before AEADs were common, people combined a cipher (CBC) with a MAC (HMAC) by hand. There are three orders, and only one is safe in general:",
+        "",
+        "| Order | What is MACed | Used by | Verdict |",
+        "|---|---|---|---|",
+        "| **Encrypt-then-MAC** | the IV + ciphertext | IPsec, many modern formats | safe: verify the tag *before* decrypting anything |",
+        "| MAC-then-encrypt | the plaintext, then all encrypted | old TLS (CBC suites) | gave us padding oracles and Lucky 13 |",
+        "| Encrypt-and-MAC | the plaintext, MAC sent in the clear | SSH (originally) | the MAC of the plaintext can leak equal messages |",
+        "",
+        "Encrypt-then-MAC rules: **separate keys** for encryption and MAC (derive them with HKDF from one secret, as in module 2), MAC **everything** the receiver will use (version, IV, ciphertext), and compare tags with `CryptographicOperations.FixedTimeEquals`.",
+        "",
+        "If you can use AES-GCM or ChaCha20-Poly1305, do: they are exactly this, done once, correctly."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each composition to its consequence.",
+      "pairs": [
+        [
+          "Encrypt-then-MAC",
+          "forgeries are rejected before the cipher ever runs"
+        ],
+        [
+          "MAC-then-encrypt",
+          "the receiver must decrypt (and check padding) before it knows the data is authentic"
+        ],
+        [
+          "Encrypt-and-MAC",
+          "a MAC over the plaintext is visible, so equal messages are linkable"
+        ],
+        [
+          "AEAD (AES-GCM)",
+          "encryption and authentication in one standard call"
+        ]
+      ],
+      "explain": "The core idea: authenticate the ciphertext, and check it first."
+    },
+    {
+      "type": "learn",
+      "title": "Padding oracles",
+      "body": [
+        "Picture a server that decrypts AES-CBC with PKCS#7 and answers **differently** when the padding is invalid (\"bad padding\") than when it is valid but the data is wrong (\"bad request\"), or merely takes a different time.",
+        "",
+        "That one bit of information is an **oracle**. In CBC, flipping a byte of the previous ciphertext block flips the same byte of the decrypted block. The attacker tweaks the last byte of the previous block up to 256 times until the server says \"padding OK\", which means the decrypted byte is now `0x01`, and from that works out the real plaintext byte. Repeat for every byte: the whole message decrypts with about 128 requests per byte, **without the key**.",
+        "",
+        "It broke SSL, ASP.NET (2010, MS10-070), and many custom token formats. The fixes, best first:",
+        "",
+        "1. Use an AEAD, or encrypt-then-MAC, and **verify before decrypting**: tampered ciphertext never reaches the padding check.",
+        "2. Return one identical error, in constant time, for every failure."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which change fixes a CBC padding oracle at its root?",
+      "options": [
+        "Verify a MAC over the IV and ciphertext before decrypting (or switch to AES-GCM)",
+        "Use a 256-bit key instead of 128-bit",
+        "Change the error message to say \"error\" for padding failures but keep the other message",
+        "Encrypt the padding with a second key"
+      ],
+      "answer": 0,
+      "explain": "Key size does not matter: the attack never touches the key. Rewording errors helps only if *every* failure becomes indistinguishable, including timing. Authenticating first removes the oracle entirely."
+    },
+    {
+      "type": "sort",
+      "prompt": "Is each scheme, used on its own, authenticated (does it reject tampered ciphertext)?",
+      "buckets": [
+        "Authenticated",
+        "Not authenticated"
+      ],
+      "items": [
+        [
+          "AES-CBC with PKCS#7",
+          1
+        ],
+        [
+          "AES-CTR",
+          1
+        ],
+        [
+          "AES-GCM",
+          0
+        ],
+        [
+          "ChaCha20-Poly1305",
+          0
+        ],
+        [
+          "AES-CBC, then HMAC-SHA256 over IV and ciphertext",
+          0
+        ],
+        [
+          "AES-ECB",
+          1
+        ]
+      ],
+      "explain": "CBC, CTR and ECB only hide data. Integrity comes from a tag: built in (GCM, Poly1305) or added correctly (encrypt-then-MAC)."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange encrypt-then-MAC **decryption** so nothing is decrypted before it is authenticated.",
+      "lines": [
+        "var (iv, cipher, tag) = Split(box);",
+        "byte[] expected = HMACSHA256.HashData(macKey, [.. iv, .. cipher]);",
+        "if (!CryptographicOperations.FixedTimeEquals(expected, tag)) throw new CryptographicException();",
+        "byte[] plain = aes.DecryptCbc(cipher, iv, PaddingMode.PKCS7);"
+      ],
+      "explain": "Recompute the tag over exactly what was sent, compare in constant time, and only then let the cipher and its padding check see the data."
+    },
+    {
+      "type": "code",
+      "title": "Encrypt-then-MAC",
+      "prompt": [
+        "Build encrypt-then-MAC with AES-CBC and HMAC-SHA256, using **two separate keys**:",
+        "",
+        "- `byte[] EtmEncrypt(byte[] encKey, byte[] macKey, byte[] iv, string text)` returns **iv (16) || ciphertext || tag (32)**, where the ciphertext is `EncryptCbc` with PKCS#7 over the UTF-8 text and the tag is `HMACSHA256(macKey, iv || ciphertext)`.",
+        "- `string EtmDecrypt(byte[] encKey, byte[] macKey, byte[] box)` recomputes the tag, compares it with `CryptographicOperations.FixedTimeEquals`, throws `CryptographicException` if it differs (or if the box is shorter than 16 + 16 + 32 bytes), and only then decrypts.",
+        "",
+        "The IV is a parameter so the tests are repeatable; a real caller passes 16 fresh random bytes."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] EtmEncrypt(byte[] encKey, byte[] macKey, byte[] iv, string text)",
+        "{",
+        "    return Array.Empty<byte>();",
+        "}",
+        "",
+        "string EtmDecrypt(byte[] encKey, byte[] macKey, byte[] box)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "using System.Text;",
+        "",
+        "byte[] EtmEncrypt(byte[] encKey, byte[] macKey, byte[] iv, string text)",
+        "{",
+        "    using var aes = Aes.Create();",
+        "    aes.Key = encKey;",
+        "    byte[] cipher = aes.EncryptCbc(Encoding.UTF8.GetBytes(text), iv, PaddingMode.PKCS7);",
+        "    byte[] signed = [.. iv, .. cipher];",
+        "    byte[] tag = HMACSHA256.HashData(macKey, signed);",
+        "    return [.. signed, .. tag];",
+        "}",
+        "",
+        "string EtmDecrypt(byte[] encKey, byte[] macKey, byte[] box)",
+        "{",
+        "    if (box.Length < 16 + 16 + 32) throw new CryptographicException(\"Too short.\");",
+        "    byte[] signed = box[..^32];",
+        "    byte[] tag = box[^32..];",
+        "    byte[] expected = HMACSHA256.HashData(macKey, signed);",
+        "    if (!CryptographicOperations.FixedTimeEquals(expected, tag))",
+        "        throw new CryptographicException(\"Authentication failed.\");",
+        "    using var aes = Aes.Create();",
+        "    aes.Key = encKey;",
+        "    byte[] plain = aes.DecryptCbc(signed[16..], signed[..16], PaddingMode.PKCS7);",
+        "    return Encoding.UTF8.GetString(plain);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoEnc = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();",
+        "var dojoMac = Enumerable.Range(0, 32).Select(i => (byte)(i + 100)).ToArray();",
+        "var dojoIv = Enumerable.Range(0, 16).Select(i => (byte)(i * 16)).ToArray();",
+        "var dojoBox = EtmEncrypt(dojoEnc, dojoMac, dojoIv, \"transfer 10 to bob\");",
+        "Dojo.Eq(\"box is 16 + 32 + 32 bytes\", 80, dojoBox.Length);",
+        "using var dojoAes = System.Security.Cryptography.Aes.Create();",
+        "dojoAes.Key = dojoEnc;",
+        "var dojoC = dojoAes.EncryptCbc(System.Text.Encoding.UTF8.GetBytes(\"transfer 10 to bob\"), dojoIv, System.Security.Cryptography.PaddingMode.PKCS7);",
+        "var dojoSigned = dojoIv.Concat(dojoC).ToArray();",
+        "var dojoExpected = dojoSigned.Concat(System.Security.Cryptography.HMACSHA256.HashData(dojoMac, dojoSigned)).ToArray();",
+        "Dojo.Eq(\"box is iv || ciphertext || HMAC(iv || ciphertext)\", Convert.ToHexStringLower(dojoExpected), Convert.ToHexStringLower(dojoBox));",
+        "Dojo.Eq(\"EtmDecrypt gives the text back\", \"transfer 10 to bob\", EtmDecrypt(dojoEnc, dojoMac, dojoBox));",
+        "foreach (var dojoAt in new[] { 0, 20, 47, 79 })",
+        "{",
+        "    var dojoBad = (byte[])dojoBox.Clone(); dojoBad[dojoAt] ^= 1;",
+        "    Dojo.Throws<System.Security.Cryptography.CryptographicException>($\"a flipped bit at byte {dojoAt} is rejected\", () => EtmDecrypt(dojoEnc, dojoMac, dojoBad));",
+        "}",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"the wrong MAC key is rejected\", () => EtmDecrypt(dojoEnc, dojoEnc, dojoBox));",
+        "Dojo.Throws<System.Security.Cryptography.CryptographicException>(\"a short box is rejected\", () => EtmDecrypt(dojoEnc, dojoMac, new byte[40]));"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares tags with CryptographicOperations.FixedTimeEquals"
+        }
+      ],
+      "hints": [
+        "The MAC covers `[.. iv, .. cipher]`; append the 32-byte tag after it.",
+        "Decrypt only after `FixedTimeEquals(expected, tag)` is true: IV is `signed[..16]`, ciphertext `signed[16..]`."
+      ]
+    }
+  ]
+}
