@@ -374,6 +374,7 @@ public static class Interleave
             {
                 case IFieldSymbol f: return !f.IsConst;
                 case IPropertySymbol p: return p.Locations.Any(l => l.IsInSource);
+                case IParameterSymbol { RefKind: not RefKind.None }: return true;    // ref int max aliases shared memory
                 case ILocalSymbol or IParameterSymbol:
                     var decl = sym.DeclaringSyntaxReferences.FirstOrDefault();
                     if (decl is null || decl.SyntaxTree != id.SyntaxTree) return false;
@@ -528,22 +529,35 @@ public static class Interleave
                 : BinaryExpression(SyntaxKind.LogicalAndExpression, probe, ParenthesizedExpression((ExpressionSyntax)Visit(original)!));
         }
 
+        // while (true) and for (;;) keep their condition (the compiler relies on it for definite returns); the
+        // switch point goes at the top of the body instead.
+        static bool Forever(ExpressionSyntax? c) => c is null || c.IsKind(SyntaxKind.TrueLiteralExpression);
+
+        StatementSyntax TopOfBody(SyntaxNode at, StatementSyntax body)
+        {
+            var y = Stmt($"__Sched.Y({Region(at)}, {Line(at)}, 7);");
+            return body is BlockSyntax b ? b.WithStatements(b.Statements.Insert(0, y)) : Block(y, body);
+        }
+
         public override SyntaxNode? VisitWhileStatement(WhileStatementSyntax node)
         {
             var visited = (WhileStatementSyntax)base.VisitWhileStatement(node)!;
-            return Region(node) < 0 ? visited : visited.WithCondition(Test(node, node.Condition));
+            if (Region(node) < 0) return visited;
+            return Forever(node.Condition) ? visited.WithStatement(TopOfBody(node, visited.Statement)) : visited.WithCondition(Test(node, node.Condition));
         }
 
         public override SyntaxNode? VisitDoStatement(DoStatementSyntax node)
         {
             var visited = (DoStatementSyntax)base.VisitDoStatement(node)!;
-            return Region(node) < 0 ? visited : visited.WithCondition(Test(node, node.Condition));
+            if (Region(node) < 0) return visited;
+            return Forever(node.Condition) ? visited.WithStatement(TopOfBody(node, visited.Statement)) : visited.WithCondition(Test(node, node.Condition));
         }
 
         public override SyntaxNode? VisitForStatement(ForStatementSyntax node)
         {
             var visited = (ForStatementSyntax)base.VisitForStatement(node)!;
-            return Region(node) < 0 ? visited : visited.WithCondition(Test(node, node.Condition));
+            if (Region(node) < 0) return visited;
+            return Forever(node.Condition) ? visited.WithStatement(TopOfBody(node, visited.Statement)) : visited.WithCondition(Test(node, node.Condition));
         }
 
         // ---------- expression-bodied methods get a block, so void Add() => _count++; is split too
@@ -877,7 +891,7 @@ public static class Interleave
             {
                 try
                 {
-                    if (spec.Result is { } r) return Dojo.Show(r());
+                    if (spec.Result is { } r) return r() is string text ? text : Dojo.Show(r());
                     return string.Join(", ", Snap(spec));
                 }
                 catch (System.Exception e) { return "the result threw " + e.GetType().Name; }

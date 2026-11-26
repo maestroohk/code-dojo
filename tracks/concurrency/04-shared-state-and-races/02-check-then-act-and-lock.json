@@ -1,0 +1,213 @@
+{
+  "title": "Check-then-act, lock and the Lock type",
+  "summary": "The overdraft race, what a lock must cover, the rules for lock bodies, and .NET 9's System.Threading.Lock.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The check was true when you looked",
+      "body": [
+        "A **check-then-act** race: a thread checks a condition, then acts on it, but another thread changes the state in between.",
+        "",
+        "```csharp fragment",
+        "if (balance >= amount)      // check",
+        "    balance -= amount;      // act: the check may be stale by now",
+        "```",
+        "",
+        "Two withdrawals of 80 from a balance of 100. Each thread checks (100 is enough), and then both subtract. The card shows it: pick",
+        "**Both pass the check** and watch the balance go to -60. Then **Try every interleaving**."
+      ],
+      "interleave": {
+        "setup": ["int balance = 100;"],
+        "threads": [
+          { "name": "T1", "code": ["if (balance >= 80)", "    balance -= 80;"] },
+          { "name": "T2", "code": ["if (balance >= 80)", "    balance -= 80;"] }
+        ],
+        "result": "balance",
+        "expect": "20",
+        "schedules": [
+          { "name": "Both pass the check", "pick": [0, 1, 0, 0, 1, 1], "expect": "-60" }
+        ],
+        "outcomes": ["20", "-60"]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "The team makes the subtraction atomic: `if (balance >= 80) Interlocked.Add(ref balance, -80);`. Is the overdraft fixed?",
+      "options": [
+        "No: the check and the act are still separate steps; both threads can pass the check before either subtracts",
+        "Yes: Interlocked makes the whole `if` atomic",
+        "Yes, on x86 only",
+        "No, because Interlocked does not work with negative numbers"
+      ],
+      "answer": 0,
+      "explain": "Making each step atomic does not make the *sequence* atomic. The invariant (balance never below zero) spans the check and the act, so both must be inside one critical section."
+    },
+    {
+      "type": "learn",
+      "title": "Rules for a lock body",
+      "body": [
+        "```csharp",
+        "class Account(int opening)",
+        "{",
+        "    private readonly Lock _gate = new();   // .NET 9 / C# 13: System.Threading.Lock",
+        "    private int _balance = opening;",
+        "",
+        "    public bool TryWithdraw(int amount)",
+        "    {",
+        "        lock (_gate)",
+        "        {",
+        "            if (_balance < amount) return false;",
+        "            _balance -= amount;",
+        "            return true;",
+        "        }",
+        "    }",
+        "}",
+        "```",
+        "",
+        "- **Cover the whole invariant**: every read and write of the state it protects, including reads (`Balance`).",
+        "- **Keep it short**: no I/O, no `await` (the compiler refuses: CS1996), no `Thread.Sleep`.",
+        "- **Never call unknown code inside** (events, callbacks, virtual methods, logging sinks): it may take another lock, which is how",
+        "  deadlocks are born.",
+        "- **Lock on a private, readonly object.** Never `this`, a `Type`, or a string.",
+        "",
+        "With the `Lock` type, the `lock` statement calls `Lock.EnterScope()`, which is a bit faster than `Monitor` and makes the intent",
+        "obvious. If a `Lock` is cast to `object` and locked, the compiler warns (CS9216): that would use `Monitor` instead. For code that must",
+        "await while holding exclusive access, use `SemaphoreSlim(1, 1)` with `await WaitAsync()` and `Release()` in `finally`."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Inside `lock (_gate) { ... }` in a request handler: fine, or a problem?",
+      "buckets": ["Fine", "Problem"],
+      "items": [
+        ["`if (_balance < amount) return false; _balance -= amount;`", 0],
+        ["`await _db.SaveAsync(account);`", 1],
+        ["`_log.LogInformation(\"withdrew {Amount}\", amount);` with a slow network sink", 1],
+        ["`Withdrawn?.Invoke(this, amount);` (an event)", 1],
+        ["`_history.Add((amount, _clock.GetUtcNow()));`", 0],
+        ["`Thread.Sleep(10); // let the DB catch up`", 1]
+      ],
+      "explain": "A lock body should only touch the protected state, quickly. I/O and sleeps hold every other thread up; events and sinks run code you do not control while you hold the lock (deadlock risk). Raise the event or log *after* leaving the lock, with values you copied inside."
+    },
+    {
+      "type": "predict",
+      "prompt": "A thread that holds a lock takes it again. What does this print?",
+      "code": [
+        "var gate = new object();",
+        "lock (gate)",
+        "{",
+        "    lock (gate)",
+        "    {",
+        "        Console.WriteLine(\"nested\");",
+        "    }",
+        "    Console.WriteLine(Monitor.IsEntered(gate));",
+        "}",
+        "Console.WriteLine(Monitor.IsEntered(gate));"
+      ],
+      "answer": ["nested", "True", "False"],
+      "explain": "`Monitor` locks are **reentrant**: the owner can enter again, and must exit as many times. Reentrancy is convenient but can hide design problems; `SemaphoreSlim` is *not* reentrant and deadlocks if the holder waits again."
+    },
+    {
+      "type": "learn",
+      "title": "The fix, under every interleaving",
+      "body": [
+        "Here the check and the act are inside one `lock`. Try to sneak T2 in between T1's check and its subtraction: T2 is **blocked** (red",
+        "hatch) until T1 leaves. **Try every interleaving**: one outcome."
+      ],
+      "interleave": {
+        "setup": ["int balance = 100;", "object gate = new();"],
+        "threads": [
+          { "name": "T1", "code": ["lock (gate)", "{", "    if (balance >= 80)", "        balance -= 80;", "}"] },
+          { "name": "T2", "code": ["lock (gate)", "{", "    if (balance >= 80)", "        balance -= 80;", "}"] }
+        ],
+        "result": "balance",
+        "expect": "20",
+        "outcomes": ["20"]
+      }
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the account so that a balance can never go below zero.",
+      "code": [
+        "class Account(int opening)",
+        "{",
+        "    private readonly Lock _gate = new();",
+        "    private int _balance = opening;",
+        "",
+        "    public bool TryWithdraw(int amount)",
+        "    {",
+        "        __1__ (_gate)",
+        "        {",
+        "            if (_balance __2__ amount) return false;",
+        "            _balance -= amount;",
+        "            return __3__;",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "blanks": ["lock", "<", "true"],
+      "bank": ["using", ">=", "false", "volatile"]
+    },
+    {
+      "type": "code",
+      "title": "No overdraft, in any interleaving",
+      "prompt": [
+        "Write a class **`Account`** with a constructor `Account(int opening)`, a method **`bool TryWithdraw(int amount)`** that withdraws",
+        "only when the balance covers it (returning whether it did), and a property **`int Balance`**.",
+        "",
+        "**How it is checked:** two threads each try to withdraw 80 from 100, under every interleaving. Exactly one must succeed and the",
+        "balance must end at 20 (the result is shown as `balance successes`, so `20 1`)."
+      ],
+      "starter": [
+        "class Account(int opening)",
+        "{",
+        "    private int _balance = opening;",
+        "",
+        "    public bool TryWithdraw(int amount)",
+        "    {",
+        "        if (_balance < amount) return false;",
+        "        _balance -= amount;",
+        "        return true;",
+        "    }",
+        "",
+        "    public int Balance => _balance;",
+        "}"
+      ],
+      "solution": [
+        "class Account(int opening)",
+        "{",
+        "    private readonly Lock _gate = new();",
+        "    private int _balance = opening;",
+        "",
+        "    public bool TryWithdraw(int amount)",
+        "    {",
+        "        lock (_gate)",
+        "        {",
+        "            if (_balance < amount) return false;",
+        "            _balance -= amount;",
+        "            return true;",
+        "        }",
+        "    }",
+        "",
+        "    public int Balance { get { lock (_gate) return _balance; } }",
+        "}"
+      ],
+      "interleavings": {
+        "title": "Two withdrawals of 80 from 100",
+        "setup": ["var account = new Account(100);", "bool ok1 = false, ok2 = false;"],
+        "threads": [
+          { "name": "T1", "code": ["ok1 = account.TryWithdraw(80);"] },
+          { "name": "T2", "code": ["ok2 = account.TryWithdraw(80);"] }
+        ],
+        "watch": ["account.Balance", "ok1", "ok2"],
+        "result": "$\"{account.Balance} {(ok1 ? 1 : 0) + (ok2 ? 1 : 0)}\"",
+        "expect": "20 1"
+      },
+      "hints": [
+        "The check and the subtraction must be inside the same `lock`.",
+        "`private readonly Lock _gate = new();` and wrap the body of `TryWithdraw` in `lock (_gate) { ... }`."
+      ]
+    }
+  ]
+}

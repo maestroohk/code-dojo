@@ -1,0 +1,172 @@
+{
+  "title": "Tokens all the way down",
+  "summary": "Cooperative cancellation, where tokens come from in ASP.NET Core, checking in loops, linked tokens, and the exceptions that carry it.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Cancellation is a request, not a kill",
+      "body": [
+        ".NET never stops your code from the outside. A `CancellationTokenSource` (CTS) owns the *switch*; the `CancellationToken` it hands",
+        "out can only *see* the switch. Code that is asked to stop must look and stop itself:",
+        "",
+        "- async APIs that take a token (`HttpClient`, EF Core, `Task.Delay`, `Channel` reads, `SemaphoreSlim.WaitAsync`) stop waiting and throw",
+        "  `OperationCanceledException` when it is cancelled;",
+        "- CPU loops call `ct.ThrowIfCancellationRequested()` every so often;",
+        "- `ct.Register(() => ...)` runs a callback on cancellation (to abort something that has no token).",
+        "",
+        "In ASP.NET Core, a `CancellationToken` parameter on an endpoint is bound to `HttpContext.RequestAborted`: it fires when the client",
+        "disconnects. If you do not pass it down, the database query keeps running for a user who left.",
+        "",
+        "```csharp fragment",
+        "app.MapGet(\"/orders/{id}\", async (int id, OrdersDb db, CancellationToken ct) =>",
+        "    await db.Orders.FindAsync([id], ct) is { } o ? Results.Ok(o) : Results.NotFound());",
+        "```",
+        "",
+        "`TaskCanceledException` derives from `OperationCanceledException`: catch the base type."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each piece to its job.",
+      "pairs": [
+        ["`CancellationTokenSource`", "owns the switch: `Cancel()`, `CancelAfter()`"],
+        ["`CancellationToken`", "lets code observe the switch, cannot flip it"],
+        ["`ct.ThrowIfCancellationRequested()`", "a check point inside a CPU-bound loop"],
+        ["`ct.Register(callback)`", "runs code when cancellation happens"],
+        ["`HttpContext.RequestAborted`", "fires when the HTTP client disconnects"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Linked tokens: more than one reason to stop",
+      "body": [
+        "A request handler usually has two reasons to stop: **the client went away** and **our own time budget ran out**. Combine them:",
+        "",
+        "```csharp fragment",
+        "using var budget = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);",
+        "budget.CancelAfter(TimeSpan.FromSeconds(2));",
+        "try",
+        "{",
+        "    return await inventory.GetAsync(sku, budget.Token);",
+        "}",
+        "catch (OperationCanceledException) when (!requestAborted.IsCancellationRequested)",
+        "{",
+        "    return Fallback(sku);          // our timeout fired: degrade gracefully",
+        "}                                   // the client left: let the exception go, nobody is listening",
+        "```",
+        "",
+        "- The linked source cancels when **any** parent cancels, or when its own timer fires.",
+        "- **Dispose** linked and timed sources (`using`): they register callbacks on their parents and hold a timer.",
+        "- The `when` filter tells *which* reason fired. Never treat every `OperationCanceledException` as a timeout."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using var request = new CancellationTokenSource();",
+        "using var linked = CancellationTokenSource.CreateLinkedTokenSource(request.Token);",
+        "request.Cancel();",
+        "Console.WriteLine(linked.Token.IsCancellationRequested);",
+        "using var other = new CancellationTokenSource();",
+        "using var linked2 = CancellationTokenSource.CreateLinkedTokenSource(other.Token);",
+        "linked2.Cancel();",
+        "Console.WriteLine(other.Token.IsCancellationRequested);"
+      ],
+      "answer": ["True", "False"],
+      "explain": "Cancellation flows from parent to child, never back up. Cancelling the linked source does not cancel the token it was made from."
+    },
+    {
+      "type": "sort",
+      "prompt": "A call was cancelled. In the `catch (OperationCanceledException)`, which ones are *our timeout* and which mean *the caller gave up*?",
+      "buckets": ["Our timeout", "The caller gave up"],
+      "items": [
+        ["`budget.IsCancellationRequested && !requestAborted.IsCancellationRequested`", 0],
+        ["`requestAborted.IsCancellationRequested`", 1],
+        ["`HttpClient.Timeout` elapsed: `TaskCanceledException` with an inner `TimeoutException`", 0],
+        ["The user closed the browser tab mid-request", 1]
+      ],
+      "explain": "Since .NET 5, `HttpClient` marks its own timeout with an inner `TimeoutException`, so you can tell it apart from your token. For your own budget, check which token is cancelled."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make the CPU-bound loop stop promptly when asked.",
+      "code": [
+        "static long Checksum(byte[][] blocks, CancellationToken ct)",
+        "{",
+        "    long sum = 0;",
+        "    foreach (var block in blocks)",
+        "    {",
+        "        ct.__1__();",
+        "        foreach (var b in block) sum += b;",
+        "    }",
+        "    return sum;",
+        "}"
+      ],
+      "blanks": ["ThrowIfCancellationRequested"],
+      "bank": ["Cancel", "Register", "WaitHandle", "Dispose"],
+      "explain": "Check once per block, not once per byte: the check is cheap, but not free, and a block is small enough to keep the response prompt."
+    },
+    {
+      "type": "code",
+      "title": "A batch that stops between items",
+      "prompt": [
+        "Write **`static async Task<int> ProcessBatchAsync(IReadOnlyList<string> items, Func<string, CancellationToken, Task> handle, CancellationToken ct)`**.",
+        "",
+        "- Handle the items **one at a time, in order**, passing `ct` to `handle`.",
+        "- Before starting each item, stop if `ct` is cancelled by throwing `OperationCanceledException` (the usual way: `ct.ThrowIfCancellationRequested()`).",
+        "- Return how many items were handled when it finishes normally.",
+        "",
+        "The tests cancel the token while the second item is being handled: the third must never start, and the method must throw."
+      ],
+      "starter": [
+        "static async Task<int> ProcessBatchAsync(IReadOnlyList<string> items, Func<string, CancellationToken, Task> handle, CancellationToken ct)",
+        "{",
+        "    var done = 0;",
+        "    foreach (var item in items)",
+        "    {",
+        "        await handle(item, CancellationToken.None);",
+        "        done++;",
+        "    }",
+        "    return done;",
+        "}"
+      ],
+      "solution": [
+        "static async Task<int> ProcessBatchAsync(IReadOnlyList<string> items, Func<string, CancellationToken, Task> handle, CancellationToken ct)",
+        "{",
+        "    var done = 0;",
+        "    foreach (var item in items)",
+        "    {",
+        "        ct.ThrowIfCancellationRequested();",
+        "        await handle(item, ct);",
+        "        done++;",
+        "    }",
+        "    return done;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSeen = new List<string>();",
+        "var dojoTokens = new List<CancellationToken>();",
+        "using var dojoCts = new CancellationTokenSource();",
+        "async Task DojoHandle(string item, CancellationToken ct)",
+        "{",
+        "    await Task.Yield();",
+        "    dojoSeen.Add(item);",
+        "    dojoTokens.Add(ct);",
+        "    if (item == \"b\") dojoCts.Cancel();",
+        "}",
+        "await Dojo.ThrowsAsync<OperationCanceledException>(\"Cancelling during item b stops the batch with OperationCanceledException\",",
+        "    () => ProcessBatchAsync(new[] { \"a\", \"b\", \"c\", \"d\" }, DojoHandle, dojoCts.Token));",
+        "Dojo.Eq(\"Items a and b ran; c never started\", new List<string> { \"a\", \"b\" }, dojoSeen);",
+        "Dojo.Check(\"The token is passed on to every item\", dojoTokens.All(t => t == dojoCts.Token), \"Call handle(item, ct), not CancellationToken.None.\");",
+        "Dojo.Eq(\"An uncancelled batch handles every item\", 3, await ProcessBatchAsync(new[] { \"x\", \"y\", \"z\" }, (_, _) => Task.CompletedTask, CancellationToken.None));"
+      ],
+      "hints": [
+        "Two changes: pass `ct` to `handle`, and check the token at the top of the loop.",
+        "`ct.ThrowIfCancellationRequested();` as the first line in the loop body, then `await handle(item, ct);`."
+      ]
+    }
+  ]
+}

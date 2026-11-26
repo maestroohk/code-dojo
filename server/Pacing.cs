@@ -231,7 +231,8 @@ public static class Pacing
 
     /// <summary>Fields a "coldOf" step borrows from the step it re-proves, so the two never drift apart.</summary>
     static readonly string[] ColdOfKeys = ["tests", "template", "require", "forbid", "setup", "check", "stateQuery", "framework", "stdin", "solution", "uses",
-        "checks", "image", "network"];   // the last three: terminal steps
+        "checks", "image", "network",   // terminal steps
+        "interleavings"];               // code steps graded under every interleaving (Interleave.cs)
 
     /// <summary>
     /// "coldOf": "track/module/lesson#N" (N is the 1-based step number): copy the grading of that step onto this one.

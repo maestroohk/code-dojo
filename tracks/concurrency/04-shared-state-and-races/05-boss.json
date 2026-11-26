@@ -1,0 +1,220 @@
+{
+  "title": "Boss: the numbers do not add up",
+  "summary": "A torn metrics snapshot, a config loaded twice, and an inventory that oversells: each fixed and proven under every interleaving.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**DATA-208: dashboards disagree with themselves.**",
+        "",
+        "```text",
+        "12:00:05 metrics total=10412 ok=10301 failed=96      # 10301 + 96 = 10397, not 10412",
+        "12:00:10 metrics total=10977 ok=10859 failed=118     # off by 0 this time",
+        "09:14:02 config loaded (pricing.json, 1.2 MB)",
+        "09:14:02 config loaded (pricing.json, 1.2 MB)        # twice, 3 ms apart",
+        "17:41:55 reserved sku=GPU-4090 qty=3 left=2",
+        "17:41:55 reserved sku=GPU-4090 qty=3 left=2          # two customers, 5 in stock, both got 3",
+        "```",
+        "",
+        "Each of these is a race. Each fix is checked by running the code under **every interleaving** of two threads; a wrong fix shows the",
+        "exact interleaving that breaks it."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "1. A snapshot that adds up",
+      "prompt": [
+        "`Metrics.Record(bool ok)` counts every request in `Total` and in either `Ok` or `Failed`. Each counter is incremented with",
+        "`Interlocked`, so no update is lost, but a `Snapshot()` taken in the middle of a `Record` sees `Total` already increased and `Ok`",
+        "not yet: a **torn read**.",
+        "",
+        "Fix **`Metrics`** so that every snapshot satisfies `Total == Ok + Failed`. Keep",
+        "`void Record(bool ok)` and `(int Total, int Ok, int Failed) Snapshot()`.",
+        "",
+        "**Checked:** T1 records a success while T2 takes a snapshot, under every interleaving. The result shows whether the snapshot added",
+        "up, then the final total: it must be `True 1`."
+      ],
+      "starter": [
+        "class Metrics",
+        "{",
+        "    private int _total, _ok, _failed;",
+        "",
+        "    public void Record(bool ok)",
+        "    {",
+        "        Interlocked.Increment(ref _total);",
+        "        if (ok) Interlocked.Increment(ref _ok);",
+        "        else Interlocked.Increment(ref _failed);",
+        "    }",
+        "",
+        "    public (int Total, int Ok, int Failed) Snapshot() =>",
+        "        (Volatile.Read(ref _total), Volatile.Read(ref _ok), Volatile.Read(ref _failed));",
+        "}"
+      ],
+      "solution": [
+        "class Metrics",
+        "{",
+        "    private readonly Lock _gate = new();",
+        "    private int _total, _ok, _failed;",
+        "",
+        "    public void Record(bool ok)",
+        "    {",
+        "        lock (_gate)",
+        "        {",
+        "            _total++;",
+        "            if (ok) _ok++;",
+        "            else _failed++;",
+        "        }",
+        "    }",
+        "",
+        "    public (int Total, int Ok, int Failed) Snapshot()",
+        "    {",
+        "        lock (_gate) return (_total, _ok, _failed);",
+        "    }",
+        "}"
+      ],
+      "interleavings": {
+        "title": "Record while a snapshot is taken",
+        "setup": ["var metrics = new Metrics();", "(int Total, int Ok, int Failed) snap = default;"],
+        "threads": [
+          { "name": "T1", "code": ["metrics.Record(true);"] },
+          { "name": "T2", "code": ["snap = metrics.Snapshot();"] }
+        ],
+        "watch": ["snap"],
+        "result": "$\"{snap.Total == snap.Ok + snap.Failed} {metrics.Snapshot().Total}\"",
+        "expect": "True 1"
+      },
+      "hints": [
+        "Three counters that must agree are one invariant: protect all three with one lock, in `Record` and in `Snapshot`.",
+        "`lock (_gate) { _total++; if (ok) _ok++; else _failed++; }` and `lock (_gate) return (_total, _ok, _failed);`"
+      ],
+      "explain": "`Interlocked` makes each counter right on its own. Relationships *between* values need one critical section, or one immutable object swapped as a whole."
+    },
+    {
+      "type": "code",
+      "title": "2. Load the config once",
+      "prompt": [
+        "`ConfigHolder.Get()` loads the configuration on first use. Two requests arriving together both see `_config == null` and both load",
+        "the 1.2 MB file.",
+        "",
+        "Fix **`ConfigHolder`** (constructor `ConfigHolder(Func<string> load)`, method **`string Get()`**) so that `load` runs **exactly once**,",
+        "however the first calls interleave, and every call returns the loaded value.",
+        "",
+        "**Checked:** two threads call `Get()` under every interleaving; the result is `loads value1 value2` and must be `1 cfg cfg`."
+      ],
+      "starter": [
+        "class ConfigHolder(Func<string> load)",
+        "{",
+        "    private string? _config;",
+        "",
+        "    public string Get()",
+        "    {",
+        "        if (_config is null)",
+        "            _config = load();",
+        "        return _config;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class ConfigHolder(Func<string> load)",
+        "{",
+        "    private readonly Lazy<string> _config = new(load);",
+        "",
+        "    public string Get() => _config.Value;",
+        "}"
+      ],
+      "interleavings": {
+        "title": "Two first calls at once",
+        "setup": ["int loads = 0;", "var holder = new ConfigHolder(() => { loads++; return \"cfg\"; });", "string? a = null, b = null;"],
+        "threads": [
+          { "name": "T1", "code": ["a = holder.Get();"] },
+          { "name": "T2", "code": ["b = holder.Get();"] }
+        ],
+        "watch": ["loads", "a", "b"],
+        "result": "$\"{loads} {a} {b}\"",
+        "expect": "1 cfg cfg"
+      },
+      "hints": [
+        "`Lazy<T>` exists for exactly this. Its default mode runs the factory once, even when the first calls race.",
+        "`private readonly Lazy<string> _config = new(load);` and `public string Get() => _config.Value;`. A double-checked `lock` also works."
+      ],
+      "explain": [
+        "Hand-written double-checked locking (`if (x == null) lock (...) if (x == null) x = ...`) is correct in .NET only with care about",
+        "publication; `Lazy<T>` gets it right for you and says what you mean."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "3. Never oversell",
+      "prompt": [
+        "Write **`Inventory`** with a constructor `Inventory(Dictionary<string, int> stock)`, **`bool TryReserve(string sku, int qty)`**",
+        "(reserve only if enough is left; return whether it did) and **`int Left(string sku)`**.",
+        "",
+        "Keep the stock in a `System.Collections.Concurrent.ConcurrentDictionary<string, int>`, and make `TryReserve` atomic **without a",
+        "lock**: a `TryUpdate` compare-and-swap loop.",
+        "",
+        "**Checked:** two customers reserve 3 of a sku with 5 left, under every interleaving. The result is `left successes`: `2 1`."
+      ],
+      "starter": [
+        "class Inventory(Dictionary<string, int> stock)",
+        "{",
+        "    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _stock = new(stock);",
+        "",
+        "    public bool TryReserve(string sku, int qty)",
+        "    {",
+        "        if (!_stock.TryGetValue(sku, out var have) || have < qty) return false;",
+        "        _stock[sku] = have - qty;",
+        "        return true;",
+        "    }",
+        "",
+        "    public int Left(string sku) => _stock.TryGetValue(sku, out var n) ? n : 0;",
+        "}"
+      ],
+      "solution": [
+        "class Inventory(Dictionary<string, int> stock)",
+        "{",
+        "    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _stock = new(stock);",
+        "",
+        "    public bool TryReserve(string sku, int qty)",
+        "    {",
+        "        while (true)",
+        "        {",
+        "            if (!_stock.TryGetValue(sku, out var have) || have < qty) return false;",
+        "            if (_stock.TryUpdate(sku, have - qty, have)) return true;",
+        "        }",
+        "    }",
+        "",
+        "    public int Left(string sku) => _stock.TryGetValue(sku, out var n) ? n : 0;",
+        "}"
+      ],
+      "interleavings": {
+        "title": "Two customers, 5 in stock, 3 each",
+        "setup": ["var inventory = new Inventory(new Dictionary<string, int> { [\"GPU-4090\"] = 5 });", "bool r1 = false, r2 = false;"],
+        "threads": [
+          { "name": "T1", "code": ["r1 = inventory.TryReserve(\"GPU-4090\", 3);"] },
+          { "name": "T2", "code": ["r2 = inventory.TryReserve(\"GPU-4090\", 3);"] }
+        ],
+        "watch": ["inventory.Left(\"GPU-4090\")", "r1", "r2"],
+        "result": "$\"{inventory.Left(\"GPU-4090\")} {(r1 ? 1 : 0) + (r2 ? 1 : 0)}\"",
+        "expect": "2 1"
+      },
+      "forbid": [
+        { "pattern": "\\block\\s*\\(", "message": "Uses TryUpdate, not a lock" }
+      ],
+      "require": [
+        { "pattern": "TryUpdate", "message": "Uses TryUpdate as a compare-and-swap" }
+      ],
+      "hints": [
+        "Read the current count, check it, then `TryUpdate(sku, have - qty, have)`: it only writes if the count is still `have`.",
+        "Put it in `while (true)`: if `TryUpdate` returns false someone else changed the count, so read again and re-check."
+      ],
+      "explain": [
+        "In a real shop the stock lives in a database, and the same idea is a conditional update:",
+        "`UPDATE stock SET qty = qty - @n WHERE sku = @sku AND qty >= @n` and check the row count, or an optimistic concurrency token",
+        "(EF Core `[ConcurrencyCheck]` / rowversion). Same race, same cure: make the check and the write one atomic step."
+      ]
+    }
+  ]
+}
