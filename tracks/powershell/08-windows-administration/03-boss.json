@@ -1,0 +1,160 @@
+{
+  "title": "Boss: three Windows tickets",
+  "summary": "An empty reboot report, a scheduled task with Last Run Result 0x1, and a registry setting the agent ignores. Fix each WinOps function until its tests are green.",
+  "minutes": 22,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The WinOps queue",
+      "body": [
+        "Three tickets are open against the team's WinOps module (`Get-Content ~/src/WinOps/TICKETS.md`). Each one has",
+        "a test file in `~/src/WinOps/tests/` that describes the right behaviour, with the Windows cmdlets mocked. Read the",
+        "ticket, read the function, run the tests, fix the **function**. The checks run the original test files."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "OPS-3101: the reboot report is always empty",
+      "prompt": [
+        "Run `Invoke-Pester ~/src/WinOps/tests/Get-RebootHistory.Tests.ps1 -Output Detailed`. Pester 6 prints the call it",
+        "recorded: compare its `StartTime` with today. Fix `~/src/WinOps/Public/Get-RebootHistory.ps1` (there is more than",
+        "one problem) until the tests pass."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "the Get-RebootHistory tests pass",
+          "cmd": "pwsh -NoProfile -NonInteractive -c '$r = Invoke-Pester \"$env:DOJO_FILES/tests-boss/Get-RebootHistory.Tests.ps1\" -PassThru -Output None; \"$($r.PassedCount) of $($r.TotalCount) pass\"; $r.Failed | ForEach-Object { \"FAILED: $($_.ExpandedName): $($_.ErrorRecord.Exception.Message)\" }'",
+          "expectContains": "2 of 2 pass",
+          "fail": "Not all tests pass yet (the failing ones are listed)." },
+        { "name": "errors are not silenced",
+          "cmd": "! grep -q 'ErrorAction SilentlyContinue' ~/src/WinOps/Public/Get-RebootHistory.ps1",
+          "fail": "`-ErrorAction SilentlyContinue` also hides *access denied* and *log not found*. Catch the one expected error (no events found) instead." }
+      ],
+      "hints": [
+        "`AddDays($Days)` is a week in the **future**: no event is newer than that. It should be `AddDays(-$Days)`.",
+        "The test wants the newest first: `Sort-Object TimeCreated -Descending`.",
+        "Replace `-ErrorAction SilentlyContinue` with `-ErrorAction Stop` inside `try`, and in `catch` return quietly only when the message starts with `No events were found`, else `throw`."
+      ],
+      "solution": [
+        "Get-Content ~/src/WinOps/TICKETS.md",
+        "Invoke-Pester ~/src/WinOps/tests/Get-RebootHistory.Tests.ps1 -Output Detailed",
+        "@'",
+        "function Get-RebootHistory {",
+        "    <#",
+        "    .SYNOPSIS",
+        "        Who restarted this server in the last -Days days, and why (event 1074).",
+        "    #>",
+        "    [CmdletBinding()]",
+        "    param([ValidateRange(1, 365)] [int] $Days = 7)",
+        "    $filter = @{ LogName = 'System'; ProviderName = 'User32'; Id = 1074; StartTime = (Get-Date).AddDays(-$Days) }",
+        "    try {",
+        "        $events = Get-WinEvent -FilterHashtable $filter -ErrorAction Stop",
+        "    }",
+        "    catch {",
+        "        if ($_.Exception.Message -like 'No events were found*') { return }",
+        "        throw",
+        "    }",
+        "    $events |",
+        "        Sort-Object TimeCreated -Descending |",
+        "        ForEach-Object {",
+        "            [pscustomobject]@{ Time = $_.TimeCreated; User = $_.Properties[6].Value; Comment = $_.Properties[5].Value }",
+        "        }",
+        "}",
+        "'@ | Set-Content ~/src/WinOps/Public/Get-RebootHistory.ps1",
+        "Invoke-Pester ~/src/WinOps/tests/Get-RebootHistory.Tests.ps1 -Output Detailed"
+      ],
+      "explain": "`SilentlyContinue` made a wrong filter look like a quiet week. Distinguish *no data* (fine, report zero) from *could not read* (fail loudly): that is the difference between a report you can trust and one that is merely green. For unexpected shutdowns, add event 6008 to the same report."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "OPS-3107: Last Run Result 0x1",
+      "prompt": [
+        "The morning report task fails with `0x1` (the script exited with 1) although the script works when run by hand in",
+        "`pwsh`. Read `~/src/WinOps/Public/Register-ReportTask.ps1` and the ticket, run its tests, and fix the function:",
+        "PowerShell 7, the path with its space quoted, `-NoProfile -NonInteractive`, still daily at 06:00."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "the Register-ReportTask tests pass",
+          "cmd": "pwsh -NoProfile -NonInteractive -c '$r = Invoke-Pester \"$env:DOJO_FILES/tests-boss/Register-ReportTask.Tests.ps1\" -PassThru -Output None; \"$($r.PassedCount) of $($r.TotalCount) pass\"; $r.Failed | ForEach-Object { \"FAILED: $($_.ExpandedName): $($_.ErrorRecord.Exception.Message)\" }'",
+          "expectContains": "4 of 4 pass",
+          "fail": "Not all tests pass yet (the failing ones are listed)." }
+      ],
+      "hints": [
+        "Three bugs in one line: `powershell.exe` is Windows PowerShell 5.1, which cannot parse `??`; `-File C:\\Ops Scripts\\...` without quotes is two arguments; and there is no `-NoProfile -NonInteractive`.",
+        "`-Execute 'pwsh.exe'`",
+        "`-Argument \"-NoProfile -NonInteractive -File `\"$ScriptPath`\"\"`"
+      ],
+      "solution": [
+        "Get-Content ~/src/WinOps/Public/Register-ReportTask.ps1",
+        "$old = @'",
+        "-Execute 'powershell.exe' -Argument \"-File $ScriptPath\"",
+        "'@",
+        "$new = @'",
+        "-Execute 'pwsh.exe' -Argument \"-NoProfile -NonInteractive -File `\"$ScriptPath`\"\"",
+        "'@",
+        "$s = (Get-Content ~/src/WinOps/Public/Register-ReportTask.ps1 -Raw).Replace($old, $new)",
+        "Set-Content ~/src/WinOps/Public/Register-ReportTask.ps1 -Value $s -NoNewline",
+        "Get-Content ~/src/WinOps/Public/Register-ReportTask.ps1",
+        "Invoke-Pester ~/src/WinOps/tests/Register-ReportTask.Tests.ps1 -Output Detailed"
+      ],
+      "explain": [
+        "On a real box, `Get-ScheduledTask 'Morning report' | Select-Object -ExpandProperty Actions` shows what the task",
+        "actually runs, and `Get-ScheduledTaskInfo` its `LastTaskResult`. Add `Start-Transcript` at the top of scheduled",
+        "scripts: a task has no console, and the transcript is where the `??` parse error would have been visible at once."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "OPS-3112: the agent ignores Enabled",
+      "prompt": [
+        "Two symptoms, one function: on a new server `Set-AgentConfig` fails because the key does not exist; on an old one",
+        "it \"works\" but the agent ignores the value. Fix `~/src/WinOps/Public/Set-AgentConfig.ps1` until",
+        "`Invoke-Pester ~/src/WinOps/tests/Set-AgentConfig.Tests.ps1` passes: create the key if needed, write `Enabled` as a",
+        "**DWord** `1` or `0`, and support **`-WhatIf`** and `-Confirm`."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "the Set-AgentConfig tests pass",
+          "cmd": "pwsh -NoProfile -NonInteractive -c '$r = Invoke-Pester \"$env:DOJO_FILES/tests-boss/Set-AgentConfig.Tests.ps1\" -PassThru -Output None; \"$($r.PassedCount) of $($r.TotalCount) pass\"; $r.Failed | ForEach-Object { \"FAILED: $($_.ExpandedName): $($_.ErrorRecord.Exception.Message)\" }'",
+          "expectContains": "3 of 3 pass",
+          "fail": "Not all tests pass yet (the failing ones are listed)." }
+      ],
+      "hints": [
+        "The agent reads `Enabled` as a number; a `String` value `\"1\"` is a different type, so it is ignored.",
+        "`if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force | Out-Null }` creates it (and missing parents).",
+        "`[CmdletBinding(SupportsShouldProcess)]`, then guard both changes with `$PSCmdlet.ShouldProcess(...)`, and write `New-ItemProperty -Path $key -Name Enabled -PropertyType DWord -Value ([int]$Enabled) -Force`."
+      ],
+      "solution": [
+        "Get-Content ~/src/WinOps/Public/Set-AgentConfig.ps1",
+        "@'",
+        "function Set-AgentConfig {",
+        "    <#",
+        "    .SYNOPSIS",
+        "        Turns the monitoring agent on or off in the registry.",
+        "    #>",
+        "    [CmdletBinding(SupportsShouldProcess)]",
+        "    param([Parameter(Mandatory)] [bool] $Enabled)",
+        "    $key = 'HKLM:\\SOFTWARE\\Contoso\\Agent'",
+        "    if (-not (Test-Path -LiteralPath $key)) {",
+        "        if ($PSCmdlet.ShouldProcess($key, 'Create registry key')) { New-Item -Path $key -Force | Out-Null }",
+        "    }",
+        "    if ($PSCmdlet.ShouldProcess(\"$key\\Enabled\", \"Set to $([int]$Enabled)\")) {",
+        "        New-ItemProperty -Path $key -Name Enabled -PropertyType DWord -Value ([int]$Enabled) -Force | Out-Null",
+        "    }",
+        "}",
+        "'@ | Set-Content ~/src/WinOps/Public/Set-AgentConfig.ps1",
+        "Invoke-Pester ~/src/WinOps/tests/Set-AgentConfig.Tests.ps1 -Output Detailed"
+      ],
+      "explain": [
+        "For settings a whole fleet must have, Group Policy or Intune is the usual tool; a function like this is for",
+        "the cases they do not cover, or for an agent's own key. Either way: right value type, create what is missing, and",
+        "`-WhatIf` before you push it to 200 servers with `Invoke-Command`."
+      ]
+    }
+  ]
+}

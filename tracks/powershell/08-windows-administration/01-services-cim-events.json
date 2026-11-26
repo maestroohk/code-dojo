@@ -1,0 +1,249 @@
+{
+  "title": "Services, CIM and the event log",
+  "summary": "Query and change Windows services, read hardware and OS facts with CIM (not WMI), filter the event log fast with -FilterHashtable, and write Windows functions test-first with mocked cmdlets.",
+  "minutes": 17,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Windows only: services and CIM",
+      "body": [
+        "> **Windows only.** The commands in this module exist on Windows (in Windows PowerShell 5.1 and in PowerShell 7",
+        "> on Windows), not on Linux or macOS. The machine in these lessons is Linux, so the hands-on steps write the",
+        "> functions **test-first**, with the Windows cmdlets mocked by Pester: the same way a Linux build agent tests",
+        "> Windows tooling.",
+        "",
+        "**Services**",
+        "",
+        "```powershell",
+        "Get-Service W3SVC, MSSQLSERVER | Select-Object Name, Status, StartType",
+        "Get-Service | Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' }   # what should run but does not",
+        "Restart-Service W3SVC -WhatIf",
+        "Set-Service Spooler -StartupType Disabled",
+        "```",
+        "",
+        "In PowerShell 7, service objects also have `BinaryPathName`, `UserName` and `Description`, and there is a",
+        "`Remove-Service`. Changing services needs an elevated (administrator) session.",
+        "",
+        "**CIM** (the Common Information Model) is how Windows exposes OS and hardware facts: disks, memory, BIOS, patches.",
+        "",
+        "```powershell",
+        "Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object Caption, Version, LastBootUpTime",
+        "Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType = 3'          # local fixed disks",
+        "Get-CimInstance -ClassName Win32_LogicalDisk -ComputerName fs01, fs02          # remote, over WinRM",
+        "```",
+        "",
+        "`Get-WmiObject` is the old way: it exists only in Windows PowerShell 5.1 (it was **removed in PowerShell 7**) and",
+        "talks DCOM, which firewalls usually block. Scripts that still use it are a common reason a 5.1 script fails in 7.",
+        "`-Filter` uses WQL and is applied on the target machine: like `-Filter` on `Get-ChildItem`, filter left."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A 2019-era inventory script uses `Get-WmiObject Win32_LogicalDisk -ComputerName $s`. In PowerShell 7 it fails with *The term 'Get-WmiObject' is not recognized*. What is the right fix?",
+      "options": [
+        "`Get-CimInstance -ClassName Win32_LogicalDisk -ComputerName $s`",
+        "Install the WMI module from the Gallery",
+        "Run the script with `-UseWindowsPowerShell`",
+        "Use `Get-PSDrive`"
+      ],
+      "answer": 0,
+      "explain": "Same classes, same properties, newer and firewall-friendlier transport (WinRM). `Get-CimInstance` also works in 5.1, so the fixed script runs in both."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Get-LowDisk, test-first",
+      "prompt": [
+        "The team's WinOps module keeps one public function per file under `~/src/WinOps/Public/`. Write",
+        "**`Get-LowDisk`** in `~/src/WinOps/Public/Get-LowDisk.ps1`. Its behaviour is defined by",
+        "`~/src/WinOps/tests/Get-LowDisk.Tests.ps1`: read it first. In short:",
+        "",
+        "- it calls `Get-CimInstance -ClassName Win32_LogicalDisk` with a filter for **local fixed disks** (`DriveType = 3`),",
+        "  passing **`-ComputerName`** on when given;",
+        "- it outputs, for each disk below **`-BelowPercent`** (default **15**) free, an object with `Drive` (the `DeviceID`),",
+        "  `FreeGB` and `PercentFree`, both rounded to one decimal.",
+        "",
+        "Run `Invoke-Pester ~/src/WinOps/tests/Get-LowDisk.Tests.ps1 -Output Detailed` until it is green."
+      ],
+      "setup": [
+        "winops.sh"
+      ],
+      "checks": [
+        {
+          "name": "the Get-LowDisk tests pass",
+          "cmd": "pwsh -NoProfile -NonInteractive -c '$r = Invoke-Pester \"$env:DOJO_FILES/tests/Get-LowDisk.Tests.ps1\" -PassThru -Output None; \"$($r.PassedCount) of $($r.TotalCount) pass\"; $r.Failed | ForEach-Object { \"FAILED: $($_.ExpandedName): $($_.ErrorRecord.Exception.Message)\" }'",
+          "expectContains": "5 of 5 pass",
+          "fail": "Not all tests pass yet (the failing ones are listed). The checks run the original test file, so changing your copy does not help."
+        }
+      ],
+      "hints": [
+        "Build the CIM call as a hashtable and splat it: `$cim = @{ ClassName = 'Win32_LogicalDisk'; Filter = 'DriveType = 3' }`; `if ($ComputerName) { $cim.ComputerName = $ComputerName }`; `Get-CimInstance @cim`.",
+        "`FreeSpace` and `Size` are in bytes: `[math]::Round($_.FreeSpace / 1GB, 1)` and `[math]::Round($_.FreeSpace / $_.Size * 100, 1)`.",
+        "Build the objects with `ForEach-Object { [pscustomobject]@{ Drive = $_.DeviceID; FreeGB = ...; PercentFree = ... } }`, then `Where-Object PercentFree -lt $BelowPercent`."
+      ],
+      "solution": [
+        "Get-Content ~/src/WinOps/tests/Get-LowDisk.Tests.ps1",
+        "@'",
+        "function Get-LowDisk {",
+        "    <#",
+        "    .SYNOPSIS",
+        "        Lists local fixed disks with less than -BelowPercent free space.",
+        "    .EXAMPLE",
+        "        Get-LowDisk -ComputerName fs01 -BelowPercent 10",
+        "    #>",
+        "    [CmdletBinding()]",
+        "    param(",
+        "        [string] $ComputerName,",
+        "        [ValidateRange(1, 99)] [double] $BelowPercent = 15",
+        "    )",
+        "    $cim = @{ ClassName = 'Win32_LogicalDisk'; Filter = 'DriveType = 3' }",
+        "    if ($ComputerName) { $cim.ComputerName = $ComputerName }",
+        "    Get-CimInstance @cim | ForEach-Object {",
+        "        [pscustomobject]@{",
+        "            Drive       = $_.DeviceID",
+        "            FreeGB      = [math]::Round($_.FreeSpace / 1GB, 1)",
+        "            PercentFree = [math]::Round($_.FreeSpace / $_.Size * 100, 1)",
+        "        }",
+        "    } | Where-Object PercentFree -lt $BelowPercent",
+        "}",
+        "'@ | Set-Content ~/src/WinOps/Public/Get-LowDisk.ps1",
+        "Invoke-Pester ~/src/WinOps/tests/Get-LowDisk.Tests.ps1 -Output Detailed"
+      ],
+      "explain": [
+        "On a real server: `Get-LowDisk -ComputerName (Get-Content servers.txt)` (make `-ComputerName` a `[string[]]`) and",
+        "you have a fleet-wide disk report. The stub-and-mock trick in the test file (`function global:Get-CimInstance`",
+        "when the command is missing) is how teams run Windows-module tests on cheap Linux CI agents."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Windows only: the event log, fast",
+      "body": [
+        "`Get-WinEvent` reads every Windows event log. Filter **at the source** with `-FilterHashtable`: the event log",
+        "service then returns only matching events, which is many times faster than reading the whole log and piping it",
+        "into `Where-Object`:",
+        "",
+        "```powershell",
+        "Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4625; StartTime = (Get-Date).AddHours(-24) }",
+        "Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Level = 2 } -MaxEvents 50",
+        "Get-WinEvent -ListLog *PowerShell*          # which logs exist",
+        "```",
+        "",
+        "Event IDs worth knowing: **4624** / **4625** successful / failed logon (Security), **4740** account locked out,",
+        "**7036** a service changed state, **1074** a planned shutdown and who asked for it, **6008** and **41** an unexpected",
+        "shutdown, **4104** PowerShell script block logging.",
+        "",
+        "The details are in **`.Properties`**, by position (for 4625, index 5 is the target user name and 19 the source IP),",
+        "or as XML: `([xml]$e.ToXml()).Event.EventData.Data`. When nothing matches, `Get-WinEvent` writes an error *No",
+        "events were found that match the specified selection criteria*, which a report should treat as \"zero\", not as a",
+        "failure. `Get-EventLog` is the old cmdlet: Windows PowerShell 5.1 only, classic logs only."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Which event ID answers the question?",
+      "pairs": [
+        [
+          "Who keeps typing the wrong password?",
+          "4625"
+        ],
+        [
+          "Why was this account locked?",
+          "4740"
+        ],
+        [
+          "Who rebooted the server last night?",
+          "1074"
+        ],
+        [
+          "Did it crash or lose power?",
+          "6008"
+        ],
+        [
+          "When did the service stop?",
+          "7036"
+        ]
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Get-FailedLogon, test-first",
+      "prompt": [
+        "Security wants a daily summary of failed logons. Write **`Get-FailedLogon`** in",
+        "`~/src/WinOps/Public/Get-FailedLogon.ps1`, defined by `~/src/WinOps/tests/Get-FailedLogon.Tests.ps1`:",
+        "",
+        "- one `Get-WinEvent -FilterHashtable` call for the **Security** log, **event 4625**, since **`-Hours`** ago (default 24);",
+        "- output one object per user: `User`, `Count` and `Sources` (the distinct source IPs, sorted), most failures first;",
+        "- no matching events is **not** an error: output nothing."
+      ],
+      "setup": [
+        "winops.sh"
+      ],
+      "checks": [
+        {
+          "name": "the Get-FailedLogon tests pass",
+          "cmd": "pwsh -NoProfile -NonInteractive -c '$r = Invoke-Pester \"$env:DOJO_FILES/tests/Get-FailedLogon.Tests.ps1\" -PassThru -Output None; \"$($r.PassedCount) of $($r.TotalCount) pass\"; $r.Failed | ForEach-Object { \"FAILED: $($_.ExpandedName): $($_.ErrorRecord.Exception.Message)\" }'",
+          "expectContains": "4 of 4 pass",
+          "fail": "Not all tests pass yet (the failing ones are listed)."
+        }
+      ],
+      "hints": [
+        "`$events = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4625; StartTime = (Get-Date).AddHours(-$Hours) } -ErrorAction Stop`, inside `try`.",
+        "In `catch`: `if ($_.Exception.Message -like 'No events were found*') { return }; throw`.",
+        "`$events | ForEach-Object { [pscustomobject]@{ User = $_.Properties[5].Value; Ip = $_.Properties[19].Value } } | Group-Object User | Sort-Object Count -Descending | ForEach-Object { [pscustomobject]@{ User = $_.Name; Count = $_.Count; Sources = @($_.Group.Ip | Sort-Object -Unique) } }`"
+      ],
+      "solution": [
+        "Get-Content ~/src/WinOps/tests/Get-FailedLogon.Tests.ps1",
+        "@'",
+        "function Get-FailedLogon {",
+        "    <#",
+        "    .SYNOPSIS",
+        "        Failed logons (event 4625) per user over the last -Hours, with their source addresses.",
+        "    #>",
+        "    [CmdletBinding()]",
+        "    param(",
+        "        [ValidateRange(1, 720)] [int] $Hours = 24,",
+        "        [string] $ComputerName",
+        "    )",
+        "    $query = @{",
+        "        FilterHashtable = @{ LogName = 'Security'; Id = 4625; StartTime = (Get-Date).AddHours(-$Hours) }",
+        "        ErrorAction     = 'Stop'",
+        "    }",
+        "    if ($ComputerName) { $query.ComputerName = $ComputerName }",
+        "    try {",
+        "        $events = Get-WinEvent @query",
+        "    }",
+        "    catch {",
+        "        if ($_.Exception.Message -like 'No events were found*') { return }",
+        "        throw",
+        "    }",
+        "    $events |",
+        "        ForEach-Object { [pscustomobject]@{ User = $_.Properties[5].Value; Ip = $_.Properties[19].Value } } |",
+        "        Group-Object User |",
+        "        Sort-Object Count -Descending |",
+        "        ForEach-Object { [pscustomobject]@{ User = $_.Name; Count = $_.Count; Sources = @($_.Group.Ip | Sort-Object -Unique) } }",
+        "}",
+        "'@ | Set-Content ~/src/WinOps/Public/Get-FailedLogon.ps1",
+        "Invoke-Pester ~/src/WinOps/tests/Get-FailedLogon.Tests.ps1 -Output Detailed"
+      ],
+      "explain": [
+        "Reading the Security log needs admin rights (or membership of *Event Log Readers*). For a domain, the same question",
+        "is usually answered by the SIEM that collects these events, but this function is what you run on one box during",
+        "an incident, and `-ComputerName` makes it work remotely."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the query together: the newest 20 errors from the System log in the last 6 hours, shown oldest first, as a table.",
+      "lines": [
+        "$filter = @{ LogName = 'System'; Level = 2; StartTime = (Get-Date).AddHours(-6) }",
+        "Get-WinEvent -FilterHashtable $filter -MaxEvents 20 |",
+        "    Sort-Object TimeCreated |",
+        "    Format-Table TimeCreated, ProviderName, Id, Message -AutoSize"
+      ],
+      "explain": "Level 2 is *Error* (1 Critical, 3 Warning, 4 Information). `Get-WinEvent` returns newest first, so `-MaxEvents 20` gives the newest 20; sort them for reading, and `Format-Table` last, for eyes only."
+    }
+  ]
+}

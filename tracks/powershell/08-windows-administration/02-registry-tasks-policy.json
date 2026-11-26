@@ -1,0 +1,179 @@
+{
+  "title": "Registry, scheduled tasks and execution policy",
+  "summary": "The registry as a PowerShell drive, scheduled tasks that run pwsh scripts correctly, what execution policy is (and is not), and living with Windows PowerShell 5.1 modules from PowerShell 7.",
+  "minutes": 17,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Windows only: the registry is a drive",
+      "body": [
+        "> **Windows only.** Everything on this card needs Windows; writing under `HKLM:` also needs an elevated session.",
+        "",
+        "PowerShell exposes the registry through **providers**, so it behaves like a file system: keys are folders, values",
+        "are *properties* of a key.",
+        "",
+        "```powershell",
+        "Get-ChildItem HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall      # installed software (64-bit)",
+        "Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager' -Name PendingFileRenameOperations",
+        "Get-ItemPropertyValue HKLM:\\SOFTWARE\\Contoso\\Agent -Name Version               # just the value",
+        "",
+        "New-Item HKLM:\\SOFTWARE\\Contoso\\Agent -Force | Out-Null                          # create the key (and parents)",
+        "New-ItemProperty HKLM:\\SOFTWARE\\Contoso\\Agent -Name Enabled -PropertyType DWord -Value 1 -Force",
+        "Set-ItemProperty HKLM:\\SOFTWARE\\Contoso\\Agent -Name Enabled -Value 0",
+        "Remove-ItemProperty HKLM:\\SOFTWARE\\Contoso\\Agent -Name Legacy -WhatIf",
+        "```",
+        "",
+        "- `HKLM:` and `HKCU:` are built in; `HKEY_CLASSES_ROOT` and others are reached as `Registry::HKEY_CLASSES_ROOT`.",
+        "- `-PropertyType` matters: `DWord` (32-bit number), `QWord`, `String`, `ExpandString`, `MultiString`, `Binary`.",
+        "  Many settings are only read as a DWord; a string `\"1\"` silently does nothing.",
+        "- 32-bit programs on 64-bit Windows read `HKLM:\\SOFTWARE\\WOW6432Node\\...`: check both when looking for software.",
+        "- Export a key before changing it: `reg.exe export HKLM\\SOFTWARE\\Contoso\\Agent agent-backup.reg`."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Turn on a setting that the agent reads as a 32-bit number, creating the key if needed. (Windows, elevated.)",
+      "code": ["$key = 'HKLM:\\SOFTWARE\\Contoso\\Agent'", "New-Item $key __1__ | Out-Null", "New-ItemProperty $key -Name Enabled -PropertyType __2__ -Value 1 -Force"],
+      "blanks": ["-Force", "DWord"],
+      "bank": ["-Recurse", "String", "Int32", "-Container"],
+      "explain": "`New-Item -Force` creates missing parent keys and does not fail if the key exists. The property type names are the registry's own (`DWord`), not .NET's (`Int32`)."
+    },
+    {
+      "type": "learn",
+      "title": "Windows only: scheduled tasks that run PowerShell",
+      "body": [
+        "The `ScheduledTasks` module builds a task from parts, then registers it:",
+        "",
+        "```powershell",
+        "$action    = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument '-NoProfile -NonInteractive -File \"C:\\Ops Scripts\\Clean-Logs.ps1\"'",
+        "$trigger   = New-ScheduledTaskTrigger -Daily -At '02:00'",
+        "$principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\\SYSTEM' -LogonType ServiceAccount -RunLevel Highest",
+        "$settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 2) -StartWhenAvailable",
+        "Register-ScheduledTask -TaskName 'Nightly cleanup' -TaskPath '\\Ops\\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings",
+        "```",
+        "",
+        "What goes wrong in real life, and the fix:",
+        "",
+        "- **`powershell.exe` instead of `pwsh.exe`**: the task runs Windows PowerShell 5.1, and a 7-only script fails.",
+        "- **No quotes around a path with spaces** in `-Argument`: `-File C:\\Ops Scripts\\...` becomes two arguments.",
+        "- **No `-NoProfile -NonInteractive`**: a profile changes behaviour, or a `Read-Host` waits forever.",
+        "- **A stored user password** that expires: run as `SYSTEM`, a gMSA (group managed service account) or",
+        "  `-LogonType S4U` instead.",
+        "- **No time limit**: a hung run blocks every later run (the default limit is 3 days).",
+        "",
+        "`Get-ScheduledTaskInfo` shows `LastRunTime` and `LastTaskResult`: `0` is success, `1` means the script exited 1,",
+        "`267009` (0x41301) still running, `267011` (0x41303) has not run yet, `2147942402` (0x80070002) file not found."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Register-NightlyCleanup, test-first",
+      "prompt": [
+        "Write **`Register-NightlyCleanup`** in `~/src/WinOps/Public/Register-NightlyCleanup.ps1`, so ops can install the",
+        "nightly clean-up task the same way on every server. Its spec is `~/src/WinOps/tests/Register-NightlyCleanup.Tests.ps1`",
+        "(the ScheduledTasks cmdlets are mocked there):",
+        "",
+        "- `-ScriptPath` (mandatory), `-At` (default `02:00`), `-TaskName` (default `Nightly cleanup`);",
+        "- `pwsh.exe` with `-NoProfile -NonInteractive -File \"<path>\"`; daily trigger; `SYSTEM`, `ServiceAccount`, `Highest`;",
+        "  a **2-hour** execution limit; registered under **`\\Ops\\`**;",
+        "- supports **`-WhatIf`**."
+      ],
+      "setup": ["winops.sh"],
+      "checks": [
+        { "name": "the Register-NightlyCleanup tests pass",
+          "cmd": "pwsh -NoProfile -NonInteractive -c '$r = Invoke-Pester \"$env:DOJO_FILES/tests/Register-NightlyCleanup.Tests.ps1\" -PassThru -Output None; \"$($r.PassedCount) of $($r.TotalCount) pass\"; $r.Failed | ForEach-Object { \"FAILED: $($_.ExpandedName): $($_.ErrorRecord.Exception.Message)\" }'",
+          "expectContains": "6 of 6 pass",
+          "fail": "Not all tests pass yet (the failing ones are listed)." }
+      ],
+      "hints": [
+        "Start from the card above: four `New-ScheduledTask*` calls, then `Register-ScheduledTask`.",
+        "The argument string needs the path in double quotes: `\"-NoProfile -NonInteractive -File `\"$ScriptPath`\"\"` (backtick-quote inside a double-quoted string).",
+        "`[CmdletBinding(SupportsShouldProcess)]`, and wrap the `Register-ScheduledTask` in `if ($PSCmdlet.ShouldProcess(\"\\Ops\\$TaskName\", 'Register scheduled task')) { ... }`."
+      ],
+      "solution": [
+        "Get-Content ~/src/WinOps/tests/Register-NightlyCleanup.Tests.ps1",
+        "@'",
+        "function Register-NightlyCleanup {",
+        "    <#",
+        "    .SYNOPSIS",
+        "        Registers the nightly clean-up script as a scheduled task that runs as SYSTEM with PowerShell 7.",
+        "    .EXAMPLE",
+        "        Register-NightlyCleanup -ScriptPath 'C:\\Ops Scripts\\Clean-Logs.ps1' -At '03:00' -WhatIf",
+        "    #>",
+        "    [CmdletBinding(SupportsShouldProcess)]",
+        "    param(",
+        "        [Parameter(Mandatory)] [string] $ScriptPath,",
+        "        [string] $At = '02:00',",
+        "        [string] $TaskName = 'Nightly cleanup'",
+        "    )",
+        "    $action    = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument \"-NoProfile -NonInteractive -File `\"$ScriptPath`\"\"",
+        "    $trigger   = New-ScheduledTaskTrigger -Daily -At $At",
+        "    $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\\SYSTEM' -LogonType ServiceAccount -RunLevel Highest",
+        "    $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 2) -StartWhenAvailable",
+        "    if ($PSCmdlet.ShouldProcess(\"\\Ops\\$TaskName\", 'Register scheduled task')) {",
+        "        Register-ScheduledTask -TaskName $TaskName -TaskPath '\\Ops\\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force",
+        "    }",
+        "}",
+        "'@ | Set-Content ~/src/WinOps/Public/Register-NightlyCleanup.ps1",
+        "Invoke-Pester ~/src/WinOps/tests/Register-NightlyCleanup.Tests.ps1 -Output Detailed"
+      ],
+      "explain": [
+        "Tasks as code: the same function registers the same task on every server, it can be reviewed, and its tests stop",
+        "the classic mistakes (5.1 instead of 7, an unquoted path, no time limit) from coming back. To see what is",
+        "registered: `Get-ScheduledTask -TaskPath '\\Ops\\' | Get-ScheduledTaskInfo`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Execution policy, and 5.1 modules from PowerShell 7",
+      "body": [
+        "**Execution policy** decides which scripts PowerShell on Windows will run. It is a **safety net against accidents,",
+        "not a security boundary**: anyone can run `pwsh -ExecutionPolicy Bypass -File x.ps1` or paste the code.",
+        "",
+        "| Policy | Runs |",
+        "|---|---|",
+        "| `Restricted` | no scripts (Windows PowerShell's default on Windows client editions) |",
+        "| `RemoteSigned` | local scripts; downloaded ones only if signed (default on Windows Server, and for PowerShell 7 on Windows) |",
+        "| `AllSigned` | only signed scripts |",
+        "| `Bypass` | everything, no warnings (for automation that controls its own inputs) |",
+        "",
+        "\"Downloaded\" means the file carries the **Mark of the Web** (a `Zone.Identifier` alternate data stream added by",
+        "browsers and mail clients). If you trust a downloaded script, `Unblock-File .\\script.ps1` removes the mark. Set the",
+        "policy per user (`Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`) or by Group Policy, not machine-wide by",
+        "hand. On Linux and macOS, execution policy is not enforced.",
+        "",
+        "**Windows PowerShell modules from PowerShell 7.** Most Windows modules (ActiveDirectory, DnsServer, Hyper-V...) work",
+        "in 7 directly. For the few that do not, `Import-Module <name> -UseWindowsPowerShell` loads them in a hidden 5.1",
+        "process and proxies the commands; results come back deserialised (properties, no methods), like remoting."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A colleague downloads `Fix-Printers.ps1` from the team wiki and gets *... cannot be loaded. The file is not digitally signed* on a machine with `RemoteSigned`. They read the script and trust it. What is the right fix?",
+      "options": [
+        "`Unblock-File .\\Fix-Printers.ps1`, then run it",
+        "`Set-ExecutionPolicy Unrestricted -Scope LocalMachine`",
+        "Rename it to `.txt` and back",
+        "Run it as administrator"
+      ],
+      "answer": 0,
+      "explain": "The file has the Mark of the Web, so RemoteSigned asks for a signature. Removing the mark from this one, reviewed file is the narrow fix. Loosening the machine-wide policy changes it for every script, forever."
+    },
+    {
+      "type": "sort",
+      "prompt": "Windows PowerShell 5.1 only, or available in PowerShell 7 on Windows?",
+      "buckets": ["5.1 only", "Also in PowerShell 7"],
+      "items": [
+        ["`Get-WmiObject`", 0],
+        ["`Get-CimInstance`", 1],
+        ["`Get-EventLog`", 0],
+        ["`Get-WinEvent`", 1],
+        ["`Register-ScheduledTask`", 1],
+        ["`Get-Service` with `BinaryPathName`", 1]
+      ],
+      "explain": "PowerShell 7 dropped the old DCOM and classic-event-log cmdlets. Their replacements work in both, so a script using `Get-CimInstance` and `Get-WinEvent` runs anywhere on Windows."
+    }
+  ]
+}
