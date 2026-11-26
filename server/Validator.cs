@@ -243,7 +243,7 @@ public static class Validator
         }
 
         // Katas (content/katas) and the error knowledge base (content/errors): `dojo validate katas`, `dojo validate errors`.
-        var contentRoot = Path.GetDirectoryName(content.TracksDir)!;
+        // (contentRoot is declared above, for the learning paths.)
         var (katasChecked, kataRuns) = await new Katas(contentRoot).Validate(checker, langs, filter, Error, Warn);
         code += kataRuns;
         var kbEntries = 0;
