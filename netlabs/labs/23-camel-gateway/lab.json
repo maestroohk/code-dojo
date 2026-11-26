@@ -1,0 +1,297 @@
+{
+  "title": "Live Camel + gateway lab",
+  "module": "Integration · Camel and API gateway",
+  "minutes": 75,
+  "summary": "A real integration stack: partner shops call a Kong API gateway, which passes orders to an Apache Camel route that talks to a warehouse and a payments partner. Nothing works yet. Trace, fix the route, make it resilient, then lock down the gateway.",
+  "download": "The first start downloads about 400 MB (the Kong and Camel JBang images) and builds a Camel image with its jars inside, so allow a few minutes. After that the lab runs offline. It uses about 500 MB of memory while running (Camel up to 768 MB).",
+  "ready_seconds": 150,
+  "nodes": {
+    "ops": "your workstation, with the project folder /work",
+    "client": "a partner shop: it can only reach the gateway",
+    "gateway": "Kong API gateway, DB-less (proxy :8000)",
+    "camel": "Apache Camel routes (HTTP :8080)",
+    "warehouse": "warehouse API (:9000)",
+    "payments": "payments partner (:9100)"
+  },
+  "default_node": "ops",
+  "ready": [
+    { "node": "ops", "cmd": "test -f /work/.seeded && curl -s -m2 -o /dev/null http://warehouse:9000/stock/LAMP-01 && curl -s -m2 -o /dev/null http://payments:9100/_audit/x && curl -s -m2 -o /dev/null http://gateway:8001/status" },
+    { "node": "ops", "cmd": "curl -s -m2 -o /dev/null http://camel:8080/orders" },
+    { "node": "client", "cmd": "curl -s -m2 -o /dev/null http://gateway:8000/" }
+  ],
+  "vars": {
+    "ERRCODE": { "type": "int", "min": 100, "max": 899 },
+    "KEYNUM": { "type": "int", "min": 100000, "max": 999999 }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Follow one order",
+      "text": "Nothing works yet, so start by watching one order travel. On **client**, send the sample order through the gateway:\n\n```\ncurl -i -X POST http://gateway:8000/api/orders -H 'Content-Type: application/json' -d @/lab/samples/order-physical.json\n```\n\nIt is rejected. Now find that request in Camel's log (on **ops**: `tail -n 30 /work/logs/camel.log`). Camel's TCP connection came from the gateway, not from the shop. The gateway added a header that names the real caller. What IP address is in `X-Forwarded-For`?",
+      "answer": ["10.60.1.10"],
+      "hints": [
+        "The first step of the route logs every header it received: look for the line `received order, headers: {...}`. `grep -o 'X-Forwarded-For=[^,]*' /work/logs/camel.log`",
+        "Compare it with `CamelVertxPlatformHttpRemoteAddress` in the same line: that is the gateway's address on the backend network."
+      ],
+      "solution": {
+        "note": "`X-Forwarded-For` is `10.60.1.10`, the client. The TCP peer Camel sees (`CamelVertxPlatformHttpRemoteAddress`) is the gateway, `10.60.2.20`. A reverse proxy hides the caller, so it passes the original address on in a header. Only trust that header when it was set by your own gateway: a caller can send a fake one.",
+        "answer_cmd": { "node": "ops", "cmd": "grep -o 'X-Forwarded-For=[0-9.]*' /work/logs/camel.log | tail -1 | cut -d= -f2" }
+      }
+    },
+    {
+      "id": "t2",
+      "type": "state",
+      "title": "The header gotcha",
+      "text": "On **client**, send the digital sample order (`-d @/lab/samples/order-digital.json`, same URL). You get a 500. The log on **ops** says `Invalid url: /orders/orders`.\n\nEvery header of the incoming request is still on the Camel message. The HTTP producer reads `CamelHttpPath` and glues the caller's path onto the backend URL. It also sends every other header on to the backend, including the caller's `Authorization` and `Cookie`.\n\nEdit `/work/camel/routes/orders.camel.yaml` (on **ops**, with `nano`). Remove the incoming headers early in `receive-order`, so digital orders reach the payments partner and carry no caller credentials. Saving the file reloads the routes.",
+      "checks": [
+        {
+          "node": "ops",
+          "cmd": "id=chk-h$RANDOM$RANDOM; curl -s -m25 -o /dev/null -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"digital\\\",\\\"items\\\":[{\\\"sku\\\":\\\"EBOOK-LIGHTING\\\",\\\"quantity\\\":1}],\\\"amount\\\":5,\\\"paymentToken\\\":\\\"tok_test_1\\\"}\"; curl -s -m5 http://payments:9100/_audit/$id | jq -e '.attempts >= 1' >/dev/null",
+          "fail_msg": "A digital order still never reaches the payments partner. Look for the newest ERROR in /work/logs/camel.log."
+        },
+        {
+          "node": "ops",
+          "cmd": "id=chk-h$RANDOM$RANDOM; curl -s -m25 -o /dev/null -X POST http://camel:8080/orders -H 'Content-Type: application/json' -H 'Authorization: Bearer partner-secret' -H 'Cookie: session=abc123' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"digital\\\",\\\"items\\\":[{\\\"sku\\\":\\\"EBOOK-LIGHTING\\\",\\\"quantity\\\":1}],\\\"amount\\\":5,\\\"paymentToken\\\":\\\"tok_test_1\\\"}\"; curl -s -m5 http://payments:9100/_audit/$id | jq -e '.attempts >= 1 and (.headers | index(\"authorization\") | not) and (.headers | index(\"cookie\") | not)' >/dev/null",
+          "fail_msg": "Orders reach the payments partner now, but the caller's Authorization or Cookie header goes with them. Removing only the Camel* headers fixes the URL, not the leak: remove the caller's headers too."
+        }
+      ],
+      "hints": [
+        "The step is `removeHeaders`. It takes a `pattern`, and `\"*\"` means all of them.",
+        "Add it to `receive-order` right after the first `log` step (same indentation as `- log:`):\n\n```\n        - removeHeaders:\n            pattern: \"*\"\n```\n\nSave, then watch `tail -f /work/logs/camel.log` until it says `Routes reloaded`."
+      ],
+      "solution": {
+        "note": "Remove every incoming header once, at the edge of the route, then set only the ones you need. (Adding `bridgeEndpoint=true` is the fix people try first: it stops the URL being replaced, but the caller's path is still appended, giving `/charges/orders`, and the headers still leak.) Removing them fixes the URL (no more `CamelHttpPath`) and stops the caller's credentials leaking to a partner. The digital order now reaches payments and gets a 503: the partner is busy. That is task 7.",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/orders-2.camel.yaml /work/camel/routes/orders.camel.yaml && sleep 5 && tail -n 4 /work/logs/camel.log" } ]
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Fix the content-based router",
+      "text": "Physical orders are still rejected with `unknown order type`, although the order clearly says `\"type\": \"physical\"`. The route has a **content-based router** (`choice`): it looks at each message and sends it down one branch. Find out why the physical branch never matches and fix it. Digital orders must still go to payments, and an unknown type must still get a 400.",
+      "checks": [
+        {
+          "node": "ops",
+          "cmd": "id=chk-r$RANDOM$RANDOM; curl -s -m25 -o /dev/null -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"physical\\\",\\\"items\\\":[{\\\"sku\\\":\\\"LAMP-01\\\",\\\"quantity\\\":1}]}\"; curl -s -m5 http://warehouse:9000/_audit/$id | jq -e '.requests | length >= 1' >/dev/null",
+          "fail_msg": "A physical order never reached the warehouse. The log shows which branch it took. If it did reach the warehouse route, is the header gotcha fixed for every backend?"
+        },
+        {
+          "node": "ops",
+          "cmd": "id=chk-r$RANDOM$RANDOM; curl -s -m25 -o /dev/null -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"digital\\\",\\\"items\\\":[{\\\"sku\\\":\\\"EBOOK-LIGHTING\\\",\\\"quantity\\\":1}],\\\"amount\\\":5}\"; curl -s -m5 http://payments:9100/_audit/$id | jq -e '.attempts >= 1' >/dev/null",
+          "fail_msg": "Physical orders work, but digital orders no longer reach the payments partner."
+        },
+        {
+          "node": "ops",
+          "cmd": "[ \"$(curl -s -m25 -o /dev/null -w '%{http_code}' -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d '{\"orderId\":\"chk-gift\",\"type\":\"gift-card\",\"items\":[]}')\" = 400 ]",
+          "fail_msg": "An order of an unknown type should still be rejected with HTTP 400 (the otherwise branch)."
+        }
+      ],
+      "hints": [
+        "Read the two `when` conditions side by side. One of them looks in a different place from the other.",
+        "`${header.type}` reads a message **header** called `type`. The order type is a field in the **body**: after `unmarshal`, the body is a map, and `${body[type]}` reads its `type` key."
+      ],
+      "solution": {
+        "note": "The first branch tested `${header.type}`, which does not exist (and after task 2 no incoming headers exist at all), so it never matched. Routing on the wrong part of the message is a classic: always check where the data actually is.",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/orders-3.camel.yaml /work/camel/routes/orders.camel.yaml && sleep 5 && tail -n 4 /work/logs/camel.log" } ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "answer",
+      "title": "Where did order B-2002 go?",
+      "text": "A partner says order B-2002 vanished. On **client**, send it yourself: `-d @/lab/samples/order-B-2002.json`. Camel's log only says the warehouse refused it, with an HTTP status. To learn **why**, follow the message one hop further: the warehouse keeps its own log. What error **code** did the warehouse give?",
+      "answer": ["STK-{{ERRCODE}}", "{{ERRCODE}}"],
+      "hints": [
+        "Open a terminal on **warehouse** (click it in the diagram). Its log is `/var/log/warehouse.log`.",
+        "`grep B-2002 /var/log/warehouse.log`"
+      ],
+      "solution": {
+        "note": "The order contains a SKU the warehouse does not stock. Each hop logs what it knows: the route knows that a call failed with 422, only the backend knows why. When you trace a failure, keep following the message until a log explains it. (A shared trace id in every log line makes this much faster.)",
+        "answer_cmd": { "node": "warehouse", "cmd": "grep B-2002 /var/log/warehouse.log | grep -o 'STK-[0-9]*' | tail -1" }
+      }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "Speak the warehouse's language",
+      "text": "Physical orders reach the warehouse now, but it answers 400: it speaks **warehouse API v2**, which wants a different shape:\n\n```\n{ \"reference\": \"A-1001\", \"lines\": [ { \"sku\": \"LAMP-01\", \"qty\": 2 } ] }\n```\n\nIt also refuses any body that contains payment data. That is good: the warehouse has no business seeing the `paymentToken`. Add a **message translator** to the `to-warehouse` route, so that A-1001 is accepted (HTTP 201) and the warehouse only gets the fields it needs.",
+      "checks": [
+        {
+          "node": "ops",
+          "cmd": "id=chk-t$RANDOM$RANDOM; curl -s -m25 -o /dev/null -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"physical\\\",\\\"customer\\\":{\\\"name\\\":\\\"Check Ltd\\\"},\\\"items\\\":[{\\\"sku\\\":\\\"LAMP-01\\\",\\\"quantity\\\":2},{\\\"sku\\\":\\\"BULB-10\\\",\\\"quantity\\\":3}],\\\"paymentToken\\\":\\\"tok_test_9\\\"}\"; curl -s -m5 http://warehouse:9000/_audit/$id | jq -e '[.requests[] | select(.status == 201)] | length >= 1' >/dev/null",
+          "fail_msg": "The warehouse did not accept a physical order (no 201). Its log, /var/log/warehouse.log on warehouse, says what was wrong with the body."
+        }
+      ],
+      "hints": [
+        "Camel can reshape JSON with **jq**: `- transform:` with `jq: '<expression>'`. It works on the order before it is turned back into text, so put it before the `marshal` step.",
+        "Rename `orderId` to `reference`, turn each item into `{sku, qty}`, and leave everything else out:\n\n```\n        - transform:\n            jq: '{reference: .orderId, lines: [.items[] | {sku, qty: .quantity}]}'\n```"
+      ],
+      "solution": {
+        "note": "jq builds a new document that contains only what you list, so the customer and payment fields simply disappear. Sending each partner only the data it needs is both a contract question and a privacy one.",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/orders-5.camel.yaml /work/camel/routes/orders.camel.yaml && sleep 5 && tail -n 4 /work/logs/camel.log" } ]
+      }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "A dead letter channel for poison messages",
+      "text": "On **client**, send `/lab/samples/poison.json`: it is cut off in the middle, so it is not valid JSON. Camel answers 500 and the message is gone: nobody can look at it or replay it later.\n\nAdd a **dead letter channel**: when an exchange fails, park the original message as a file in `/work/camel/dead-letter`. And mind the 204 trap: after the dead letter channel handles a failure, the caller must still get an error status (4xx or 5xx), not a success.",
+      "checks": [
+        {
+          "node": "ops",
+          "cmd": "id=chk-d$RANDOM$RANDOM; curl -s -m25 -o /dev/null -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"physical\\\",\\\"items\\\":[{\\\"sku\\\":\"; sleep 1; grep -rlq \"$id\" /work/camel/dead-letter",
+          "fail_msg": "A broken message did not land in /work/camel/dead-letter."
+        },
+        {
+          "node": "ops",
+          "cmd": "id=chk-d$RANDOM$RANDOM; code=$(curl -s -m25 -o /dev/null -w '%{http_code}' -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"physical\\\",\\\"items\\\":[{\\\"sku\\\":\"); [ \"$code\" -ge 400 ] && [ \"$code\" -le 599 ]",
+          "fail_msg": "The message is parked, but the caller is told it worked (a 2xx answer). Make the dead letter route set CamelHttpResponseCode and an error body."
+        }
+      ],
+      "hints": [
+        "An error handler for all routes goes in a `routeConfiguration` at the top of `orders.camel.yaml` (keep everything in that one file: live reload copes best with that). A `deadLetterChannel` with `useOriginalMessage: true` sends the message as it first arrived to its `deadLetterUri`.",
+        "Point it at a small route of your own, so that you can both save the file and build the answer:\n\n```\n- routeConfiguration:\n    errorHandler:\n      deadLetterChannel:\n        deadLetterUri: direct:dead-letter\n        useOriginalMessage: true\n\n- route:\n    id: dead-letter\n    from:\n      uri: direct:dead-letter\n      steps:\n        - log: \"parked in the dead letter folder: ${exception.message}\"\n        - to: file:/work/camel/dead-letter\n        - removeHeaders: { pattern: \"*\" }\n        - setHeader: { name: CamelHttpResponseCode, constant: 502 }\n        - setBody: { constant: '{\"error\":\"order could not be processed\"}' }\n```"
+      ],
+      "solution": {
+        "note": "The solution file `/lab/solution/orders-6.camel.yaml` has the `routeConfiguration` at the top and the `dead-letter` route at the bottom (plus the fixes from the earlier tasks). A handled failure counts as a success unless you say otherwise, which is why the route sets the status itself. `ls /work/camel/dead-letter` shows the parked messages; after fixing the cause you could send them again.",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/orders-6.camel.yaml /work/camel/routes/orders.camel.yaml && sleep 6 && tail -n 4 /work/logs/camel.log" } ]
+      }
+    },
+    {
+      "id": "t7",
+      "type": "state",
+      "title": "Retry the busy partner, with backoff",
+      "text": "Digital orders now end up in the dead letter folder: the payments partner answers **503** (busy) to the first two attempts for every order, and the third one works. Add retries for that call, waiting **longer before each new try** (exponential backoff).\n\nOnly retry failures that can go away. The warehouse's 422 for B-2002 is permanent: retrying it just repeats the same answer, slower.",
+      "checks": [
+        {
+          "node": "ops",
+          "cmd": "id=chk-p$RANDOM$RANDOM; curl -s -m25 -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"digital\\\",\\\"items\\\":[{\\\"sku\\\":\\\"EBOOK-LIGHTING\\\",\\\"quantity\\\":1}],\\\"amount\\\":5}\" | grep -q RCPT-",
+          "fail_msg": "A digital order still does not come back with a receipt. Is there a retry? Look for 'Failed delivery' in /work/logs/camel.log."
+        },
+        {
+          "node": "ops",
+          "cmd": "id=chk-p$RANDOM$RANDOM; curl -s -m25 -o /dev/null -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"digital\\\",\\\"items\\\":[{\\\"sku\\\":\\\"EBOOK-LIGHTING\\\",\\\"quantity\\\":1}],\\\"amount\\\":5}\"; curl -s -m5 http://payments:9100/_audit/$id | jq -e '.attempts >= 3 and .gaps_ms[0] >= 50 and .gaps_ms[1] >= .gaps_ms[0] * 1.4' >/dev/null",
+          "fail_msg": "Retries work, but each wait is as long as the last one. Turn on exponential backoff, so a struggling partner gets more room each time."
+        },
+        {
+          "node": "ops",
+          "cmd": "id=chk-p$RANDOM$RANDOM; curl -s -m25 -o /dev/null -X POST http://camel:8080/orders -H 'Content-Type: application/json' -d \"{\\\"orderId\\\":\\\"$id\\\",\\\"type\\\":\\\"physical\\\",\\\"items\\\":[{\\\"sku\\\":\\\"GLOW-9\\\",\\\"quantity\\\":1}]}\"; curl -s -m5 http://warehouse:9000/_audit/$id | jq -e '.requests | length == 1' >/dev/null",
+          "fail_msg": "An order the warehouse refuses with 422 is sent to it more than once (or never). A 422 will not change: retry only 5xx answers."
+        }
+      ],
+      "hints": [
+        "Retries are a **redelivery policy**. Put it on an `onException` for `org.apache.camel.http.base.HttpOperationFailedException` (what the HTTP call throws for a non-2xx answer), with an `onWhen` that only matches status 500 and up: `${exception.statusCode} >= 500`.",
+        "Inside the `routeConfiguration` from task 6:\n\n```\n    onException:\n      - onException:\n          exception:\n            - org.apache.camel.http.base.HttpOperationFailedException\n          onWhen:\n            simple: \"${exception.statusCode} >= 500\"\n          redeliveryPolicy:\n            maximumRedeliveries: 3\n            redeliveryDelay: 200\n            useExponentialBackOff: true\n            backOffMultiplier: 2\n            retryAttemptedLogLevel: WARN\n```"
+      ],
+      "solution": {
+        "note": "Waits of 200, 400, 800 ms: a short blip is absorbed, and a partner that is really down gets fewer, slower calls. If all retries fail, the dead letter channel still parks the order. Charging is not naturally safe to repeat; a real payments API needs an idempotency key so that a retry after a timeout cannot charge twice.",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/orders-7.camel.yaml /work/camel/routes/orders.camel.yaml && sleep 6 && tail -n 4 /work/logs/camel.log" } ]
+      }
+    },
+    {
+      "id": "t8",
+      "type": "state",
+      "title": "Publish the stock API",
+      "text": "Partners also want to see stock. The warehouse already has `GET /stock/<sku>`, and it needs no mediation, so publish it **straight through the gateway**. On **ops**, edit `/work/kong/kong.yml`: add a service for `http://warehouse:9000/stock` with a route on `/api/stock`. Apply it with `gw-apply`. From **client**, `curl http://gateway:8000/api/stock/LAMP-01` must show the warehouse's answer.",
+      "checks": [
+        {
+          "node": "client",
+          "cmd": "curl -s -m5 http://gateway:8000/api/stock/LAMP-01 | jq -e '.sku == \"LAMP-01\" and .available == 42' >/dev/null && curl -s -m5 http://gateway:8000/api/stock/BULB-10 | jq -e '.available == 310' >/dev/null",
+          "fail_msg": "GET http://gateway:8000/api/stock/LAMP-01 does not return the warehouse's stock answer yet. Did gw-apply succeed?"
+        }
+      ],
+      "hints": [
+        "Copy the `orders` service block and change its name, `url` and route path. YAML is picky: keep the same indentation (spaces, never tabs).",
+        "Kong strips the route path and appends the rest to the service URL: `/api/stock/LAMP-01` becomes `http://warehouse:9000/stock/LAMP-01`.\n\n```\n  - name: stock\n    url: http://warehouse:9000/stock\n    routes:\n      - name: stock\n        paths:\n          - /api/stock\n```"
+      ],
+      "solution": {
+        "note": "Not everything needs an integration route. A gateway can pass a call straight through and still give it one front door with the same security and limits as the rest.",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/kong-stock.yml /work/kong/kong.yml && gw-apply" } ]
+      }
+    },
+    {
+      "id": "t9",
+      "type": "state",
+      "title": "Require an API key",
+      "text": "Anyone on the network can place orders. Add Kong's **key-auth** plugin to the `orders` service, and a consumer `corner-shop` with the key `ck-{{KEYNUM}}`. Calls without a key, or with a wrong one, must get 401. Calls with the key must still reach Camel. The stock API stays open.",
+      "checks": [
+        {
+          "node": "client",
+          "cmd": "[ \"$(curl -s -m5 -o /dev/null -w '%{http_code}' http://gateway:8000/api/orders)\" = 401 ]",
+          "fail_msg": "Without a key, /api/orders still answers something other than 401."
+        },
+        {
+          "node": "client",
+          "cmd": "[ \"$(curl -s -m5 -o /dev/null -w '%{http_code}' -H 'apikey: ck-000000' http://gateway:8000/api/orders)\" = 401 ]",
+          "fail_msg": "A wrong key is accepted (or does not get 401)."
+        },
+        {
+          "node": "client",
+          "cmd": "code=$(curl -s -m5 -o /dev/null -w '%{http_code}' -H 'apikey: ck-{{KEYNUM}}' http://gateway:8000/api/orders); case \"$code\" in 000|401|403|404|5*) exit 1;; esac",
+          "fail_msg": "With the key ck-{{KEYNUM}} in an apikey header, the call should get through to Camel. Is the consumer there, with exactly that key?"
+        },
+        {
+          "node": "client",
+          "cmd": "[ \"$(curl -s -m5 -o /dev/null -w '%{http_code}' http://gateway:8000/api/stock/LAMP-01)\" = 200 ]",
+          "fail_msg": "The stock API now needs a key too (or is gone). Put key-auth on the orders service only."
+        }
+      ],
+      "hints": [
+        "Plugins can sit under a service (`plugins:` at the same level as `routes:`). Consumers are a top-level list, like `services:`.",
+        "```\n  - name: orders\n    url: http://camel:8080/orders\n    routes: ...\n    plugins:\n      - name: key-auth\n\nconsumers:\n  - username: corner-shop\n    keyauth_credentials:\n      - key: ck-{{KEYNUM}}\n```\n\nThen `gw-apply`, and test from client with `-H 'apikey: ck-{{KEYNUM}}'`."
+      ],
+      "solution": {
+        "note": "The gateway now knows **who** is calling (the consumer), which is what makes per-partner limits and usage reports possible. A 401 means \"who are you?\"; a 403 would mean \"I know you, but no\".",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/kong-key.yml /work/kong/kong.yml && sed -i 's/ck-KEY/ck-{{KEYNUM}}/' /work/kong/kong.yml && gw-apply" } ]
+      }
+    },
+    {
+      "id": "t10",
+      "type": "state",
+      "title": "Rate limit, and see a 429",
+      "text": "One partner's buggy script could flood Camel and the backends. Add Kong's **rate-limiting** plugin to the `orders` service: at most **5 requests per minute** per consumer (`policy: local` keeps the counters in the gateway's memory). Then, from **client**, call `/api/orders` with your key a few times in a row and watch for `429 Too Many Requests` and the `RateLimit-*` headers (`curl -i`).",
+      "checks": [
+        {
+          "node": "client",
+          "cmd": "for i in 1 2 3 4 5 6 7 8; do curl -s -m5 -D - -o /dev/null -H 'apikey: ck-{{KEYNUM}}' http://gateway:8000/api/orders; done > /tmp/rl.txt; grep -q '^HTTP/[0-9.]* 429' /tmp/rl.txt && grep -qiE '^ratelimit-limit: 5\\b' /tmp/rl.txt",
+          "fail_msg": "Eight quick calls with the key did not hit a 429 with a limit of 5 per minute."
+        }
+      ],
+      "hints": [
+        "Add a second plugin under the orders service, next to key-auth:\n\n```\n      - name: rate-limiting\n        config:\n          minute: 5\n          policy: local\n```",
+        "`for i in 1 2 3 4 5 6 7; do curl -s -o /dev/null -w '%{http_code}\\n' -H 'apikey: ck-{{KEYNUM}}' http://gateway:8000/api/orders; done`"
+      ],
+      "solution": {
+        "note": "429 tells a well-behaved client to slow down, and `Retry-After` says for how long. Limits are counted per consumer, which is only possible because task 9 made callers identify themselves. With several gateway nodes you would keep the counters in a shared store (`policy: redis`), or each node would allow 5.",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/kong-limit.yml /work/kong/kong.yml && sed -i 's/ck-KEY/ck-{{KEYNUM}}/' /work/kong/kong.yml && gw-apply" } ]
+      }
+    },
+    {
+      "id": "t11",
+      "type": "state",
+      "title": "Mask headers, both ways",
+      "text": "Two leaks are left at the gateway.\n\n1. **In**: the partner's `apikey` header is still sent on to Camel (look at the `received order` lines in the log). The gateway checked it; nothing behind the gateway needs it.\n2. **Out**: `curl -i http://gateway:8000/api/stock/LAMP-01` shows an `X-Internal-Host` header that names a server inside the company. Callers should never learn that.\n\nFix both in `kong.yml`, then `gw-apply`.",
+      "checks": [
+        {
+          "node": "ops",
+          "cmd": "curl -s -m5 http://gateway:8001/plugins | jq -e '[.data[] | select(.name == \"key-auth\" and .config.hide_credentials == true)] | length > 0' >/dev/null",
+          "fail_msg": "key-auth still passes the apikey header on to Camel."
+        },
+        {
+          "node": "client",
+          "cmd": "h=$(curl -s -m5 -D - -o /dev/null http://gateway:8000/api/stock/LAMP-01); echo \"$h\" | grep -q '^HTTP/[0-9.]* 200' && ! echo \"$h\" | grep -qi '^x-internal-host:'",
+          "fail_msg": "GET /api/stock/LAMP-01 still answers with an X-Internal-Host header (or no longer answers 200)."
+        }
+      ],
+      "hints": [
+        "key-auth has an option for exactly this: `hide_credentials`. For responses, the **response-transformer** plugin can remove headers.",
+        "```\n      - name: key-auth\n        config:\n          hide_credentials: true\n```\n\nand under the stock service:\n\n```\n    plugins:\n      - name: response-transformer\n        config:\n          remove:\n            headers:\n              - X-Internal-Host\n```"
+      ],
+      "solution": {
+        "note": "Credentials should stop at the component that checks them, and internal names should stop at the edge. Both make the next attacker's job harder for free. Look at `/lab/solution/kong.yml` for the whole finished gateway configuration.",
+        "steps": [ { "node": "ops", "cmd": "cp /lab/solution/kong.yml /work/kong/kong.yml && sed -i 's/ck-KEY/ck-{{KEYNUM}}/' /work/kong/kong.yml && gw-apply" } ]
+      }
+    }
+  ]
+}

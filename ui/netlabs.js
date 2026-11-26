@@ -89,7 +89,8 @@ function listPage(page, cleanups, kind) {
         h('div.nl-card-body',
           h('h3', l.title, l.running && h('span.nl-pill.on', 'running')),
           h('p.muted.small', l.summary),
-          h('div.topic-meta', l.minutes && h('span', `about ${l.minutes} min`), h('span', `${l.done}/${l.total} tasks`)),
+          h('div.topic-meta', l.minutes && h('span', `about ${l.minutes} min`), h('span', `${l.done}/${l.total} tasks`),
+            l.download && h('span', { title: l.download }, 'big first download')),
           h('div.bar', h('div.bar-fill', { style: { width: `${(l.done / Math.max(1, l.total)) * 100}%` } })))));
     }
     const total = labs.reduce((a, l) => a + l.total, 0), done = labs.reduce((a, l) => a + l.done, 0);
@@ -361,7 +362,9 @@ function labPage(page, id, cleanups, kind) {
       !lab.running && h('button.btn.primary', { type: 'button', disabled: busy, onclick: () => act('start', 'Starting the lab') }, 'Start lab'),
       lab.running && h('button.btn.ghost', { type: 'button', disabled: busy, title: 'Throw everything away and start from scratch (new random values)',
         onclick: async () => { if (await ask('Restart from scratch? Every change you made inside the lab is lost, and random values (flags, ports) change.', { ok: 'Restart' })) act('start', 'Restarting'); } }, 'Restart'),
-      lab.running && h('button.btn.ghost', { type: 'button', disabled: busy, onclick: () => act('stop', 'Stopping') }, 'Stop lab')].filter(Boolean));
+      lab.running && h('button.btn.ghost', { type: 'button', disabled: busy, onclick: () => act('stop', 'Stopping') }, 'Stop lab'),
+      // Labs with their own (big) images say so before the first start.
+      !lab.running && lab.download && h('p.muted.small', lab.download)].filter(Boolean));
   }
 
   function taskCard(t, i) {

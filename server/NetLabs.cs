@@ -332,7 +332,8 @@ public sealed partial class NetLabs
                 return (false, "Could not start the lab:\n" + err);
             }
             var pending = (lab.Def["ready"] as JsonArray ?? []).OfType<JsonObject>().ToList();
-            var deadline = DateTime.UtcNow.AddSeconds(45);
+            // JVM-based labs (Camel) need longer than plain toolbox nodes: lab.json may say how long.
+            var deadline = DateTime.UtcNow.AddSeconds(Math.Clamp((int?)lab.Def["ready_seconds"] ?? 45, 10, 300));
             while (pending.Count > 0 && DateTime.UtcNow < deadline)
             {
                 var still = new List<JsonObject>();
@@ -492,7 +493,7 @@ public sealed partial class NetLabs
                 return new
                 {
                     id = l.Id, num = l.Num, title = l.Title, module = (string?)l.Def["module"], minutes = (int?)l.Def["minutes"],
-                    summary = (string?)l.Def["summary"] ?? "", running = up.Contains(l.Project),
+                    summary = (string?)l.Def["summary"] ?? "", download = (string?)l.Def["download"], running = up.Contains(l.Project),
                     done = ids.Count(i => i is not null && done.Contains(i)), total = ids.Count,
                 };
             }),
@@ -509,7 +510,7 @@ public sealed partial class NetLabs
         return new
         {
             id = lab.Id, num = lab.Num, title = lab.Title, module = (string?)lab.Def["module"], minutes = (int?)lab.Def["minutes"],
-            summary = (string?)lab.Def["summary"] ?? "", running, defaultNode = (string?)lab.Def["default_node"] ?? lab.Nodes.FirstOrDefault().Key,
+            summary = (string?)lab.Def["summary"] ?? "", download = (string?)lab.Def["download"], running, defaultNode = (string?)lab.Def["default_node"] ?? lab.Nodes.FirstOrDefault().Key,
             lesson = File.Exists(lesson) ? File.ReadAllText(lesson) : "",
             topology = ParseTopology(compose, lab.Nodes, vars),
             tasks = lab.Tasks.Select(t => new

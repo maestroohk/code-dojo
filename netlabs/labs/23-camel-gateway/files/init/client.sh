@@ -1,0 +1,1 @@
+printf '%s\n' "echo 'You are a partner shop. The only thing you can reach is the API gateway: http://gateway:8000'" >> /root/.bashrc

@@ -17,7 +17,10 @@ Alongside the courses:
   a small network of Linux containers; open a terminal on any host right in the page, then let the lab check
   your work. Needs [Docker Desktop](https://www.docker.com/products/docker-desktop/) running; the first visit
   offers a one-time build of the tools image. Labs live in `netlabs/labs/<id>/` (`lab.json`, `lesson.md`,
-  `docker-compose.yml`, `files/`); progress is saved to `.state/netlabs.json`.
+  `docker-compose.yml`, `files/`); progress is saved to `.state/netlabs.json`. The **Live Camel + gateway lab**
+  (`23-camel-gateway`, under the Integration heading) runs a real Apache Camel route behind a Kong gateway; its
+  first start pulls about 400 MB and builds a Camel image with the jars inside (`image/`), then runs offline.
+  A lab may set `ready_seconds` (slow JVM startup) and `download` (shown before the first start).
 - **Workbench**: run your own ASP.NET Core apps live inside the dojo. Send them requests (JSON, forms,
   multipart file uploads, custom headers), see the response, the curl command and the C# test for it, and
   watch each request travel through *your* code: the map is drawn from your `Program.cs` (middleware, then
