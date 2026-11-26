@@ -169,7 +169,7 @@ const LABS = [
   { id: 'composebuild', icon: '🐳', title: 'Compose builder', category: 'Docker',
     text: 'Draw containers, networks, volumes and bind mounts and run docker compose up: start order, healthchecks, port clashes, who reaches whom by name, and which data survives. Live compose.yaml you can edit. Eleven challenges.' },
   { id: 'kubebuild', icon: '☸', title: 'Kubernetes builder', category: 'Kubernetes',
-    text: 'Ingress, Services, Deployments, probes, ConfigMaps, Secrets and claims. Send requests from outside, roll out a broken release, delete pods: no endpoints, 502, CrashLoopBackOff, explained. Eleven challenges.' },
+    text: 'A Gateway and HTTPRoutes (Gateway API v1), Services, Deployments, probes, ConfigMaps, Secrets and claims. Send requests from outside through listeners, path matches and weighted backends, run a 10% canary, translate a legacy Ingress, roll out a broken release, delete pods: Accepted: False, ResolvedRefs, 404, no endpoints, 502, CrashLoopBackOff, explained. Sixteen challenges.' },
   { id: 'pipebuild', icon: '⛓', title: 'Pipeline builder', category: 'CI/CD',
     text: 'Jobs, needs, artifacts, caches, a matrix, environments with approvals and secrets. Run it for a push, a pull request or a fork and watch the timeline. Generates the GitHub Actions YAML. Ten challenges.' },
   { id: 'msgbuild', icon: '📨', title: 'Messaging builder', category: 'Messaging',
