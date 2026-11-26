@@ -1,0 +1,177 @@
+{
+  "title": "Live RabbitMQ lab",
+  "module": "Messaging · RabbitMQ and Kafka",
+  "minutes": 60,
+  "summary": "A real RabbitMQ 4.4 broker with a shop publishing orders and three services consuming them. Shipments go nowhere, refunds vanish, a poison payment loops forever, dead letters pile up and one email worker hogs the queue. Diagnose with rabbitmqctl, rabbitmqadmin and the HTTP API, then fix it like on-call would.",
+  "download": "The first start downloads about 130 MB (the rabbitmq:4.4.1-management image) and builds a small services image on top of the lab tools image (it installs the Python AMQP client, a few MB, so it needs the internet once). After that the lab runs offline. It uses about 250 MB of memory while running (the broker is capped at 512 MB).",
+  "ready_seconds": 120,
+  "nodes": {
+    "rabbit": "the RabbitMQ broker: rabbitmqctl, rabbitmqadmin, rabbitmq-diagnostics (AMQP :5672, management API :15672)",
+    "ops": "your workstation: curl and jq against the management API, the shop's settings in /work/apps",
+    "apps": "the shop's services: a publisher and the billing, payments and email workers"
+  },
+  "default_node": "rabbit",
+  "ready": [
+    { "node": "ops", "cmd": "test -f /work/.seeded" },
+    { "node": "rabbit", "cmd": "test -f /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q check_running >/dev/null" },
+    { "node": "apps", "cmd": "test -f /work/.apps-up && pgrep -f worker.py >/dev/null" }
+  ],
+  "vars": {
+    "DLQN": { "type": "int", "min": 23, "max": 89 }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Read the room",
+      "text": "Monday morning: the shop team says \"something is stuck in RabbitMQ\". Before you touch anything, look. On **rabbit**:\n\n```\nrabbitmqctl list_queues name type messages_ready messages_unacknowledged consumers\n```\n\n`messages_ready` waits for a consumer; `messages_unacknowledged` has been delivered and not yet acked. One queue has messages and **no consumer at all**: last week's failed orders, dead-lettered by a billing bug that has since been fixed. How many messages are waiting in it?",
+      "answer": ["{{DLQN}}"],
+      "hints": [
+        "Look for the queue whose `consumers` column is 0 and whose name says what it is for.",
+        "It is `orders.dlq`. `rabbitmqctl list_queues name messages consumers | grep dlq`"
+      ],
+      "solution": {
+        "note": "`orders.dlq` holds {{DLQN}} messages. Other things to notice in the same table: `email` has almost everything **unacknowledged** (delivered to a consumer, not finished: task 7), `payments` keeps one message unacked forever (task 5), and `shipping` is empty although the shop ships orders all day (task 2). One table, four incidents: always start with list_queues."
+      }
+    },
+    {
+      "id": "t2",
+      "type": "state",
+      "title": "The binding that never matches",
+      "text": "The warehouse says no shipment has reached the `shipping` queue for days. The shop publishes to the **topic** exchange `orders` with routing keys like `order.eu.shipped` and `order.us.shipped`.\n\nList the bindings (on **rabbit**: `rabbitmqctl list_bindings source_name destination_name routing_key`) and find out why `shipping` gets nothing. Fix it so every region's shipped events reach `shipping`, and created events still do not. On **ops**, `route-check orders order.eu.shipped shipping` tells you whether a key would reach a queue.",
+      "checks": [
+        { "node": "ops", "cmd": "route-check orders order.eu.shipped shipping && route-check orders order.us.shipped shipping && route-check orders order.uk.shipped shipping", "fail_msg": "order.eu.shipped (or another region) still does not reach shipping. In a topic binding, * is exactly one word." },
+        { "node": "ops", "cmd": "route-check orders order.eu.created shipping", "expect": "fail", "fail_msg": "Shipped events arrive now, but so do created events. Use a binding that only matches shipped events (not order.#)." }
+      ],
+      "hints": [
+        "The binding key is `order.shipped`: two words. The routing keys have three words. A topic binding matches word by word, so they never match.",
+        "Add a binding with a wildcard for the region, and remove the dead one:\n\n```\nrabbitmqadmin declare binding --source orders --destination-type queue --destination shipping --routing-key 'order.*.shipped'\nrabbitmqadmin delete binding --source orders --destination-type queue --destination shipping --routing-key 'order.shipped'\n```"
+      ],
+      "solution": {
+        "note": "`*` matches exactly one word, `#` matches zero or more. `order.*.shipped` matches every region; `order.#` would also match created and refunded events. The broker never warns you: a binding that matches nothing is perfectly valid, so a test that publishes a real key and checks the queue is the only proof. Quote the key in the shell: an unquoted * is a filename glob.",
+        "steps": [ { "node": "rabbit", "cmd": "rabbitmqadmin declare binding --source orders --destination-type queue --destination shipping --routing-key 'order.*.shipped' && rabbitmqadmin delete binding --source orders --destination-type queue --destination shipping --routing-key 'order.shipped'" } ]
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Catch what nobody listens to",
+      "text": "Some of the shop's messages match no binding at all. A topic exchange **drops** an unroutable message silently: the publisher does not set `mandatory`, so it never hears about it.\n\nSee it yourself from **ops**: publish through the HTTP API with a key nobody binds and read `routed`:\n\n```\ncurl -s -u guest:guest -X POST http://rabbit:15672/api/exchanges/%2F/orders/publish \\\n  -H 'content-type: application/json' \\\n  -d '{\"properties\":{},\"routing_key\":\"order.test.nowhere\",\"payload\":\"hi\",\"payload_encoding\":\"string\"}'\n```\n\nGive `orders` an **alternate exchange**: a fanout exchange `orders.unrouted` that sends everything unroutable to a durable quorum queue `unrouted`. You cannot redeclare `orders` with new arguments, so attach it with a **policy**.",
+      "checks": [
+        { "node": "ops", "cmd": "api-check exchanges/%2F/orders/publish '.routed == true' '{\"properties\":{},\"routing_key\":\"chk.nobody.listens\",\"payload\":\"check\",\"payload_encoding\":\"string\"}'", "fail_msg": "A message nobody binds is still dropped (\"routed\": false). Is the policy applied to the orders exchange (rabbitmqctl list_policies)?" },
+        { "node": "ops", "cmd": "sleep 1; api-check queues/%2F/unrouted '.type == \"quorum\" and .durable == true and .messages >= 1' && api-check exchanges/%2F/orders '.policy != null'", "fail_msg": "Unroutable messages should end up in a durable quorum queue called unrouted, through a policy on the orders exchange." }
+      ],
+      "hints": [
+        "Three objects and one policy: `rabbitmqadmin declare exchange --name orders.unrouted --type fanout --durable true`, `rabbitmqadmin declare queue --name unrouted --type quorum --durable true`, a binding between them (`--routing-key ''`), then `rabbitmqctl set_policy`.",
+        "```\nrabbitmqctl set_policy AE '^orders$' '{\"alternate-exchange\":\"orders.unrouted\"}' --apply-to exchanges\n```\n\nThe pattern is a regex: `^orders$` matches only that exchange, not `orders.dlx`."
+      ],
+      "solution": {
+        "note": "An alternate exchange is the broker-side safety net: nothing is lost, and the `unrouted` queue's depth becomes an alert (\"we publish something nobody consumes\"). The client-side alternative is `mandatory: true` plus handling `basic.return` (in RabbitMQ.Client 7 with publisher confirmation tracking, `BasicPublishAsync` then throws a `PublishException` for a returned message). Policies beat arguments for this: you can change them later without deleting anything.",
+        "steps": [ { "node": "rabbit", "cmd": "rabbitmqadmin declare exchange --name orders.unrouted --type fanout --durable true && rabbitmqadmin declare queue --name unrouted --type quorum --durable true && rabbitmqadmin declare binding --source orders.unrouted --destination-type queue --destination unrouted --routing-key '' && rabbitmqctl set_policy AE '^orders$' '{\"alternate-exchange\":\"orders.unrouted\"}' --apply-to exchanges && sleep 3" } ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "answer",
+      "title": "Which event was going nowhere?",
+      "text": "Now the safety net fills up. Peek into `unrouted` without taking the messages away (the ack mode `ack_requeue_true` puts them back). On **rabbit**:\n\n```\nrabbitmqadmin get messages --queue unrouted --count 5 --ack-mode ack_requeue_true\n```\n\nIgnore your own test messages. Which routing key does the shop publish that no queue was bound to?",
+      "answer": ["order.eu.refunded"],
+      "hints": [
+        "Look at the `routing_key` column.",
+        "The same over HTTP from **ops**: `curl -s -u guest:guest -X POST http://rabbit:15672/api/queues/%2F/unrouted/get -H 'content-type: application/json' -d '{\"count\":5,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}' | jq '.[].routing_key'`"
+      ],
+      "solution": {
+        "note": "Refunds (`order.eu.refunded`) were published for days and silently dropped: no refund service ever bound a queue. With the alternate exchange you can see it, count it and tell the owning team. Never use `get` with a requeue mode on a busy production queue to browse: requeued messages go back and are redelivered (flagged as redelivered). It is for a quick look."
+      }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "Stop the poison loop",
+      "text": "`payments` always shows one unacknowledged message, and `/work/logs/payments.log` (on **ops** or **apps**) prints the same failure several times a second: a malformed payment, `POISON-7731`. The worker answers with `nack, requeue=true`, so the broker hands it straight back. Forever. It burns CPU and hides real failures.\n\nThe platform team already created a dead-letter exchange `payments.dlx` with a queue `payments.dlq`, but nobody attached them. Make the poison message end up in `payments.dlq`. Two parts: the queue needs a **dead-letter exchange** (a policy), and the worker must stop requeueing: its settings are in `/work/apps/payments.env` (saving the file restarts the worker).",
+      "checks": [
+        { "node": "ops", "cmd": "api-check queues/%2F/payments.dlq/get 'map(.properties.message_id) | index(\"POISON-7731\") != null' '{\"count\":50,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}'", "fail_msg": "POISON-7731 is not in payments.dlq. A nack with requeue=false only dead-letters when the queue has a dead-letter exchange; without one the message is simply dropped." },
+        { "node": "ops", "cmd": "sleep 2; [ -s /work/logs/payments.log ] && ! tail -n 5 /work/logs/payments.log | grep -q 'requeue=true'", "fail_msg": "The worker is still requeueing failures. Change ON_ERROR in /work/apps/payments.env." }
+      ],
+      "hints": [
+        "A dead-letter exchange is a queue setting. On an existing queue, set it with a policy: `rabbitmqctl set_policy <name> '^payments$' '{\"dead-letter-exchange\":\"payments.dlx\"}' --apply-to queues`.",
+        "Then on **ops**: `sed -i 's/^ON_ERROR=requeue/ON_ERROR=reject/' /work/apps/payments.env` and watch `tail -f /work/logs/payments.log`."
+      ],
+      "solution": {
+        "note": "Set the policy FIRST: if the worker rejects before the queue has a DLX, the broker drops the message and the payment is gone. A failure that will never succeed (unparseable JSON) must not be requeued; park it where a human can read it. A quorum queue would have stopped this loop on its own after its delivery limit (20 by default since RabbitMQ 4.0), and dropped the message unless a DLX is set: one more reason to always attach a DLX. `rabbitmqctl list_queues name messages_unacknowledged` and the redelivery rate in the management UI are how you spot a loop.",
+        "steps": [
+          { "node": "rabbit", "cmd": "rabbitmqctl set_policy payments-dlx '^payments$' '{\"dead-letter-exchange\":\"payments.dlx\"}' --apply-to queues" },
+          { "node": "ops", "cmd": "sed -i 's/^ON_ERROR=requeue/ON_ERROR=reject/' /work/apps/payments.env && sleep 8 && tail -n 3 /work/logs/payments.log" }
+        ]
+      }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "Drain the dead-letter pile-up",
+      "text": "The billing bug that dead-lettered last week's orders is fixed, so the {{DLQN}} messages in `orders.dlq` must be processed after all: move them back into the `billing` queue, where the billing worker picks them up (it logs `processed D-...` in `/work/logs/billing.log`).\n\nDo not write a script that gets and republishes them one by one. RabbitMQ has a tool made for moving messages between queues: a **shovel** (the plugin is enabled here). Make it delete itself once the queue is empty.",
+      "checks": [
+        { "node": "ops", "cmd": "api-check queues/%2F/orders.dlq '.messages == 0'", "fail_msg": "orders.dlq still holds messages." },
+        { "node": "ops", "cmd": "[ -s /work/.dlq-ids ] || exit 1; for id in $(cat /work/.dlq-ids); do grep -q \"processed $id\\$\" /work/logs/billing.log || { echo missing $id; exit 1; }; done", "fail_msg": "orders.dlq is empty, but billing has not processed every one of those orders: were they moved to the billing queue, or deleted?" }
+      ],
+      "hints": [
+        "A dynamic shovel is a runtime parameter of the component `shovel`: `rabbitmqctl set_parameter shovel <name> '<json>'`. It needs a source (`src-uri`, `src-queue`) and a destination (`dest-uri`, `dest-queue`). `amqp://` means this broker.",
+        "```\nrabbitmqctl set_parameter shovel drain-orders-dlq '{\"src-uri\":\"amqp://\",\"src-queue\":\"orders.dlq\",\"src-delete-after\":\"queue-length\",\"dest-uri\":\"amqp://\",\"dest-queue\":\"billing\"}'\n```\n\nThen `rabbitmqctl shovel_status` and `rabbitmqctl list_queues name messages`."
+      ],
+      "solution": {
+        "note": "`src-delete-after: queue-length` moves exactly the messages that were there when it started, then removes the shovel, so new dead letters are not swept up by accident. Fix the cause before you redrive, or the messages come straight back. `rabbitmqadmin shovels declare_amqp091 --name ... --source-queue ... --destination-queue ...` does the same through the HTTP API, and the management UI's \"Move messages\" button is a shovel too.",
+        "steps": [ { "node": "rabbit", "cmd": "rabbitmqctl set_parameter shovel drain-orders-dlq '{\"src-uri\":\"amqp://\",\"src-queue\":\"orders.dlq\",\"src-delete-after\":\"queue-length\",\"dest-uri\":\"amqp://\",\"dest-queue\":\"billing\"}' && sleep 8 && rabbitmqctl list_queues name messages" } ]
+      }
+    },
+    {
+      "id": "t7",
+      "type": "state",
+      "title": "One greedy consumer",
+      "text": "`email` has two worker instances, yet emails go out at the speed of one, and almost every message is **unacknowledged**. Find out which instance holds them (on **rabbit**: `rabbitmqctl list_consumers queue_name consumer_tag ack_required prefetch_count`, or `curl -s -u guest:guest http://rabbit:15672/api/consumers | jq` on **ops**).\n\nFix the setting in `/work/apps/email.env` so the two instances share the work. Saving the file restarts them.",
+      "checks": [
+        { "node": "ops", "cmd": "api-check consumers '[.[] | select(.queue.name == \"email\")] | length >= 2 and all(.prefetch_count >= 1 and .prefetch_count <= 50)'", "fail_msg": "The email consumers do not both have a small prefetch (1 to 50) yet. 0 means unlimited." }
+      ],
+      "hints": [
+        "prefetch_count 0 means unlimited: the broker pushes the whole backlog to whichever consumer subscribed first, and the second one only gets new messages.",
+        "On **ops**: `sed -i 's/^PREFETCH=0/PREFETCH=10/' /work/apps/email.env`, then list the consumers again and watch `messages_unacknowledged` fall."
+      ],
+      "solution": {
+        "note": "Prefetch (basic.qos) caps unacked deliveries per consumer. Unlimited means one consumer can hoard thousands of messages, holding them in its memory; if it crashes, all of them are redelivered at once. Start around 10 to 50 and tune: about (processing time / network round trip) plus a little keeps a consumer busy without hoarding. In RabbitMQ.Client 7: `await channel.BasicQosAsync(0, 10, false)`.",
+        "steps": [ { "node": "ops", "cmd": "sed -i 's/^PREFETCH=0/PREFETCH=10/' /work/apps/email.env && sleep 8" } ]
+      }
+    },
+    {
+      "id": "t8",
+      "type": "state",
+      "title": "Survive a broker restart",
+      "text": "Compliance wants every created order kept in `audit` until their exporter reads it. Try a restart on **rabbit** and compare the counts:\n\n```\nrabbitmqctl list_queues name type messages | grep audit\nrabbitmqctl stop_app && rabbitmqctl start_app\nrabbitmqctl list_queues name type messages | grep audit\n```\n\nEverything is gone. `audit` is a durable **classic** queue, but the shop publishes **transient** messages (delivery mode 1), and a classic queue does not keep those across a restart. You cannot change the shop today. Replace `audit` with a queue type that persists every message, still bound to `orders` with `order.*.created`. (The check restarts the broker itself.)",
+      "checks": [
+        { "node": "ops", "cmd": "api-check queues/%2F/audit '.type == \"quorum\" and .durable == true'", "fail_msg": "audit is not a durable quorum queue yet. A queue's type cannot be changed: delete it and declare it again." },
+        { "node": "ops", "cmd": "route-check orders order.eu.created audit", "fail_msg": "audit no longer receives created orders: declare its binding again (order.*.created)." },
+        { "node": "rabbit", "cmd": "sleep 5; bash /lab/checks/restart-keeps-audit.sh", "fail_msg": "After a restart audit had fewer messages than before." }
+      ],
+      "hints": [
+        "Quorum queues write every message to disk (their replicated log) whatever its delivery mode.",
+        "```\nrabbitmqadmin delete queue --name audit\nrabbitmqadmin declare queue --name audit --type quorum --durable true\nrabbitmqadmin declare binding --source orders --destination-type queue --destination audit --routing-key 'order.*.created'\n```"
+      ],
+      "solution": {
+        "note": "Durability has three parts and you need all of them: a durable queue, persistent messages (or a quorum queue, which persists everything), and publisher confirms so the publisher knows the broker has them. Deleting a queue deletes its messages, so in production you would first drain or shovel them somewhere. Quorum queues are also the replicated queue type (classic mirrored queues were removed in RabbitMQ 4.0).",
+        "steps": [ { "node": "rabbit", "cmd": "rabbitmqadmin delete queue --name audit && rabbitmqadmin declare queue --name audit --type quorum --durable true && rabbitmqadmin declare binding --source orders --destination-type queue --destination audit --routing-key 'order.*.created' && sleep 5" } ]
+      }
+    },
+    {
+      "id": "t9",
+      "type": "answer",
+      "title": "Health checks and metrics",
+      "text": "Before you hand over, check the broker the way your monitoring would. On **rabbit**:\n\n```\nrabbitmq-diagnostics -q check_running\nrabbitmq-diagnostics -q check_local_alarms\nrabbitmq-diagnostics -q listeners\n```\n\n`check_local_alarms` fails when a memory or disk alarm is blocking publishers. `listeners` shows every port the node serves. On which port does the Prometheus metrics endpoint listen? (Try it from **ops**: `curl -s http://rabbit:<port>/metrics | grep rabbitmq_queue_messages_ready`.)",
+      "answer": ["15692"],
+      "hints": [
+        "Look for the listener whose protocol is `http/prometheus`.",
+        "`rabbitmq-diagnostics -q listeners | grep -i prometheus`"
+      ],
+      "solution": {
+        "note": "15692 is the rabbitmq_prometheus plugin. The default `/metrics` endpoint aggregates; `/metrics/per-object` or `/metrics/detailed?family=queue_coarse_metrics` give per-queue numbers. The alerts worth having: messages ready growing for 10 minutes, unacked stuck at the prefetch total, DLQ or unrouted depth above zero, and any memory or disk alarm (publishers are blocked while it lasts)."
+      }
+    }
+  ]
+}
