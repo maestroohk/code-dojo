@@ -83,6 +83,8 @@ app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = ui });
 app.UseStaticFiles(new StaticFileOptions { FileProvider = ui });
 
 app.MapGet("/api/tracks", () => Results.Text(content.Tracks().ToJsonString(), "application/json"));
+// Search everything (Ctrl+K) and the glossary: one cached index, rebuilt when content changes (Search.cs).
+SearchIndex.Map(app, new SearchIndex(root, content));
 
 // ?dream= serves each step's variant for the learner's chosen dream (see Builds.cs, "dreams").
 app.MapGet("/api/lesson/{track}/{module}/{lesson}", (string track, string module, string lesson, string? dream) =>
