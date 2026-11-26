@@ -1,208 +1,130 @@
 {
   "title": "Boss: on-call in vim",
-  "summary": "Pull together vimrc, macros and server editing into tools you would really use.",
-  "minutes": 15,
+  "summary": "Save a root-owned config without leaving Vim, run a macro on just the right lines, and find which file sets a setting.",
+  "minutes": 18,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "Your on-call kit",
-      "body": "Three pieces of tooling for the day you only have ssh and vim: a write-permission advisor, a macro runner that edits real lines, and an effective-settings report."
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Can :w work?",
-      "prompt": [
-        "Write `string WritePlan(string owner, string mode, string user, bool userHasSudo, bool isNeovim)` advising what to do when saving a file. `mode` is a symbolic mode like `rw-r--r--` (owner, group, others; ignore groups: treat the user as either the owner or \"others\").",
+      "body": [
+        "Three things that come up when all you have is SSH and Vim:",
         "",
-        "- if the user can write the file (owner with `w` in the first triplet, or anyone with `w` in the last triplet) → `\":w\"`",
-        "- otherwise, if the user has sudo: `\":w !sudo tee % > /dev/null\"` in vim, but in neovim `\":w /tmp/copy then sudo cp\"`",
-        "- otherwise → `\"ask an admin\"`"
-      ],
-      "starter": [
-        "string WritePlan(string owner, string mode, string user, bool userHasSudo, bool isNeovim)",
-        "{",
-        "    return \":w\";",
-        "}"
-      ],
-      "solution": [
-        "string WritePlan(string owner, string mode, string user, bool userHasSudo, bool isNeovim)",
-        "{",
-        "    bool canWrite = (user == owner && mode[1] == 'w') || mode[7] == 'w';",
-        "    if (canWrite) return \":w\";",
-        "    if (userHasSudo) return isNeovim ? \":w /tmp/copy then sudo cp\" : \":w !sudo tee % > /dev/null\";",
-        "    return \"ask an admin\";",
-        "}"
-      ],
-      "hints": [
-        "The owner's write bit is `mode[1]`, others' is `mode[7]`."
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"own file\", \":w\", WritePlan(\"ana\", \"rw-r--r--\", \"ana\", false, false));",
-        "Dojo.Eq(\"root file with sudo in vim\", \":w !sudo tee % > /dev/null\", WritePlan(\"root\", \"rw-r--r--\", \"ana\", true, false));",
-        "Dojo.Eq(\"root file with sudo in neovim\", \":w /tmp/copy then sudo cp\", WritePlan(\"root\", \"rw-r--r--\", \"ana\", true, true));",
-        "Dojo.Eq(\"world-writable\", \":w\", WritePlan(\"root\", \"rw-rw-rw-\", \"ana\", false, false));",
-        "Dojo.Eq(\"read-only even for the owner\", \"ask an admin\", WritePlan(\"ana\", \"r--r--r--\", \"ana\", false, false));",
-        "Dojo.Eq(\"no sudo\", \"ask an admin\", WritePlan(\"root\", \"rw-r--r--\", \"ana\", false, false));"
+        "1. You opened a root-owned config without `sudo`, edited it, and `:w` says **E45: 'readonly' option is set** or **E212: Can't open file for writing**. `:w !sudo tee % > /dev/null` pipes the buffer to `sudo tee`, which writes the file as root. (`sudoedit` is the cleaner habit next time; Neovim does not support the `tee` trick because it cannot ask for a password there.)",
+        "2. An inventory needs the same edit on some lines but not others: `:g/pattern/norm @q`.",
+        "3. Someone's Vim indents Python by 8 and nobody knows why: `:verbose set shiftwidth?` prints the value **and the file and line that last set it**."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Run a macro over lines",
+      "type": "terminal",
+      "title": "E212: save it as root",
       "prompt": [
-        "Write `List<string> RunMacro(List<string> lines, string macro, int times)` that runs a macro on the buffer, starting with the cursor at line 0, column 0. The macro uses only these keys:",
+        "`/etc/app/app.conf` is owned by root. As the learner user (not root), change `log_level = debug` to `log_level = info`, and write it **from inside Vim** with `:w !sudo tee % > /dev/null`.",
         "",
-        "- `0` start of line, `$` last character, `j` down a line (if there is no next line, **the macro stops** and so do all remaining repetitions, just like vim),",
-        "- `I` / `A` + text + `\\u001b`: insert at the start / append at the end,",
-        "- `x` delete the character under the cursor,",
-        "- `dd` delete the line (the cursor stays at the same index, clamped).",
+        "The file must stay owned by `root:root` with mode `644`. After the `tee` write the buffer still counts as modified, so leave with `:q!`.",
         "",
-        "Run the whole macro `times` times. Return the lines."
+        "Here: `vim -es -c '%s/.../.../' -c 'w !sudo tee % > /dev/null' -c 'q!' /etc/app/app.conf`."
       ],
-      "starter": [
-        "List<string> RunMacro(List<string> lines, string macro, int times)",
-        "{",
-        "    return new List<string>(lines);",
-        "}"
+      "setup": [
+        "boss.sh"
       ],
-      "solution": [
-        "List<string> RunMacro(List<string> lines, string macro, int times)",
-        "{",
-        "    var text = new List<string>(lines);",
-        "    int row = 0, col = 0;",
-        "    for (int t = 0; t < times; t++)",
-        "    {",
-        "        int i = 0;",
-        "        while (i < macro.Length)",
-        "        {",
-        "            char k = macro[i];",
-        "            if (k == '0') { col = 0; i++; }",
-        "            else if (k == '$') { col = Math.Max(0, text[row].Length - 1); i++; }",
-        "            else if (k == 'j')",
-        "            {",
-        "                if (row + 1 >= text.Count) return text;",
-        "                row++; col = Math.Min(col, Math.Max(0, text[row].Length - 1)); i++;",
-        "            }",
-        "            else if (k == 'I' || k == 'A')",
-        "            {",
-        "                int end = macro.IndexOf('\\u001b', i + 1);",
-        "                if (end < 0) end = macro.Length;",
-        "                string typed = macro.Substring(i + 1, end - i - 1);",
-        "                if (k == 'I') { text[row] = typed + text[row]; col = Math.Max(0, typed.Length - 1); }",
-        "                else { text[row] = text[row] + typed; col = Math.Max(0, text[row].Length - 1); }",
-        "                i = end + 1;",
-        "            }",
-        "            else if (k == 'x')",
-        "            {",
-        "                if (text[row].Length > 0) { text[row] = text[row].Remove(col, 1); col = Math.Min(col, Math.Max(0, text[row].Length - 1)); }",
-        "                i++;",
-        "            }",
-        "            else if (k == 'd' && i + 1 < macro.Length && macro[i + 1] == 'd')",
-        "            {",
-        "                text.RemoveAt(row);",
-        "                if (text.Count == 0) return text;",
-        "                row = Math.Min(row, text.Count - 1); col = 0; i += 2;",
-        "            }",
-        "            else i++;",
-        "        }",
-        "    }",
-        "    return text;",
-        "}"
+      "checks": [
+        {
+          "name": "log_level is info, nothing else changed",
+          "cmd": "diff /opt/dojo/state/app.conf.expected /etc/app/app.conf",
+          "fail": "`/etc/app/app.conf` should be the same file with `log_level = info`."
+        },
+        {
+          "name": "still owned by root:root with mode 644",
+          "cmd": "stat -c '%U:%G %a' /etc/app/app.conf",
+          "expectOutput": "root:root 644",
+          "fail": "Ownership or mode changed. `tee` writes into the existing file, so it keeps both; replacing the file (or `chown`) does not."
+        }
       ],
       "hints": [
-        "Walk the macro with an index `i`; `I` and `A` consume everything up to the next Esc.",
-        "A `j` on the last line ends the whole run: `return`."
+        "`:%s/log_level = debug/log_level = info/` makes the change in the buffer.",
+        "`:w !cmd` sends the buffer to a command's input instead of writing a file. `%` is the current file name.",
+        "`vim -es -c '%s/log_level = debug/log_level = info/' -c 'w !sudo tee % > /dev/null' -c 'q!' /etc/app/app.conf`, then `cat /etc/app/app.conf`."
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"append ; and move down, 3 times\", new List<string> { \"a;\", \"b;\", \"c;\", \"d\" }, RunMacro(new List<string> { \"a\", \"b\", \"c\", \"d\" }, \"A;\\u001bj\", 3));",
-        "Dojo.Eq(\"stops at the end of the file\", new List<string> { \"- a\", \"- b\" }, RunMacro(new List<string> { \"a\", \"b\" }, \"0I- \\u001bj\", 100));",
-        "Dojo.Eq(\"uncomment with 0xj\", new List<string> { \"port=80\", \"host=x\" }, RunMacro(new List<string> { \"#port=80\", \"#host=x\" }, \"0xj\", 5));",
-        "Dojo.Eq(\"delete every line\", new List<string>(), RunMacro(new List<string> { \"a\", \"b\", \"c\" }, \"dd\", 10));",
-        "Dojo.Eq(\"quote every line\", new List<string> { \"\\\"a\\\",\", \"\\\"b\\\",\" }, RunMacro(new List<string> { \"a\", \"b\" }, \"0I\\\"\\u001bA\\\",\\u001bj\", 2));"
-      ]
+      "solution": [
+        "vim -es -c '%s/log_level = debug/log_level = info/' -c 'w !sudo tee % > /dev/null' -c 'q!' /etc/app/app.conf",
+        "cat /etc/app/app.conf",
+        "stat -c '%U:%G %a' /etc/app/app.conf"
+      ],
+      "explain": "`:w !sudo tee %` saves your edit when you forgot `sudo`, without losing it. The better habit is `sudoedit /etc/app/app.conf`: your own editor and plugins run as you on a temporary copy, and only the copy back is done as root."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Effective settings report",
+      "type": "terminal",
+      "title": "A macro on just the host lines",
       "prompt": [
-        "Write `List<string> Report(string[] systemVimrc, string[] userVimrc, string[] modeline)` that applies three sources in order (later wins) and returns `\"<name>=<value> (<source>)\"` lines sorted by name (ordinal), where source is `system`, `user` or `modeline`, the **last** source that set that option.",
+        "Turn each host in `~/inventory.txt` into a two-line YAML entry, leaving the `#` comment lines alone:",
         "",
-        "- The two vimrc arrays use the `set` syntax from lesson 1 (`name`, `noname`, `name=value`, `name!`; comments with `\"`).",
-        "- `modeline` is one line like `# vim: set ts=2 sw=2 et:`; the options are between `set ` and the final `:`. Abbreviations map: `ts`→`tabstop`, `sw`→`shiftwidth`, `et`→`expandtab`, `noet`→`noexpandtab`, `nu`→`number`."
+        "```text",
+        "web1.example.com      becomes      - host: web1.example.com",
+        "                                     port: 443",
+        "```",
+        "",
+        "(two spaces before `- host:`, four before `port:`). Put the edit in register `q` with `:let @q = \"...\"` and run it only on the host lines with `:g/pattern/norm @q`."
       ],
-      "starter": [
-        "List<string> Report(string[] systemVimrc, string[] userVimrc, string[] modeline)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "boss.sh"
       ],
-      "solution": [
-        "List<string> Report(string[] systemVimrc, string[] userVimrc, string[] modeline)",
-        "{",
-        "    var values = new Dictionary<string, string>();",
-        "    var source = new Dictionary<string, string>();",
-        "    var abbrev = new Dictionary<string, string> { [\"ts\"] = \"tabstop\", [\"sw\"] = \"shiftwidth\", [\"et\"] = \"expandtab\", [\"nu\"] = \"number\" };",
-        "",
-        "    void Apply(string item, string src)",
-        "    {",
-        "        string Full(string n) => abbrev.TryGetValue(n, out var f) ? f : n;",
-        "        int eq = item.IndexOf('=');",
-        "        string name;",
-        "        if (eq > 0) { name = Full(item.Substring(0, eq)); values[name] = item.Substring(eq + 1); }",
-        "        else if (item.EndsWith(\"!\")) { name = Full(item.TrimEnd('!')); values[name] = values.TryGetValue(name, out var v) && v == \"true\" ? \"false\" : \"true\"; }",
-        "        else if (item.StartsWith(\"no\") && !abbrev.ContainsKey(item)) { name = Full(item.Substring(2)); values[name] = \"false\"; }",
-        "        else { name = Full(item); values[name] = \"true\"; }",
-        "        source[name] = src;",
-        "    }",
-        "",
-        "    void ApplyRc(string[] lines, string src)",
-        "    {",
-        "        foreach (var raw in lines)",
-        "        {",
-        "            var line = raw.Trim();",
-        "            int c = line.IndexOf(\" \\\"\", StringComparison.Ordinal);",
-        "            if (c >= 0) line = line.Substring(0, c).Trim();",
-        "            if (!line.StartsWith(\"set \")) continue;",
-        "            foreach (var item in line.Substring(4).Split(' ', StringSplitOptions.RemoveEmptyEntries)) Apply(item, src);",
-        "        }",
-        "    }",
-        "",
-        "    ApplyRc(systemVimrc, \"system\");",
-        "    ApplyRc(userVimrc, \"user\");",
-        "    foreach (var m in modeline)",
-        "    {",
-        "        int s = m.IndexOf(\"set \", StringComparison.Ordinal);",
-        "        int e = m.LastIndexOf(':');",
-        "        if (s < 0 || e <= s) continue;",
-        "        foreach (var item in m.Substring(s + 4, e - s - 4).Split(' ', StringSplitOptions.RemoveEmptyEntries)) Apply(item, \"modeline\");",
-        "    }",
-        "    return values.Keys.OrderBy(k => k, StringComparer.Ordinal).Select(k => $\"{k}={values[k]} ({source[k]})\").ToList();",
-        "}"
+      "checks": [
+        {
+          "name": "every host is a YAML entry, comments kept",
+          "cmd": "diff /opt/dojo/state/inventory.expected ~/inventory.txt",
+          "fail": "`~/inventory.txt` is not right yet (`<` is the goal, `>` is yours). Count the spaces."
+        }
       ],
       "hints": [
-        "Write one `Apply(item, source)` that updates both a value and a source dictionary.",
-        "Map abbreviations after stripping `no`, `!` or `=value`.",
-        "For the modeline, take the text between `set ` and the last `:`."
+        "The keys for one line: `I` + `  - host: ` + Escape, then `o` + `    port: 443` + Escape.",
+        "In a `let` string: `\"I  - host: \\<Esc>o    port: 443\\<Esc>\"`. `:g/\\.example\\.com$/norm @q` runs it on host lines only.",
+        "`vim -es -c 'let @q = \"I  - host: \\<Esc>o    port: 443\\<Esc>\"' -c 'g/\\.example\\.com$/norm @q' -c x ~/inventory.txt`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoSys = new[] { \"set nocompatible\", \"set tabstop=8\", \"set hlsearch\" };",
-        "var dojoUser = new[] { \"\\\" mine\", \"set expandtab shiftwidth=4 tabstop=4\", \"set nohlsearch\" };",
-        "var dojoMode = new[] { \"# vim: set ts=2 sw=2 noet:\" };",
-        "Dojo.Eq(\"all three sources\", new List<string> {",
-        "    \"compatible=false (system)\",",
-        "    \"expandtab=false (modeline)\",",
-        "    \"hlsearch=false (user)\",",
-        "    \"shiftwidth=2 (modeline)\",",
-        "    \"tabstop=2 (modeline)\" }, Report(dojoSys, dojoUser, dojoMode));",
-        "Dojo.Eq(\"no modeline\", new List<string> { \"number=true (user)\" }, Report(new string[0], new[] { \"set nu\" }, new string[0]));",
-        "Dojo.Eq(\"toggle across files\", new List<string> { \"number=false (user)\" }, Report(new[] { \"set number\" }, new[] { \"set number!\" }, new string[0]));"
-      ]
+      "solution": [
+        "vim -es -c 'let @q = \"I  - host: \\<Esc>o    port: 443\\<Esc>\"' -c 'g/\\.example\\.com$/norm @q' -c x ~/inventory.txt",
+        "cat ~/inventory.txt"
+      ],
+      "explain": "`:g` marks the matching lines first and then runs the command on each, so the `port:` lines the macro adds are never touched themselves. That makes `:g/pattern/norm @q` safe where `5@q` would have run on the wrong lines."
+    },
+    {
+      "type": "terminal",
+      "title": "Who set shiftwidth=8?",
+      "prompt": [
+        "`~/.vimrc` says `shiftwidth=4`, yet in Python files Vim indents by 8 with tabs. Find the file that sets it and fix it.",
+        "",
+        "1. Ask Vim: open `~/work/sample.py` and run `:verbose set shiftwidth?`. In Ex mode the answer goes to the screen only if you redirect it: `vim -Nes -u ~/.vimrc -c 'e ~/work/sample.py' -c 'redir! > /dev/stdout' -c 'verbose set sw? et?' -c 'redir END' -c 'qa!'`.",
+        "2. Write the path of the file it names to `~/answers/culprit.txt`.",
+        "3. Fix it so Python buffers get `shiftwidth=4` and `expandtab` (remove the stale file, or correct it)."
+      ],
+      "setup": [
+        "boss.sh"
+      ],
+      "checks": [
+        {
+          "name": "culprit.txt names the file",
+          "cmd": "grep -q '\\.vim/after/ftplugin/python\\.vim' ~/answers/culprit.txt",
+          "fail": "`~/answers/culprit.txt` should hold the path `:verbose` printed after *Last set from*."
+        },
+        {
+          "name": "Python buffers indent with 4 spaces",
+          "cmd": "bash $DOJO_FILES/vimset.sh ~/work/sample.py shiftwidth expandtab",
+          "expectMatch": "\\bshiftwidth=4\\s+expandtab=1\\b",
+          "fail": "In `sample.py` Vim should now have `shiftwidth=4` and `expandtab`."
+        }
+      ],
+      "hints": [
+        "`:verbose set sw?` prints `Last set from ~/.vim/after/ftplugin/python.vim line 2`.",
+        "Files in `~/.vim/after/` run after the normal ftplugins, so they win over your vimrc for that file type.",
+        "`echo ~/.vim/after/ftplugin/python.vim > ~/answers/culprit.txt`, then `rm ~/.vim/after/ftplugin/python.vim`."
+      ],
+      "solution": [
+        "vim -Nes -u ~/.vimrc -c 'e ~/work/sample.py' -c 'redir! > /dev/stdout' -c 'verbose set sw? et?' -c 'redir END' -c 'qa!'",
+        "echo ~/.vim/after/ftplugin/python.vim > ~/answers/culprit.txt",
+        "rm ~/.vim/after/ftplugin/python.vim",
+        "bash $DOJO_FILES/vimset.sh ~/work/sample.py shiftwidth expandtab"
+      ],
+      "explain": "`:verbose set opt?` and `:verbose map key` answer \"where did this come from?\" in one line. Order matters: vimrc first, then ftplugins when a file type is detected, then `after/` files, then modelines in the file itself (if `modeline` is on)."
     }
   ]
 }

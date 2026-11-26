@@ -26,7 +26,7 @@ public static partial class LabSteps
     };
 
     // The Vim & nano trainer's levels: { id: 'quit', group: ..., par: 3, ... } in VIM_LEVELS and NANO_LEVELS.
-    [GeneratedRegex(@"^\s*\{\s*id:\s*'([a-z0-9-]+)'", RegexOptions.Multiline)]
+    [GeneratedRegex(@"^\s*\{\s*id:\s*'([A-Za-z0-9-]+)'", RegexOptions.Multiline)]
     private static partial Regex LevelRe();
 
     // { id: 'static', title: 'Two routers, static routes', xp: 40, ... } as the labs write them.

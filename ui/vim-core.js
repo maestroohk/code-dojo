@@ -74,7 +74,7 @@ function splitDelim(s, d) {
 // ===================================================================== Vim
 
 export class Vim {
-  constructor(text = '', { row = 0, col = 0, disk, file = 'file.txt' } = {}) {
+  constructor(text = '', { row = 0, col = 0, disk, file = 'file.txt', pre } = {}) {
     this.lines = String(text).split('\n');
     this.row = clamp(row, 0, this.lines.length - 1);
     this.col = clamp(col, 0, Math.max(0, this.lines[this.row].length - 1));
@@ -91,6 +91,8 @@ export class Vim {
     this.keys = 0; this.log = [];
     this.quit = false; this.number = true;
     this.disk = disk ?? this.text; this.file = file;
+    // A level can start mid-mistake (say, stuck in Insert mode): these keys are played first and not counted.
+    if (pre) { this.feedAll(pre); this.keys = 0; this.log = []; }
   }
   get text() { return this.lines.join('\n'); }
   get modified() { return this.text !== this.disk; }
@@ -107,7 +109,7 @@ export class Vim {
   /** Feed one key token. */
   feed(key) {
     if (this.quit) return;
-    if (!this.replaying) { this.keys++; this.log.push(key); if (this.recording) this.recording.push(key); }
+    if (!this.replaying) { this.keys++; this.log.push(key); if (this.recording) this.recording.push(key); if (this.macro) this.macro.keys.push(key); }
     if (key === '<C-[>') key = 'Escape';
     if (this.mode === 'insert') return this.insertKey(key);
     if (this.mode === 'command') return this.cmdKey(key);
@@ -240,6 +242,28 @@ export class Vim {
         this.pending = [];
         const was = this.replaying; this.replaying = true;
         for (const key of ks) this.feed(key);
+        this.replaying = was;
+        return OK;
+      }
+      case 'q': {   // macros: q{a-z} starts recording, q stops; @{a-z} replays, @@ repeats the last one
+        if (this.macro) {
+          const m = this.macro; this.macro = null; m.keys.pop();
+          (this.macros ||= {})[m.reg] = m.keys; this.msg(''); return OK;
+        }
+        const reg = keys[i + 1];
+        if (reg === undefined) return MORE;
+        if (!/^[a-z]$/.test(reg)) return BAD;
+        this.macro = { reg, keys: [] }; this.msg(`recording @${reg}`); return OK;
+      }
+      case '@': {
+        let reg = keys[i + 1];
+        if (reg === undefined) return MORE;
+        if (reg === '@') reg = this.lastMacro;
+        const ks = this.macros?.[reg];
+        if (!ks) return BAD;
+        this.lastMacro = reg; this.pending = [];
+        const was = this.replaying; this.replaying = true;
+        for (let t = 0; t < n; t++) for (const key of ks) this.feed(key);
         this.replaying = was;
         return OK;
       }

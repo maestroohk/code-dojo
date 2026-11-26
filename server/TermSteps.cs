@@ -124,7 +124,7 @@ public sealed partial class TermSteps : IAsyncDisposable
         if (c.ExpectExit is { } want) ok &= r.Code == want;
         if (c.ExpectOutput is { } exact) ok &= output == Checker.Tidy(exact);
         foreach (var part in c.ExpectContains) ok &= r.Out.Contains(part, StringComparison.Ordinal);
-        if (c.ExpectMatch is { } re) ok &= Regex.IsMatch(r.Out, re, RegexOptions.Multiline);
+        if (c.ExpectMatch is { } re) ok &= Regex.IsMatch(r.Out.Replace("\r\n", "\n"), re, RegexOptions.Multiline);
         if (c.ExpectExit is null && c.ExpectOutput is null && c.ExpectContains.Count == 0 && c.ExpectMatch is null) ok = r.Code == 0;
         return ok && r.Code != 124;
     }
