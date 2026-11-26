@@ -81,6 +81,8 @@ public static class Validator
                                 if (t.Error is not null) Error(where, "trace: " + t.Error + " " + string.Join(" ", t.Diagnostics.Where(d => d.Severity == "error").Select(d => $"line {d.Line}: {d.Message}")));
                                 else if (t.Truncated) Warn(where, "trace: stopped after the step limit; use a smaller example");
                             }
+                            if (step["interleave"] is JsonObject ilCard)
+                                foreach (var (isError, msg) in await Interleave.Validate(runner, ilCard)) if (isError) Error(where, msg); else Warn(where, msg);
                             if (step["regex"] is JsonObject rxCard)
                             {
                                 var (rxOptions, rxFlagError) = RegexLab.ParseFlags((string?)rxCard["flags"]);

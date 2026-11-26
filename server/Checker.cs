@@ -28,6 +28,9 @@ public sealed class Checker(CSharpRunner runner)
         foreach (var rule in Rules(step, "forbid"))
             results.Add(new(rule.Message, !Regex.IsMatch(bare, rule.Pattern, RegexOptions.Singleline), "This exercise asks you to solve it another way."));
 
+        // "interleavings": graded by running the code under every interleaving (Interleave.cs).
+        if (step["interleavings"] is { } interleavings) return await Interleave.Grade(runner, interleavings, code, results);
+
         var (web, efCore) = CSharpRunner.Frameworks((string?)step["framework"]);
         var files = wrapped is { } w ? [.. extra ?? [], w] : extra;
         var (program, diags) = runner.Compile(wrapped is null ? code : "", (string?)step["template"], web, efCore: efCore, extra: files);

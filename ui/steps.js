@@ -6,6 +6,7 @@ import { createEditor } from './editor.js';
 import { state, save } from './game.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
+import { interleaveCard, interleaveDetail } from './interleave.js';
 import { memoryTrace, eventLoop } from './polyviz.js';
 import { sqlGrid } from './sqlgrid.js';
 import { overTime, clock } from './pacing.js';
@@ -203,7 +204,7 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), sqlVisuals(step)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.interleave && interleaveCard(step.interleave), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), sqlVisuals(step)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }
@@ -613,7 +614,7 @@ export function renderRunOutput(panel, r, { stdin } = {}) {
       h(`div.out-title.${failed ? 'bad' : 'good'}`, failed ? `${r.tests.length - failed} of ${r.tests.length} checks pass` : r.tests.length === 1 ? 'The check passes' : `All ${r.tests.length} checks pass`),
       r.tests.map(t => h(`div.test.${t.pass ? 'pass' : 'fail'}`,
         h('span.test-mark', t.pass ? '✓' : '✗'),
-        h('div', h('div.test-name', t.name), !t.pass && t.detail && h('pre.test-detail', t.detail))))));
+        h('div', h('div.test-name', t.name), !t.pass && t.detail && interleaveDetail(t.detail))))));
   }
   if (r.timedOut) panel.append(h('div.diag.error', 'Stopped: it ran for too long. Is there a loop that never ends, or is it waiting for something that never happens?'));
   if (stdin) panel.append(h('div.out-section', h('div.out-title', 'Input given'), h('pre.out', stdin)));

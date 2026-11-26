@@ -1,0 +1,223 @@
+{
+  "title": "Lost updates: watch a race happen",
+  "summary": "Why count++ on two threads can lose updates, seen one step at a time on real threads, and how to prove a fix holds for every interleaving.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "count++ is three steps, not one",
+      "body": [
+        "`count++` looks like one operation. The CPU does it in three: **read** `count` into a register, **add** one, **write** the register back.",
+        "When two threads do that at the same time, the operating system can switch between them after any of those steps.",
+        "If both threads read before either writes, both write the same value and one increment is **lost**.",
+        "",
+        "The card below runs this code for real: two threads, a scheduler that lets one thread move at a time, and a timeline like a profiler's.",
+        "Press **Play** to see the lucky order. Then pick **Lost update** under *Interleaving*, or click **Run next: T2** after T1's read and watch the register go stale.",
+        "Finally press **Try every interleaving**: it runs all of them and counts the results."
+      ],
+      "interleave": {
+        "setup": ["int count = 0;"],
+        "threads": [
+          { "name": "T1", "code": ["count++;"] },
+          { "name": "T2", "code": ["count++;"] }
+        ],
+        "result": "count",
+        "expect": "2",
+        "schedules": [
+          { "name": "Lost update: both read before either writes", "pick": [0, 1, 0, 1], "expect": "1" }
+        ],
+        "outcomes": ["1", "2"]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "In the card, four of the six interleavings end with `count = 1`. What do those four have in common?",
+      "options": [
+        "Both threads read `count` before either of them writes it back",
+        "T2 runs first",
+        "One of the threads never runs",
+        "The two writes happen at exactly the same time"
+      ],
+      "answer": 0,
+      "explain": [
+        "Each thread writes `(the value it read) + 1`. If both read 0, both write 1. Who goes first does not matter; what matters is that",
+        "the read of one thread falls between the read and the write of the other. That window is the **critical section**."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which of these are read-modify-write races when two threads run them on the same shared field, with no lock?",
+      "buckets": ["Race", "Safe on its own"],
+      "items": [
+        ["`total += amount;`", 0],
+        ["`hits[key] = hits[key] + 1;` on a `Dictionary`", 0],
+        ["`if (cache.Count < 100) cache.Add(x);`", 0],
+        ["`Interlocked.Increment(ref total);`", 1],
+        ["`var local = 0; local++;` inside each thread", 1],
+        ["`seen |= flag;`", 0]
+      ],
+      "explain": [
+        "Compound assignment (`+=`, `|=`) and indexer read-then-write are all read, compute, write. A check followed by an action",
+        "(`if (Count < 100) Add`) is the same shape: the check can be stale by the time the action runs. A local variable is private",
+        "to its thread, and `Interlocked.Increment` does the read, add and write as one atomic CPU instruction."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Why your tests did not catch it",
+      "body": [
+        "Run the racy counter with 2 threads and 1,000 increments each, and on most runs you get 2,000. The window between the read and the",
+        "write is a few nanoseconds, so it is rarely hit. Run it with a million increments on 8 cores and it is almost always wrong.",
+        "",
+        "That is the danger: **a race passes in tests and fails in production**, under real load, a few times a day, with no stack trace.",
+        "",
+        "Two ways to test concurrent code properly:",
+        "",
+        "1. **Systematic exploration** (what the card does, and what tools like Microsoft's **Coyote** do for .NET): control the scheduler and",
+        "   try every interleaving, or every one with a few forced switches. A bug that exists is found every time.",
+        "2. **Forced interleavings**: make the test itself pause one thread at the dangerous point (a `ManualResetEventSlim`, a `Barrier`,",
+        "   a `TaskCompletionSource`), so the bad order happens on purpose. You will write these later in this module.",
+        "",
+        "A stress test (many threads, many loops) is still useful as a smoke test, but a green stress run proves little."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each step of `count++` to what it does on the CPU.",
+      "pairs": [
+        ["read", "load the current value from memory into a register"],
+        ["add", "change the register, which only this thread can see"],
+        ["write", "store the register back to memory, overwriting what is there"],
+        ["lost update", "a write that overwrites another thread's write it never saw"]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Each thread does one `count++`, and they run in this order: T1 reads, T2 reads, T2 writes, T1 writes. What is `count` at the end? (It starts at 5.)",
+      "code": [
+        "int count = 5;",
+        "int t1 = count;      // T1 reads",
+        "int t2 = count;      // T2 reads",
+        "count = t2 + 1;      // T2 writes",
+        "count = t1 + 1;      // T1 writes",
+        "Console.WriteLine(count);"
+      ],
+      "answer": "6",
+      "explain": "Both registers hold 5. T2 writes 6, then T1 writes 6 over it. Two increments ran and the value went up by one. The code above is exactly that interleaving, written out by hand."
+    },
+    {
+      "type": "learn",
+      "title": "A lock makes the three steps one",
+      "body": [
+        "`lock (gate) { ... }` lets only one thread at a time run the code inside. A second thread that reaches the `lock` **blocks** until the",
+        "first one leaves. The read, add and write can no longer be split by another thread's read.",
+        "",
+        "In the card below, the threads take the lock first. Try to make T2 read early: the **Run next** button for T2 is disabled while it waits,",
+        "and its lane shows the red hatch for *blocked*. Then **Try every interleaving**: only one outcome is left.",
+        "",
+        "```csharp",
+        "readonly Lock _gate = new();   // .NET 9+: System.Threading.Lock. Older code uses: readonly object _gate = new();",
+        "public void Record() { lock (_gate) { _total++; } }",
+        "```",
+        "",
+        "Lock on a **private** object you own. `lock (this)` or `lock (typeof(X))` lets other code take your lock too, which invites deadlocks."
+      ],
+      "interleave": {
+        "setup": ["int count = 0;", "object gate = new();"],
+        "threads": [
+          { "name": "T1", "code": ["lock (gate)", "{", "    count++;", "}"] },
+          { "name": "T2", "code": ["lock (gate)", "{", "    count++;", "}"] }
+        ],
+        "result": "count",
+        "expect": "2",
+        "outcomes": ["2"]
+      }
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the counter so that `Record` is safe to call from many threads at once.",
+      "code": [
+        "class HitCounter",
+        "{",
+        "    private readonly __1__ _gate = new();",
+        "    private int _total;",
+        "",
+        "    public void Record()",
+        "    {",
+        "        __2__ (_gate)",
+        "        {",
+        "            _total++;",
+        "        }",
+        "    }",
+        "",
+        "    public int Total { get { lock (_gate) return _total; } }",
+        "}"
+      ],
+      "blanks": [["Lock", "object"], "lock"],
+      "bank": ["volatile", "async", "using", "Mutex"],
+      "explain": "Either `Lock` (the .NET 9+ type, slightly faster and clearer) or a plain `object` works with the `lock` statement. Reading `Total` inside the lock too guarantees you see the latest value."
+    },
+    {
+      "type": "code",
+      "title": "Make the hit counter safe for every interleaving",
+      "prompt": [
+        "An API counts page hits with this class. Under load the totals come out low.",
+        "",
+        "Fix `HitCounter` so that `Record()` never loses an update. Keep the names: `void Record()` and `int Total`.",
+        "",
+        "**How it is checked:** the tests run two threads that each call `Record()` twice, under a scheduler that tries **every**",
+        "interleaving of their shared-memory steps (or every one with up to two forced switches, when there are too many). `Total`",
+        "must be 4 in all of them. If one breaks your code, the results show that exact interleaving on a timeline."
+      ],
+      "starter": [
+        "class HitCounter",
+        "{",
+        "    private int _total;",
+        "",
+        "    public void Record()",
+        "    {",
+        "        _total++;",
+        "    }",
+        "",
+        "    public int Total => _total;",
+        "}"
+      ],
+      "solution": [
+        "class HitCounter",
+        "{",
+        "    private readonly Lock _gate = new();",
+        "    private int _total;",
+        "",
+        "    public void Record()",
+        "    {",
+        "        lock (_gate)",
+        "        {",
+        "            _total++;",
+        "        }",
+        "    }",
+        "",
+        "    public int Total { get { lock (_gate) return _total; } }",
+        "}"
+      ],
+      "interleavings": {
+        "title": "Two threads, two hits each",
+        "setup": ["var counter = new HitCounter();"],
+        "threads": [
+          { "name": "T1", "code": ["counter.Record();", "counter.Record();"] },
+          { "name": "T2", "code": ["counter.Record();", "counter.Record();"] }
+        ],
+        "watch": ["counter.Total"],
+        "result": "counter.Total",
+        "expect": "4"
+      },
+      "hints": [
+        "Give the class a private object to lock on, and put the increment inside `lock (...) { }`.",
+        "`private readonly Lock _gate = new();` then `lock (_gate) { _total++; }`. `Interlocked.Increment(ref _total)` also works."
+      ],
+      "explain": [
+        "Both fixes pass every interleaving. `Interlocked.Increment` is the cheapest for a single counter. A lock is the general tool: it",
+        "also protects several fields that must change together, which `Interlocked` cannot."
+      ]
+    }
+  ]
+}
