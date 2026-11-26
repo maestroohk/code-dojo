@@ -34,12 +34,44 @@ const NESTED = ['stats', 'settings', 'habit', 'league', 'challenge', 'rewards', 
 
 export let state = DEFAULTS();
 let saveTimer = null;
+let saving = null;
+// The server's revision of progress.json when this page last read or wrote it. A sync (another machine's file) or an
+// import moves it on; a save from an older revision is merged by the server, never written over (ProgressSync.cs).
+let rev = null;
+export const revision = () => rev;
+export const hasPendingSave = () => !!saveTimer || !!saving;
+
+/** Fill in defaults for an object read from disk (older saves lack newer fields). */
+function withDefaults(saved) {
+  const base = DEFAULTS();
+  const next = { ...base, ...saved };
+  for (const k of NESTED) next[k] = { ...base[k], ...(saved?.[k] || {}) };
+  return next;
+}
+
+/**
+ * Adopt a merged record (from a sync or an import) in place, so views holding game.state keep a live reference.
+ * Fires 'dojo:progress' on window so the page can redraw.
+ */
+export function replaceState(saved, newRev) {
+  const next = withDefaults(saved || {});
+  for (const k of Object.keys(state)) if (!(k in next)) delete state[k];
+  Object.assign(state, next);
+  if (newRev) rev = newRev;
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('dojo:progress'));
+}
+
+/** Re-read progress.json (after another machine's record was merged in on the server). */
+export async function reload() {
+  const res = await fetch('/api/progress');
+  if (!res.ok) return false;
+  replaceState(await res.json(), res.headers.get('X-Dojo-Rev'));
+  return true;
+}
 
 export async function load() {
-  const saved = await api('progress').catch(() => ({}));
-  const base = DEFAULTS();
-  state = { ...base, ...saved };
-  for (const k of NESTED) state[k] = { ...base[k], ...(saved[k] || {}) };
+  const saved = await fetch('/api/progress').then(r => { rev = r.headers.get('X-Dojo-Rev'); return r.ok ? r.json() : {}; }).catch(() => ({}));
+  state = withDefaults(saved);
   // The welcome profile also lives in .state/profile.json (GET/PUT /api/profile); state.profile is its cache.
   const file = await api('profile').catch(() => null);
   if (file && typeof file === 'object' && (!state.profile || (file.updatedAt || file.createdAt || '') >= (state.profile.updatedAt || state.profile.createdAt || ''))) state.profile = file;
@@ -69,7 +101,22 @@ export function emit(type, data = {}) {
 
 export function save(now) {
   clearTimeout(saveTimer);
-  const put = () => api('progress', state, 'PUT').catch(e => console.error('Could not save progress', e));
+  saveTimer = null;
+  const put = () => {
+    saveTimer = null;
+    const p = fetch('/api/progress', { method: 'PUT', headers: { 'Content-Type': 'application/json', ...(rev ? { 'X-Dojo-Rev': rev } : {}) }, body: JSON.stringify(state) })
+      .then(async res => {
+        if (!res.ok) throw new Error(`progress: ${res.status}`);
+        const newRev = res.headers.get('X-Dojo-Rev');
+        // 200: our copy was older than the server's (a sync merged something in); adopt the merged record.
+        if (res.status === 200) { const body = await res.json(); if (body?.merged) replaceState(body.state, body.rev || newRev); }
+        else if (newRev) rev = newRev;
+      })
+      .catch(e => console.error('Could not save progress', e))
+      .finally(() => { if (saving === p) saving = null; });
+    saving = p;
+    return p;
+  };
   if (now) return put();
   saveTimer = setTimeout(put, 400);
 }

@@ -32,6 +32,14 @@ public static class Validator
             if (issue.Error) Error(issue.Where, issue.Message); else Warn(issue.Where, issue.Message);
         }
 
+        // Learning paths (content/paths): every module, lab and live lab they name must exist (Paths.cs).
+        var contentRoot = Path.GetDirectoryName(content.TracksDir)!;
+        foreach (var issue in Paths.Check(Paths.Load(contentRoot), allTracks, Paths.NetlabIds(contentRoot)))
+        {
+            if (filter is not null && !issue.Where.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
+            if (issue.Error) Error(issue.Where, issue.Message); else Warn(issue.Where, issue.Message);
+        }
+
         foreach (var track in allTracks.OfType<JsonObject>())
         foreach (var module in (track["modules"] as JsonArray ?? []).OfType<JsonObject>())
         foreach (var meta in (module["lessons"] as JsonArray ?? []).OfType<JsonObject>())
