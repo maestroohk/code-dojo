@@ -1,0 +1,215 @@
+{
+  "title": "Boss: the pentest's server-side findings",
+  "summary": "An external penetration test of the partner portal found three server-side issues: webhooks that reach the internal network, a price-list import with XXE, and a cart cookie anyone can rewrite. Fix them with the pentest's own proofs as tests.",
+  "minutes": 35,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Pentest report, partner portal (excerpt)",
+      "body": [
+        "```text",
+        "PP-01  High    SSRF via webhook URL",
+        "       Registered https://10.0.4.12:8443/admin and https://[::ffff:169.254.169.254]/ as webhooks;",
+        "       the portal called both. http://, user@host and *.internal names are also accepted.",
+        "PP-02  High    XXE in price-list import (POST /partners/prices, text/xml)",
+        "       <!DOCTYPE p [<!ENTITY x SYSTEM \"file:///etc/hosts\">]> returned the file in an error",
+        "       message. A 200 MB upload was parsed in full.",
+        "PP-03  Medium  Cart cookie can be modified",
+        "       The 'cart' cookie is Base64 JSON: {\"items\":[...],\"discount\":0}. Changing discount to 100",
+        "       and re-encoding gives a free order. The cookie is not signed.",
+        "```",
+        "",
+        "Each step is one finding. The tests replay the tester's inputs."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "PP-01: validate webhook URLs",
+      "prompt": [
+        "Write `bool IsValidWebhook(string url)` (`using System.Net;` and `using System.Net.Sockets;`). It is `true` only when all hold:",
+        "",
+        "- an absolute URI, scheme `https`, the default port (443), no user info;",
+        "- the host is not `localhost` and does not end with `.localhost`, `.internal` or `.local` (any case);",
+        "- if the host is an IP address (`IPAddress.TryParse(uri.IdnHost.Trim('[', ']'), ...)`), it must be **public**: the same rules as `IsPublicAddress` in the SSRF lesson (IPv4-mapped IPv6 judged as IPv4).",
+        "",
+        "(Names that resolve to private addresses are caught at connect time by the `ConnectCallback`; this check runs when the webhook is saved.)"
+      ],
+      "starter": [
+        "using System.Net;",
+        "using System.Net.Sockets;",
+        "",
+        "bool IsValidWebhook(string url) => Uri.TryCreate(url, UriKind.Absolute, out _);"
+      ],
+      "solution": [
+        "using System.Net;",
+        "using System.Net.Sockets;",
+        "",
+        "bool IsValidWebhook(string url)",
+        "{",
+        "    if (!Uri.TryCreate(url, UriKind.Absolute, out var u) || u.Scheme != Uri.UriSchemeHttps || !u.IsDefaultPort || u.UserInfo.Length > 0)",
+        "        return false;",
+        "    var host = u.IdnHost.Trim('[', ']').ToLowerInvariant();",
+        "    if (host == \"localhost\" || host.EndsWith(\".localhost\") || host.EndsWith(\".internal\") || host.EndsWith(\".local\")) return false;",
+        "    return !IPAddress.TryParse(host, out var ip) || IsPublicAddress(ip);",
+        "}",
+        "",
+        "bool IsPublicAddress(IPAddress ip)",
+        "{",
+        "    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();",
+        "    var b = ip.GetAddressBytes();",
+        "    if (ip.AddressFamily == AddressFamily.InterNetwork)",
+        "        return !(b[0] == 0 || b[0] == 10 || b[0] == 127 || (b[0] == 100 && b[1] >= 64 && b[1] <= 127) || (b[0] == 169 && b[1] == 254)",
+        "            || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168) || b[0] >= 224);",
+        "    if (ip.Equals(IPAddress.IPv6Loopback) || ip.Equals(IPAddress.IPv6None)) return false;",
+        "    if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return false;",
+        "    return (b[0] & 0xfe) != 0xfc;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "Dojo.Eq(\"a partner's https webhook\", true, IsValidWebhook(\"https://hooks.partner.example/shop/orders\"));",
+        "Dojo.Eq(\"a public IP literal\", true, IsValidWebhook(\"https://93.184.215.14/hook\"));",
+        "Dojo.Eq(\"PP-01: a private IP on another port\", false, IsValidWebhook(\"https://10.0.4.12:8443/admin\"));",
+        "Dojo.Eq(\"PP-01: a private IP on 443\", false, IsValidWebhook(\"https://10.0.4.12/admin\"));",
+        "Dojo.Eq(\"PP-01: the metadata address as IPv4-mapped IPv6\", false, IsValidWebhook(\"https://[::ffff:169.254.169.254]/\"));",
+        "Dojo.Eq(\"plain http\", false, IsValidWebhook(\"http://hooks.partner.example/\"));",
+        "Dojo.Eq(\"user@host\", false, IsValidWebhook(\"https://hooks.partner.example@10.0.0.1/\"));",
+        "Dojo.Eq(\"localhost\", false, IsValidWebhook(\"https://localhost/\"));",
+        "Dojo.Eq(\"an .internal name\", false, IsValidWebhook(\"https://billing.Internal/\"));",
+        "Dojo.Eq(\"IPv6 loopback\", false, IsValidWebhook(\"https://[::1]/\"));",
+        "Dojo.Eq(\"decimal metadata IP\", false, IsValidWebhook(\"https://2852039166/\"));",
+        "Dojo.Eq(\"not a URL\", false, IsValidWebhook(\"hooks.partner.example\"));"
+      ],
+      "hints": [
+        "Parse with `Uri.TryCreate`, then check scheme, `IsDefaultPort` and `UserInfo` before anything else.",
+        "`Uri` turns `https://2852039166/` into host `169.254.169.254`, so `IPAddress.TryParse` on the host catches it. IPv6 hosts come with brackets: trim them."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "PP-02: the price-list import",
+      "prompt": [
+        "`List<string> ImportPrices(string xml)` reads `<prices><item sku=\"LAMP-01\" price=\"49.00\"/>...</prices>` and returns `\"LAMP-01=49.00\"` per item. Fix the parser settings:",
+        "",
+        "- DTDs prohibited and no resolver (a DOCTYPE throws `XmlException`);",
+        "- `MaxCharactersInDocument = 1_000_000`: bigger uploads throw `XmlException` instead of being parsed in full."
+      ],
+      "starter": [
+        "using System.Xml;",
+        "",
+        "List<string> ImportPrices(string xml)",
+        "{",
+        "    var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Parse, XmlResolver = new XmlUrlResolver() };",
+        "    var result = new List<string>();",
+        "    using var r = XmlReader.Create(new StringReader(xml), settings);",
+        "    while (r.Read())",
+        "        if (r.NodeType == XmlNodeType.Element && r.Name == \"item\")",
+        "            result.Add($\"{r.GetAttribute(\"sku\")}={r.GetAttribute(\"price\")}\");",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "using System.Xml;",
+        "",
+        "List<string> ImportPrices(string xml)",
+        "{",
+        "    var settings = new XmlReaderSettings",
+        "    {",
+        "        DtdProcessing = DtdProcessing.Prohibit,",
+        "        XmlResolver = null,",
+        "        MaxCharactersInDocument = 1_000_000,",
+        "    };",
+        "    var result = new List<string>();",
+        "    using var r = XmlReader.Create(new StringReader(xml), settings);",
+        "    while (r.Read())",
+        "        if (r.NodeType == XmlNodeType.Element && r.Name == \"item\")",
+        "            result.Add($\"{r.GetAttribute(\"sku\")}={r.GetAttribute(\"price\")}\");",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "Dojo.Eq(\"a normal price list\", new List<string> { \"LAMP-01=49.00\", \"BULB-04=12.00\" },",
+        "    ImportPrices(\"<prices><item sku=\\\"LAMP-01\\\" price=\\\"49.00\\\"/><item sku=\\\"BULB-04\\\" price=\\\"12.00\\\"/></prices>\"));",
+        "Dojo.Throws<XmlException>(\"PP-02: the tester's DOCTYPE is refused\", () => ImportPrices(\"<!DOCTYPE p [<!ENTITY x SYSTEM \\\"file:///etc/hosts\\\">]><prices><item sku=\\\"&x;\\\" price=\\\"1\\\"/></prices>\"));",
+        "var dojoBig = \"<prices>\" + string.Concat(Enumerable.Repeat(\"<item sku=\\\"PAD-0000000000\\\" price=\\\"1.00\\\"/>\", 40_000)) + \"</prices>\";",
+        "Dojo.Throws<XmlException>(\"PP-02: a document over a million characters is refused\", () => ImportPrices(dojoBig));"
+      ],
+      "hints": [
+        "Three settings: `DtdProcessing = DtdProcessing.Prohibit`, `XmlResolver = null`, `MaxCharactersInDocument = 1_000_000`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "PP-03: a cart cookie that cannot be edited",
+      "prompt": [
+        "Sign the cart cookie with HMAC-SHA256 (`using System.Security.Cryptography;`). Write two functions:",
+        "",
+        "- `string Protect(string json, byte[] key)` returns `Base64(UTF-8 json) + \".\" + Base64(HMACSHA256(key, UTF-8 json))`;",
+        "- `string? Unprotect(string cookie, byte[] key)` returns the JSON when the signature is right, and `null` when it is not: tampered payload, tampered or missing signature, wrong key, or text that is not two Base64 parts. Compare signatures with `CryptographicOperations.FixedTimeEquals`.",
+        "",
+        "(In an ASP.NET Core app, `IDataProtector.Protect` does this and encrypts as well; writing it once shows what it guarantees.)"
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "string Protect(string json, byte[] key) => Convert.ToBase64String(Encoding.UTF8.GetBytes(json));",
+        "",
+        "string? Unprotect(string cookie, byte[] key) => Encoding.UTF8.GetString(Convert.FromBase64String(cookie));"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "string Protect(string json, byte[] key)",
+        "{",
+        "    var data = Encoding.UTF8.GetBytes(json);",
+        "    return Convert.ToBase64String(data) + \".\" + Convert.ToBase64String(HMACSHA256.HashData(key, data));",
+        "}",
+        "",
+        "string? Unprotect(string cookie, byte[] key)",
+        "{",
+        "    var parts = cookie.Split('.');",
+        "    if (parts.Length != 2) return null;",
+        "    try",
+        "    {",
+        "        var data = Convert.FromBase64String(parts[0]);",
+        "        var mac = Convert.FromBase64String(parts[1]);",
+        "        return CryptographicOperations.FixedTimeEquals(mac, HMACSHA256.HashData(key, data)) ? Encoding.UTF8.GetString(data) : null;",
+        "    }",
+        "    catch (FormatException)",
+        "    {",
+        "        return null;",
+        "    }",
+        "}"
+      ],
+      "require": [
+        { "pattern": "FixedTimeEquals", "message": "Compares the signature in constant time" }
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var dojoKey = Enumerable.Range(1, 32).Select(i => (byte)i).ToArray();",
+        "var dojoOther = Enumerable.Range(2, 32).Select(i => (byte)i).ToArray();",
+        "var dojoJson = \"{\\\"items\\\":[\\\"LAMP-01\\\"],\\\"discount\\\":0}\";",
+        "var dojoCookie = Protect(dojoJson, dojoKey);",
+        "Dojo.Check(\"the cookie has two parts\", dojoCookie.Split('.').Length == 2, dojoCookie);",
+        "Dojo.Eq(\"the signature is HMAC-SHA256 of the JSON\", Convert.ToBase64String(HMACSHA256.HashData(dojoKey, Encoding.UTF8.GetBytes(dojoJson))), dojoCookie.Split('.').Last());",
+        "Dojo.Eq(\"a genuine cookie is read back\", dojoJson, Unprotect(dojoCookie, dojoKey));",
+        "var dojoTampered = Convert.ToBase64String(Encoding.UTF8.GetBytes(dojoJson.Replace(\"\\\"discount\\\":0\", \"\\\"discount\\\":100\"))) + \".\" + dojoCookie.Split('.')[1];",
+        "Dojo.Eq(\"PP-03: discount changed to 100 is refused\", null, Unprotect(dojoTampered, dojoKey));",
+        "Dojo.Eq(\"the old unsigned cookie is refused\", null, Unprotect(Convert.ToBase64String(Encoding.UTF8.GetBytes(dojoJson)), dojoKey));",
+        "Dojo.Eq(\"a signature from another key is refused\", null, Unprotect(Protect(dojoJson, dojoOther), dojoKey));",
+        "Dojo.Eq(\"a cut signature is refused\", null, Unprotect(dojoCookie[..^4], dojoKey));",
+        "Dojo.Eq(\"garbage is refused, not a crash\", null, Unprotect(\"not-base64.!!!\", dojoKey));"
+      ],
+      "hints": [
+        "`HMACSHA256.HashData(key, data)` computes the signature in one call.",
+        "In `Unprotect`: split on `.`, decode both parts inside a `try` (a `FormatException` means `null`), recompute the MAC over the decoded data and compare with `CryptographicOperations.FixedTimeEquals`."
+      ]
+    }
+  ]
+}

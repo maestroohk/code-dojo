@@ -1,0 +1,209 @@
+{
+  "title": "SSRF: the server fetches what the attacker chose",
+  "summary": "A link preview, a webhook or an image import makes requests from inside your network. See it reach the cloud metadata service, then defend with an allow-list, no redirects, and an address check at connect time against DNS rebinding.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "From the outside, through the server, to the inside",
+      "body": [
+        "```text",
+        "attacker ---GET /api/preview?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/web-role--> shop",
+        "shop     ---GET /latest/meta-data/iam/security-credentials/web-role--> 169.254.169.254  (only the shop can reach it)",
+        "shop     <--{\"AccessKeyId\":\"...\",\"SecretAccessKey\":\"...\",\"Token\":\"...\"}--",
+        "attacker <--the same JSON, as the 'preview'--",
+        "```",
+        "",
+        "**Server-side request forgery** turns your server into the attacker's proxy. It reaches what they cannot: the cloud **metadata service** at `169.254.169.254` (AWS, Azure, GCP all use that address) with the server's credentials, admin panels on `localhost`, databases and caches on the private network, other tenants' services.",
+        "",
+        "Features that fetch URLs: link previews, webhooks, \"import from URL\", PDF and image rendering, OAuth/OpenID metadata discovery, XML with external entities (next lesson). The 2019 Capital One breach began with SSRF to the metadata service. SSRF is part of **A01:2025** and **API7:2023**."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which mitigation on AWS stops the plain `GET http://169.254.169.254/...` SSRF to steal role credentials, even if the app has the bug?",
+      "options": [
+        "Requiring IMDSv2: a token must first be fetched with a PUT and a special header, which a GET-only SSRF cannot do, and the hop limit of 1 keeps it inside the instance",
+        "Using HTTPS for the metadata service",
+        "Blocking 169.254.169.254 in the WAF",
+        "Giving the role fewer permissions only"
+      ],
+      "answer": 0,
+      "explain": "IMDSv2 is the platform's defence and should be enforced on every instance. Least-privilege roles limit what stolen credentials can do. Neither replaces fixing the SSRF: the internal network is still reachable."
+    },
+    {
+      "type": "learn",
+      "title": "Why block-lists lose",
+      "body": [
+        "A block-list for \"internal addresses\" has to catch every spelling of them:",
+        "",
+        "```text",
+        "http://169.254.169.254/           http://2852039166/          (the same IPv4 as one decimal number)",
+        "http://0xa9fea9fe/                http://[::ffff:169.254.169.254]/   (IPv4-mapped IPv6)",
+        "http://cdn.shop.example@169.254.169.254/   (the part before @ is a user name)",
+        "http://metadata.attacker.example/   (a DNS name that resolves to 169.254.169.254)",
+        "http://cdn.shop.example/redirect?to=http://169.254.169.254/   (an allowed host that redirects)",
+        "```",
+        "",
+        "Defend in this order:",
+        "",
+        "1. **Allow-list** destinations by parsed host (`new Uri(url).IdnHost`), scheme (`https`) and port. Compare the parsed host, never the string.",
+        "2. **No automatic redirects** (`SocketsHttpHandler.AllowAutoRedirect = false`), or re-check every hop.",
+        "3. **Check the IP you actually connect to**, after DNS: `SocketsHttpHandler.ConnectCallback` resolves the name, refuses private, loopback and link-local addresses, then connects to that same address. That defeats **DNS rebinding** (a name that resolves to a public IP when you check and to `169.254.169.254` a second later, when you fetch).",
+        "4. **Network**: send fetches through an egress proxy, and block the metadata address from app containers that do not need it.",
+        "5. **Return less**: a preview needs a title, not the body."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "The preview allows only `https://cdn.shop.example` on port 443, parsed with `Uri`. Allowed or refused?",
+      "buckets": ["Allowed", "Refused"],
+      "items": [
+        ["`https://cdn.shop.example/specs/desk-lamp.html`", 0],
+        ["`https://CDN.shop.example/specs/a.html`", 0],
+        ["`https://cdn.shop.example@169.254.169.254/`", 1],
+        ["`https://cdn.shop.example.evil.example/`", 1],
+        ["`https://cdn.shop.example:8443/`", 1],
+        ["`http://cdn.shop.example/specs/a.html`", 1],
+        ["`file:///etc/passwd`", 1]
+      ],
+      "explain": "`Uri` lower-cases the host and puts `cdn.shop.example` of the third URL into `UserInfo`; its host is `169.254.169.254`. A string `StartsWith(\"https://cdn.shop.example\")` would have allowed it."
+    },
+    {
+      "type": "code",
+      "title": "An allow-list on the parsed URL",
+      "prompt": [
+        "Write `bool IsAllowedPreviewUrl(string url)`. It is `true` only when `url` is an absolute URI with scheme `https`, the **default port**, **no user info**, and a host (`IdnHost`) that is exactly `cdn.shop.example` or `images.shop.example`, ignoring case. Everything else is `false`, including text that is not a URI."
+      ],
+      "starter": [
+        "bool IsAllowedPreviewUrl(string url) =>",
+        "    url.StartsWith(\"https://cdn.shop.example\") || url.StartsWith(\"https://images.shop.example\");"
+      ],
+      "solution": [
+        "bool IsAllowedPreviewUrl(string url)",
+        "{",
+        "    string[] hosts = [\"cdn.shop.example\", \"images.shop.example\"];",
+        "    return Uri.TryCreate(url, UriKind.Absolute, out var u)",
+        "        && u.Scheme == Uri.UriSchemeHttps",
+        "        && u.IsDefaultPort",
+        "        && u.UserInfo.Length == 0",
+        "        && hosts.Contains(u.IdnHost, StringComparer.OrdinalIgnoreCase);",
+        "}"
+      ],
+      "hints": [
+        "`Uri.TryCreate(url, UriKind.Absolute, out var u)` first; then check `u.Scheme`, `u.IsDefaultPort`, `u.UserInfo` and `u.IdnHost`.",
+        "`hosts.Contains(u.IdnHost, StringComparer.OrdinalIgnoreCase)` compares the host exactly."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "Dojo.Eq(\"a spec sheet on the cdn\", true, IsAllowedPreviewUrl(\"https://cdn.shop.example/specs/desk-lamp.html\"));",
+        "Dojo.Eq(\"the images host\", true, IsAllowedPreviewUrl(\"https://images.shop.example/p/1.png?w=200\"));",
+        "Dojo.Eq(\"upper case host\", true, IsAllowedPreviewUrl(\"https://CDN.Shop.Example/a\"));",
+        "Dojo.Eq(\"metadata IP\", false, IsAllowedPreviewUrl(\"https://169.254.169.254/latest/meta-data/\"));",
+        "Dojo.Eq(\"user@host trick\", false, IsAllowedPreviewUrl(\"https://cdn.shop.example@169.254.169.254/\"));",
+        "Dojo.Eq(\"look-alike suffix\", false, IsAllowedPreviewUrl(\"https://cdn.shop.example.evil.example/\"));",
+        "Dojo.Eq(\"look-alike prefix\", false, IsAllowedPreviewUrl(\"https://cdn.shop.examples.example/\"));",
+        "Dojo.Eq(\"another port\", false, IsAllowedPreviewUrl(\"https://cdn.shop.example:8443/\"));",
+        "Dojo.Eq(\"plain http\", false, IsAllowedPreviewUrl(\"http://cdn.shop.example/a\"));",
+        "Dojo.Eq(\"file scheme\", false, IsAllowedPreviewUrl(\"file:///etc/passwd\"));",
+        "Dojo.Eq(\"not a URL\", false, IsAllowedPreviewUrl(\"cdn.shop.example/a\"));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The address check, at connect time",
+      "body": [
+        "For webhooks (customers enter any URL, so no host allow-list is possible) the check moves to the moment of connecting:",
+        "",
+        "```csharp fragment",
+        "var handler = new SocketsHttpHandler",
+        "{",
+        "    AllowAutoRedirect = false,",
+        "    ConnectCallback = async (ctx, ct) =>",
+        "    {",
+        "        var addresses = await Dns.GetHostAddressesAsync(ctx.DnsEndPoint.Host, ct);",
+        "        var ip = addresses.FirstOrDefault(IsPublicAddress)",
+        "                 ?? throw new HttpRequestException(\"Destination not allowed.\");",
+        "        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };",
+        "        await socket.ConnectAsync(ip, ctx.DnsEndPoint.Port, ct);   // the address we checked",
+        "        return new NetworkStream(socket, ownsSocket: true);",
+        "    },",
+        "};",
+        "```",
+        "",
+        "Because the same resolved address is checked and used, a rebinding DNS server gets no second chance. `IsPublicAddress` is the piece to get right: next."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "IsPublicAddress",
+      "prompt": [
+        "Write `bool IsPublicAddress(IPAddress ip)` (`using System.Net;`). Return `false` for:",
+        "",
+        "- IPv4 `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (carrier-grade NAT), `127.0.0.0/8`, `169.254.0.0/16` (link-local: metadata), `172.16.0.0/12`, `192.168.0.0/16`, and `224.0.0.0` and above (multicast, reserved, broadcast);",
+        "- IPv6 loopback `::1`, unspecified `::`, link-local `fe80::/10`, unique-local `fc00::/7`;",
+        "- an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is judged as its IPv4 address.",
+        "",
+        "Everything else is `true`."
+      ],
+      "starter": [
+        "using System.Net;",
+        "",
+        "bool IsPublicAddress(IPAddress ip) => !IPAddress.IsLoopback(ip);"
+      ],
+      "solution": [
+        "using System.Net;",
+        "using System.Net.Sockets;",
+        "",
+        "bool IsPublicAddress(IPAddress ip)",
+        "{",
+        "    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();",
+        "    if (ip.AddressFamily == AddressFamily.InterNetwork)",
+        "    {",
+        "        var b = ip.GetAddressBytes();",
+        "        return !(b[0] == 0 || b[0] == 10 || b[0] == 127",
+        "            || (b[0] == 100 && b[1] >= 64 && b[1] <= 127)",
+        "            || (b[0] == 169 && b[1] == 254)",
+        "            || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)",
+        "            || (b[0] == 192 && b[1] == 168)",
+        "            || b[0] >= 224);",
+        "    }",
+        "    if (ip.AddressFamily == AddressFamily.InterNetworkV6)",
+        "    {",
+        "        if (ip.Equals(IPAddress.IPv6Loopback) || ip.Equals(IPAddress.IPv6None)) return false;",
+        "        var b = ip.GetAddressBytes();",
+        "        if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return false;   // fe80::/10",
+        "        if ((b[0] & 0xfe) == 0xfc) return false;                  // fc00::/7",
+        "        return true;",
+        "    }",
+        "    return false;",
+        "}"
+      ],
+      "hints": [
+        "Map first: `if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();`. Then `ip.GetAddressBytes()` gives 4 bytes for IPv4, 16 for IPv6.",
+        "`172.16.0.0/12` is first byte 172 and second byte 16 to 31. `100.64.0.0/10` is 100 and 64 to 127.",
+        "For IPv6: `fe80::/10` means `b[0] == 0xfe && (b[1] & 0xc0) == 0x80`; `fc00::/7` means `(b[0] & 0xfe) == 0xfc`. `IPAddress.IPv6None` is `::`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "foreach (var a in new[] { \"93.184.215.14\", \"8.8.8.8\", \"172.32.0.1\", \"100.128.0.1\", \"2606:4700:4700::1111\" })",
+        "    Dojo.Eq($\"{a} is public\", true, IsPublicAddress(IPAddress.Parse(a)));",
+        "foreach (var a in new[] { \"169.254.169.254\", \"127.0.0.1\", \"10.1.2.3\", \"172.16.0.1\", \"172.31.255.255\", \"192.168.1.1\", \"100.64.0.1\", \"0.0.0.0\", \"224.0.0.1\", \"255.255.255.255\",",
+        "                            \"::1\", \"::\", \"fe80::1\", \"fd00::1\", \"fc00::5\", \"::ffff:169.254.169.254\", \"::ffff:127.0.0.1\" })",
+        "    Dojo.Eq($\"{a} is not public\", false, IsPublicAddress(IPAddress.Parse(a)));"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "26-vulnerable-shop",
+      "task": ["t11", "t12"],
+      "title": "Live lab: the metadata service, then the allow-list",
+      "prompt": [
+        "In the **vulnerable shop** lab, do **Attack: reach the cloud metadata service** (walk `169.254.169.254` through the shop's link preview) and **Fix: an allow-list, and no redirects** in `Preview.cs`. The check includes the cdn's own open redirect: the allow-list alone is not enough."
+      ],
+      "explain": "An allowed host that redirects is a classic bypass. With `AllowAutoRedirect = false`, the 302 is the end of the request."
+    }
+  ]
+}
