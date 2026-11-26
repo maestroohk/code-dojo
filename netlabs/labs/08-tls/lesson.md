@@ -30,6 +30,8 @@ Your client trusts a set of **root CAs** stored on the machine (the trust store)
 
 Public websites use certificates from public CAs (like Let's Encrypt) that ship in every operating system. Companies often run a **private CA** for internal sites; every company PC must be told to trust it. That is this lab.
 
+Public certificates are short-lived: since March 2026 a publicly trusted TLS certificate may be valid for at most 200 days (falling to 100 days in 2027 and 47 days in 2029), so renewal must be automated (ACME). A private CA sets its own rules, but copying the public limits keeps internal sites honest. The shop's certificate here is valid for 200 days.
+
 ## Tools
 
 ```

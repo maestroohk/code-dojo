@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""minicron: a small stand-in for the classic cron daemon, for a container without an init system.
+
+Behaves like Vixie/Debian cron where it matters for the lab:
+  - crontabs in /var/spool/cron/crontabs/<user>, managed with the `crontab` command
+  - five time fields (or @hourly, @daily, ...), then the command
+  - NAME=value lines set the environment for the job lines below them
+  - jobs run with /bin/sh and a minimal environment (PATH=/usr/bin:/bin, no .bashrc)
+  - the first unescaped % ends the command; the rest is fed to it as input (\\% is a literal %)
+  - output is mailed to the user (/var/mail/<user>), starts and exit codes go to /var/log/cron.log
+
+Extra, not in real cron:  minicron --run-now TEXT  runs every job whose command contains TEXT right away,
+exactly as cron would, prints its output and exits with its exit code.
+"""
+import datetime as dt
+import os
+import pwd
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+SPOOL = "/var/spool/cron/crontabs"
+LOG = "/var/log/cron.log"
+MAILDIR = "/var/mail"
+HOST = socket.gethostname()
+
+MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
+DAYS = {d: i for i, d in enumerate("sun mon tue wed thu fri sat".split())}
+SPECIAL = {"@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *", "@weekly": "0 0 * * 0",
+           "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *"}
+RANGES = [(0, 59, None), (0, 23, None), (1, 31, None), (1, 12, MONTHS), (0, 7, DAYS)]
+
+
+def parse_field(text, lo, hi, names):
+    """The set of values a field allows. Raises ValueError when it is not valid cron syntax."""
+    values = set()
+    for part in text.lower().split(","):
+        step, stepped = 1, "/" in part
+        if stepped:
+            part, s = part.split("/", 1)
+            if not s.isdigit() or int(s) == 0:
+                raise ValueError(f"bad step '{s}'")
+            step = int(s)
+        if part == "*":
+            a, b = lo, hi
+        else:
+            ends = part.split("-")
+            if len(ends) > 2 or not all(ends):
+                raise ValueError(f"bad range '{part}'")
+            nums = []
+            for e in ends:
+                if e.isdigit():
+                    nums.append(int(e))
+                elif names and e in names:
+                    nums.append(names[e])
+                else:
+                    raise ValueError(f"bad value '{e}'")
+            a = nums[0]
+            b = nums[1] if len(nums) == 2 else (hi if stepped else a)   # "5/15" means 5 to the end, every 15
+            if not (lo <= a <= hi and lo <= b <= hi) or a > b:
+                raise ValueError(f"'{part}' is out of range {lo}-{hi}")
+        values.update(range(a, b + 1, step))
+    return values
+
+
+def parse_crontab(text):
+    """[(env, schedule, command, lineno)] for every job line; raises ValueError(lineno, message) on bad syntax."""
+    jobs, env = [], {}
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+        if m and not re.match(r"^[0-9*@]", line):
+            val = m.group(2)
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+                val = val[1:-1]
+            env[m.group(1)] = val
+            continue
+        if line.startswith("@"):
+            word, _, cmd = line.partition(" ")
+            if word == "@reboot":
+                sched = None
+            elif word in SPECIAL:
+                sched = SPECIAL[word].split()
+            else:
+                raise ValueError(n, f"unknown special schedule '{word}'")
+            cmd = cmd.strip()
+        else:
+            parts = line.split(None, 5)
+            if len(parts) < 6:
+                raise ValueError(n, "a job needs five time fields and a command")
+            sched, cmd = parts[:5], parts[5]
+        if not cmd:
+            raise ValueError(n, "the job has no command")
+        if sched is not None:
+            try:
+                sched = [parse_field(f, lo, hi, names) for f, (lo, hi, names) in zip(sched, RANGES)]
+            except ValueError as e:
+                raise ValueError(n, str(e))
+            if 7 in sched[4]:
+                sched[4].add(0)
+        jobs.append((dict(env), sched, cmd, n))
+    return jobs
+
+
+def due(sched, t):
+    if sched is None:
+        return False
+    minute, hour, dom, mon, dow = sched
+    if t.minute not in minute or t.hour not in hour or t.month not in mon:
+        return False
+    wd = (t.weekday() + 1) % 7
+    dom_all, dow_all = dom == set(range(1, 32)), dow >= set(range(0, 7))
+    if dom_all or dow_all:
+        return t.day in dom and wd in dow
+    return t.day in dom or wd in dow          # cron's rule: either day field may match
+
+
+def split_percent(cmd):
+    """Cron's % handling: the command, and the text it gets on standard input."""
+    out, i = [], 0
+    while i < len(cmd):
+        if cmd[i] == "\\" and i + 1 < len(cmd) and cmd[i + 1] == "%":
+            out.append("%")
+            i += 2
+            continue
+        if cmd[i] == "%":
+            return "".join(out), cmd[i + 1:].replace("%", "\n") + "\n"
+        out.append(cmd[i])
+        i += 1
+    return "".join(out), ""
+
+
+def log(msg):
+    with open(LOG, "a") as f:
+        f.write(dt.datetime.now().strftime("%b %d %H:%M:%S ") + f"{HOST} CRON[{os.getpid()}]: {msg}\n")
+
+
+def run_job(user, env, cmd):
+    """Run one job the way cron does. Returns (exit code, output)."""
+    try:
+        pw = pwd.getpwnam(user)
+        home, shell = pw.pw_dir, "/bin/sh"
+    except KeyError:
+        home, shell = "/", "/bin/sh"
+    job_env = {"HOME": home, "LOGNAME": user, "USER": user, "SHELL": shell, "PATH": "/usr/bin:/bin"}
+    job_env.update(env)
+    command, stdin = split_percent(cmd)
+    log(f"({user}) CMD ({command})")
+    p = subprocess.run([env.get("SHELL", shell), "-c", command], input=stdin, env=job_env, cwd=home,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    output = p.stdout
+    log(f"({user}) END ({command}) exit status {p.returncode}")
+    if output.strip():
+        os.makedirs(MAILDIR, exist_ok=True)
+        with open(os.path.join(MAILDIR, user), "a") as f:
+            f.write(f"From root@{HOST} {dt.datetime.now():%a %b %d %H:%M:%S %Y}\n"
+                    f"From: root (Cron Daemon)\nTo: {user}\nSubject: Cron <{user}@{HOST}> {cmd}\n\n{output}\n")
+    return p.returncode, output
+
+
+def crontabs():
+    tabs = []
+    if os.path.isdir(SPOOL):
+        for user in sorted(os.listdir(SPOOL)):
+            try:
+                with open(os.path.join(SPOOL, user)) as f:
+                    tabs.append((user, parse_crontab(f.read())))
+            except (OSError, ValueError):
+                continue
+    return tabs
+
+
+def run_now(text):
+    found, worst = 0, 0
+    for user, jobs in crontabs():
+        for env, _, cmd, _ in jobs:
+            if text in cmd:
+                found += 1
+                command, stdin = split_percent(cmd)
+                print(f"minicron: running ({user}) {command}")
+                if stdin:
+                    print(f"minicron: ...with this on its standard input: {stdin.strip()}")
+                code, output = run_job(user, env, cmd)
+                sys.stdout.write(output)
+                print(f"minicron: exit status {code}" + ("" if code == 0 else "   (the output was also mailed to /var/mail/" + user + ")"))
+                worst = worst or code
+    if not found:
+        print(f"minicron: no job in any crontab contains '{text}' (crontab -l to see them)", file=sys.stderr)
+        return 1
+    return worst
+
+
+def daemon():
+    log("(CRON) INFO (minicron started)")
+    for user, jobs in crontabs():
+        for env, sched, cmd, _ in jobs:
+            if sched is None:
+                threading.Thread(target=run_job, args=(user, env, cmd), daemon=True).start()
+    while True:
+        now = time.time()
+        time.sleep(60 - now % 60 + 0.05)
+        t = dt.datetime.now().replace(second=0, microsecond=0)
+        for user, jobs in crontabs():
+            for env, sched, cmd, _ in jobs:
+                if due(sched, t):
+                    threading.Thread(target=run_job, args=(user, env, cmd), daemon=True).start()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--run-now":
+        if len(sys.argv) < 3:
+            print("usage: minicron --run-now TEXT   (runs the jobs whose command contains TEXT)", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(run_now(" ".join(sys.argv[2:])))
+    if len(sys.argv) >= 2 and sys.argv[1] == "--check":
+        try:
+            parse_crontab(sys.stdin.read())
+        except ValueError as e:
+            line, msg = e.args if len(e.args) == 2 else (0, str(e))
+            print(f"crontab: line {line}: {msg}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+    daemon()

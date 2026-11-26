@@ -12,8 +12,8 @@ ps aux --sort=-%cpu | head      # the hungriest first
 ps -eo pid,ppid,ni,stat,args    # pick your own columns
 ps -p 1234 -o pid,ppid,args     # one process
 pgrep -f oven                   # PIDs whose command line contains "oven"
-top                             # live view (q quits, P sorts by CPU, M by memory)
-top -b -n 1 | head -15          # one snapshot, handy in scripts
+top -b -n 1 | head -15          # one snapshot sorted by CPU, handy in scripts
+top                             # live view on a real terminal (q quits, P sorts by CPU, M by memory)
 ```
 
 The **STAT** column: `R` running, `S` sleeping (waiting for something), `T` stopped, `Z` zombie.
@@ -51,7 +51,7 @@ Nice values run from -20 (first in the queue) to 19 (after everyone else). Only 
 sleep 300 &          # run in the background; prints [1] 4321
 jobs                 # your shell's background jobs
 fg %1                # bring job 1 to the foreground
-Ctrl+Z, then bg      # pause the foreground job, then continue it in the background
+Ctrl+Z, then bg      # pause the foreground job, then continue it (a real terminal; here use &)
 nohup cmd &          # keep running after you log out
 ```
 

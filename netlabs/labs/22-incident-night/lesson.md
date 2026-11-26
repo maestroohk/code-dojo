@@ -20,7 +20,7 @@ This mission has no new commands. It is a **fight**: every tool from the earlier
 |---|---|---|
 | disk full | `df -h`, `du -sh dir/*`, `ls -lhS` | Disk full! |
 | permission denied | `ls -l`, `namei -l path`, `id user`, `su -s /bin/sh user -c '...'` | Permission heist |
-| something hogging CPU | `top`, `ps aux --sort=-%cpu` | Process hunt |
+| something hogging CPU | `ps aux --sort=-%cpu`, `top -b -n 1` | Process hunt |
 | a service won't start | its status command, its logs, running it by hand | Packages and services |
 | not listening | `ss -ltn`, `curl -v http://127.0.0.1:port/` | Packages and services |
 | what did it say? | `tail -n 30 log`, `grep -i error log` | Pipes and plumbing |

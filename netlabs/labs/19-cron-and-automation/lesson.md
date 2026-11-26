@@ -25,7 +25,7 @@ Each user has a crontab: a list of jobs, one per line.
 
 ```
 crontab -l          # list my jobs
-crontab -e          # edit them (installs on save, after a syntax check)
+crontab -e          # edit them in an editor (installs on save; needs a real terminal, not this in-page one)
 crontab -r          # remove ALL of them (careful: no confirmation)
 crontab file        # install a file as my crontab;  crontab -  reads stdin
 (crontab -l; echo '0 6 * * * /usr/local/bin/wake-up') | crontab -   # add a job in one line

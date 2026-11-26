@@ -1,0 +1,30 @@
+#!/bin/bash
+# gw-apply: send the gateway configuration (/work/kong/kong.yml) to Kong's admin API.
+# Kong (DB-less) validates the whole file first. If anything is wrong it keeps the old
+# configuration and says why; otherwise the new one is live at once.
+file=${1:-/work/kong/kong.yml}
+admin=http://gateway:8001
+if [ ! -s "$file" ]; then echo "gw-apply: $file is missing or empty" >&2; exit 1; fi
+out=$(curl -s -m 15 -w '\n%{http_code}' -X POST "$admin/config" -F "config=@$file")
+code=$(printf '%s' "$out" | tail -n 1)
+body=$(printf '%s' "$out" | sed '$d')
+case "$code" in
+  200|201)
+    n() { curl -s -m 5 "$admin/$1" | jq '.data | length'; }
+    echo "gw-apply: Kong accepted $file and is using it now."
+    echo "          services: $(n services)   routes: $(n routes)   plugins: $(n plugins)   consumers: $(n consumers)"
+    ;;
+  000)
+    echo "gw-apply: no answer from the gateway's admin API ($admin). Is the gateway running? (docker compose may still be starting it)" >&2
+    exit 1 ;;
+  *)
+    echo "gw-apply: Kong REJECTED $file (HTTP $code) and kept its old configuration." >&2
+    if printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
+      printf '%s' "$body" | jq -r '.message // empty' >&2
+      printf '%s' "$body" | jq -r '(.fields // {}) | paths(scalars) as $p | "  at \($p | map(if type == "number" then "[\(. + 1)]" else tostring end) | join(".")): \(getpath($p))"' >&2
+      printf '%s' "$body" | jq -r '(.flattened_errors // [])[] | "  \(.entity_type // "entity") \(.entity_name // .entity_id // ""): \([.errors[]?.message] | join("; "))"' >&2 2>/dev/null
+    else
+      printf '%s\n' "$body" >&2
+    fi
+    exit 1 ;;
+esac

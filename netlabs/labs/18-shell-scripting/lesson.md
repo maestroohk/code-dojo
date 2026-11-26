@@ -13,8 +13,13 @@ name="$1"
 echo "Hello, $name!"
 ```
 
+The in-page terminal is line based, so full-screen editors like `nano` cannot draw in it. Write a script with a **here-document** instead: type the first line, press Enter after each line of the script, and finish with a line that is just `EOF`. To change a script, write it again the same way (the Up arrow brings back earlier lines), or change one line with `sed -i`.
+
 ```
-nano /root/greet.sh        # write it (Ctrl+O save, Ctrl+X exit)
+cat > /root/greet.sh <<'EOF'   # write it: every line up to EOF goes into the file
+#!/bin/bash
+echo "Hello, $1!"
+EOF
 chmod +x /root/greet.sh    # make it executable (once)
 /root/greet.sh Ada         # run it (or ./greet.sh from inside /root)
 ```

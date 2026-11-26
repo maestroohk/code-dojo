@@ -1,0 +1,29 @@
+#!/bin/bash
+# camel-restart (on the camel host): stop the running Camel integration. The container's start
+# script (run-camel.sh) notices and starts Camel again from /work/camel/routes after two seconds.
+# Use it when live reload gets stuck, for example on "duplicate route id".
+self=$$
+find_camel() {
+  for p in /proc/[0-9]*; do
+    pid=${p#/proc/}
+    [ "$pid" = "$self" ] && continue
+    cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    case "$cmd" in *"--source-dir=/work/camel/routes"*) echo "$pid" ;; esac
+  done
+}
+pids=$(find_camel)
+if [ -z "$pids" ]; then
+  echo "camel-restart: Camel is not running right now; it should start again by itself in a few seconds."
+else
+  echo "camel-restart: stopping Camel (pid $(echo $pids | tr '\n' ' '))"
+  kill $pids 2>/dev/null
+  for _ in $(seq 1 10); do [ -z "$(find_camel)" ] && break; sleep 0.5; done
+  left=$(find_camel); [ -n "$left" ] && kill -9 $left 2>/dev/null
+fi
+echo "camel-restart: waiting for Camel to answer on :8080 again (watch: tail -f /work/logs/camel.log)"
+for _ in $(seq 1 90); do
+  if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then echo "camel-restart: Camel is back."; exit 0; fi
+  sleep 1
+done
+echo "camel-restart: Camel did not come back within 90 seconds. Read the end of /work/logs/camel.log: a route file that does not parse stops it from starting." >&2
+exit 1
