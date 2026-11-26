@@ -1,0 +1,147 @@
+{
+  "title": "Path traversal: files outside the folder",
+  "summary": "A file name from a request reaches the file system. See how ../ and Path.Combine's rooted-path rule escape the folder, then resolve and confine every path the safe way.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The request and what the server opens",
+      "body": [
+        "```text",
+        "GET /api/invoices/download?file=invoice-1001.txt     -> opens /work/data/invoices/invoice-1001.txt",
+        "GET /api/invoices/download?file=../../../etc/passwd  -> opens /etc/passwd",
+        "GET /api/invoices/download?file=/etc/passwd          -> opens /etc/passwd as well",
+        "```",
+        "",
+        "```csharp fragment",
+        "var path = Path.Combine(\"/work/data/invoices\", file);",
+        "return Results.File(path, \"text/plain\");",
+        "```",
+        "",
+        "Two things go wrong. `..` climbs out of the folder. And `Path.Combine` has a rule that surprises most people: **if a later part is rooted, the earlier parts are dropped**. `Path.Combine(\"/work/data/invoices\", \"/etc/passwd\")` is `/etc/passwd`. On Windows, `C:\\Windows\\win.ini` and `\\\\server\\share` are rooted too.",
+        "",
+        "What an attacker reads depends on the process's rights: config files with connection strings, `/proc/self/environ` (the process's environment variables, often full of secrets), source code, other customers' files. Running as a low-privilege user limits the damage, which is why containers should not run as root."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does `Path.Combine` give for each input? (This runs on Linux paths with forward slashes; read it as the shop would.)",
+      "code": [
+        "var root = \"/work/data/invoices\";",
+        "Console.WriteLine(Path.Combine(root, \"invoice-1001.txt\").Replace('\\\\', '/'));",
+        "Console.WriteLine(Path.IsPathRooted(\"/etc/passwd\"));",
+        "Console.WriteLine(Path.IsPathRooted(\"../../etc/passwd\"));"
+      ],
+      "answer": ["/work/data/invoices/invoice-1001.txt", "True", "False"],
+      "explain": "A rooted second argument replaces the first in `Path.Combine`. A relative one with `..` is appended, and `..` is only resolved later, when the path is opened or passed to `Path.GetFullPath`."
+    },
+    {
+      "type": "learn",
+      "title": "Resolve, then confine",
+      "body": [
+        "Do not try to clean the input (`file.Replace(\"../\", \"\")` turns `....//` into `../`). Instead let the framework **resolve** the path, then check where it ended up:",
+        "",
+        "```csharp fragment",
+        "var root = Path.GetFullPath(\"/work/data/invoices\") + Path.DirectorySeparatorChar;",
+        "var full = Path.GetFullPath(Path.Combine(root, file));      // resolves .. and rooted paths",
+        "if (!full.StartsWith(root, StringComparison.Ordinal))        // still inside?",
+        "    return Results.BadRequest();",
+        "```",
+        "",
+        "The **separator at the end of `root` matters**: `/work/data/invoices-old/ledger.txt` starts with `/work/data/invoices`, but not with `/work/data/invoices/`.",
+        "",
+        "Even better options, when you can:",
+        "",
+        "- **Do not take paths at all**: take an order id, check ownership, and build the file name yourself (`invoice-{order.Id}.pdf`).",
+        "- **Allow-list the name**: `^invoice-\\d{1,8}\\.txt$` admits nothing else.",
+        "- `new PhysicalFileProvider(root).GetFileInfo(name)` refuses absolute paths and paths that leave the root."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "`root` is `/work/data/invoices/`. After `Path.GetFullPath(Path.Combine(root, file))`, does the result pass the `StartsWith(root)` check?",
+      "buckets": ["Inside: served", "Outside: refused"],
+      "items": [
+        ["`invoice-1001.txt`", 0],
+        ["`2026/invoice-1001.txt`", 0],
+        ["`2026/../invoice-1001.txt`", 0],
+        ["`../invoices-old/ledger.txt`", 1],
+        ["`/etc/passwd`", 1],
+        ["`../../../proc/self/environ`", 1]
+      ],
+      "explain": "`..` that stays inside is harmless after resolving. Anything that ends up outside is refused, however it was spelled."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A reviewer suggests: `if (file.Contains(\"..\")) return BadRequest();`. What is wrong with that as the only check?",
+      "options": [
+        "It misses rooted paths such as /etc/passwd, which need no .. at all",
+        "Nothing: without .. there is no traversal",
+        "It is too slow",
+        "It blocks every file name with a dot"
+      ],
+      "answer": 0,
+      "explain": "`Path.Combine(root, \"/etc/passwd\")` escapes without a single dot. String checks on the input chase spellings; checking the resolved path covers every spelling at once."
+    },
+    {
+      "type": "code",
+      "title": "SafeInvoicePath",
+      "prompt": [
+        "Write `string? SafeInvoicePath(string root, string file)`. It returns the **full path** of `file` inside the folder `root`, or `null` when the resolved path is not strictly inside `root` (the folder itself does not count).",
+        "",
+        "- resolve with `Path.GetFullPath(Path.Combine(...))`;",
+        "- compare against `Path.GetFullPath(root)` **plus** `Path.DirectorySeparatorChar`, with `StringComparison.Ordinal`;",
+        "- an empty `file` returns `null`.",
+        "",
+        "The tests use a temporary folder, so they work on Windows and Linux alike."
+      ],
+      "starter": [
+        "string? SafeInvoicePath(string root, string file)",
+        "{",
+        "    return Path.Combine(root, file);",
+        "}"
+      ],
+      "solution": [
+        "string? SafeInvoicePath(string root, string file)",
+        "{",
+        "    if (string.IsNullOrEmpty(file)) return null;",
+        "    var rootFull = Path.GetFullPath(root);",
+        "    if (!rootFull.EndsWith(Path.DirectorySeparatorChar)) rootFull += Path.DirectorySeparatorChar;",
+        "    var full = Path.GetFullPath(Path.Combine(rootFull, file));",
+        "    // Strictly inside: the folder itself (\"root/\" or \"root/.\") is not a file.",
+        "    return full.Length > rootFull.Length && full.StartsWith(rootFull, StringComparison.Ordinal) ? full : null;",
+        "}"
+      ],
+      "hints": [
+        "Make the root end with a separator first: `var rootFull = Path.GetFullPath(root) + Path.DirectorySeparatorChar;` (skip the extra one if it already ends with one).",
+        "`var full = Path.GetFullPath(Path.Combine(rootFull, file)); return full.StartsWith(rootFull, StringComparison.Ordinal) ? full : null;`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var dojoBase = Path.Combine(Path.GetTempPath(), \"dojo-traversal\");",
+        "var dojoRoot = Path.Combine(dojoBase, \"invoices\");",
+        "var sep = Path.DirectorySeparatorChar;",
+        "Dojo.Eq(\"a plain invoice name\", Path.Combine(dojoRoot, \"invoice-1001.txt\"), SafeInvoicePath(dojoRoot, \"invoice-1001.txt\"));",
+        "Dojo.Eq(\"a sub-folder is fine\", Path.Combine(dojoRoot, \"2026\", \"invoice-7.txt\"), SafeInvoicePath(dojoRoot, $\"2026{sep}invoice-7.txt\"));",
+        "Dojo.Eq(\"a .. that stays inside is fine\", Path.Combine(dojoRoot, \"invoice-7.txt\"), SafeInvoicePath(dojoRoot, $\"2026{sep}..{sep}invoice-7.txt\"));",
+        "Dojo.Eq(\"../ out of the folder is refused\", null, SafeInvoicePath(dojoRoot, $\"..{sep}..{sep}secret.txt\"));",
+        "Dojo.Eq(\"a sibling folder with the same prefix is refused\", null, SafeInvoicePath(dojoRoot, $\"..{sep}invoices-old{sep}ledger.txt\"));",
+        "Dojo.Eq(\"an absolute path is refused\", null, SafeInvoicePath(dojoRoot, Path.Combine(dojoBase, \"config.json\")));",
+        "Dojo.Eq(\"the folder itself is refused\", null, SafeInvoicePath(dojoRoot, \".\"));",
+        "Dojo.Eq(\"an empty name is refused\", null, SafeInvoicePath(dojoRoot, \"\"));",
+        "Dojo.Eq(\"a root given with a trailing separator works too\", Path.Combine(dojoRoot, \"a.txt\"), SafeInvoicePath(dojoRoot + sep, \"a.txt\"));"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "26-vulnerable-shop",
+      "task": ["t13", "t14"],
+      "title": "Live lab: read /etc/passwd, then confine the path",
+      "prompt": [
+        "In the **vulnerable shop** lab, do **Attack: read /etc/passwd** (the invoice download takes any file name) and **Fix: resolve the path and confine it** in `Invoices.cs`. The check includes the `invoices-old` sibling folder: make sure your prefix ends with a separator."
+      ],
+      "explain": "Resolving then checking the prefix (with the separator) blocks every spelling the check tries: `../`, absolute paths, encoded slashes and the sibling folder."
+    }
+  ]
+}
