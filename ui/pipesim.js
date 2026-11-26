@@ -258,16 +258,16 @@ export function toYaml(m) {
     if (j.environment) L.push(`    environment: ${Y.scalar(j.environment)}`);
     const mx = matrixOf(j);
     if (mx.length) L.push('    strategy:', '      fail-fast: true', '      matrix:', `        node: [${mx.map(v => (/^\d+$/.test(v) ? v : Y.scalar(v))).join(', ')}]`);
-    L.push('    steps:', '      - uses: actions/checkout@v4');
+    L.push('    steps:', '      - uses: actions/checkout@v7');
     if (p.install) {
-      L.push('      - uses: actions/setup-node@v4', '        with:', `          node-version: ${mx.length ? quoteExpr('matrix.node') : 20}`);
-      if (j.cache !== 'none') L.push('      - uses: actions/cache@v4', '        with:', '          path: node_modules', `          key: ${j.cache === 'hash' ? `deps-${quoteExpr("hashFiles('package-lock.json')")}` : 'deps'}`);
+      L.push('      - uses: actions/setup-node@v7', '        with:', `          node-version: ${mx.length ? quoteExpr('matrix.node') : 20}`);
+      if (j.cache !== 'none') L.push('      - uses: actions/cache@v6', '        with:', '          path: node_modules', `          key: ${j.cache === 'hash' ? `deps-${quoteExpr("hashFiles('package-lock.json')")}` : 'deps'}`);
       L.push('      - run: npm ci');
     }
-    if (j.download) L.push('      - uses: actions/download-artifact@v4', '        with:', `          name: ${Y.scalar(j.download)}`);
+    if (j.download) L.push('      - uses: actions/download-artifact@v8', '        with:', `          name: ${Y.scalar(j.download)}`);
     L.push(`      - run: ${p.run.includes(':') || p.run.includes('"') ? `'${p.run}'` : p.run}`);
     if (j.secret) L.push('        env:', `          ${j.preset === 'deploy' ? 'DEPLOY_TOKEN' : 'TOKEN'}: ${quoteExpr(`secrets.${j.secret}`)}`);
-    if (j.upload) L.push('      - uses: actions/upload-artifact@v4', '        with:', `          name: ${Y.scalar(j.upload)}`, '          path: dist/');
+    if (j.upload) L.push('      - uses: actions/upload-artifact@v7', '        with:', `          name: ${Y.scalar(j.upload)}`, '          path: dist/');
   }
   return L.join('\n') + '\n';
 }
