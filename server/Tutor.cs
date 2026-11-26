@@ -1,13 +1,15 @@
-using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Anthropic;
+using Anthropic.Exceptions;
+using Anthropic.Models.Beta.Messages;
 
 namespace CodeDojo;
 
 /// <summary>
 /// The optional AI tutor behind "Explain this error": with an Anthropic API key saved in Settings, the explanation can
-/// also come from Claude (Messages API) for this exact code and error. Without a key everything works offline from the
+/// also come from Claude (Messages API, through the official Anthropic C# SDK) for this exact code and error. Without a key everything works offline from the
 /// knowledge base (ErrorKb.cs).
 ///
 /// The key lives in {state}/tutor.json on this machine. It is never sent to the browser (GET says only whether one is
@@ -17,11 +19,14 @@ namespace CodeDojo;
 public static class Tutor
 {
     public const string Model = "claude-opus-5-5";
-    public const string ApiVersion = "2026-10-21";
-    const string Endpoint = "https://api.anthropic.com/v1/messages";
+    /// <summary>Beta header for server-side refusal fallback (<c>fallbacks: "default"</c>).</summary>
+    public const string FallbackBeta = "server-side-fallback-2026-07-01";
+    const string BaseUrl = "https://api.anthropic.com";
     const int MaxCode = 12_000;
 
-    static readonly HttpClient Http = new(HappyEyeballs.Handler()) { Timeout = TimeSpan.FromSeconds(60) };
+    // Shared by every client (one per key); never disposed. The SDK's own Timeout bounds each attempt, so the
+    // HttpClient's built-in timeout is turned off to keep it from cancelling first.
+    static readonly HttpClient Http = new(HappyEyeballs.Handler()) { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
     static readonly object Gate = new();
 
     public record KeyRequest(string? ApiKey);
@@ -81,19 +86,34 @@ public static class Tutor
 
     static string Clip(string s, int n) => s.Length > n ? s[..n] + "…" : s;
 
-    /// <summary>The JSON body sent to the Messages API.</summary>
-    public static JsonObject Body(AskRequest req, string model, bool fallbacks)
+    /// <summary>
+    /// The Messages API request (beta endpoint, for server-side fallback). No sampling parameters and no
+    /// <c>thinking</c>: Opus 5.5 always thinks adaptively, and effort "low" keeps it short.
+    /// </summary>
+    public static MessageCreateParams Params(AskRequest req, bool fallbacks)
     {
-        var body = new JsonObject
+        var system = SystemPrompt(req.Graded);
+        var user = UserMessage(req);
+        if (!fallbacks)
+            return new MessageCreateParams
+            {
+                Model = Model,
+                MaxTokens = 2000,
+                System = system,
+                OutputConfig = new BetaOutputConfig { Effort = Effort.Low },
+                Messages = [new BetaUserMessageParam { Content = user }],
+            };
+        // A policy decline is re-served by the model's default fallback model inside the same call.
+        return new MessageCreateParams
         {
-            ["model"] = model,
-            ["max_tokens"] = 2000,
-            ["system"] = SystemPrompt(req.Graded),
-            ["output_config"] = new JsonObject { ["effort"] = "low" },
-            ["messages"] = new JsonArray(new JsonObject { ["role"] = "user", ["content"] = UserMessage(req) }),
+            Model = Model,
+            MaxTokens = 2000,
+            System = system,
+            OutputConfig = new BetaOutputConfig { Effort = Effort.Low },
+            Messages = [new BetaUserMessageParam { Content = user }],
+            Betas = [FallbackBeta],
+            Fallbacks = new Default(),
         };
-        if (fallbacks) body["fallbacks"] = "default";
-        return body;
     }
 
     public static void Map(WebApplication app, string stateDir, JsonSerializerOptions json)
@@ -129,51 +149,58 @@ public static class Tutor
     }
 
     /// <summary>Calls the Messages API. Errors come back as a sentence for the learner; the key never appears in them.</summary>
-    public static async Task<(string? Text, string? Error)> Ask(string key, AskRequest req)
+    /// <param name="http">Tests pass an HttpClient over a fake handler; the app uses the shared one.</param>
+    public static async Task<(string? Text, string? Error)> Ask(string key, AskRequest req, HttpClient? http = null)
     {
+        var client = Client(key, http ?? Http);
         try
         {
-            var (status, doc) = await Send(key, Body(req, Model, fallbacks: true), fallbacks: true);
-            // An account without the fallback beta: ask again without it.
-            if (status == HttpStatusCode.BadRequest && (ErrorMessage(doc) ?? "").Contains("fallback", StringComparison.OrdinalIgnoreCase))
-                (status, doc) = await Send(key, Body(req, Model, fallbacks: false), fallbacks: false);
-            if (status != HttpStatusCode.OK)
-                return (null, (int)status switch
-                {
-                    401 => "The API key was rejected (401). Check it in Profile → Settings.",
-                    403 => "This API key is not allowed to use the model (403).",
-                    429 => "Rate limited by the API (429). Wait a minute and try again.",
-                    529 or 503 => "The API is overloaded right now. Try again in a moment.",
-                    >= 500 => $"The API had a problem ({(int)status}). Try again in a moment.",
-                    _ => $"The API refused the request ({(int)status}): {ErrorMessage(doc) ?? "no details"}",
-                });
-            var stop = (string?)doc?["stop_reason"];
-            if (stop == "refusal") return (null, "The tutor declined to answer this one. The offline explanation still applies.");
-            var text = string.Join("\n\n", (doc?["content"] as JsonArray ?? []).OfType<JsonObject>()
-                .Where(b => (string?)b["type"] == "text").Select(b => (string?)b["text"] ?? "")).Trim();
-            if (text.Length == 0) return (null, "The tutor returned no text. Try again.");
-            if (stop == "max_tokens") text += "\n\n*(cut short)*";
-            return (text, null);
+            BetaMessage message;
+            try { message = await client.Beta.Messages.Create(Params(req, fallbacks: true)); }
+            catch (AnthropicBadRequestException)
+            {
+                // An account without the fallback beta gets a 400 (not billed): ask once more without it.
+                // Any other 400 comes back again from this call and is reported below.
+                message = await client.Beta.Messages.Create(Params(req, fallbacks: false));
+            }
+            return Read(message);
         }
+        // Most specific first; every message is ours or the API's, never the key.
+        catch (AnthropicUnauthorizedException) { return (null, "The API key was rejected (401). Check it in Profile → Settings."); }
+        catch (AnthropicForbiddenException) { return (null, "This API key is not allowed to use the model (403)."); }
+        catch (AnthropicRateLimitException) { return (null, "Rate limited by the API (429). Wait a minute and try again."); }
+        catch (AnthropicOverloadedException) { return (null, "The API is overloaded right now. Try again in a moment."); }
+        catch (AnthropicServiceUnavailableException) { return (null, "The API is overloaded right now. Try again in a moment."); }
+        catch (Anthropic5xxException e) { return (null, $"The API had a problem ({(int)e.StatusCode}). Try again in a moment."); }
+        catch (AnthropicApiException e) { return (null, $"The API refused the request ({(int)e.StatusCode}): {(string.IsNullOrWhiteSpace(e.ApiMessage) ? "no details" : e.ApiMessage)}"); }
         catch (TaskCanceledException) { return (null, "The tutor took too long to answer. Try again."); }
-        catch (HttpRequestException) { return (null, "Could not reach api.anthropic.com. Are you online? The offline explanation still works."); }
-    }
-
-    static async Task<(HttpStatusCode, JsonNode?)> Send(string key, JsonObject body, bool fallbacks)
-    {
-        using var msg = new HttpRequestMessage(HttpMethod.Post, Endpoint)
+        catch (Exception e) when (e is AnthropicIOException or HttpRequestException)
         {
-            Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
-        };
-        msg.Headers.Add("x-api-key", key);
-        msg.Headers.Add("anthropic-version", ApiVersion);
-        if (fallbacks) msg.Headers.Add("anthropic-beta", "server-side-fallback-2026-07-01");
-        using var res = await Http.SendAsync(msg);
-        var text = await res.Content.ReadAsStringAsync();
-        JsonNode? doc = null;
-        try { doc = JsonNode.Parse(text); } catch (JsonException) { }
-        return (res.StatusCode, doc);
+            return (null, "Could not reach api.anthropic.com. Are you online? The offline explanation still works.");
+        }
     }
 
-    static string? ErrorMessage(JsonNode? doc) => (string?)doc?["error"]?["message"];
+    /// <summary>The learner-facing result of a response: stop reason first, then the text blocks.</summary>
+    public static (string? Text, string? Error) Read(BetaMessage message)
+    {
+        var stop = message.StopReason;
+        if (stop == "refusal") return (null, "The tutor declined to answer this one. The offline explanation still applies.");
+        var text = string.Join("\n\n", message.Content.Select(b => b.TryPickText(out var t) ? t.Text : null).OfType<string>()).Trim();
+        if (text.Length == 0) return (null, "The tutor returned no text. Try again.");
+        if (stop == "max_tokens") text += "\n\n*(cut short)*";
+        return (text, null);
+    }
+
+    /// <summary>
+    /// A client for this key. The key is passed explicitly (never from the environment), and the base URL is pinned so
+    /// an ANTHROPIC_BASE_URL in the environment cannot send the key anywhere but api.anthropic.com.
+    /// </summary>
+    static AnthropicClient Client(string key, HttpClient http) => new()
+    {
+        ApiKey = key,
+        BaseUrl = BaseUrl,
+        HttpClient = http,
+        Timeout = TimeSpan.FromSeconds(60),
+        MaxRetries = 1,
+    };
 }
