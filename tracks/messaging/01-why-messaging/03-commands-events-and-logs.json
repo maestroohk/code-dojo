@@ -1,0 +1,558 @@
+{
+  "title": "Commands, events and logs",
+  "summary": "What you send (command, event, query) decides the channel (queue, publish-subscribe, log), and every choice has a cost you must design for.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Commands, events and queries",
+      "body": [
+        "Three kinds of message, three different contracts:",
+        "",
+        "| | **Command** | **Event** | **Query** |",
+        "|---|---|---|---|",
+        "| Name | `PlaceOrder`, `SendInvoice` (imperative) | `OrderPlaced`, `PaymentDeclined` (past tense) | `GetOrderStatus` |",
+        "| Receivers | exactly **one** owner | zero to many, unknown to the publisher | one, and the caller waits |",
+        "| Can it be refused? | yes, the owner may reject it | no, it already happened | n/a |",
+        "| Natural channel | a queue (point-to-point) | publish-subscribe or a log | usually a sync call (HTTP, gRPC) |",
+        "",
+        "Why it matters: an event named like a command (`SendWelcomeEmail` broadcast to everyone) means the publisher",
+        "decides what others do, which is coupling dressed up as messaging. Publish the **fact** (`CustomerRegistered`)",
+        "and let each subscriber decide.",
+        "",
+        "A query over messaging is request-reply: a `ReplyTo` queue and a `CorrelationId` to match the answer. It works,",
+        "but if you need the answer now a direct call is usually simpler."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Command, event or query?",
+      "buckets": [
+        "Command",
+        "Event",
+        "Query"
+      ],
+      "items": [
+        [
+          "`ReserveStock`",
+          0
+        ],
+        [
+          "`StockReserved`",
+          1
+        ],
+        [
+          "`PaymentDeclined`",
+          1
+        ],
+        [
+          "`GetBasketTotal`",
+          2
+        ],
+        [
+          "`ShipParcel`",
+          0
+        ],
+        [
+          "`CustomerAddressChanged`",
+          1
+        ],
+        [
+          "`FindOrdersByCustomer`",
+          2
+        ]
+      ],
+      "explain": "Imperative names ask one owner to do something; past-tense names announce a fact; questions want an answer back."
+    },
+    {
+      "type": "learn",
+      "title": "Three channel shapes",
+      "body": [
+        "```text",
+        "Point-to-point queue (destructive read)",
+        "  producer ──> [ m3 m2 m1 ] ──> worker-1      m1 is gone once worker-1 acks it",
+        "                           └──> worker-2      workers compete: each message goes to one of them",
+        "",
+        "Publish-subscribe (a copy per subscription)",
+        "  producer ──> exchange / topic ──> [ billing queue ] ──> billing",
+        "                               └──> [ email queue   ] ──> email",
+        "  a subscriber that binds later only sees messages published after it bound",
+        "",
+        "Append-only log (replayable, offsets)",
+        "  orders  P0 | 0 | 1 | 2 | 3 | 4 | 5 |",
+        "                         ^              ^",
+        "                   billing at 3    email at 6 (caught up)",
+        "```",
+        "",
+        "In a **log** (Kafka, RabbitMQ streams, Event Hubs, Kinesis) reading does **not** delete. Each consumer group",
+        "keeps its own committed **offset**; records go away only by retention (time or size) or compaction. Replay is",
+        "just moving an offset back, and a brand-new group can start from the beginning.",
+        "",
+        "> **See it:** open **Labs → Messaging builder → RabbitMQ** and play *Everyone gets a copy*, then switch to",
+        "> **Kafka** and play *The new service saw nothing*."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Two consumer groups read the same log. What does this print?",
+      "code": [
+        "var log = new List<string> { \"A1\", \"A2\", \"A3\", \"A4\", \"A5\" };",
+        "var offsets = new Dictionary<string, int> { [\"billing\"] = 3, [\"email\"] = 5 };",
+        "foreach (var (group, offset) in offsets)",
+        "    Console.WriteLine($\"{group}: lag {log.Count - offset}, next {(offset < log.Count ? log[offset] : \"-\")}\");"
+      ],
+      "answer": [
+        "billing: lag 2, next A4",
+        "email: lag 0, next -"
+      ],
+      "explain": "The offset is the position of the *next* record to read. Lag is the log-end offset minus the committed offset, exactly the LAG column of `kafka-consumer-groups.sh --describe`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A new fraud-scoring service must score the **last 7 days** of orders, then every new one. Billing already consumes the order events. What design works?",
+      "options": [
+        "Orders on a Kafka topic with retention of at least 7 days; fraud uses its **own** consumer group with `AutoOffsetReset = Earliest`",
+        "Fraud consumes from the same RabbitMQ queue as billing",
+        "Bind a new RabbitMQ queue for fraud to the orders exchange",
+        "Ask the billing team to re-publish last week's orders"
+      ],
+      "answer": 0,
+      "explain": [
+        "Sharing billing's queue makes fraud and billing **compete**: each order goes to one of them. A newly bound",
+        "queue only receives messages published from now on. Only a log that kept the records can be replayed, and a",
+        "new group starts wherever `auto.offset.reset` says when it has no committed offset."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: looking at a broker",
+      "body": "The first five minutes of any messaging incident are spent looking, so reach for these to see where the messages are, who reads them and how far behind each group is (try them in **Labs → Live network labs → 24 Live RabbitMQ lab** and **25 Live Kafka lab**).",
+      "toolkit": [
+        {
+          "cmd": "rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers",
+          "what": "RabbitMQ: where are the messages, and who is reading them?",
+          "flags": [
+            [
+              "messages_ready",
+              "waiting for a consumer; growing means consumers are too slow or gone"
+            ],
+            [
+              "messages_unacknowledged",
+              "delivered but not acked; high means consumers are stuck or prefetch is too big"
+            ],
+            [
+              "consumers",
+              "how many consumers are attached to the queue"
+            ]
+          ]
+        },
+        {
+          "cmd": "rabbitmqctl list_consumers queue_name prefetch_count ack_required",
+          "what": "Every consumer per queue, with its prefetch and whether it acks.",
+          "flags": [
+            [
+              "prefetch_count",
+              "how many unacked messages the consumer may hold"
+            ],
+            [
+              "ack_required",
+              "false means autoAck"
+            ]
+          ]
+        },
+        {
+          "cmd": "rabbitmqctl list_bindings source_name destination_name routing_key",
+          "what": "Which exchange routes to which queue, with which routing key."
+        },
+        {
+          "cmd": "curl -s -u guest:guest http://rabbit:15672/api/queues/%2F/orders | jq '.messages_ready'",
+          "what": "The same queue numbers from the management HTTP API, for scripts and dashboards.",
+          "flags": [
+            [
+              "%2F",
+              "the default vhost /, URL-encoded"
+            ],
+            [
+              "jq '.messages_ready'",
+              "pick one number out of the JSON"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing",
+          "what": "Kafka: how far behind is each group, partition by partition?",
+          "flags": [
+            [
+              "--describe --group billing",
+              "CURRENT-OFFSET, LOG-END-OFFSET and LAG per partition"
+            ]
+          ],
+          "when": "LAG growing on every partition: the group is falling behind. On one partition only: a hot key or a stuck consumer."
+        },
+        {
+          "cmd": "kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic orders",
+          "what": "Where is the end of the log, per partition?"
+        },
+        {
+          "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic orders",
+          "what": "How the topic is laid out: partitions, leaders, replicas and in-sync replicas."
+        },
+        {
+          "cmd": "await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 10, global: false);",
+          "what": "RabbitMQ prefetch: the first setting you reach for on a consumer.",
+          "flags": [
+            [
+              "prefetchCount",
+              "how many unacked messages one consumer may hold"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true)",
+          "what": "RabbitMQ publisher confirms: the broker tells the publisher it stored the message.",
+          "flags": [
+            [
+              "publisherConfirmationsEnabled",
+              "turn confirms on for the channel"
+            ],
+            [
+              "publisherConfirmationTrackingEnabled",
+              "BasicPublishAsync waits for the confirm"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ProducerConfig { Acks = Acks.All, EnableIdempotence = true }",
+          "what": "Kafka producer settings you reach for first.",
+          "flags": [
+            [
+              "Acks = Acks.All",
+              "the write counts only once the in-sync replicas have it"
+            ],
+            [
+              "EnableIdempotence = true",
+              "retries do not write duplicates"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ConsumerConfig { AutoOffsetReset = AutoOffsetReset.Earliest, EnableAutoOffsetStore = false }",
+          "what": "Kafka consumer settings you reach for first.",
+          "flags": [
+            [
+              "AutoOffsetReset",
+              "where a group with no committed offset starts"
+            ],
+            [
+              "EnableAutoOffsetStore = false",
+              "manual offset storing: you call StoreOffset after the work"
+            ]
+          ],
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match what you see to what it usually means.",
+      "pairs": [
+        [
+          "`messages_ready` keeps growing",
+          "Consumers are too slow or gone"
+        ],
+        [
+          "`messages_unacknowledged` is high",
+          "Consumers are stuck or prefetch is too big"
+        ],
+        [
+          "`LAG` grows on every partition",
+          "The group is falling behind"
+        ],
+        [
+          "`LAG` grows on one partition only",
+          "A hot key or a stuck consumer"
+        ]
+      ],
+      "explain": "Look before you touch anything: these four readings point you at the consumer, the prefetch, the group or one key."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which question does each command answer?",
+      "buckets": [
+        "How much is waiting?",
+        "Who consumes, and how?",
+        "How is it wired or laid out?"
+      ],
+      "items": [
+        [
+          "`rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers`",
+          0
+        ],
+        [
+          "`curl .../api/queues/%2F/orders | jq '.messages_ready'`",
+          0
+        ],
+        [
+          "`kafka-consumer-groups.sh --describe --group billing`",
+          0
+        ],
+        [
+          "`rabbitmqctl list_consumers queue_name prefetch_count ack_required`",
+          1
+        ],
+        [
+          "`rabbitmqctl list_bindings source_name destination_name routing_key`",
+          2
+        ],
+        [
+          "`kafka-topics.sh --describe --topic orders`",
+          2
+        ]
+      ],
+      "explain": "Counts and lag tell you how much is waiting; `list_consumers` tells you who reads and with what prefetch; bindings and the topic layout tell you how messages get where they go."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each cloud service to its shape.",
+      "pairs": [
+        [
+          "AWS SQS",
+          "A queue: one consumer gets each message, visibility timeout, redrive to a DLQ"
+        ],
+        [
+          "AWS SNS",
+          "Fan-out: one publish, a copy to every subscribed queue or endpoint"
+        ],
+        [
+          "Azure Service Bus topic",
+          "Publish-subscribe with named subscriptions, sessions and a built-in DLQ"
+        ],
+        [
+          "Azure Event Hubs",
+          "A partitioned log with consumer groups and checkpoints (Kafka-compatible endpoint)"
+        ],
+        [
+          "Amazon MSK",
+          "Managed Apache Kafka"
+        ],
+        [
+          "Google Cloud Pub/Sub",
+          "Publish-subscribe with ack deadlines, ordering keys and dead-letter topics"
+        ]
+      ],
+      "explain": "The names change between clouds, the three shapes do not. Map a new service onto queue, pub-sub or log first, then learn its limits."
+    },
+    {
+      "type": "learn",
+      "title": "What messaging costs you",
+      "body": [
+        "Messaging is not free. You trade a loud, immediate failure for quieter ones you must design for:",
+        "",
+        "- **Eventual consistency.** The user sees \"order placed\", refreshes the order page, and it is not there yet.",
+        "  Design the UI and the read side for \"a moment later\".",
+        "- **Duplicates.** Brokers deliver *at least once*: a crash between processing and ack redelivers. Every",
+        "  consumer must be idempotent (module 4).",
+        "- **Ordering.** Only per queue or per partition, and competing consumers or retries reorder even that.",
+        "- **Operations.** One more stateful, clustered system: disks, upgrades, quorum, monitoring of depth, lag and",
+        "  dead letters, and someone on call for it.",
+        "- **Debugging.** One request is now several hops in time. Carry a correlation id and the W3C `traceparent` in",
+        "  message headers, or you will not be able to follow an order through the system.",
+        "",
+        "Keep a **query** that needs an answer now synchronous. Use messaging where time or rate decoupling earns this bill."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You replace the synchronous email call with an `OrderPlaced` event. Which **new** problems do you now have to handle? Select all that apply.",
+      "options": [
+        "The same email can be sent twice after a consumer crash",
+        "Emails can lag behind orders during a spike",
+        "You need monitoring for queue depth and dead letters",
+        "Checkout fails whenever the email service is down",
+        "Emails may be sent in a different order than the orders were placed"
+      ],
+      "answer": [
+        0,
+        1,
+        2,
+        4
+      ],
+      "explain": [
+        "Checkout failing with the email service is the problem you just removed. In exchange you get at-least-once",
+        "duplicates, delay, ordering only per queue, and one more system to watch."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Queues destroy, fan-out copies",
+      "prompt": [
+        "Write a class `FanoutBroker` that models a fanout exchange with destructive queues:",
+        "",
+        "- `void Bind(string queue)`: creates the queue (if new) and binds it; binding twice does nothing more.",
+        "- `void Publish(string message)`: puts a copy of the message into **every queue bound so far**.",
+        "- `string? Get(string queue)`: removes and returns the oldest message of that queue, or `null` if the queue is",
+        "  empty or unknown.",
+        "",
+        "A queue bound after a publish does **not** receive that message: that is the difference from a log."
+      ],
+      "starter": [
+        "class FanoutBroker",
+        "{",
+        "    public void Bind(string queue) { }",
+        "",
+        "    public void Publish(string message) { }",
+        "",
+        "    public string? Get(string queue) => null;",
+        "}"
+      ],
+      "solution": [
+        "class FanoutBroker",
+        "{",
+        "    readonly Dictionary<string, Queue<string>> queues = new();",
+        "",
+        "    public void Bind(string queue)",
+        "    {",
+        "        if (!queues.ContainsKey(queue)) queues[queue] = new Queue<string>();",
+        "    }",
+        "",
+        "    public void Publish(string message)",
+        "    {",
+        "        foreach (var q in queues.Values) q.Enqueue(message);",
+        "    }",
+        "",
+        "    public string? Get(string queue) =>",
+        "        queues.TryGetValue(queue, out var q) && q.Count > 0 ? q.Dequeue() : null;",
+        "}"
+      ],
+      "hints": [
+        "A `Dictionary<string, Queue<string>>` from queue name to its messages.",
+        "`Publish` enqueues into every value; `Get` dequeues if there is something."
+      ],
+      "template": [
+        "var dojoF = new FanoutBroker();",
+        "dojoF.Bind(\"billing\");",
+        "dojoF.Bind(\"email\");",
+        "dojoF.Publish(\"A1\");",
+        "dojoF.Bind(\"fraud\");",
+        "dojoF.Publish(\"A2\");",
+        "dojoF.Bind(\"email\");",
+        "Dojo.Eq(\"billing gets A1 first\", \"A1\", dojoF.Get(\"billing\"));",
+        "Dojo.Eq(\"email gets its own copy of A1\", \"A1\", dojoF.Get(\"email\"));",
+        "Dojo.Eq(\"then A2\", \"A2\", dojoF.Get(\"billing\"));",
+        "Dojo.Eq(\"reading removes: billing is empty\", (string?)null, dojoF.Get(\"billing\"));",
+        "Dojo.Eq(\"a late queue misses A1\", \"A2\", dojoF.Get(\"fraud\"));",
+        "Dojo.Eq(\"binding twice does not duplicate\", \"A2\", dojoF.Get(\"email\"));",
+        "Dojo.Eq(\"email is now empty\", (string?)null, dojoF.Get(\"email\"));",
+        "Dojo.Eq(\"unknown queue\", (string?)null, dojoF.Get(\"audit\"));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An append-only log with consumer groups",
+      "prompt": [
+        "Now the other shape. Write a class `EventLog`:",
+        "",
+        "- `long Append(string value)`: appends and returns the record's offset (`0`, `1`, `2`, ...).",
+        "- `long EndOffset`: the offset the **next** record will get (the log-end offset).",
+        "- `void Join(string group, bool fromEarliest)`: a new group starts at `0` when `fromEarliest`, else at",
+        "  `EndOffset` (that is `auto.offset.reset`). Joining an existing group changes nothing.",
+        "- `List<string> Poll(string group, int max)`: returns up to `max` records from the group's position and moves",
+        "  the position past them (as if committed). A group that never joined throws `InvalidOperationException`.",
+        "- `long Lag(string group)`: `EndOffset` minus the group's position.",
+        "- `void Seek(string group, long offset)`: moves the group's position (replay or skip). An offset below `0` or",
+        "  above `EndOffset` throws `ArgumentOutOfRangeException`.",
+        "",
+        "Reading never removes anything: two groups read the same records independently."
+      ],
+      "starter": [
+        "class EventLog",
+        "{",
+        "    public long EndOffset => 0;",
+        "",
+        "    public long Append(string value) => 0;",
+        "",
+        "    public void Join(string group, bool fromEarliest) { }",
+        "",
+        "    public List<string> Poll(string group, int max) => new();",
+        "",
+        "    public long Lag(string group) => 0;",
+        "",
+        "    public void Seek(string group, long offset) { }",
+        "}"
+      ],
+      "solution": [
+        "class EventLog",
+        "{",
+        "    readonly List<string> records = new();",
+        "    readonly Dictionary<string, long> positions = new();",
+        "",
+        "    public long EndOffset => records.Count;",
+        "",
+        "    public long Append(string value)",
+        "    {",
+        "        records.Add(value);",
+        "        return records.Count - 1;",
+        "    }",
+        "",
+        "    public void Join(string group, bool fromEarliest)",
+        "    {",
+        "        if (!positions.ContainsKey(group)) positions[group] = fromEarliest ? 0 : EndOffset;",
+        "    }",
+        "",
+        "    public List<string> Poll(string group, int max)",
+        "    {",
+        "        var pos = Position(group);",
+        "        var batch = records.Skip((int)pos).Take(max).ToList();",
+        "        positions[group] = pos + batch.Count;",
+        "        return batch;",
+        "    }",
+        "",
+        "    public long Lag(string group) => EndOffset - Position(group);",
+        "",
+        "    public void Seek(string group, long offset)",
+        "    {",
+        "        Position(group);",
+        "        if (offset < 0 || offset > EndOffset) throw new ArgumentOutOfRangeException(nameof(offset));",
+        "        positions[group] = offset;",
+        "    }",
+        "",
+        "    long Position(string group) =>",
+        "        positions.TryGetValue(group, out var p) ? p : throw new InvalidOperationException($\"group '{group}' has not joined\");",
+        "}"
+      ],
+      "hints": [
+        "Keep a `List<string>` of records and a `Dictionary<string, long>` of positions per group.",
+        "`Poll`: `records.Skip((int)pos).Take(max).ToList()`, then advance the position by the count."
+      ],
+      "template": [
+        "var dojoLog = new EventLog();",
+        "Dojo.Eq(\"first offset is 0\", 0L, dojoLog.Append(\"A1\"));",
+        "dojoLog.Append(\"A2\");",
+        "dojoLog.Append(\"A3\");",
+        "Dojo.Eq(\"end offset is the next offset\", 3L, dojoLog.EndOffset);",
+        "dojoLog.Join(\"billing\", fromEarliest: true);",
+        "Dojo.Eq(\"billing polls two\", new List<string> { \"A1\", \"A2\" }, dojoLog.Poll(\"billing\", 2));",
+        "Dojo.Eq(\"billing lag is 1\", 1L, dojoLog.Lag(\"billing\"));",
+        "dojoLog.Join(\"email\", fromEarliest: false);",
+        "Dojo.Eq(\"latest: a new group sees nothing old\", new List<string>(), dojoLog.Poll(\"email\", 10));",
+        "Dojo.Eq(\"appending gives offset 3\", 3L, dojoLog.Append(\"A4\"));",
+        "Dojo.Eq(\"email gets only the new record\", new List<string> { \"A4\" }, dojoLog.Poll(\"email\", 10));",
+        "Dojo.Eq(\"billing still reads independently\", new List<string> { \"A3\", \"A4\" }, dojoLog.Poll(\"billing\", 10));",
+        "Dojo.Eq(\"caught up: lag 0\", 0L, dojoLog.Lag(\"billing\"));",
+        "dojoLog.Join(\"billing\", fromEarliest: true);",
+        "Dojo.Eq(\"joining again does not reset\", 0L, dojoLog.Lag(\"billing\"));",
+        "dojoLog.Seek(\"billing\", 1);",
+        "Dojo.Eq(\"seek back replays\", new List<string> { \"A2\", \"A3\" }, dojoLog.Poll(\"billing\", 2));",
+        "Dojo.Throws<InvalidOperationException>(\"polling an unknown group\", () => dojoLog.Poll(\"fraud\", 1));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"seeking past the end\", () => dojoLog.Seek(\"billing\", 99));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"seeking below zero\", () => dojoLog.Seek(\"billing\", -1));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

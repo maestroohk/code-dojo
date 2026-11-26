@@ -1,0 +1,413 @@
+{
+  "title": "Alerts that page and traces that connect",
+  "summary": "Alert on symptoms with a for: window instead of noisy thresholds, and follow one message from producer to consumer with W3C traceparent headers and correlation ids.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Good alerts, noisy alerts",
+      "body": [
+        "An alert that pages must mean **users are hurt or soon will be, and a human can act now**. Everything else is a ticket",
+        "or a dashboard.",
+        "",
+        "| Page (wake someone up) | Ticket (next working day) | Dashboard only |",
+        "|---|---|---|",
+        "| lag in **time** above the SLO and still growing for 10 min | DLQ depth > 0 and rising | a single rebalance |",
+        "| `UnderMinIsrPartitionCount` > 0 (writes failing) | `UnderReplicatedPartitions` > 0 for 30 min | CPU at 70% |",
+        "| `OfflinePartitionsCount` > 0 | broker disk > 75% | queue depth during a known nightly batch |",
+        "| RabbitMQ memory or disk alarm (publishers blocked) | redelivery rate > 5% for an hour | consumer count changes during a deploy |",
+        "| broker disk > 90% | certificate expiry in 14 days | |",
+        "",
+        "Rules that keep alerts quiet and useful:",
+        "",
+        "- **Symptoms over causes**: \"invoices are late\" pages; \"CPU high\" does not.",
+        "- A **`for:` window**: the condition must hold for several minutes, so a burst that drains on its own never pages.",
+        "- **Growth, not size**: a large lag that shrinks is a recovering system. Combine a threshold with \"still growing\".",
+        "- Every page links a **runbook** and has an owner; if an alert has fired ten times without action, delete or fix it."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Page, ticket, or dashboard?",
+      "buckets": [
+        "Page",
+        "Ticket",
+        "Dashboard only"
+      ],
+      "items": [
+        [
+          "billing lag = 14 minutes of orders and growing for 10 minutes",
+          0
+        ],
+        [
+          "`OfflinePartitionsCount` = 2",
+          0
+        ],
+        [
+          "`orders.dlq` received 40 messages since yesterday",
+          1
+        ],
+        [
+          "One consumer group rebalanced during a deploy",
+          2
+        ],
+        [
+          "RabbitMQ disk alarm: publishers blocked",
+          0
+        ],
+        [
+          "Broker disk at 78%",
+          1
+        ],
+        [
+          "Queue depth spikes to 50 000 at the 02:00 batch and drains by 02:20",
+          2
+        ]
+      ],
+      "explain": [
+        "Page only for what hurts users now and needs a human now. The DLQ and disk at 78% need work but not at 3 am; a",
+        "batch spike that drains itself and a deploy rebalance are normal operation."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Evaluate a lag alert with a for: window",
+      "prompt": [
+        "Implement the state machine Prometheus uses for an alert rule, for one lag series.",
+        "",
+        "Write `List<string> Evaluate(List<(long TimeSec, long Lag)> samples, long threshold, long forSec)`.",
+        "",
+        "- The **condition** at a sample is true when `Lag > threshold` **and** there is a previous sample **and**",
+        "  `Lag >= previous Lag` (still growing or flat).",
+        "- When the condition becomes true the alert is `pending` (remember the time). When it has been true continuously",
+        "  for at least `forSec` (`t - pendingSince >= forSec`, possibly at the same sample) it is `firing`.",
+        "- When the condition is false: a firing alert becomes `resolved`; a pending one is `cleared`; then it starts over.",
+        "- Return the transitions as `\"t={time} pending\"`, `\"t={time} firing\"`, `\"t={time} resolved\"`, `\"t={time} cleared\"`."
+      ],
+      "starter": [
+        "List<string> Evaluate(List<(long TimeSec, long Lag)> samples, long threshold, long forSec)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Evaluate(List<(long TimeSec, long Lag)> samples, long threshold, long forSec)",
+        "{",
+        "    var result = new List<string>();",
+        "    long? since = null;",
+        "    long? previous = null;",
+        "    var firing = false;",
+        "    foreach (var (t, lag) in samples)",
+        "    {",
+        "        var condition = lag > threshold && previous is long p && lag >= p;",
+        "        previous = lag;",
+        "        if (condition)",
+        "        {",
+        "            if (since is null)",
+        "            {",
+        "                since = t;",
+        "                result.Add($\"t={t} pending\");",
+        "            }",
+        "            if (!firing && t - since >= forSec)",
+        "            {",
+        "                firing = true;",
+        "                result.Add($\"t={t} firing\");",
+        "            }",
+        "        }",
+        "        else",
+        "        {",
+        "            if (firing) result.Add($\"t={t} resolved\");",
+        "            else if (since is not null) result.Add($\"t={t} cleared\");",
+        "            since = null;",
+        "            firing = false;",
+        "        }",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "Keep three pieces of state: the previous lag, the time the condition became true (`long?`) and whether it is firing.",
+        "`previous is long p && lag >= p` is false for the first sample.",
+        "Check for firing right after setting pending, so `forSec = 0` fires on the same sample."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoS = new List<(long TimeSec, long Lag)> { (0, 9000), (60, 12000), (120, 15000), (180, 14000), (240, 16000), (300, 17000), (360, 18000), (420, 19000), (480, 20000), (540, 21000), (600, 22000), (660, 23000), (720, 24000), (780, 25000), (840, 26000), (900, 9000) };",
+        "Dojo.Eq(\"a draining backlog clears, sustained growth fires\", new List<string> { \"t=60 pending\", \"t=180 cleared\", \"t=240 pending\", \"t=840 firing\", \"t=900 resolved\" }, Evaluate(dojoS, 10000, 600));",
+        "Dojo.Eq(\"for: 0 fires at once; flat counts as growing\", new List<string> { \"t=60 pending\", \"t=60 firing\" },",
+        "    Evaluate(new List<(long TimeSec, long Lag)> { (0, 100), (60, 20000), (120, 30000), (180, 30000) }, 10000, 0));",
+        "Dojo.Eq(\"never above the threshold\", new List<string>(),",
+        "    Evaluate(new List<(long TimeSec, long Lag)> { (0, 1), (60, 2), (120, 3) }, 10000, 60));",
+        "Dojo.Eq(\"the first sample alone never triggers\", new List<string>(),",
+        "    Evaluate(new List<(long TimeSec, long Lag)> { (0, 50000) }, 10000, 0));"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the Prometheus rule (lag from `kafka_exporter`). Lag is a gauge, not a counter.",
+      "code": [
+        "groups:",
+        "  - name: messaging",
+        "    rules:",
+        "      - alert: ConsumerLagGrowing",
+        "        expr: |",
+        "          __1__ by (consumergroup, topic) (kafka_consumergroup_lag) > 10000",
+        "          and",
+        "          sum by (consumergroup, topic) (__2__(kafka_consumergroup_lag[15m])) > 0",
+        "        __3__: 10m",
+        "        labels:",
+        "          severity: __4__",
+        "        annotations:",
+        "          runbook_url: https://runbooks.shop.example/messaging/lag"
+      ],
+      "blanks": [
+        "sum",
+        "deriv",
+        "for",
+        "page"
+      ],
+      "bank": [
+        "avg",
+        "rate",
+        "delay",
+        "info"
+      ],
+      "explain": [
+        "`sum by` adds the partitions of a group. `deriv` gives the slope of a **gauge**; `rate` is only for counters, which",
+        "only go up. `for: 10m` keeps a short burst from paging, and every paging rule links its runbook."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Tracing through a broker",
+      "body": [
+        "An HTTP call carries its trace context in the `traceparent` header; a message must carry it **in its own headers**,",
+        "or the trace ends at the producer.",
+        "",
+        "```text",
+        "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "             |  |                                |                |",
+        "          version  trace-id (32 hex, whole flow)  parent span id   flags (01 = sampled)",
+        "                                                  (16 hex)",
+        "",
+        "orders-api  [POST /orders]--[send orders]  -- Kafka header traceparent -->  billing [process orders]--[INSERT invoice]",
+        "            same trace-id all the way; the consumer span's parent is the producer span",
+        "```",
+        "",
+        "```csharp",
+        "static readonly ActivitySource Source = new(\"Shop.Orders\");",
+        "",
+        "// producer",
+        "using var activity = Source.StartActivity(\"send orders\", ActivityKind.Producer);",
+        "var headers = new Headers();",
+        "if (activity is not null) headers.Add(\"traceparent\", Encoding.ASCII.GetBytes(activity.Id!));   // W3C format by default",
+        "await producer.ProduceAsync(\"orders\", new Message<string, string> { Key = orderId, Value = json, Headers = headers });",
+        "",
+        "// consumer",
+        "ActivityContext parent = default;",
+        "if (cr.Message.Headers.TryGetLastBytes(\"traceparent\", out var raw))",
+        "    ActivityContext.TryParse(Encoding.ASCII.GetString(raw), null, out parent);",
+        "using var span = Source.StartActivity(\"process orders\", ActivityKind.Consumer, parent);",
+        "span?.SetTag(\"messaging.system\", \"kafka\");",
+        "span?.SetTag(\"messaging.destination.name\", \"orders\");",
+        "span?.SetTag(\"messaging.consumer.group.name\", \"billing\");",
+        "```",
+        "",
+        "- RabbitMQ.Client 7 creates these activities and propagates `traceparent` in message headers itself; listen to them",
+        "  with OpenTelemetry's `.AddSource(\"RabbitMQ.Client.*\")`. For Confluent.Kafka, add headers yourself as above (or use",
+        "  the OpenTelemetry contrib instrumentation package).",
+        "- A **correlation id** is the business-level twin: carry `orderId` (or a `CorrelationId` property / header) on every",
+        "  message and put it in every log line via a logging scope, so you can search all services for one order even where",
+        "  tracing is sampled out."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var tp = \"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\";",
+        "var parts = tp.Split('-');",
+        "var sampled = (Convert.ToInt32(parts[3], 16) & 1) == 1;",
+        "Console.WriteLine($\"trace {parts[1][..8]} parent {parts[2][..4]} sampled={sampled}\");"
+      ],
+      "answer": "trace 4bf92f35 parent 00f0 sampled=True",
+      "explain": [
+        "Field 1 is the trace id, field 2 the parent span id, field 3 the flags; bit 0 of the flags is \"sampled\". .NET prints",
+        "`bool` as `True`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Continue the trace",
+      "prompt": [
+        "A consumer must continue the producer's trace, or start a new one when the header is missing or broken.",
+        "",
+        "- `string? ChildTraceparent(string? incoming, string newSpanId)`: if `incoming` is a valid version-00 `traceparent`,",
+        "  return it with the parent span id replaced by `newSpanId` (same trace id, same flags); otherwise `null` (the caller",
+        "  starts a new trace). Valid means: 4 fields separated by `-`; version `00`; a trace id of 32 and a span id of 16",
+        "  **lowercase** hex characters, neither all zeros; flags of 2 lowercase hex characters.",
+        "- `bool Sampled(string traceparent)`: bit 0 of the flags (assume a valid header)."
+      ],
+      "starter": [
+        "string? ChildTraceparent(string? incoming, string newSpanId)",
+        "{",
+        "    return null;",
+        "}",
+        "",
+        "bool Sampled(string traceparent)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool IsHex(string s, int length) => s.Length == length && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');",
+        "",
+        "string? ChildTraceparent(string? incoming, string newSpanId)",
+        "{",
+        "    if (incoming is null) return null;",
+        "    var p = incoming.Split('-');",
+        "    if (p.Length != 4 || p[0] != \"00\") return null;",
+        "    if (!IsHex(p[1], 32) || p[1].All(c => c == '0')) return null;",
+        "    if (!IsHex(p[2], 16) || p[2].All(c => c == '0')) return null;",
+        "    if (!IsHex(p[3], 2)) return null;",
+        "    return $\"00-{p[1]}-{newSpanId}-{p[3]}\";",
+        "}",
+        "",
+        "bool Sampled(string traceparent)",
+        "{",
+        "    return (Convert.ToInt32(traceparent.Split('-')[3], 16) & 1) == 1;",
+        "}"
+      ],
+      "hints": [
+        "A helper `bool IsHex(string s, int length)` that checks the length and `c is >= '0' and <= '9' or >= 'a' and <= 'f'` for every character.",
+        "Split on `-`, check each field, then rebuild the string with the new span id in field 2."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"keeps trace id and flags, new parent\", \"00-4bf92f3577b34da6a3ce929d0e0e4736-53995c3f42cd8ad8-01\",",
+        "    ChildTraceparent(\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\", \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"missing header\", (string?)null, ChildTraceparent(null, \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"garbage\", (string?)null, ChildTraceparent(\"garbage\", \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"uppercase hex is invalid\", (string?)null, ChildTraceparent(\"00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01\", \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"an all-zero trace id is invalid\", (string?)null, ChildTraceparent(\"00-00000000000000000000000000000000-00f067aa0ba902b7-01\", \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"an all-zero span id is invalid\", (string?)null, ChildTraceparent(\"00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01\", \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"short trace id\", (string?)null, ChildTraceparent(\"00-4bf92f35-00f067aa0ba902b7-01\", \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"unknown version\", (string?)null, ChildTraceparent(\"ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\", \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"not sampled flag is kept\", \"00-4bf92f3577b34da6a3ce929d0e0e4736-53995c3f42cd8ad8-00\",",
+        "    ChildTraceparent(\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00\", \"53995c3f42cd8ad8\"));",
+        "Dojo.Eq(\"sampled\", true, Sampled(\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\"));",
+        "Dojo.Eq(\"not sampled\", false, Sampled(\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00\"));"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A billing consumer reads 50 messages at once and writes them in **one** database batch. Each message carries a different `traceparent`. How should the processing span relate to the 50 producer spans?",
+      "options": [
+        "One `process` span with a **link** to each message's span context, as the OpenTelemetry messaging conventions describe for batches",
+        "Make the first message's span the parent and ignore the other 49",
+        "Start 50 spans, all in the same new trace",
+        "Copy the 50 trace ids into one tag"
+      ],
+      "answer": 0,
+      "explain": [
+        "A span has one parent but any number of **links**. For batch processing the conventions say: one span for the batch,",
+        "linked to every message it processed, so each producer's trace still leads to the batch that handled it",
+        "(`new ActivityLink(context)` when starting the activity)."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "End-to-end latency from the logs",
+      "prompt": [
+        "Use the traces to answer \"how late are our messages, and did any get lost?\".",
+        "",
+        "Write `List<string> EndToEnd(string[] logLines, long slowMs)`. Each line is `\"{timeMs} {service} {publish|consume} traceparent={value}\"`.",
+        "",
+        "- Lines whose `traceparent` is not valid (the rules of the previous step) are counted, not used.",
+        "- Group the valid lines by **trace id**, in order of first appearance. For each trace (use the first 8 characters of the",
+        "  trace id as its name):",
+        "  - with a publish and a consume line: latency = first consume time - first publish time →",
+        "    `\"{id8}: {latency} ms\"`, plus `\" SLOW\"` when latency > `slowMs`;",
+        "  - with a publish but no consume: `\"{id8}: published, never consumed\"`;",
+        "  - with a consume but no publish: `\"{id8}: consumed, publish not seen\"`.",
+        "- If any lines were invalid, add `\"invalid traceparent lines: {n}\"` at the end."
+      ],
+      "starter": [
+        "List<string> EndToEnd(string[] logLines, long slowMs)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "bool IsHex(string s, int length) => s.Length == length && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');",
+        "",
+        "bool Valid(string tp)",
+        "{",
+        "    var p = tp.Split('-');",
+        "    return p.Length == 4 && p[0] == \"00\" && IsHex(p[1], 32) && p[1].Any(c => c != '0')",
+        "        && IsHex(p[2], 16) && p[2].Any(c => c != '0') && IsHex(p[3], 2);",
+        "}",
+        "",
+        "List<string> EndToEnd(string[] logLines, long slowMs)",
+        "{",
+        "    var order = new List<string>();",
+        "    var published = new Dictionary<string, long>();",
+        "    var consumed = new Dictionary<string, long>();",
+        "    var invalid = 0;",
+        "    foreach (var line in logLines)",
+        "    {",
+        "        var f = line.Split(' ');",
+        "        var tp = f.Length == 4 && f[3].StartsWith(\"traceparent=\") ? f[3][\"traceparent=\".Length..] : \"\";",
+        "        if (!Valid(tp)) { invalid++; continue; }",
+        "        var traceId = tp.Split('-')[1];",
+        "        var time = long.Parse(f[0]);",
+        "        if (!order.Contains(traceId)) order.Add(traceId);",
+        "        var target = f[2] == \"publish\" ? published : consumed;",
+        "        target.TryAdd(traceId, time);",
+        "    }",
+        "    var result = new List<string>();",
+        "    foreach (var id in order)",
+        "    {",
+        "        var name = id[..8];",
+        "        var hasP = published.TryGetValue(id, out var p);",
+        "        var hasC = consumed.TryGetValue(id, out var c);",
+        "        if (hasP && hasC) result.Add($\"{name}: {c - p} ms\" + (c - p > slowMs ? \" SLOW\" : \"\"));",
+        "        else if (hasP) result.Add($\"{name}: published, never consumed\");",
+        "        else result.Add($\"{name}: consumed, publish not seen\");",
+        "    }",
+        "    if (invalid > 0) result.Add($\"invalid traceparent lines: {invalid}\");",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "Reuse your validation from the previous step as a helper method.",
+        "Keep a list of trace ids in first-seen order and two dictionaries (first publish time, first consume time); `TryAdd` keeps the first.",
+        "`f[3][\"traceparent=\".Length..]` cuts the prefix off."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoLog = new[]",
+        "{",
+        "    \"1000 orders-api publish traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\",",
+        "    \"1004 orders-api publish traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\",",
+        "    \"1150 billing consume traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-53995c3f42cd8ad8-01\",",
+        "    \"1200 orders-api publish traceparent=00-11111111111111111111111111111111-2222222222222222-01\",",
+        "    \"5204 billing consume traceparent=00-0af7651916cd43dd8448eb211c80319c-c2fb0c1b7e1b8a70-01\",",
+        "    \"5300 billing consume traceparent=garbage\",",
+        "    \"5301 email consume traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-9f1c2d3e4f5a6b7c-01\",",
+        "};",
+        "Dojo.Eq(\"latency per trace, the lost one and the broken header\", new List<string>",
+        "{",
+        "    \"4bf92f35: 150 ms\",",
+        "    \"0af76519: 4200 ms SLOW\",",
+        "    \"11111111: published, never consumed\",",
+        "    \"invalid traceparent lines: 1\",",
+        "}, EndToEnd(dojoLog, 1000));",
+        "Dojo.Eq(\"a consume without its publish\", new List<string> { \"abcdef01: consumed, publish not seen\" },",
+        "    EndToEnd(new[] { \"10 billing consume traceparent=00-abcdef0123456789abcdef0123456789-0123456789abcdef-01\" }, 1000));",
+        "Dojo.Eq(\"nothing logged\", new List<string>(), EndToEnd(new string[0], 1000));"
+      ]
+    }
+  ]
+}

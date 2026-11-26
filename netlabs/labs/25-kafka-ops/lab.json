@@ -1,0 +1,202 @@
+{
+  "title": "Live Kafka lab",
+  "module": "Messaging · RabbitMQ and Kafka",
+  "minutes": 60,
+  "summary": "A real Apache Kafka 4.4 broker in KRaft mode with the shop's order stream on it. A topic with too few partitions, a consumer group far behind, a service stuck on a poison record, a replay request, retention that eats data and a profile topic that should be compacted. Fix it all with the Kafka CLI tools seniors use every week.",
+  "download": "The first start downloads about 230 MB (the apache/kafka:4.4.0 image). After that the lab runs offline. It uses about 400 MB of memory while running (the broker is capped at 768 MB with a 448 MB heap). Every Kafka command starts a small Java program, so each one takes a second or two.",
+  "ready_seconds": 150,
+  "nodes": {
+    "kafka": "the Kafka broker and KRaft controller (PLAINTEXT :9092)",
+    "ops": "your workstation: every Kafka CLI tool, talking to kafka:9092"
+  },
+  "default_node": "ops",
+  "ready": [
+    { "node": "ops", "cmd": "test -f /work/.seeded" }
+  ],
+  "vars": {
+    "BILLOFF": { "type": "int", "min": 40, "max": 110 },
+    "SHIPOFF": { "type": "int", "min": 100, "max": 180 }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Why are two settlement workers idle?",
+      "text": "The payments team scaled their settlement service to three instances in one consumer group, but only one of them ever gets work. On **ops**, describe the topic they read:\n\n```\nkafka-topics.sh --bootstrap-server kafka:9092 --describe --topic payments\n```\n\nThe first line has the topic's settings, then one line per partition with its **Leader**, **Replicas** and **Isr** (in-sync replicas). How many partitions does `payments` have?",
+      "answer": ["1"],
+      "hints": [
+        "Read `PartitionCount` on the first line.",
+        "Within one consumer group, each partition is read by exactly one member. With one partition, one member works and the others wait."
+      ],
+      "solution": {
+        "note": "One partition, so at most one consumer in the group can work: the partition count is the ceiling on a group's parallelism. `kafka-topics.sh --list` lists topics, `--describe` without `--topic` describes all of them, and `--describe --under-replicated-partitions` shows only the partitions whose ISR is smaller than their replica set (the first thing to look at after a broker problem)."
+      }
+    },
+    {
+      "id": "t2",
+      "type": "state",
+      "title": "Add partitions",
+      "text": "Give `payments` **6** partitions, so the team can scale to six instances. Partitions can be added to a live topic, never removed.",
+      "checks": [
+        { "node": "ops", "cmd": "n=$(kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic payments 2>/dev/null | grep -o 'PartitionCount: *[0-9]*' | grep -o '[0-9]*$'); [ \"${n:-0}\" -ge 6 ]", "fail_msg": "payments does not have 6 partitions yet." }
+      ],
+      "hints": [
+        "`kafka-topics.sh` has an `--alter` mode.",
+        "`kafka-topics.sh --bootstrap-server kafka:9092 --alter --topic payments --partitions 6`, then `--describe` again."
+      ],
+      "solution": {
+        "note": "Existing records stay where they are; new records spread over all six. Careful with keyed topics: the partition of a key is hash(key) % partitions, so adding partitions sends a key's NEW records to a different partition than its old ones, and per-key order across that moment is lost. That is why you size partitions up front for keyed topics (and why `payments`, keyless, was safe to change).",
+        "steps": [ { "node": "ops", "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --alter --topic payments --partitions 6" } ]
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Create a topic properly",
+      "text": "The invoicing service needs a topic. Create `invoices` with **6 partitions** and a retention of **3 days** (in milliseconds), set when the topic is created. This broker refuses to create topics automatically (`auto.create.topics.enable=false`, as in most production clusters), so a typo in a producer cannot quietly create a new topic.",
+      "checks": [
+        { "node": "ops", "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic invoices 2>/dev/null | grep -q 'PartitionCount: *6'", "fail_msg": "There is no topic invoices with 6 partitions." },
+        { "node": "ops", "cmd": "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name invoices --describe 2>/dev/null | grep -q 'retention.ms=259200000'", "fail_msg": "invoices exists, but its retention.ms is not 3 days (3 x 24 x 60 x 60 x 1000)." }
+      ],
+      "hints": [
+        "`kafka-topics.sh --create` takes `--partitions`, `--replication-factor` and any number of `--config key=value`.",
+        "```\nkafka-topics.sh --bootstrap-server kafka:9092 --create --topic invoices --partitions 6 --replication-factor 1 --config retention.ms=259200000\n```\n\n(This lab has one broker, so the replication factor can only be 1. In production: 3, with `--config min.insync.replicas=2`.)"
+      ],
+      "solution": {
+        "note": "Topic-level configs override the broker defaults (`log.retention.hours=168` is 7 days). Check what a topic really uses with `kafka-configs.sh --entity-type topics --entity-name invoices --describe --all`. On a real cluster you would create topics from code review (Terraform, a GitOps repo or an operator), not by hand, but this is the command underneath.",
+        "steps": [ { "node": "ops", "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --create --topic invoices --partitions 6 --replication-factor 1 --config retention.ms=259200000" } ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "state",
+      "title": "Keys keep order",
+      "text": "Every invoice event of one customer must be processed in order, so it must land in the same partition. Produce **at least three** events with the key `C-42` to `invoices`, each on its own line as `key:value`, with the console producer told to parse keys. Then read them back with the key and partition printed and see where they went.\n\nIn Kafka 4.x the console tools take `--reader-property` (producer) and `--formatter-property` (consumer); the older `--property` still works but is deprecated.",
+      "checks": [
+        { "node": "ops", "cmd": "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic invoices --from-beginning --formatter-property print.key=true --formatter-property print.partition=true --timeout-ms 8000 2>/dev/null | awk -F'\\t' '$2==\"C-42\" { n++; p[$1]=1 } END { k=0; for (x in p) k++; exit !(n >= 3 && k == 1) }'", "fail_msg": "invoices does not hold three or more records with the key C-42 (all in one partition). Was the key parsed, or did it end up inside the value?" }
+      ],
+      "hints": [
+        "Without `parse.key=true` the whole line, `C-42:...`, becomes the value and the key is null: null-key records are spread over partitions.",
+        "```\nkafka-console-producer.sh --bootstrap-server kafka:9092 --topic invoices --reader-property parse.key=true --reader-property key.separator=:\nC-42:{\"invoice\":\"I-1\",\"amount\":10}\nC-42:{\"invoice\":\"I-2\",\"amount\":20}\nC-42:{\"invoice\":\"I-3\",\"amount\":30}\n```\n\nCtrl+D ends it. Then: `kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic invoices --from-beginning --formatter-property print.key=true --formatter-property print.partition=true --formatter-property print.offset=true --timeout-ms 5000`"
+      ],
+      "solution": {
+        "note": "Same key, same partition, so same order. The Java client (and these console tools) hash the key with murmur2; the librdkafka default used by Confluent.Kafka is `consistent_random` (CRC32), so a C# producer and a Java producer can put the same key on different partitions unless you set `Partitioner = Partitioner.Murmur2Random` in the C# ProducerConfig.",
+        "steps": [ { "node": "ops", "cmd": "printf 'C-42:{\"invoice\":\"I-1\"}\\nC-42:{\"invoice\":\"I-2\"}\\nC-42:{\"invoice\":\"I-3\"}\\n' | kafka-console-producer.sh --bootstrap-server kafka:9092 --topic invoices --reader-property parse.key=true --reader-property key.separator=:" } ]
+      }
+    },
+    {
+      "id": "t5",
+      "type": "answer",
+      "title": "How far behind is billing?",
+      "text": "Billing was down over the weekend. Before you restart it, find out how much work is waiting:\n\n```\nkafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing\n```\n\nPer partition: **CURRENT-OFFSET** (what the group has committed), **LOG-END-OFFSET** (the next offset to be written), and **LAG** (the difference). CONSUMER-ID is `-` because no member is running. What is billing's **total** lag on `orders`?",
+      "answer_cmd": { "node": "ops", "cmd": "cat /work/.billing-lag" },
+      "hints": [
+        "Add up the LAG column over the three partitions.",
+        "`kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing | awk '$2==\"orders\" {s+=$6} END {print s}'`"
+      ],
+      "solution": {
+        "note": "Lag is counted in records, not time. What on-call cares about is whether it shrinks: describe it twice a minute apart, or graph it (kafka_consumergroup_lag from an exporter). `--describe --all-groups` shows every group; `--describe --group billing --members` shows who owns which partitions; `--state` shows whether the group is Stable, Empty or rebalancing."
+      }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "Catch billing up",
+      "text": "Billing's new version is deployed and you are asked to work off the backlog yourself, as group `billing`. Run a console consumer **in that group** on `orders` until it stops finding records, then describe the group again: LAG must be 0 on every partition.\n\nWatch out: `--from-beginning` only applies when a group has **no committed offset**. Billing has one, so it continues from there, which is what you want.",
+      "checks": [
+        { "node": "ops", "cmd": "[ \"$(group-lag billing)\" = 0 ]", "fail_msg": "billing still has lag on orders (or has no offsets at all)." }
+      ],
+      "hints": [
+        "Add `--group billing`. To make it stop by itself, add `--timeout-ms 10000` (stop after 10 s with no record; it then ends with `ERROR ... TimeoutException`, which only means the timeout fired); otherwise press Ctrl+C when it goes quiet.",
+        "`kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic orders --group billing --timeout-ms 10000 > /dev/null`, then `kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing`."
+      ],
+      "solution": {
+        "note": "The console consumer commits as it reads (auto commit), so the group's offsets moved to the end. With a real service, lag drains only if it processes faster than records arrive; if not, add members (up to the partition count) or make processing faster. A consumer that is slower than its poll interval allows (`max.poll.interval.ms`, 5 minutes by default) is kicked out of the group and triggers a rebalance: that is the classic \"lag grows and the group keeps rebalancing\" incident.",
+        "steps": [ { "node": "ops", "cmd": "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic orders --group billing --timeout-ms 10000 > /dev/null 2>&1; kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing" } ]
+      }
+    },
+    {
+      "id": "t7",
+      "type": "state",
+      "title": "Replay for analytics",
+      "text": "Analytics found a bug in its aggregation and wants to **reprocess all of `orders`** from the start. Its group is caught up (LAG 0). Move the group's committed offsets back to the earliest offsets of every partition. Preview the change first, then apply it. (The group has no running members; Kafka refuses to reset offsets of an active group.)",
+      "checks": [
+        { "node": "ops", "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group analytics 2>/dev/null | awk '$2==\"orders\" { n++; if ($4 != 0) bad++ } END { exit !(n == 3 && bad == 0) }'", "fail_msg": "analytics is not at the earliest offset (0) on all three partitions of orders. Did you add --execute?" }
+      ],
+      "hints": [
+        "`kafka-consumer-groups.sh --reset-offsets` needs a group, a scope (`--topic orders` or `--all-topics`), a target (`--to-earliest`, `--to-latest`, `--to-offset N`, `--to-datetime`, `--shift-by N`), and either `--dry-run` or `--execute`.",
+        "```\nkafka-consumer-groups.sh --bootstrap-server kafka:9092 --group analytics --topic orders --reset-offsets --to-earliest --dry-run\nkafka-consumer-groups.sh --bootstrap-server kafka:9092 --group analytics --topic orders --reset-offsets --to-earliest --execute\n```"
+      ],
+      "solution": {
+        "note": "Without `--execute` the tool only shows the plan (current versions print a warning that it is a dry run). Replays are why consumers must be idempotent: analytics will see every order again. `--to-datetime 2026-11-23T00:00:00.000` replays from a point in time instead, which is usually what an incident needs (\"everything since the bad deploy\").",
+        "steps": [ { "node": "ops", "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group analytics --topic orders --reset-offsets --to-earliest --execute" } ]
+      }
+    },
+    {
+      "id": "t8",
+      "type": "state",
+      "title": "Skip one poison record",
+      "text": "The shipping service crash-loops. Its log is `/work/shipping.log` on **ops**: it dies on the same record every time and never commits past it. The team has copied that record for a later fix and asks you to move `shipping` **exactly one record** forward on that partition only. Every other partition must stay where it is.",
+      "checks": [
+        { "node": "ops", "cmd": "want=$(( $(cat /work/.ship-poison) + 1 )); kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group shipping 2>/dev/null | awk -v w=$want '$2==\"orders\" && $3==0 { found=1; if ($4 != w) bad=1 } END { exit !(found && !bad) }'", "fail_msg": "shipping is not exactly one record past the poison record on orders partition 0." },
+        { "node": "ops", "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group shipping 2>/dev/null | awk '$2==\"orders\" && $3!=0 {print $3, $4}' | diff -q - /work/.ship-others >/dev/null", "fail_msg": "Partition 0 is right, but another partition of shipping moved too. Scope the reset to one partition: --topic orders:0." }
+      ],
+      "hints": [
+        "The log line `orders-0@N` means partition 0, offset N. A topic scope can name partitions: `--topic orders:0`.",
+        "`kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group shipping --topic orders:0 --reset-offsets --shift-by 1 --execute` (try `--dry-run` first)."
+      ],
+      "solution": {
+        "note": "`--shift-by 1` moves from the committed offset; `--to-offset N` sets it exactly. Skipping is a business decision (that shipment is not processed until someone replays it), so in production the consumer should park poison records in a dead-letter topic by itself instead of crash-looping, and alert. Kafka never deletes the record: you can read it with `kafka-console-consumer.sh --topic orders --partition 0 --offset N --max-messages 1`.",
+        "steps": [ { "node": "ops", "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group shipping --topic orders:0 --reset-offsets --shift-by 1 --execute" } ]
+      }
+    },
+    {
+      "id": "t9",
+      "type": "state",
+      "title": "Retention that eats data",
+      "text": "The clickstream team says their nightly job finds `clicks` almost empty. Look at the topic's own configuration:\n\n```\nkafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name clicks --describe\n```\n\nSomeone left test settings on it: Kafka deletes its data after a minute. Give `clicks` a retention of **7 days**. (What was already deleted is gone for good.)",
+      "checks": [
+        { "node": "ops", "cmd": "r=$(kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name clicks --describe --all 2>/dev/null | grep -o ' retention.ms=[0-9-]*' | head -1 | cut -d= -f2); [ \"${r:-0}\" = -1 ] || [ \"${r:-0}\" -ge 604800000 ]", "fail_msg": "clicks still keeps its data for less than 7 days (604800000 ms)." }
+      ],
+      "hints": [
+        "`kafka-configs.sh --alter --add-config key=value` changes a topic config on a live cluster; `--delete-config key` removes the override so the broker default applies.",
+        "`kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name clicks --alter --add-config retention.ms=604800000` (and you may remove the one-minute `segment.ms` with `--delete-config segment.ms`)."
+      ],
+      "solution": {
+        "note": "Retention deletes whole closed **segments**: the one-minute `segment.ms` made segments roll every minute, so they became deletable that fast. A consumer that falls behind by more than the retention loses data silently (its offset is out of range and `auto.offset.reset` decides where it lands). Alert when lag in time approaches retention.",
+        "steps": [ { "node": "ops", "cmd": "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name clicks --alter --add-config retention.ms=604800000 && kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name clicks --alter --delete-config segment.ms" } ]
+      }
+    },
+    {
+      "id": "t10",
+      "type": "state",
+      "title": "Latest value per key",
+      "text": "`customer-profiles` holds every update of every customer's profile, keyed by customer id. Services read it from the beginning to build their own copy, and only the **latest** profile per customer matters, forever. Time-based deletion is the wrong policy: it would eventually drop customers who never change. Switch the topic to **log compaction**.",
+      "checks": [
+        { "node": "ops", "cmd": "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name customer-profiles --describe 2>/dev/null | grep -q 'cleanup.policy=compact'", "fail_msg": "customer-profiles does not have cleanup.policy=compact." }
+      ],
+      "hints": [
+        "The setting is `cleanup.policy`, values `delete`, `compact`, or `compact,delete`.",
+        "`kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name customer-profiles --alter --add-config cleanup.policy=compact`"
+      ],
+      "solution": {
+        "note": "Compaction keeps at least the last record of every key (offsets never change; older duplicates are removed in the background, never from the active segment). A record with a key and a null value is a **tombstone**: it deletes the key after `delete.retention.ms`. Compacted topics need keys: a producer sending a keyless record to one gets an error. Kafka's own `__consumer_offsets` is compacted.",
+        "steps": [ { "node": "ops", "cmd": "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name customer-profiles --alter --add-config cleanup.policy=compact" } ]
+      }
+    },
+    {
+      "id": "t11",
+      "type": "answer",
+      "title": "Offsets at a glance",
+      "text": "A quick way to see how much is in a topic without a consumer group: `kafka-get-offsets.sh`. It prints `topic:partition:offset`, by default the **latest** offset (the next one to be written). What is the latest offset of `orders` partition **2**?",
+      "answer_cmd": { "node": "ops", "cmd": "kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic orders --partitions 2 2>/dev/null | cut -d: -f3" },
+      "hints": [
+        "`kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic orders`",
+        "`--time -2` gives the earliest offsets instead (`-1`, the default, the latest); latest minus earliest is how many records each partition holds."
+      ],
+      "solution": {
+        "note": "kafka-get-offsets answers \"is anything being written?\" (run it twice) and \"how big is this partition?\" without touching any group. `kafka-log-dirs.sh --bootstrap-server kafka:9092 --describe` shows the bytes each partition uses on each broker's disks, the number to watch when a disk fills up."
+      }
+    }
+  ]
+}

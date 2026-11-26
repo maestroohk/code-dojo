@@ -1,0 +1,457 @@
+{
+  "title": "RabbitMQ vs Kafka, honestly",
+  "summary": "What each broker is built for in 2026, where they overlap, how to measure instead of guess, and a weighted scoring matrix with knock-out criteria.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Smart broker, dumb log",
+      "body": [
+        "| | RabbitMQ 4.x | Kafka 4.x |",
+        "|---|---|---|",
+        "| Model | broker routes and tracks every message (exchanges → queues) | append-only partitioned log; consumers track their offsets |",
+        "| Routing | direct, topic (`*`, `#`), fanout, headers exchanges; alternate exchanges | topic plus key; anything smarter happens in consumers or Kafka Streams |",
+        "| After consume | acked messages are deleted (queues); streams keep them | kept until retention or compaction removes them |",
+        "| Replay | streams only (`x-stream-offset`) | any group, any offset or timestamp |",
+        "| Per-message features | TTL, dead-letter exchange, quorum-queue delivery limit (default 20), delayed retry via TTL + DLX | none built in: retry and DLQ topics are yours to build |",
+        "| Scaling consumers | any number compete on a queue; prefetch bounds each | at most one per partition per group |",
+        "| Ordering | per queue (with one active consumer) | per partition |",
+        "| Replication | quorum queues (Raft); classic mirrored queues were removed in 4.0 | replication factor + `min.insync.replicas`; KRaft only since 4.0 |",
+        "| Throughput shape | each queue has one leader; scale with more queues (or super streams) | scale with partitions and brokers, batching and compression |",
+        "",
+        "Neither is \"faster\" in the abstract. RabbitMQ is built for per-message work and flexible routing; Kafka for",
+        "high-volume, retained, replayable streams with many readers."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which broker gives you this out of the box?",
+      "buckets": [
+        "RabbitMQ",
+        "Kafka",
+        "Both"
+      ],
+      "items": [
+        [
+          "Dead-letter exchange and a delivery limit on quorum queues",
+          0
+        ],
+        [
+          "Topic exchange routing with `*` and `#`",
+          0
+        ],
+        [
+          "Log compaction: keep the latest value per key",
+          1
+        ],
+        [
+          "Transactions that commit output records and input offsets together",
+          1
+        ],
+        [
+          "Replay from an offset or a timestamp",
+          2
+        ],
+        [
+          "Replicated storage that survives losing a node",
+          2
+        ],
+        [
+          "Publisher acknowledgements (confirms / `acks=all`)",
+          2
+        ]
+      ],
+      "explain": "Replay is \"both\" only thanks to RabbitMQ **streams**: a classic or quorum queue cannot replay what was acked."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which statements are accurate in 2026? Select all that apply.",
+      "options": [
+        "Quorum queues are RabbitMQ's replicated queue type; classic mirrored queues were removed in RabbitMQ 4.0",
+        "Kafka 4.x runs without ZooKeeper: KRaft is the only mode",
+        "A quorum queue keeps acked messages so a new consumer can replay them",
+        "Confluent.Kafka producers enable idempotence by default, like the Java client",
+        "RabbitMQ streams let consumers re-read from an offset or a timestamp"
+      ],
+      "answer": [
+        0,
+        1,
+        4
+      ],
+      "explain": [
+        "The Java producer defaults to `enable.idempotence=true` since Kafka 3.0; librdkafka (and so Confluent.Kafka) does",
+        "not, so set `EnableIdempotence = true` yourself. Quorum queues delete acked messages like any queue."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: measure before you argue",
+      "body": "Reach for these to load-test a candidate broker with your message size and your durability settings, and to watch it while the test runs.",
+      "toolkit": [
+        {
+          "cmd": "kafka-producer-perf-test.sh --topic perf --num-records 1000000 --record-size 1024 --throughput -1 --producer-props bootstrap.servers=kafka:9092 acks=all linger.ms=5 compression.type=lz4",
+          "what": "Records/s and latency percentiles for a Kafka producer.",
+          "flags": [
+            [
+              "--num-records 1000000 --record-size 1024",
+              "one million 1 KiB records"
+            ],
+            [
+              "--throughput -1",
+              "no rate limit"
+            ],
+            [
+              "--producer-props acks=all",
+              "measure at acks=all, the setting you will actually run"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-consumer-perf-test.sh --bootstrap-server kafka:9092 --topic perf --group perf-check --messages 1000000",
+          "what": "Consume rate.",
+          "flags": [
+            [
+              "--messages",
+              "how many to read (recent releases rename it to --num-records; check --help)"
+            ]
+          ]
+        },
+        {
+          "cmd": "java -jar perf-test.jar --uri amqp://guest:guest@rabbit:5672 --quorum-queue -u perf -x 2 -y 4 -s 1024 -r 5000 -z 60",
+          "what": "RabbitMQ PerfTest.",
+          "flags": [
+            [
+              "--quorum-queue -u perf",
+              "against a quorum queue named perf"
+            ],
+            [
+              "-x 2 -y 4",
+              "2 producers, 4 consumers"
+            ],
+            [
+              "-s 1024",
+              "1 KiB messages"
+            ],
+            [
+              "-r 5000",
+              "5,000 msg/s"
+            ],
+            [
+              "-z 60",
+              "for 60 s"
+            ]
+          ]
+        },
+        {
+          "cmd": "rabbitmq-diagnostics memory_breakdown",
+          "what": "Where RabbitMQ's memory goes while the test runs."
+        },
+        {
+          "cmd": "rabbitmq-diagnostics check_local_alarms",
+          "what": "Memory and disk alarms, which block publishers."
+        },
+        {
+          "cmd": "rabbitmq-queues quorum_status perf",
+          "what": "Raft members and who leads."
+        },
+        {
+          "cmd": "curl -s http://rabbit:15692/metrics",
+          "what": "RabbitMQ's Prometheus metrics.",
+          "when": "For Kafka use JMX or an exporter."
+        },
+        {
+          "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --describe --under-replicated-partitions",
+          "what": "Is the cluster keeping up?",
+          "when": "Empty output is good."
+        },
+        {
+          "cmd": "kafka-log-dirs.sh --bootstrap-server kafka:9092 --describe --topic-list perf",
+          "what": "Disk per partition, for retention sizing."
+        },
+        {
+          "cmd": "new ProducerConfig { LingerMs = 5, BatchSize = 1000000, CompressionType = CompressionType.Lz4 }",
+          "what": "Kafka producer settings that move the numbers.",
+          "flags": [
+            [
+              "LingerMs",
+              "wait to fill bigger batches"
+            ],
+            [
+              "BatchSize",
+              "the most bytes per batch"
+            ],
+            [
+              "CompressionType.Lz4",
+              "cheap compression"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ConsumerConfig { FetchMinBytes = 1024, MaxPollIntervalMs = 300000 }",
+          "what": "Kafka consumer settings that move the numbers.",
+          "flags": [
+            [
+              "FetchMinBytes",
+              "the broker waits for at least this much data per fetch"
+            ],
+            [
+              "MaxPollIntervalMs",
+              "room for slow handlers"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 50, global: false);",
+          "what": "RabbitMQ consumer prefetch.",
+          "flags": [
+            [
+              "prefetchCount: 50",
+              "up to 50 unacked messages per consumer"
+            ]
+          ],
+          "when": "Pair it with publisher confirms and a bounded number of publishes in flight.",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ServiceBusProcessorOptions { PrefetchCount = 50, MaxConcurrentCalls = 8 }",
+          "what": "Azure Service Bus throughput settings.",
+          "flags": [
+            [
+              "PrefetchCount",
+              "messages fetched ahead"
+            ],
+            [
+              "MaxConcurrentCalls",
+              "handlers running in parallel"
+            ]
+          ],
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each load-test flag to what it sets.",
+      "pairs": [
+        [
+          "`--throughput -1`",
+          "No rate limit"
+        ],
+        [
+          "`--producer-props acks=all`",
+          "The durability you will really run"
+        ],
+        [
+          "`-x 2 -y 4`",
+          "2 producers and 4 consumers"
+        ],
+        [
+          "`-r 5000`",
+          "5,000 messages per second"
+        ],
+        [
+          "`-z 60`",
+          "Run for 60 seconds"
+        ],
+        [
+          "`--quorum-queue`",
+          "Test against a quorum queue"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Generating load, or watching the broker while it runs?",
+      "buckets": [
+        "Generate load",
+        "Watch the broker"
+      ],
+      "items": [
+        [
+          "`kafka-producer-perf-test.sh`",
+          0
+        ],
+        [
+          "`kafka-consumer-perf-test.sh`",
+          0
+        ],
+        [
+          "`java -jar perf-test.jar`",
+          0
+        ],
+        [
+          "`rabbitmq-diagnostics memory_breakdown`",
+          1
+        ],
+        [
+          "`rabbitmq-diagnostics check_local_alarms`",
+          1
+        ],
+        [
+          "`rabbitmq-queues quorum_status perf`",
+          1
+        ],
+        [
+          "`kafka-topics.sh --describe --under-replicated-partitions`",
+          1
+        ],
+        [
+          "`kafka-log-dirs.sh --describe --topic-list perf`",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each requirement to the better fit and the feature that makes it so.",
+      "pairs": [
+        [
+          "Email jobs: retry after 30 s, park after 5 attempts",
+          "RabbitMQ: TTL retry queue plus a dead-letter exchange"
+        ],
+        [
+          "Clickstream at 500k events/s, kept 7 days, read by three teams",
+          "Kafka: partitions scale out, each team is a consumer group"
+        ],
+        [
+          "Latest price per SKU, rebuilt by new services at startup",
+          "Kafka: a compacted topic"
+        ],
+        [
+          "Route by region and event type to a dozen small consumers",
+          "RabbitMQ: a topic exchange with bindings"
+        ],
+        [
+          "Replay a few days of events, but the team only runs RabbitMQ",
+          "RabbitMQ: a stream"
+        ]
+      ],
+      "explain": "Notice the last pair: the right answer depends on the team as much as on the feature list."
+    },
+    {
+      "type": "predict",
+      "prompt": "A first-pass scoring matrix. What does this print?",
+      "code": [
+        "var weights = new Dictionary<string, int> { [\"replay\"] = 3, [\"routing\"] = 2, [\"retry\"] = 2, [\"throughput\"] = 1 };",
+        "var kafka = new Dictionary<string, int> { [\"replay\"] = 5, [\"routing\"] = 1, [\"retry\"] = 2, [\"throughput\"] = 5 };",
+        "var rabbit = new Dictionary<string, int> { [\"replay\"] = 2, [\"routing\"] = 5, [\"retry\"] = 5, [\"throughput\"] = 3 };",
+        "int Score(Dictionary<string, int> s) => weights.Sum(w => w.Value * s[w.Key]);",
+        "Console.WriteLine($\"kafka {Score(kafka)}, rabbitmq {Score(rabbit)}\");"
+      ],
+      "answer": "kafka 26, rabbitmq 29",
+      "explain": [
+        "Kafka: 15 + 2 + 4 + 5 = 26. RabbitMQ: 6 + 10 + 10 + 3 = 29. A three-point gap on a matrix you made up is not a",
+        "decision. The weights are the real argument: write them down and agree on them **before** scoring."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "A RabbitMQ shop wants 7 days of replay. Complete the stream declaration and a consumer that starts from the beginning.",
+      "code": [
+        "await channel.QueueDeclareAsync(\"orders.stream\", durable: true, exclusive: false, autoDelete: false,",
+        "    arguments: new Dictionary<string, object?> { [\"x-queue-type\"] = \"__1__\", [\"x-max-age\"] = \"7D\" });",
+        "",
+        "await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 100, global: false);   // streams require a prefetch",
+        "await channel.BasicConsumeAsync(\"orders.stream\", autoAck: __2__, consumerTag: \"\", noLocal: false, exclusive: false,",
+        "    arguments: new Dictionary<string, object?> { [\"x-stream-offset\"] = \"__3__\" }, consumer: consumer);"
+      ],
+      "blanks": [
+        "stream",
+        "false",
+        "first"
+      ],
+      "bank": [
+        "quorum",
+        "true",
+        "earliest"
+      ],
+      "explain": [
+        "`x-stream-offset` takes `first`, `last`, `next`, a numeric offset or a timestamp. `earliest` is Kafka's",
+        "`auto.offset.reset` vocabulary, not RabbitMQ's. Stream consumers must use manual acks and a prefetch; the acks only",
+        "move the credit window, they do not delete anything."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A scoring matrix with knock-outs",
+      "prompt": [
+        "Turn the matrix into a function the review can rerun when someone challenges a weight. Write",
+        "`List<string> Rank(Dictionary<string, int> weights, Dictionary<string, Dictionary<string, int>> scores, Dictionary<string, int> minimums)`:",
+        "",
+        "- An option's score is the sum over `weights` of `weight * score`; a criterion missing from an option's scores counts as 0.",
+        "- **Knock-outs**: an option is excluded when any criterion in `minimums` scores below its minimum (missing = 0).",
+        "  Report the first failing criterion in alphabetical (ordinal) order.",
+        "- Return the ranked options as `\"{name} {score}\"`, highest score first, ties by name (ordinal); then the excluded",
+        "  ones as `\"excluded {name}: {criterion} {score} < {minimum}\"`, ordered by name.",
+        "",
+        "```text",
+        "rabbitmq 37",
+        "kafka 30",
+        "excluded sqs: replay 0 < 2",
+        "```"
+      ],
+      "starter": [
+        "List<string> Rank(Dictionary<string, int> weights, Dictionary<string, Dictionary<string, int>> scores, Dictionary<string, int> minimums)",
+        "{",
+        "    return new();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Rank(Dictionary<string, int> weights, Dictionary<string, Dictionary<string, int>> scores, Dictionary<string, int> minimums)",
+        "{",
+        "    var ranked = new List<(string Name, int Score)>();",
+        "    var excluded = new List<string>();",
+        "    foreach (var name in scores.Keys.OrderBy(n => n, StringComparer.Ordinal))",
+        "    {",
+        "        var s = scores[name];",
+        "        var failed = minimums.Keys.OrderBy(k => k, StringComparer.Ordinal)",
+        "            .FirstOrDefault(k => s.GetValueOrDefault(k) < minimums[k]);",
+        "        if (failed is not null)",
+        "        {",
+        "            excluded.Add($\"excluded {name}: {failed} {s.GetValueOrDefault(failed)} < {minimums[failed]}\");",
+        "            continue;",
+        "        }",
+        "        ranked.Add((name, weights.Sum(w => w.Value * s.GetValueOrDefault(w.Key))));",
+        "    }",
+        "    return ranked.OrderByDescending(r => r.Score).ThenBy(r => r.Name, StringComparer.Ordinal)",
+        "        .Select(r => $\"{r.Name} {r.Score}\")",
+        "        .Concat(excluded)",
+        "        .ToList();",
+        "}"
+      ],
+      "hints": [
+        "Go through the options by name. For each, find the first failing minimum with `minimums.Keys.OrderBy(k => k, StringComparer.Ordinal).FirstOrDefault(...)`.",
+        "`s.GetValueOrDefault(k)` gives 0 for a missing criterion.",
+        "Sort the survivors with `OrderByDescending(r => r.Score).ThenBy(r => r.Name, StringComparer.Ordinal)`, then append the excluded lines."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var dojoWeights = new Dictionary<string, int> { [\"replay\"] = 3, [\"routing\"] = 2, [\"retry\"] = 2, [\"throughput\"] = 1, [\"ops\"] = 2 };",
+        "var dojoScores = new Dictionary<string, Dictionary<string, int>>",
+        "{",
+        "    [\"kafka\"] = new() { [\"replay\"] = 5, [\"routing\"] = 1, [\"retry\"] = 2, [\"throughput\"] = 5, [\"ops\"] = 2 },",
+        "    [\"rabbitmq\"] = new() { [\"replay\"] = 2, [\"routing\"] = 5, [\"retry\"] = 5, [\"throughput\"] = 3, [\"ops\"] = 4 },",
+        "    [\"sqs\"] = new() { [\"replay\"] = 0, [\"routing\"] = 1, [\"retry\"] = 4, [\"throughput\"] = 4, [\"ops\"] = 5 },",
+        "};",
+        "Dojo.Eq(\"weighted ranking with a knock-out\", new List<string> { \"rabbitmq 37\", \"kafka 30\", \"excluded sqs: replay 0 < 2\" },",
+        "    Rank(dojoWeights, dojoScores, new Dictionary<string, int> { [\"replay\"] = 2 }));",
+        "Dojo.Eq(\"no minimums: everyone is ranked\", new List<string> { \"rabbitmq 37\", \"kafka 30\", \"sqs 24\" },",
+        "    Rank(dojoWeights, dojoScores, new Dictionary<string, int>()));",
+        "Dojo.Eq(\"a missing score counts as 0\", new List<string> { \"b 6\", \"a 4\" },",
+        "    Rank(new Dictionary<string, int> { [\"x\"] = 2, [\"y\"] = 3 },",
+        "         new Dictionary<string, Dictionary<string, int>> { [\"a\"] = new() { [\"x\"] = 2 }, [\"b\"] = new() { [\"y\"] = 2 } },",
+        "         new Dictionary<string, int>()));",
+        "Dojo.Eq(\"ties are broken by name\", new List<string> { \"alpha 4\", \"beta 4\" },",
+        "    Rank(new Dictionary<string, int> { [\"x\"] = 1 },",
+        "         new Dictionary<string, Dictionary<string, int>> { [\"beta\"] = new() { [\"x\"] = 4 }, [\"alpha\"] = new() { [\"x\"] = 4 } },",
+        "         new Dictionary<string, int>()));",
+        "Dojo.Eq(\"several failures: the first criterion alphabetically is reported\", new List<string> { \"excluded kafka: ops 2 < 3\", \"excluded rabbitmq: replay 2 < 3\", \"excluded sqs: replay 0 < 3\" },",
+        "    Rank(dojoWeights, dojoScores, new Dictionary<string, int> { [\"replay\"] = 3, [\"ops\"] = 3 }));"
+      ]
+    }
+  ]
+}

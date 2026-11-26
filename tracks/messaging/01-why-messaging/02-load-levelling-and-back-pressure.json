@@ -1,0 +1,303 @@
+{
+  "title": "Load levelling and back-pressure",
+  "summary": "A queue turns a spike into a delay; a bounded queue tells the producer to slow down. Drain time, overflow policies and what RabbitMQ and Kafka do when full.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A queue flattens the spike",
+      "body": [
+        "Consumers work at a steady rate. Arrivals do not. The queue sits between them and stores the difference:",
+        "",
+        "```text",
+        "arrivals/s     50   300   300    50    50    50",
+        "             ───────────────────────────────────>  [ queue ]  ──>  workers: 100/s",
+        "depth after     0   200   400   350   300   250",
+        "```",
+        "",
+        "This is **load levelling**: the error rate stays at zero, the spike becomes a **delay** that drains later.",
+        "The question changes from \"can billing handle 300/s?\" to \"how long may billing be behind?\". Step through it.",
+        "",
+        "> **See it:** open **Labs → Messaging builder → RabbitMQ** and play the challenge *Drain the backlog*."
+      ],
+      "trace": {
+        "code": [
+          "int[] arrivals = { 50, 300, 300, 50, 50, 50 };",
+          "var rate = 100;",
+          "var depth = 0;",
+          "foreach (var a in arrivals)",
+          "{",
+          "    depth += a;",
+          "    depth -= Math.Min(depth, rate);",
+          "    Console.WriteLine($\"in {a,3}  depth {depth}\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Workers consume 120 messages per tick. What does this print?",
+      "code": [
+        "int[] arrivals = { 100, 400, 100, 0 };",
+        "var depth = 0;",
+        "foreach (var a in arrivals)",
+        "{",
+        "    depth += a;",
+        "    depth -= Math.Min(depth, 120);",
+        "    Console.Write(depth + \" \");",
+        "}"
+      ],
+      "answer": "0 280 260 140",
+      "explain": "After the spike the backlog drains by only 120 minus the arrival rate per tick. With 100 arriving per tick against 120 consumed, it shrinks by just 20 a tick."
+    },
+    {
+      "type": "learn",
+      "title": "Drain time: how far behind is too far?",
+      "body": [
+        "A backlog drains at the **difference** between the consume rate and the arrival rate:",
+        "",
+        "```text",
+        "drain time = backlog / (consume rate − arrival rate)",
+        "48,000 messages, workers 800/s, arrivals 600/s  →  48,000 / 200 = 240 s",
+        "```",
+        "",
+        "If consumers are only as fast as arrivals, the backlog **never** drains, it just stops growing. That is why",
+        "\"add one consumer\" often does nothing visible: the first extra consumer only catches up with arrivals.",
+        "",
+        "Seniors watch the **age of the oldest message** (or consumer lag in time) next to the depth: 50,000 messages",
+        "can be fine for analytics and a disaster for password-reset emails."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** The email queue has been growing for two hours. Arrivals are steady at 600/s and the two",
+        "consumers ack about 400/s together (200/s each). Traffic is expected to stay at 600/s. How many consumers of",
+        "the same speed do you need to drain the backlog within about 5 minutes?"
+      ],
+      "code": [
+        "$ rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers",
+        "Timeout: 60.0 seconds ...",
+        "Listing queues for vhost / ...",
+        "name            messages_ready  messages_unacknowledged  consumers",
+        "email.send      48210           40                       2",
+        "billing         0               3                        4"
+      ],
+      "options": [
+        "4",
+        "3",
+        "6",
+        "241"
+      ],
+      "answer": 0,
+      "explain": [
+        "3 consumers ack exactly 600/s: the backlog stops growing but never shrinks. 4 consumers give 800/s, a net",
+        "200/s, so 48,210 messages drain in about 241 s. 6 would also work but costs 50 % more for no requirement."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Back-pressure: when the buffer is full",
+      "body": [
+        "A buffer is not infinite. An **unbounded** queue just moves the outage: the broker runs out of memory or",
+        "disk later and stops everyone. Decide what happens when it is full:",
+        "",
+        "| Where | Setting | What happens when full |",
+        "|---|---|---|",
+        "| RabbitMQ queue | `x-max-length` + `x-overflow: drop-head` (default) | the **oldest** message is dropped (or dead-lettered if a DLX is set) |",
+        "| RabbitMQ queue | `x-overflow: reject-publish` | the publish is **nacked**: with confirms on, the publisher knows |",
+        "| RabbitMQ broker | memory / disk alarm (`vm_memory_high_watermark`) | every publishing connection is **blocked** (`connection.blocked`) |",
+        "| Kafka topic | `retention.ms`, `retention.bytes` | old segments are deleted, **read or not**: no length limit, a time limit |",
+        "| Confluent.Kafka producer | `QueueBufferingMaxMessages` | the local buffer is full: `ProduceAsync` throws `ProduceException` with `ErrorCode.Local_QueueFull` |",
+        "| HTTP edge | `429 Too Many Requests` + `Retry-After` | the caller slows down before anything is queued |",
+        "",
+        "**Back-pressure** means the slow end can push back on the fast end instead of silently losing work.",
+        "Prefer a visible refusal (nack, 429) over a silent drop."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Declare the email queue so that it holds at most 100,000 messages and the **publisher hears about it** (a nack) instead of old messages being thrown away.",
+      "code": [
+        "await channel.QueueDeclareAsync(\"email.send\", durable: true, exclusive: false, autoDelete: false,",
+        "    arguments: new Dictionary<string, object?>",
+        "    {",
+        "        [\"x-queue-type\"] = \"quorum\",",
+        "        [\"__1__\"] = 100_000,",
+        "        [\"x-overflow\"] = \"__2__\",",
+        "    });"
+      ],
+      "blanks": [
+        "x-max-length",
+        "reject-publish"
+      ],
+      "bank": [
+        "x-message-ttl",
+        "drop-head",
+        "x-max-priority",
+        "block"
+      ],
+      "explain": "`drop-head` is the default and silently loses the oldest messages. `reject-publish` nacks new publishes, which the publisher sees as a failed confirm and can slow down, return 503, or alert on."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each limit to what the producer or consumer experiences.",
+      "pairs": [
+        [
+          "`x-overflow: drop-head`",
+          "The oldest message disappears (or goes to the DLX)"
+        ],
+        [
+          "`x-overflow: reject-publish`",
+          "The publisher's confirm comes back as a nack"
+        ],
+        [
+          "RabbitMQ memory alarm",
+          "Every publishing connection is blocked until memory drops"
+        ],
+        [
+          "Kafka `retention.ms`",
+          "Old records are deleted whether a group has read them or not"
+        ],
+        [
+          "`ErrorCode.Local_QueueFull`",
+          "The client's own buffer is full and `ProduceAsync` throws"
+        ]
+      ],
+      "explain": "Each limit is a choice between losing data and slowing the producer. Know which one each of your queues makes."
+    },
+    {
+      "type": "code",
+      "title": "How long to drain?",
+      "prompt": [
+        "Write `int DrainSeconds(int backlog, int consumePerSec, int arrivePerSec)`:",
+        "",
+        "- `0` if the backlog is already `0`;",
+        "- `-1` if consumers are not faster than arrivals (it never drains);",
+        "- otherwise the seconds to drain, **rounded up**.",
+        "",
+        "`DrainSeconds(48210, 800, 600)` is `242` (241.05 rounded up)."
+      ],
+      "starter": [
+        "int DrainSeconds(int backlog, int consumePerSec, int arrivePerSec)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int DrainSeconds(int backlog, int consumePerSec, int arrivePerSec)",
+        "{",
+        "    if (backlog == 0) return 0;",
+        "    var net = consumePerSec - arrivePerSec;",
+        "    if (net <= 0) return -1;",
+        "    return (backlog + net - 1) / net;",
+        "}"
+      ],
+      "hints": [
+        "The net drain rate is `consumePerSec - arrivePerSec`.",
+        "Round up with integers: `(backlog + net - 1) / net`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"48210 at a net 200/s\", 242, DrainSeconds(48210, 800, 600));",
+        "Dojo.Eq(\"exact division\", 240, DrainSeconds(48000, 800, 600));",
+        "Dojo.Eq(\"consumers only keep up: never\", -1, DrainSeconds(48000, 600, 600));",
+        "Dojo.Eq(\"consumers slower: never\", -1, DrainSeconds(10, 100, 150));",
+        "Dojo.Eq(\"empty queue: already drained\", 0, DrainSeconds(0, 100, 150));",
+        "Dojo.Eq(\"no arrivals\", 5, DrainSeconds(500, 100, 0));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A bounded, levelling queue",
+      "prompt": [
+        "Model a bounded queue with an overflow policy, one tick at a time.",
+        "",
+        "Write a class `LevelingQueue`:",
+        "",
+        "- `LevelingQueue(int consumePerTick, int maxLength, string overflow)`: `overflow` is `\"drop-head\"` or",
+        "  `\"reject-publish\"`; anything else throws `ArgumentException`.",
+        "- `int Tick(int arrivals)`: first offer the arriving messages one by one. If the queue already holds",
+        "  `maxLength` messages, `\"reject-publish\"` refuses the new one (count it in `Rejected`) and `\"drop-head\"`",
+        "  drops the oldest to make room (count it in `Dropped`). Then the consumers take up to `consumePerTick`",
+        "  messages (count them in `Consumed`). Return the depth after consuming.",
+        "- `int Rejected`, `int Dropped`, `int Consumed`, `int Depth` (get-only).",
+        "",
+        "With `new LevelingQueue(100, 300, \"reject-publish\")`, ticks of 50, 300, 300, 50 return 0, 200, 200, 150 and",
+        "200 publishes are rejected in the third tick."
+      ],
+      "starter": [
+        "class LevelingQueue",
+        "{",
+        "    public LevelingQueue(int consumePerTick, int maxLength, string overflow) { }",
+        "",
+        "    public int Rejected { get; }",
+        "    public int Dropped { get; }",
+        "    public int Consumed { get; }",
+        "    public int Depth { get; }",
+        "",
+        "    public int Tick(int arrivals) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class LevelingQueue",
+        "{",
+        "    readonly int consumePerTick;",
+        "    readonly int maxLength;",
+        "    readonly bool rejectPublish;",
+        "",
+        "    public LevelingQueue(int consumePerTick, int maxLength, string overflow)",
+        "    {",
+        "        if (overflow != \"drop-head\" && overflow != \"reject-publish\")",
+        "            throw new ArgumentException($\"unknown overflow '{overflow}'\", nameof(overflow));",
+        "        this.consumePerTick = consumePerTick;",
+        "        this.maxLength = maxLength;",
+        "        rejectPublish = overflow == \"reject-publish\";",
+        "    }",
+        "",
+        "    public int Rejected { get; private set; }",
+        "    public int Dropped { get; private set; }",
+        "    public int Consumed { get; private set; }",
+        "    public int Depth { get; private set; }",
+        "",
+        "    public int Tick(int arrivals)",
+        "    {",
+        "        for (var i = 0; i < arrivals; i++)",
+        "        {",
+        "            if (Depth < maxLength) Depth++;",
+        "            else if (rejectPublish) Rejected++;",
+        "            else Dropped++;",
+        "        }",
+        "        var taken = Math.Min(Depth, consumePerTick);",
+        "        Depth -= taken;",
+        "        Consumed += taken;",
+        "        return Depth;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Loop over the arrivals: `if (Depth < maxLength) Depth++; else ...`.",
+        "Consume after offering: `var taken = Math.Min(Depth, consumePerTick);`."
+      ],
+      "template": [
+        "var dojoR = new LevelingQueue(100, 300, \"reject-publish\");",
+        "Dojo.Eq(\"quiet tick drains fully\", 0, dojoR.Tick(50));",
+        "Dojo.Eq(\"spike fits under the limit\", 200, dojoR.Tick(300));",
+        "Dojo.Eq(\"second spike hits the limit\", 200, dojoR.Tick(300));",
+        "Dojo.Eq(\"then it drains\", 150, dojoR.Tick(50));",
+        "Dojo.Eq(\"200 publishes were rejected\", 200, dojoR.Rejected);",
+        "Dojo.Eq(\"reject-publish drops nothing\", 0, dojoR.Dropped);",
+        "Dojo.Eq(\"consumed so far\", 350, dojoR.Consumed);",
+        "Dojo.Eq(\"every message is accounted for\", 700, dojoR.Consumed + dojoR.Depth + dojoR.Rejected + dojoR.Dropped);",
+        "var dojoD = new LevelingQueue(100, 300, \"drop-head\");",
+        "foreach (var dojoA in new[] { 50, 300, 300, 50 }) dojoD.Tick(dojoA);",
+        "Dojo.Eq(\"drop-head loses the oldest instead\", 200, dojoD.Dropped);",
+        "Dojo.Eq(\"drop-head never rejects\", 0, dojoD.Rejected);",
+        "Dojo.Eq(\"depth is the same either way\", 150, dojoD.Depth);",
+        "Dojo.Throws<ArgumentException>(\"unknown overflow policy\", () => new LevelingQueue(1, 1, \"block\"));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

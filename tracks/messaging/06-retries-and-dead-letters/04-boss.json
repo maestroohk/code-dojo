@@ -1,0 +1,205 @@
+{
+  "title": "Boss: the payments poison loop",
+  "summary": "Classify failures from real log lines, route retries through TTL tiers by reading x-death, and plan a safe DLQ drain.",
+  "minutes": 35,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "INC-6120: payments-consumer pinned at 100 % CPU",
+      "body": [
+        "**INC-6120 (SEV-2)** · opened 10:05 · service: payments-consumer · queue: `payments` (quorum)",
+        "",
+        "> Since 09:58 one message is redelivered thousands of times a minute and 41,000 payments are stuck behind it.",
+        "> The consumer requeues on **every** exception. A tax-service blip at 09:40 also left transient failures",
+        "> mixed in. The parking lot already holds 312 messages from last week that nobody looked at.",
+        "",
+        "```text",
+        "10:02:11.004 WRN payments-consumer MessageId=pay-381 System.Text.Json.JsonException: 'x' is an invalid start of a value.",
+        "10:02:11.210 WRN payments-consumer MessageId=pay-377 System.TimeoutException: tax-svc did not answer in 2000 ms",
+        "```",
+        "",
+        "**Acceptance criteria**",
+        "",
+        "1. Classify each failure from its log line as transient or permanent.",
+        "2. Route every failure: permanent to the parking lot; transient to the next TTL tier",
+        "   (`payments.retry.10s`, `payments.retry.1m`, `payments.retry.10m`) based on the `x-death` history, and to",
+        "   the parking lot when the tiers are used up.",
+        "3. Produce a drain plan for the parking lot: redrive what the fixes cover, in batches, and list what stays."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Classify from the log line",
+      "prompt": [
+        "Write `string Classify(string logLine)` returning `\"transient\"`, `\"permanent\"` or `\"unknown\"`.",
+        "",
+        "Find the **first** word in the line that ends in `Exception` (a run of letters, digits and dots, such as",
+        "`System.Text.Json.JsonException`), and use its simple name (after the last `.`):",
+        "",
+        "- permanent: `JsonException`, `FormatException`, `ValidationException`, `NullReferenceException`;",
+        "- transient: `TimeoutException`, `TaskCanceledException`, `HttpRequestException`, `SocketException`;",
+        "- `SqlException`: transient if the line contains `1205` (deadlock victim), otherwise permanent;",
+        "- anything else, or no exception in the line: `\"unknown\"`."
+      ],
+      "starter": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "string Classify(string logLine)",
+        "{",
+        "    return \"unknown\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "string Classify(string logLine)",
+        "{",
+        "    var m = Regex.Match(logLine, @\"[\\w.]*Exception\\b\");",
+        "    if (!m.Success) return \"unknown\";",
+        "    var name = m.Value[(m.Value.LastIndexOf('.') + 1)..];",
+        "    return name switch",
+        "    {",
+        "        \"JsonException\" or \"FormatException\" or \"ValidationException\" or \"NullReferenceException\" => \"permanent\",",
+        "        \"TimeoutException\" or \"TaskCanceledException\" or \"HttpRequestException\" or \"SocketException\" => \"transient\",",
+        "        \"SqlException\" => logLine.Contains(\"1205\") ? \"transient\" : \"permanent\",",
+        "        _ => \"unknown\",",
+        "    };",
+        "}"
+      ],
+      "hints": [
+        "`Regex.Match(logLine, @\"[\\w.]*Exception\\b\")` finds the first exception name.",
+        "Take the part after the last `.` and switch on it."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"JSON is permanent\", \"permanent\", Classify(\"10:02:11.004 WRN payments-consumer MessageId=pay-381 System.Text.Json.JsonException: 'x' is an invalid start of a value.\"));",
+        "Dojo.Eq(\"a timeout is transient\", \"transient\", Classify(\"10:02:11.210 WRN payments-consumer MessageId=pay-377 System.TimeoutException: tax-svc did not answer in 2000 ms\"));",
+        "Dojo.Eq(\"deadlock victim is transient\", \"transient\", Classify(\"ERR Microsoft.Data.SqlClient.SqlException (0x80131904): Transaction (Process ID 61) was deadlocked ... Error Number:1205\"));",
+        "Dojo.Eq(\"other SQL errors are permanent\", \"permanent\", Classify(\"ERR Microsoft.Data.SqlClient.SqlException (0x80131904): Invalid column name 'Amount'. Error Number:207\"));",
+        "Dojo.Eq(\"an unknown exception\", \"unknown\", Classify(\"ERR MessageId=pay-9 Acme.Payments.LedgerLockedException: busy\"));",
+        "Dojo.Eq(\"no exception at all\", \"unknown\", Classify(\"INF MessageId=pay-1 processed in 41 ms\"));",
+        "Dojo.Eq(\"the first exception wins\", \"transient\", Classify(\"WRN System.Net.Http.HttpRequestException: 503 ---> System.Text.Json.JsonException\"));",
+        "Dojo.Eq(\"a bug is permanent until a deploy\", \"permanent\", Classify(\"ERR System.NullReferenceException: Object reference not set at PaymentMapper.Map\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Route through the TTL tiers",
+      "prompt": [
+        "Write `string Route(IDictionary<string, object?>? headers, string kind, string[] tiers, string parkingLot)`",
+        "returning the queue to send the failed message to:",
+        "",
+        "- `kind == \"permanent\"` → `parkingLot`;",
+        "- otherwise (`\"transient\"` or `\"unknown\"`): `retries` = the **sum** of the `count` values of the `x-death`",
+        "  entries with `reason == \"expired\"` whose `queue` is one of `tiers`. If `retries < tiers.Length` return",
+        "  `tiers[retries]`, else `parkingLot`.",
+        "",
+        "As before, `queue` and `reason` may be `byte[]` (UTF-8) or `string`, `count` is a `long`, and headers or",
+        "`x-death` may be missing.",
+        "",
+        "```text",
+        "no x-death                                → payments.retry.10s",
+        "x-death: [payments.retry.10s expired ×1]  → payments.retry.1m",
+        "x-death: [10s ×1, 1m ×1, 10m ×1]          → payments.parking-lot",
+        "```"
+      ],
+      "starter": [
+        "string Route(IDictionary<string, object?>? headers, string kind, string[] tiers, string parkingLot)",
+        "{",
+        "    return parkingLot;",
+        "}"
+      ],
+      "solution": [
+        "string Route(IDictionary<string, object?>? headers, string kind, string[] tiers, string parkingLot)",
+        "{",
+        "    if (kind == \"permanent\") return parkingLot;",
+        "    long retries = 0;",
+        "    if (headers is not null && headers.TryGetValue(\"x-death\", out var raw) && raw is IEnumerable<object> deaths)",
+        "    {",
+        "        foreach (var item in deaths)",
+        "        {",
+        "            if (item is not IDictionary<string, object?> d) continue;",
+        "            var queue = Text(d, \"queue\");",
+        "            if (Text(d, \"reason\") == \"expired\" && queue is not null && tiers.Contains(queue)",
+        "                && d.TryGetValue(\"count\", out var c) && c is long n)",
+        "                retries += n;",
+        "        }",
+        "    }",
+        "    return retries < tiers.Length ? tiers[retries] : parkingLot;",
+        "",
+        "    static string? Text(IDictionary<string, object?> d, string key) =>",
+        "        d.TryGetValue(key, out var v) ? v switch { byte[] b => Encoding.UTF8.GetString(b), string s => s, _ => null } : null;",
+        "",
+        "}"
+      ],
+      "hints": [
+        "Reuse the `Text` helper from the x-death fix: `byte[]` or `string`, anything else is null.",
+        "Sum the counts of matching entries into a `long retries`, then index `tiers[retries]` if it is in range."
+      ],
+      "template": [
+        "{{CODE}}",
+        "byte[] DojoBytes(string s) => Encoding.UTF8.GetBytes(s);",
+        "Dictionary<string, object?> DojoDeath(string queue, string reason, long count) =>",
+        "    new() { [\"queue\"] = DojoBytes(queue), [\"reason\"] = DojoBytes(reason), [\"count\"] = count };",
+        "var dojoTiers = new[] { \"payments.retry.10s\", \"payments.retry.1m\", \"payments.retry.10m\" };",
+        "const string DojoPark = \"payments.parking-lot\";",
+        "Dojo.Eq(\"first failure goes to the first tier\", \"payments.retry.10s\", Route(null, \"transient\", dojoTiers, DojoPark));",
+        "Dojo.Eq(\"permanent is parked at once\", DojoPark, Route(null, \"permanent\", dojoTiers, DojoPark));",
+        "var dojoOne = new Dictionary<string, object?> { [\"x-death\"] = new List<object?> { DojoDeath(\"payments.retry.10s\", \"expired\", 1), DojoDeath(\"payments\", \"rejected\", 1) } };",
+        "Dojo.Eq(\"after one retry: the next tier\", \"payments.retry.1m\", Route(dojoOne, \"transient\", dojoTiers, DojoPark));",
+        "var dojoAll = new Dictionary<string, object?> { [\"x-death\"] = new List<object?> { DojoDeath(\"payments.retry.10m\", \"expired\", 1), DojoDeath(\"payments.retry.1m\", \"expired\", 1), DojoDeath(\"payments.retry.10s\", \"expired\", 1), DojoDeath(\"payments\", \"rejected\", 3) } };",
+        "Dojo.Eq(\"tiers used up: parking lot\", DojoPark, Route(dojoAll, \"transient\", dojoTiers, DojoPark));",
+        "Dojo.Eq(\"unknown errors are retried like transient ones\", \"payments.retry.10m\", Route(new Dictionary<string, object?> { [\"x-death\"] = new List<object?> { DojoDeath(\"payments.retry.10s\", \"expired\", 2) } }, \"unknown\", dojoTiers, DojoPark));",
+        "var dojoText = new Dictionary<string, object?> { [\"x-death\"] = new List<object?> { new Dictionary<string, object?> { [\"queue\"] = \"payments.retry.10s\", [\"reason\"] = \"expired\", [\"count\"] = 1L } } };",
+        "Dojo.Eq(\"string header values\", \"payments.retry.1m\", Route(dojoText, \"transient\", dojoTiers, DojoPark));",
+        "var dojoOther = new Dictionary<string, object?> { [\"x-death\"] = new List<object?> { DojoDeath(\"refunds.retry.10s\", \"expired\", 5) } };",
+        "Dojo.Eq(\"other queues' history is ignored\", \"payments.retry.10s\", Route(dojoOther, \"transient\", dojoTiers, DojoPark));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Plan the parking-lot drain",
+      "prompt": [
+        "Write `List<string> DrainPlan(List<(string Id, string Exception)> parked, ISet<string> fixedExceptions, int batchSize)`:",
+        "",
+        "- the messages whose `Exception` is in `fixedExceptions` are redriven, in parking-lot order, in batches of",
+        "  `batchSize`: one line per batch, `\"batch {n}: {ids}\"` with the ids joined by `\", \"` (`n` from 1);",
+        "- then one line for what stays: `\"keep: {id} ({exception}), ...\"` in parking-lot order, or `\"keep: none\"`.",
+        "",
+        "```text",
+        "DrainPlan([pay-1 Json, pay-2 Timeout, pay-3 Json, pay-4 Json], {Json}, 2)",
+        "→ [\"batch 1: pay-1, pay-3\", \"batch 2: pay-4\", \"keep: pay-2 (Timeout)\"]",
+        "```"
+      ],
+      "starter": [
+        "List<string> DrainPlan(List<(string Id, string Exception)> parked, ISet<string> fixedExceptions, int batchSize)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> DrainPlan(List<(string Id, string Exception)> parked, ISet<string> fixedExceptions, int batchSize)",
+        "{",
+        "    var plan = parked.Where(p => fixedExceptions.Contains(p.Exception)).Select(p => p.Id)",
+        "        .Chunk(batchSize).Select((ids, i) => $\"batch {i + 1}: {string.Join(\", \", ids)}\").ToList();",
+        "    var keep = parked.Where(p => !fixedExceptions.Contains(p.Exception)).Select(p => $\"{p.Id} ({p.Exception})\").ToList();",
+        "    plan.Add(keep.Count == 0 ? \"keep: none\" : $\"keep: {string.Join(\", \", keep)}\");",
+        "    return plan;",
+        "}"
+      ],
+      "hints": [
+        "`Chunk(batchSize)` splits a sequence into batches.",
+        "Build the batch lines first, then append the single keep line."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoParked = new List<(string, string)> { (\"pay-1\", \"JsonException\"), (\"pay-2\", \"TimeoutException\"), (\"pay-3\", \"JsonException\"), (\"pay-4\", \"JsonException\"), (\"pay-5\", \"LedgerLockedException\") };",
+        "Dojo.Eq(\"redrive the JSON fix in batches of 2\", new List<string> { \"batch 1: pay-1, pay-3\", \"batch 2: pay-4\", \"keep: pay-2 (TimeoutException), pay-5 (LedgerLockedException)\" }, DrainPlan(dojoParked, new HashSet<string> { \"JsonException\" }, 2));",
+        "Dojo.Eq(\"two fixes, one big batch\", new List<string> { \"batch 1: pay-1, pay-2, pay-3, pay-4\", \"keep: pay-5 (LedgerLockedException)\" }, DrainPlan(dojoParked, new HashSet<string> { \"JsonException\", \"TimeoutException\" }, 10));",
+        "Dojo.Eq(\"nothing fixed yet\", new List<string> { \"keep: pay-1 (JsonException), pay-2 (TimeoutException), pay-3 (JsonException), pay-4 (JsonException), pay-5 (LedgerLockedException)\" }, DrainPlan(dojoParked, new HashSet<string>(), 3));",
+        "Dojo.Eq(\"an empty parking lot\", new List<string> { \"keep: none\" }, DrainPlan(new List<(string, string)>(), new HashSet<string> { \"JsonException\" }, 3));"
+      ]
+    }
+  ]
+}

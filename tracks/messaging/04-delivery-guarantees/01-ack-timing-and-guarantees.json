@@ -1,0 +1,369 @@
+{
+  "title": "Ack timing decides the guarantee",
+  "summary": "At-most-once, at-least-once and exactly-once come down to one question: do you acknowledge before or after the work?",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three guarantees, one decision",
+      "body": [
+        "Every broker hands you a message and waits for a signal: an **ack** (RabbitMQ `basic.ack`) or a **committed",
+        "offset** (Kafka). Where you put that signal relative to the work decides what happens when the process dies",
+        "half-way, and processes always die half-way eventually: a deploy, an OOM kill, a node drain.",
+        "",
+        "```text",
+        "                    receive ──► work ──► ack          crash between work and ack",
+        "at-least-once:      ════════════════════════►         → redelivered → work runs TWICE",
+        "",
+        "                    receive ──► ack ──► work          crash between ack and work",
+        "at-most-once:       ════════════════════════►         → broker forgot it → work NEVER runs",
+        "",
+        "\"exactly-once\":     at-least-once delivery + an effect that is safe to repeat (idempotent)",
+        "```",
+        "",
+        "- **At-most-once** is fine for metrics samples or presence pings, where a gap is cheaper than a duplicate.",
+        "- **At-least-once** is the default for anything that matters (orders, payments). Duplicates are certain, so",
+        "  the consumer must make them harmless. The rest of this module is about how.",
+        "- **Exactly-once** is not a delivery mode a network can give you. It is an *end-to-end* property you build.",
+        "",
+        "> **See it:** open **Labs → Messaging builder → Kafka** and play the challenge *Committed, then crashed*, then",
+        "> **Labs → Messaging builder → RabbitMQ** and play *Auto-ack ate my order*."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which guarantee does each setup give you when the consumer or producer crashes at the worst moment?",
+      "buckets": [
+        "At-most-once (can lose)",
+        "At-least-once (can duplicate)"
+      ],
+      "items": [
+        [
+          "RabbitMQ `BasicConsumeAsync(\"billing\", autoAck: true, consumer)`",
+          0
+        ],
+        [
+          "RabbitMQ: `BasicAckAsync` after the handler committed its database transaction",
+          1
+        ],
+        [
+          "Kafka: `consumer.Commit(cr)` *before* calling `Handle`",
+          0
+        ],
+        [
+          "Kafka: `EnableAutoOffsetStore = false` and `StoreOffset(cr)` *after* `Handle`",
+          1
+        ],
+        [
+          "A producer that retries a send whose ack timed out (no idempotence)",
+          1
+        ],
+        [
+          "A producer that fires and forgets: no confirms, no retries",
+          0
+        ]
+      ],
+      "explain": [
+        "With `autoAck: true` RabbitMQ considers the message delivered the moment it is written to the socket: a crash",
+        "loses it. Committing before the work is the same mistake in Kafka. Acking after the work, or retrying a send whose",
+        "outcome you do not know, always errs on the side of a duplicate."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Watch a crash produce a duplicate",
+      "body": [
+        "Kafka's committed offset is \"the **next** offset to read\". This consumer processes, *then* commits, and crashes",
+        "right after charging `m2`. Step through it and watch `committed` and `charged`: the restart begins at the",
+        "committed offset, so `m2` is charged a second time. Nothing was lost; something was repeated."
+      ],
+      "trace": {
+        "code": [
+          "var log = new[] { \"m1\", \"m2\", \"m3\" };",
+          "int committed = 0;",
+          "var charged = new List<string>();",
+          "// run 1: process, then commit; the pod dies right after charging m2",
+          "for (int i = committed; i < log.Length; i++)",
+          "{",
+          "    charged.Add(log[i]);",
+          "    if (log[i] == \"m2\") break;",
+          "    committed = i + 1;",
+          "}",
+          "// run 2: the restarted pod resumes at the committed offset",
+          "for (int i = committed; i < log.Length; i++)",
+          "{",
+          "    charged.Add(log[i]);",
+          "    committed = i + 1;",
+          "}",
+          "Console.WriteLine(string.Join(\",\", charged));"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Now the commit moves **before** the work, and the crash lands between the commit and the charge. What does this print?",
+      "code": [
+        "var log = new[] { \"m1\", \"m2\", \"m3\" };",
+        "int committed = 0;",
+        "var charged = new List<string>();",
+        "for (int i = committed; i < log.Length; i++)",
+        "{",
+        "    committed = i + 1;",
+        "    if (log[i] == \"m2\") break;   // crash after the commit, before charging",
+        "    charged.Add(log[i]);",
+        "}",
+        "for (int i = committed; i < log.Length; i++)",
+        "{",
+        "    committed = i + 1;",
+        "    charged.Add(log[i]);",
+        "}",
+        "Console.WriteLine(string.Join(\",\", charged));"
+      ],
+      "answer": "m1,m3",
+      "explain": [
+        "The offset for `m2` was committed, so the restart begins at `m3`: `m2` is silently gone. That is at-most-once,",
+        "and it is exactly what `EnableAutoCommit = true` with the default `EnableAutoOffsetStore = true` can do to you:",
+        "offsets are stored as soon as `Consume` returns and committed in the background every 5 seconds, whether or not",
+        "your handler finished."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A RabbitMQ billing consumer acks **after** its database commit. The pod is OOM-killed after the commit but before `BasicAckAsync` reaches the broker. What happens next?",
+      "options": [
+        "The channel closes, the unacked message goes back to the queue and is delivered again with `ea.Redelivered == true`; without an idempotent handler the customer is charged twice",
+        "The message is lost, because the database already has the row",
+        "RabbitMQ notices the database row and drops the duplicate",
+        "The message goes straight to the dead-letter exchange"
+      ],
+      "answer": 0,
+      "explain": [
+        "The broker only knows \"delivered, not acked\". When the connection drops, every unacked delivery on it is",
+        "requeued. `Redelivered` is a hint (\"this may have been seen before\"), not proof: the first delivery may have",
+        "failed before doing anything. So you cannot skip on `Redelivered` alone; you need a dedup key (lesson 3)."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The producer side duplicates too",
+      "body": [
+        "Duplicates do not only come from consumers. A producer sends, the broker writes the message, and the **ack is",
+        "lost** (timeout, connection reset). The producer cannot tell \"not written\" from \"written, ack lost\", so it retries:",
+        "",
+        "```text",
+        "producer ──send m7──► broker (writes m7)   ✗ ack lost",
+        "producer ──retry m7─► broker (writes m7 again)   → two copies in the log",
+        "```",
+        "",
+        "- **Kafka** fixes this one hop with the **idempotent producer**: the broker tracks a producer id and a sequence",
+        "  number per partition and drops a retried batch it already has. The Java client enables it by default since",
+        "  Kafka 3.0; **librdkafka and Confluent.Kafka do not**, so set it:",
+        "  `new ProducerConfig { Acks = Acks.All, EnableIdempotence = true }` (idempotence requires `acks=all`).",
+        "- **RabbitMQ** publisher confirms tell you a message is safe, but a confirm lost with the connection means you",
+        "  republish and the queue may hold two copies. RabbitMQ has no broker-side dedup, so set a stable",
+        "  `BasicProperties.MessageId` and let consumers dedup.",
+        "",
+        "Either way the rule holds: **exactly-once processing = at-least-once delivery + idempotent handling.**"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the Confluent.Kafka consumer so an offset is stored only after the order has shipped, and the pod leaves the group cleanly on shutdown.",
+      "code": [
+        "var cc = new ConsumerConfig",
+        "{",
+        "    BootstrapServers = \"kafka:9092\", GroupId = \"shipping\",",
+        "    AutoOffsetReset = AutoOffsetReset.Earliest,",
+        "    EnableAutoCommit = true, EnableAutoOffsetStore = __1__",
+        "};",
+        "using var consumer = new ConsumerBuilder<string, string>(cc).Build();",
+        "consumer.Subscribe(\"orders\");",
+        "while (!ct.IsCancellationRequested)",
+        "{",
+        "    var cr = consumer.Consume(ct);",
+        "    Ship(cr.Message.Key, cr.Message.Value);",
+        "    consumer.__2__(cr);",
+        "}",
+        "consumer.__3__();"
+      ],
+      "blanks": [
+        "false",
+        "StoreOffset",
+        "Close"
+      ],
+      "bank": [
+        "true",
+        "Seek",
+        "Assign"
+      ],
+      "explain": [
+        "With `EnableAutoOffsetStore = false` the background auto-commit only commits offsets you explicitly stored, and",
+        "you store each one after `Ship` returns. `Close()` commits the stored offsets and leaves the group, so the",
+        "rebalance is fast and the next owner starts where you stopped. Skipping `Close` (or getting SIGKILLed) means the",
+        "group waits for the session timeout and the new owner redelivers everything after the last commit."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the lost shipment",
+      "prompt": [
+        "**Symptom.** Support: \"order `o-17` was paid but never shipped\". The shipping pod's log:",
+        "",
+        "```text",
+        "10:02:11.204 INFO  shipping committed offset 2 (partition orders-0)",
+        "10:02:11.207 WARN  container shipping-7f9c restarted: OOMKilled (exit code 137)",
+        "10:02:13.880 INFO  shipping resumed at offset 2, shipped o-18",
+        "```",
+        "",
+        "`ShipmentConsumer.Run(log, crashAt)` processes the log from `Committed` to the end. The line",
+        "`if (i == crashAt) return false;` simulates the pod dying while it handles record `i` (keep that line **between**",
+        "the two actions). `crashAt = -1` means no crash. Calling `Run` again simulates the restart: `Committed` and",
+        "`Shipped` survive, like the broker's offset and the real shipments.",
+        "",
+        "Fix the order of the actions so the consumer is **at-least-once**: after a crash on `o-17` and a restart, every",
+        "order has shipped (a repeat of `o-17` is acceptable for now; lesson 3 makes it harmless). `Committed` is always",
+        "the next offset to read."
+      ],
+      "starter": [
+        "class ShipmentConsumer",
+        "{",
+        "    public int Committed { get; private set; }",
+        "    public List<string> Shipped { get; } = new();",
+        "",
+        "    public bool Run(string[] log, int crashAt)",
+        "    {",
+        "        for (int i = Committed; i < log.Length; i++)",
+        "        {",
+        "            Committed = i + 1;              // commit",
+        "            if (i == crashAt) return false; // the pod dies here",
+        "            Shipped.Add(log[i]);            // ship the order",
+        "        }",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class ShipmentConsumer",
+        "{",
+        "    public int Committed { get; private set; }",
+        "    public List<string> Shipped { get; } = new();",
+        "",
+        "    public bool Run(string[] log, int crashAt)",
+        "    {",
+        "        for (int i = Committed; i < log.Length; i++)",
+        "        {",
+        "            Shipped.Add(log[i]);            // ship the order first",
+        "            if (i == crashAt) return false; // the pod dies here",
+        "            Committed = i + 1;              // then commit the next offset to read",
+        "        }",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "The log says the offset was committed *before* the pod died. Which action has to come first so a crash cannot skip work?",
+        "Ship, then the crash check, then `Committed = i + 1`."
+      ],
+      "template": [
+        "var dojoLog = new[] { \"o-16\", \"o-17\", \"o-18\" };",
+        "var dojoC = new ShipmentConsumer();",
+        "Dojo.Eq(\"first run dies while handling o-17\", false, dojoC.Run(dojoLog, 1));",
+        "Dojo.Eq(\"after the crash the committed offset still points at o-17\", 1, dojoC.Committed);",
+        "Dojo.Eq(\"the restart runs to the end\", true, dojoC.Run(dojoLog, -1));",
+        "Dojo.Eq(\"every order shipped (o-17 twice is the at-least-once price)\", new List<string> { \"o-16\", \"o-17\", \"o-17\", \"o-18\" }, dojoC.Shipped);",
+        "Dojo.Eq(\"committed offset is the log end\", 3, dojoC.Committed);",
+        "var dojoC2 = new ShipmentConsumer();",
+        "Dojo.Eq(\"no crash: runs to the end\", true, dojoC2.Run(dojoLog, -1));",
+        "Dojo.Eq(\"no crash: each order exactly once\", new List<string> { \"o-16\", \"o-17\", \"o-18\" }, dojoC2.Shipped);",
+        "{{CODE}}"
+      ],
+      "explain": [
+        "Swapping two lines changes the guarantee from \"can lose\" to \"can duplicate\". Losing an order is invisible until a",
+        "customer calls; a duplicate can be detected and made harmless. That is why at-least-once is the default."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Simulate both guarantees",
+      "prompt": [
+        "Write `string Simulate(string[] log, bool ackAfter, int crashAt)` that replays one crash and reports what it cost.",
+        "",
+        "- **Run 1** starts at offset 0. For each record `i`:",
+        "  - `ackAfter == true`: process it, then if `i == crashAt` the pod dies, otherwise commit `i + 1`;",
+        "  - `ackAfter == false`: commit `i + 1`, then if `i == crashAt` the pod dies, otherwise process it.",
+        "- **Run 2** (the restart) starts at the committed offset and runs to the end with the same order of actions and no crash.",
+        "- `crashAt = -1` means run 1 never crashes.",
+        "",
+        "Return `\"processed {list} | duplicates {list} | lost {list}\"` where lists are joined with `,` and an empty list is `-`:",
+        "",
+        "- `processed`: every processing in the order it happened;",
+        "- `duplicates`: ids processed more than once, in log order, each once;",
+        "- `lost`: ids in the log never processed, in log order.",
+        "",
+        "```text",
+        "Simulate([\"m1\",\"m2\",\"m3\"], ackAfter: true,  crashAt: 1)  →  \"processed m1,m2,m2,m3 | duplicates m2 | lost -\"",
+        "Simulate([\"m1\",\"m2\",\"m3\"], ackAfter: false, crashAt: 1)  →  \"processed m1,m3 | duplicates - | lost m2\"",
+        "```"
+      ],
+      "starter": [
+        "string Simulate(string[] log, bool ackAfter, int crashAt)",
+        "{",
+        "    var processed = new List<string>();",
+        "    int committed = 0;",
+        "    // run 1 (may crash), then run 2 from the committed offset",
+        "",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Simulate(string[] log, bool ackAfter, int crashAt)",
+        "{",
+        "    var processed = new List<string>();",
+        "    int committed = 0;",
+        "    for (int run = 1; run <= 2; run++)",
+        "    {",
+        "        for (int i = committed; i < log.Length; i++)",
+        "        {",
+        "            bool crash = run == 1 && i == crashAt;",
+        "            if (ackAfter)",
+        "            {",
+        "                processed.Add(log[i]);",
+        "                if (crash) break;",
+        "                committed = i + 1;",
+        "            }",
+        "            else",
+        "            {",
+        "                committed = i + 1;",
+        "                if (crash) break;",
+        "                processed.Add(log[i]);",
+        "            }",
+        "        }",
+        "    }",
+        "    string Join(IEnumerable<string> xs) => xs.Any() ? string.Join(\",\", xs) : \"-\";",
+        "    var duplicates = log.Distinct().Where(id => processed.Count(p => p == id) > 1);",
+        "    var lost = log.Where(id => !processed.Contains(id));",
+        "    return $\"processed {Join(processed)} | duplicates {Join(duplicates)} | lost {Join(lost)}\";",
+        "}"
+      ],
+      "hints": [
+        "Wrap the record loop in `for (int run = 1; run <= 2; run++)` and only crash when `run == 1`.",
+        "A crash is a `break` out of the record loop; `committed` keeps whatever value it had.",
+        "`log.Distinct().Where(id => processed.Count(p => p == id) > 1)` gives the duplicates in log order."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoLog = new[] { \"m1\", \"m2\", \"m3\" };",
+        "Dojo.Eq(\"ack after, crash on m2: duplicate\", \"processed m1,m2,m2,m3 | duplicates m2 | lost -\", Simulate(dojoLog, true, 1));",
+        "Dojo.Eq(\"ack before, crash on m2: lost\", \"processed m1,m3 | duplicates - | lost m2\", Simulate(dojoLog, false, 1));",
+        "Dojo.Eq(\"no crash, ack after\", \"processed m1,m2,m3 | duplicates - | lost -\", Simulate(dojoLog, true, -1));",
+        "Dojo.Eq(\"no crash, ack before\", \"processed m1,m2,m3 | duplicates - | lost -\", Simulate(dojoLog, false, -1));",
+        "Dojo.Eq(\"ack after, crash on the last record\", \"processed m1,m2,m3,m3 | duplicates m3 | lost -\", Simulate(dojoLog, true, 2));",
+        "Dojo.Eq(\"ack before, crash on the first record\", \"processed m2,m3 | duplicates - | lost m1\", Simulate(dojoLog, false, 0));",
+        "Dojo.Eq(\"ack before, crash on the last record\", \"processed m1,m2 | duplicates - | lost m3\", Simulate(dojoLog, false, 2));",
+        "Dojo.Eq(\"empty log\", \"processed - | duplicates - | lost -\", Simulate(new string[0], true, -1));"
+      ]
+    }
+  ]
+}

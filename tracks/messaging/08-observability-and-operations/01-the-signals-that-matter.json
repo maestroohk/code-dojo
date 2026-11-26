@@ -1,0 +1,367 @@
+{
+  "title": "The signals that matter",
+  "summary": "Lag and its growth, age of the oldest message, ready versus unacked, redeliveries, dead letters, under-replicated and offline partitions, disk and memory alarms: what each one tells you and where to read it.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Where the signals live",
+      "body": [
+        "Most messaging dashboards have fifty graphs and the incident is in none of them. A short list answers the three",
+        "questions on-call asks: **are we keeping up, are we losing or looping on messages, is the broker healthy?**",
+        "",
+        "```text",
+        " producers ------------------> broker ------------------> consumers",
+        " publish rate                 queue depth: ready | unacked  deliver / ack rate",
+        " publish errors / nacks       consumer lag (records) and its GROWTH RATE",
+        " confirm latency              age of the oldest message (lag in TIME)",
+        "                              redelivery rate, DLQ depth",
+        "                              under-replicated / offline partitions, ISR shrinks",
+        "                              disk free, memory alarm, flow control (RabbitMQ)",
+        "```",
+        "",
+        "- **Lag in records** says how much is waiting; its **growth rate** says whether you are falling behind (positive)",
+        "  or recovering (negative). A lag of 50 000 that shrinks by 500/s is fine; a lag of 2 000 that grows all night is not.",
+        "- **Lag in time** (age of the oldest unprocessed message, or lag / consume rate) is what users feel: \"invoices are",
+        "  12 minutes late\". Alert on that, not on a record count that means different things per topic.",
+        "- **Ready vs unacked** (RabbitMQ): *ready* waits for a consumer; *unacked* is delivered but not yet acknowledged.",
+        "  High unacked with ready near 0 means consumers hold messages they are not finishing.",
+        "- **Redeliveries** and **DLQ depth**: a poison message loop shows up as a high redelivery rate long before the DLQ.",
+        "",
+        "> **See it:** in **Labs → Messaging builder → Kafka**, play *Lag keeps growing*."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each signal to what it tells you.",
+      "pairs": [
+        [
+          "Consumer lag growth rate > 0 for 15 minutes",
+          "Consumers process slower than producers write"
+        ],
+        [
+          "Age of the oldest message",
+          "How late the work is, in the unit users feel"
+        ],
+        [
+          "High `messages_unacknowledged`, `messages_ready` near 0",
+          "Consumers hold messages they do not finish"
+        ],
+        [
+          "Redelivery rate climbing",
+          "Messages are nacked or consumers crash, often a poison loop"
+        ],
+        [
+          "`UnderReplicatedPartitions` > 0",
+          "Followers are not keeping up with leaders"
+        ],
+        [
+          "RabbitMQ memory or disk alarm",
+          "Publishers on every connection are being blocked"
+        ]
+      ],
+      "explain": [
+        "Each of these points to a different first action: scale or fix consumers, find the poison message, or look at broker",
+        "health. That is what makes them good signals."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Lag trend and time to drain",
+      "prompt": [
+        "Write two methods behind every lag panel.",
+        "",
+        "- `double GrowthPerSecond(List<(long TimeMs, long Lag)> samples)`: the change in lag per second between the **first**",
+        "  and the **last** sample (negative when recovering); 0 with fewer than two samples.",
+        "- `double? SecondsToDrain(long lag, double producePerSec, double consumePerSec)`: how long until the lag reaches 0 at",
+        "  these rates: 0 when there is no lag, `null` when consumers are not faster than producers (it never drains),",
+        "  otherwise `lag / (consumePerSec - producePerSec)`."
+      ],
+      "starter": [
+        "double GrowthPerSecond(List<(long TimeMs, long Lag)> samples)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double? SecondsToDrain(long lag, double producePerSec, double consumePerSec)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "double GrowthPerSecond(List<(long TimeMs, long Lag)> samples)",
+        "{",
+        "    if (samples.Count < 2) return 0;",
+        "    var first = samples[0];",
+        "    var last = samples[^1];",
+        "    return (last.Lag - first.Lag) / ((last.TimeMs - first.TimeMs) / 1000.0);",
+        "}",
+        "",
+        "double? SecondsToDrain(long lag, double producePerSec, double consumePerSec)",
+        "{",
+        "    if (lag <= 0) return 0;",
+        "    if (consumePerSec <= producePerSec) return null;",
+        "    return lag / (consumePerSec - producePerSec);",
+        "}"
+      ],
+      "hints": [
+        "Use `samples[0]` and `samples[^1]`; divide the lag difference by the time difference in seconds (`/ 1000.0`).",
+        "`SecondsToDrain`: check `lag <= 0` first, then whether consumers are faster at all."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"growing 50 records per second\", 50.0, GrowthPerSecond(new List<(long TimeMs, long Lag)> { (0, 1000), (60000, 4000), (120000, 7000) }));",
+        "Dojo.Eq(\"recovering\", -100.0, GrowthPerSecond(new List<(long TimeMs, long Lag)> { (0, 9000), (30000, 6000) }));",
+        "Dojo.Eq(\"one sample has no trend\", 0.0, GrowthPerSecond(new List<(long TimeMs, long Lag)> { (0, 5) }));",
+        "Dojo.Eq(\"drains in two minutes\", (double?)120, SecondsToDrain(48000, 200, 600));",
+        "Dojo.Eq(\"no lag, nothing to drain\", (double?)0, SecondsToDrain(0, 500, 100));",
+        "Dojo.Eq(\"consumers no faster than producers: never\", (double?)null, SecondsToDrain(1000, 500, 500));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "RabbitMQ: depth, alarms and flow control",
+      "body": [
+        "What to watch on a RabbitMQ 4.x node, and where it comes from:",
+        "",
+        "| Signal | Prometheus (`rabbitmq_prometheus`, port **15692**) | CLI |",
+        "|---|---|---|",
+        "| ready / unacked per queue | `rabbitmq_queue_messages_ready`, `rabbitmq_queue_messages_unacked` | `rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers` |",
+        "| publish / deliver / ack / redeliver rates | `rabbitmq_global_messages_received_total`, `..._delivered_total`, `..._acknowledged_total`, `..._redelivered_total` (use `rate()`) | management UI |",
+        "| dead-lettered | `rabbitmq_global_messages_dead_lettered_*_total` | DLQ depth via `list_queues` |",
+        "| memory / disk alarms | `rabbitmq_alarms_memory_used_watermark`, `rabbitmq_alarms_free_disk_space_watermark` | `rabbitmq-diagnostics check_local_alarms` |",
+        "",
+        "- `/metrics` returns metrics **aggregated** per node (cheap); per-queue metrics are on `/metrics/per-object` or",
+        "  `/metrics/detailed?family=queue_coarse_metrics`. Scraping per-object on a node with 50 000 queues is expensive.",
+        "- **Memory alarm** at `vm_memory_high_watermark.relative` (0.6 of RAM by default) and **disk alarm** below",
+        "  `disk_free_limit` (default 50 MB, far too low for production) **block every publishing connection** in the cluster",
+        "  (`connection.blocked`), while consumers keep running. Producers see publishes hang, not errors.",
+        "- **Flow control**: before the alarm, RabbitMQ slows fast publishers per connection (state `flow` in the UI).",
+        "  Many connections in `flow` means the node cannot keep up with ingress.",
+        "- Long queues are the root of most RabbitMQ pain: keep them short (consumers keep up), or bound them with",
+        "  `x-max-length` + `x-overflow` and alert on depth growth."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The billing team says \"RabbitMQ is slow\". Which queue shows the actual problem, and what is it?",
+      "code": [
+        "$ rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers",
+        "name     messages_ready  messages_unacknowledged  consumers",
+        "orders   0               12                       4",
+        "billing  0               2000                     1",
+        "audit    3               0                        1"
+      ],
+      "options": [
+        "`billing`: 2 000 delivered but unacknowledged to one consumer, nothing ready: the consumer is stuck (or has a huge prefetch) and holds the messages",
+        "`orders`: 12 unacked means messages are lost",
+        "`audit`: 3 ready means the consumer is too slow",
+        "RabbitMQ itself is overloaded, because the total is over 2 000"
+      ],
+      "answer": 0,
+      "explain": [
+        "`billing` has one consumer holding 2 000 messages it has not acknowledged, and nothing waiting. Either the handler hangs",
+        "(a blocked database call, a deadlock) or prefetch is very high and the consumer is slow. Next: `rabbitmqctl",
+        "list_consumers queue_name prefetch_count ack_required`, then the consumer's thread dump and logs. Restarting the",
+        "consumer returns all 2 000 to *ready* with `Redelivered = true`, so the handler must be idempotent."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A lag of 90 000 records, consumed at 1 500 records per second. What does the dashboard's \"time lag\" panel show?",
+      "code": [
+        "long lag = 90000;",
+        "double consumedPerSec = 1500;",
+        "Console.WriteLine($\"{lag / consumedPerSec / 60:0.0} minutes behind\");"
+      ],
+      "answer": "1.0 minutes behind",
+      "explain": [
+        "90 000 / 1 500 = 60 seconds. Converting lag to time makes alerts comparable across topics: 90 000 records is a minute",
+        "here and a week on a topic that gets 10 records an hour."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Kafka: replication health and broker resources",
+      "body": [
+        "Broker metrics come over **JMX**; scrape them with the Prometheus JMX exporter java agent on every broker.",
+        "Consumer lag comes from a separate exporter (for example `kafka_exporter`: `kafka_consumergroup_lag`) or from the",
+        "consumer clients themselves.",
+        "",
+        "| JMX metric | Healthy | When it is not |",
+        "|---|---|---|",
+        "| `kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions` | 0 | a follower is down or slow: disk, network, GC, a dead broker |",
+        "| `kafka.server:type=ReplicaManager,name=UnderMinIsrPartitionCount` | 0 | `acks=all` writes to those partitions are **failing now** |",
+        "| `kafka.controller:type=KafkaController,name=OfflinePartitionsCount` | 0 | partitions without a leader: nothing can read or write them |",
+        "| `kafka.controller:type=KafkaController,name=ActiveControllerCount` | exactly 1 across the controllers | 0 = no metadata changes possible |",
+        "| `kafka.server:type=ReplicaManager,name=IsrShrinksPerSec` / `IsrExpandsPerSec` | near 0 | flapping replicas: an overloaded broker or network |",
+        "| `kafka.server:type=KafkaRequestHandlerPool,name=RequestHandlerAvgIdlePercent` | > 0.3 | the broker is saturated |",
+        "| log dir disk usage (`kafka-log-dirs.sh --describe`, node exporter) | < 70-80% | a full disk takes the log dir offline |",
+        "",
+        "The CLI equivalents for a quick look:",
+        "",
+        "```bash",
+        "kafka-topics.sh --bootstrap-server kafka:9092 --describe --under-replicated-partitions",
+        "kafka-topics.sh --bootstrap-server kafka:9092 --describe --under-min-isr-partitions",
+        "kafka-topics.sh --bootstrap-server kafka:9092 --describe --unavailable-partitions",
+        "kafka-metadata-quorum.sh --bootstrap-server kafka:9092 describe --status",
+        "```"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Healthy, or worth investigating?",
+      "buckets": [
+        "Healthy",
+        "Investigate"
+      ],
+      "items": [
+        [
+          "`ActiveControllerCount` sums to 1 across the controllers",
+          0
+        ],
+        [
+          "`UnderReplicatedPartitions` = 12 for 20 minutes",
+          1
+        ],
+        [
+          "Queue with 0 ready, 20 unacked, 1 consumer with prefetch 20",
+          0
+        ],
+        [
+          "Lag of 300 records, flat all day, on a busy topic",
+          0
+        ],
+        [
+          "`IsrShrinksPerSec` spikes every few minutes",
+          1
+        ],
+        [
+          "Redelivered rate is 30% of the deliver rate",
+          1
+        ],
+        [
+          "`OfflinePartitionsCount` = 0",
+          0
+        ],
+        [
+          "Several publishing connections stuck in state `flow`",
+          1
+        ]
+      ],
+      "explain": [
+        "A small, **stable** lag and a full prefetch window are normal steady state. Trends and flapping are what matter:",
+        "replicas falling out of sync, redeliveries (a poison loop or crashing consumers) and flow control (a node at its",
+        "ingress limit)."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Triage the CLI output",
+      "prompt": [
+        "On-call pastes the output of two commands. Turn it into findings.",
+        "",
+        "Write `List<string> Triage(string[] listQueues, string[] topicDescribe)`.",
+        "",
+        "**`rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers`**: data lines have 4 tab-separated",
+        "fields with numbers in the last three; skip every other line (the `Timeout:` and `Listing` lines and the header). For",
+        "each queue, in order, the first rule that applies:",
+        "",
+        "1. name ends with `.dlq` and holds messages (ready + unacked > 0) → `\"orders.dlq: 37 dead letters\"`",
+        "2. ready > 0 and no consumers → `\"email: 18000 ready and no consumers\"`",
+        "3. unacked >= 1000 → `\"billing: 2000 unacknowledged (consumer stuck or prefetch too high)\"`",
+        "4. ready >= 10000 → `\"search-index: backlog of 25000 ready\"`",
+        "",
+        "**`kafka-topics.sh --describe`**: partition lines contain the tokens `Partition:`, `Leader:`, `Replicas:` and `Isr:`,",
+        "each followed by its value (split on spaces and tabs); other lines are skipped. For each partition, in order:",
+        "",
+        "1. `Leader:` is `none` or `-1` → `\"orders-2: OFFLINE (no leader)\"`",
+        "2. fewer ISR members than replicas → `\"orders-1: under-replicated, isr 2 of replicas 2,3,1\"`",
+        "",
+        "Queue findings come first, then partition findings. No findings at all → `[\"all clear\"]`."
+      ],
+      "starter": [
+        "List<string> Triage(string[] listQueues, string[] topicDescribe)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Triage(string[] listQueues, string[] topicDescribe)",
+        "{",
+        "    var findings = new List<string>();",
+        "    foreach (var line in listQueues)",
+        "    {",
+        "        var f = line.Split('\\t');",
+        "        if (f.Length != 4 || !long.TryParse(f[1], out var ready) || !long.TryParse(f[2], out var unacked) || !int.TryParse(f[3], out var consumers))",
+        "            continue;",
+        "        var name = f[0];",
+        "        if (name.EndsWith(\".dlq\") && ready + unacked > 0) findings.Add($\"{name}: {ready + unacked} dead letters\");",
+        "        else if (ready > 0 && consumers == 0) findings.Add($\"{name}: {ready} ready and no consumers\");",
+        "        else if (unacked >= 1000) findings.Add($\"{name}: {unacked} unacknowledged (consumer stuck or prefetch too high)\");",
+        "        else if (ready >= 10000) findings.Add($\"{name}: backlog of {ready} ready\");",
+        "    }",
+        "    foreach (var line in topicDescribe)",
+        "    {",
+        "        var t = line.Split(new[] { ' ', '\\t' }, StringSplitOptions.RemoveEmptyEntries).ToList();",
+        "        string? Value(string key)",
+        "        {",
+        "            var i = t.IndexOf(key);",
+        "            return i >= 0 && i + 1 < t.Count ? t[i + 1] : null;",
+        "        }",
+        "        var partition = Value(\"Partition:\");",
+        "        if (partition is null || !t.Contains(\"Leader:\")) continue;",
+        "        var name = $\"{Value(\"Topic:\")}-{partition}\";",
+        "        var leader = Value(\"Leader:\");",
+        "        if (leader is \"none\" or \"-1\") { findings.Add($\"{name}: OFFLINE (no leader)\"); continue; }",
+        "        var replicas = Value(\"Replicas:\") ?? \"\";",
+        "        var isr = Value(\"Isr:\") ?? \"\";",
+        "        var isrCount = isr.EndsWith(\":\") ? 0 : isr.Split(',', StringSplitOptions.RemoveEmptyEntries).Length;",
+        "        var replicaCount = replicas.Split(',', StringSplitOptions.RemoveEmptyEntries).Length;",
+        "        if (isrCount < replicaCount) findings.Add($\"{name}: under-replicated, isr {isr} of replicas {replicas}\");",
+        "    }",
+        "    return findings.Count > 0 ? findings : new List<string> { \"all clear\" };",
+        "}"
+      ],
+      "hints": [
+        "Queues: `line.Split('\\t')`, then `long.TryParse` the three numbers; lines that do not parse are skipped.",
+        "Topics: split on spaces and tabs, then find the token `\"Leader:\"` and read the next token. An empty `Isr:` is followed by the next key (`Elr:`).",
+        "Use `if / else if` so each queue gets at most one finding."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoQueues = new[]",
+        "{",
+        "    \"Timeout: 60.0 seconds ...\",",
+        "    \"Listing queues for vhost / ...\",",
+        "    \"name\\tmessages_ready\\tmessages_unacknowledged\\tconsumers\",",
+        "    \"orders\\t0\\t12\\t4\",",
+        "    \"billing\\t0\\t2000\\t1\",",
+        "    \"email\\t18000\\t0\\t0\",",
+        "    \"orders.dlq\\t37\\t0\\t0\",",
+        "    \"search-index\\t25000\\t40\\t8\",",
+        "    \"audit\\t3\\t0\\t1\",",
+        "};",
+        "var dojoTopics = new[]",
+        "{",
+        "    \"Topic: orders\\tTopicId: 9xQ2bLwTQm2c1yK0aZ3Fqg\\tPartitionCount: 3\\tReplicationFactor: 3\\tConfigs: min.insync.replicas=2\",",
+        "    \"\\tTopic: orders\\tPartition: 0\\tLeader: 1\\tReplicas: 1,2,3\\tIsr: 1,2,3\\tElr: \\tLastKnownElr: \",",
+        "    \"\\tTopic: orders\\tPartition: 1\\tLeader: 2\\tReplicas: 2,3,1\\tIsr: 2\\tElr: \\tLastKnownElr: \",",
+        "    \"\\tTopic: orders\\tPartition: 2\\tLeader: none\\tReplicas: 3,1,2\\tIsr: \\tElr: \\tLastKnownElr: \",",
+        "};",
+        "Dojo.Eq(\"the incident output\", new List<string>",
+        "{",
+        "    \"billing: 2000 unacknowledged (consumer stuck or prefetch too high)\",",
+        "    \"email: 18000 ready and no consumers\",",
+        "    \"orders.dlq: 37 dead letters\",",
+        "    \"search-index: backlog of 25000 ready\",",
+        "    \"orders-1: under-replicated, isr 2 of replicas 2,3,1\",",
+        "    \"orders-2: OFFLINE (no leader)\",",
+        "}, Triage(dojoQueues, dojoTopics));",
+        "Dojo.Eq(\"a healthy system\", new List<string> { \"all clear\" }, Triage(new[] { \"name\\tmessages_ready\\tmessages_unacknowledged\\tconsumers\", \"orders\\t0\\t12\\t4\", \"orders.dlq\\t0\\t0\\t0\" }, new[] { dojoTopics[0], dojoTopics[1] }));",
+        "Dojo.Eq(\"empty input\", new List<string> { \"all clear\" }, Triage(new string[0], new string[0]));"
+      ]
+    }
+  ]
+}

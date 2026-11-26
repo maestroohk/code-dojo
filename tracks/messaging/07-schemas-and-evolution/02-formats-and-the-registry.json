@@ -1,0 +1,496 @@
+{
+  "title": "JSON, Avro, Protobuf and the schema registry",
+  "summary": "How the three formats trade size, typing and tooling, how a schema registry frames messages, and what each compatibility mode lets you change.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three formats, three trade-offs",
+      "body": [
+        "The same `OrderPlaced` event in each format:",
+        "",
+        "```json",
+        "// Avro schema (the reader needs the WRITER's schema to decode the bytes)",
+        "{ \"type\": \"record\", \"name\": \"OrderPlaced\", \"namespace\": \"shop.orders\",",
+        "  \"fields\": [",
+        "    { \"name\": \"orderId\",    \"type\": \"string\" },",
+        "    { \"name\": \"totalCents\", \"type\": \"long\" },",
+        "    { \"name\": \"currency\",   \"type\": \"string\", \"default\": \"EUR\" },",
+        "    { \"name\": \"coupon\",     \"type\": [\"null\", \"string\"], \"default\": null } ] }",
+        "```",
+        "",
+        "```text",
+        "// Protobuf (.proto): field NUMBERS are the identity on the wire",
+        "syntax = \"proto3\";",
+        "package shop.orders.v1;",
+        "message OrderPlaced {",
+        "  string order_id = 1;",
+        "  int64 total_cents = 2;",
+        "  string currency = 3;",
+        "  optional string coupon = 4;",
+        "}",
+        "```",
+        "",
+        "| | JSON | Avro | Protobuf |",
+        "|---|---|---|---|",
+        "| On the wire | text with every field name | binary, **no names or tags** | binary with field numbers |",
+        "| `{\"orderId\":\"o-88213\",\"totalCents\":1299,\"currency\":\"EUR\"}` | about 60 bytes | about 15 bytes | about 17 bytes |",
+        "| Read without a schema? | yes | **no**: needs the writer's schema | partly: unknown fields are skipped, names unknown |",
+        "| Typing | weak (numbers are doubles in JavaScript; no int64, no decimal) | strong, with unions and defaults | strong; proto3 scalars have no presence unless `optional` |",
+        "| Codegen in .NET | optional (`System.Text.Json`) | `Apache.Avro` + `avrogen`, or generic records | `Google.Protobuf` + `Grpc.Tools` (protoc) at build time |",
+        "| Usual home | webhooks, low-volume events, public APIs | Kafka with a schema registry | gRPC, Kafka, polyglot teams |",
+        "",
+        "JSON wins on \"anyone can read it with `jq`\". Binary formats win on size, CPU and an enforced contract."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A consumer receives an Avro-encoded record but cannot reach the schema it was written with. What can it do?",
+      "options": [
+        "Almost nothing reliable: Avro binary has no field names or tags, so the bytes only make sense with the writer's schema",
+        "Decode it with its own reader schema; Avro matches fields by name in the bytes",
+        "Skip unknown fields the way Protobuf does",
+        "Read it as JSON"
+      ],
+      "answer": 0,
+      "explain": [
+        "That is exactly why Avro on Kafka travels with a schema registry: each message carries the writer schema's **id**,",
+        "and the consumer fetches (and caches) the schema by id, then resolves it against its own reader schema."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the Avro fields so old records (written before these fields existed) can still be read.",
+      "code": [
+        "{ \"name\": \"currency\", \"type\": \"string\", \"__1__\": \"EUR\" },",
+        "{ \"name\": \"coupon\", \"type\": [\"__2__\", \"string\"], \"default\": __3__ }"
+      ],
+      "blanks": [
+        "default",
+        "null",
+        "null"
+      ],
+      "bank": [
+        "optional",
+        "required",
+        "\"\""
+      ],
+      "explain": [
+        "A reader schema field with a `default` can read data that lacks it. For an optional value use a union with `null`",
+        "**first**, because an Avro union's default must match the union's first branch."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The schema registry and compatibility modes",
+      "body": [
+        "A **schema registry** (Confluent Schema Registry, Apicurio, Azure Event Hubs schema registry, AWS Glue Schema",
+        "Registry) stores versions of each schema under a **subject** and gives each schema a global **id**.",
+        "",
+        "- Subject naming: `TopicNameStrategy` (default) gives `orders-value` and `orders-key`; `RecordNameStrategy`",
+        "  (`shop.orders.OrderPlaced`) allows several event types on one topic.",
+        "- The Confluent wire format puts 5 bytes in front of every payload:",
+        "",
+        "```text",
+        "| 00 | 00 00 01 2A | avro / protobuf / json-schema bytes ... |",
+        " magic  schema id 298 (big-endian int32)",
+        "```",
+        "",
+        "Before registering a new version the registry checks it against the subject's **compatibility mode**:",
+        "",
+        "| Mode | Guarantee | Upgrade first |",
+        "|---|---|---|",
+        "| `BACKWARD` (default) | the new schema can read data written with the previous one | **consumers** |",
+        "| `FORWARD` | data written with the new schema can be read with the previous one | **producers** |",
+        "| `FULL` | both | either, in any order |",
+        "| `*_TRANSITIVE` | the same, against **every** earlier version, not only the latest | as above |",
+        "| `NONE` | no check | you are on your own |",
+        "",
+        "Kafka keeps old records, and consumers replay them. That is why `BACKWARD` is the default, and why",
+        "`BACKWARD_TRANSITIVE` is the safer choice for topics you replay from the beginning."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A consumer inspects the first bytes of a record. What does this print?",
+      "code": [
+        "using System.Buffers.Binary;",
+        "",
+        "byte[] msg = { 0x00, 0x00, 0x00, 0x01, 0x2A, 0x0C, 0x6F, 0x2D, 0x37 };",
+        "Console.WriteLine(msg[0] == 0 ? \"magic ok\" : \"not registry framed\");",
+        "int id = BinaryPrimitives.ReadInt32BigEndian(msg.AsSpan(1, 4));",
+        "Console.WriteLine($\"schema id {id}, payload {msg.Length - 5} bytes\");"
+      ],
+      "answer": [
+        "magic ok",
+        "schema id 298, payload 4 bytes"
+      ],
+      "explain": [
+        "`0x0000012A` is 298. When a consumer logs \"Unknown magic byte!\" it is reading bytes that were not produced by a",
+        "registry serializer: a plain JSON producer on the same topic, or the wrong deserializer."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "For each compatibility mode, which side should you deploy first when you change the schema?",
+      "buckets": [
+        "Upgrade consumers first",
+        "Upgrade producers first",
+        "Either order"
+      ],
+      "items": [
+        [
+          "`BACKWARD`",
+          0
+        ],
+        [
+          "`BACKWARD_TRANSITIVE`",
+          0
+        ],
+        [
+          "`FORWARD`",
+          1
+        ],
+        [
+          "`FORWARD_TRANSITIVE`",
+          1
+        ],
+        [
+          "`FULL`",
+          2
+        ],
+        [
+          "`FULL_TRANSITIVE`",
+          2
+        ]
+      ],
+      "explain": [
+        "BACKWARD: the **new reader** handles old data, so new consumers can go out while old producers still write the old",
+        "shape. FORWARD: **old readers** handle new data, so producers can go first. FULL gives you both."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: schema registry and contracts",
+      "body": "Reach for these when a consumer cannot decode a record, and before you merge a schema change.",
+      "toolkit": [
+        {
+          "cmd": "curl -s http://schema-registry:8081/subjects | jq",
+          "what": "Which subjects exist (the registry listens on 8081 by default)."
+        },
+        {
+          "cmd": "curl -s http://schema-registry:8081/subjects/orders-value/versions/latest | jq '.version, .id'",
+          "what": "What producers write now."
+        },
+        {
+          "cmd": "curl -s http://schema-registry:8081/schemas/ids/298 | jq -r .schema",
+          "what": "The schema of the record you are staring at.",
+          "when": "Deserializers do this lookup themselves and cache schemas by id, so the registry is only on the hot path on a cache miss, but it is a dependency: run it replicated and alert on it."
+        },
+        {
+          "cmd": "curl -s -X POST -H 'Content-Type: application/vnd.schemaregistry.v1+json' --data @candidate.json 'http://schema-registry:8081/compatibility/subjects/orders-value/versions/latest?verbose=true'",
+          "what": "Would this candidate schema break the latest version?",
+          "flags": [
+            [
+              "?verbose=true",
+              "explain why it is incompatible"
+            ]
+          ],
+          "example": "{\"is_compatible\": false, \"messages\": [...]}",
+          "when": "In CI before merging a schema change."
+        },
+        {
+          "cmd": "curl -s -X PUT -H 'Content-Type: application/vnd.schemaregistry.v1+json' --data '{\"compatibility\":\"BACKWARD_TRANSITIVE\"}' http://schema-registry:8081/config/orders-value",
+          "what": "Set the compatibility mode per subject."
+        },
+        {
+          "cmd": "kafka-avro-console-consumer --bootstrap-server kafka:9092 --topic orders --from-beginning --property schema.registry.url=http://schema-registry:8081",
+          "what": "Decode Avro records.",
+          "flags": [
+            [
+              "--property schema.registry.url",
+              "where to fetch the schemas"
+            ]
+          ],
+          "when": "A Confluent Platform tool, not part of the Apache Kafka download."
+        },
+        {
+          "cmd": "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic orders --formatter-property print.headers=true",
+          "what": "See ce_type and friends."
+        },
+        {
+          "cmd": "buf lint",
+          "what": "Lint Protobuf contracts."
+        },
+        {
+          "cmd": "buf breaking --against '.git#branch=main'",
+          "what": "Fail the pull request that reuses a field number or changes a type.",
+          "flags": [
+            [
+              "--against '.git#branch=main'",
+              "compare with the contracts on main"
+            ]
+          ]
+        },
+        {
+          "cmd": "new AvroSerializerConfig { AutoRegisterSchemas = false, UseLatestVersion = true }",
+          "what": "Production producers.",
+          "flags": [
+            [
+              "AutoRegisterSchemas = false",
+              "schemas are registered by CI, not by whichever pod deploys first"
+            ],
+            [
+              "UseLatestVersion = true",
+              "serialize with the latest registered version"
+            ]
+          ],
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each registry call or setting to what it gives you.",
+      "pairs": [
+        [
+          "`/subjects/orders-value/versions/latest`",
+          "What producers write now"
+        ],
+        [
+          "`/schemas/ids/298`",
+          "The schema a record's id points at"
+        ],
+        [
+          "`/compatibility/...?verbose=true`",
+          "Whether a candidate breaks readers, and why"
+        ],
+        [
+          "`/config/orders-value`",
+          "The compatibility mode of one subject"
+        ],
+        [
+          "`AutoRegisterSchemas = false`",
+          "Only CI registers schemas"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Check a candidate schema in CI before it is merged.",
+      "code": [
+        "curl -s -X __1__ -H 'Content-Type: application/vnd.schemaregistry.v1+json' --data @candidate.json \\",
+        "  'http://schema-registry:8081/__2__/subjects/orders-value/versions/latest?verbose=true'"
+      ],
+      "blanks": [
+        "POST",
+        "compatibility"
+      ],
+      "bank": [
+        "PUT",
+        "GET",
+        "config"
+      ],
+      "explain": "The compatibility endpoint takes the candidate as a POST and answers with `is_compatible`; `PUT /config` would change the mode instead."
+    },
+    {
+      "type": "sort",
+      "prompt": "When do you reach for each one?",
+      "buckets": [
+        "Before merging a change",
+        "Debugging a record in production"
+      ],
+      "items": [
+        [
+          "`buf breaking --against '.git#branch=main'`",
+          0
+        ],
+        [
+          "`buf lint`",
+          0
+        ],
+        [
+          "`curl -X POST .../compatibility/subjects/orders-value/versions/latest`",
+          0
+        ],
+        [
+          "`curl .../schemas/ids/298 | jq -r .schema`",
+          1
+        ],
+        [
+          "`kafka-avro-console-consumer --property schema.registry.url=...`",
+          1
+        ],
+        [
+          "`kafka-console-consumer.sh --formatter-property print.headers=true`",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Can this reader read that writer?",
+      "prompt": [
+        "Model a record schema as a list of fields. The tests define:",
+        "",
+        "```csharp",
+        "record Field(string Name, string Type, bool HasDefault);",
+        "```",
+        "",
+        "Write `bool CanRead(List<Field> reader, List<Field> writer)`: can a consumer using the `reader` schema decode data",
+        "written with the `writer` schema? Use Avro's resolution rules, simplified:",
+        "",
+        "- every reader field must either exist in the writer with the **same name and type**, or (if the writer does not",
+        "  have it) have a **default**;",
+        "- one type promotion is allowed: writer `int`, reader `long`;",
+        "- writer fields the reader does not know are **ignored**."
+      ],
+      "starter": [
+        "bool CanRead(List<Field> reader, List<Field> writer)",
+        "{",
+        "    return true;",
+        "}"
+      ],
+      "solution": [
+        "bool CanRead(List<Field> reader, List<Field> writer)",
+        "{",
+        "    foreach (var r in reader)",
+        "    {",
+        "        var w = writer.FirstOrDefault(f => f.Name == r.Name);",
+        "        if (w is null)",
+        "        {",
+        "            if (!r.HasDefault) return false;   // the reader needs a value the writer never wrote",
+        "            continue;",
+        "        }",
+        "        if (w.Type != r.Type && !(w.Type == \"int\" && r.Type == \"long\")) return false;",
+        "    }",
+        "    return true;                               // writer fields the reader does not know are skipped",
+        "}"
+      ],
+      "hints": [
+        "Loop over the reader's fields and look each one up by name in the writer.",
+        "Missing in the writer: OK only if `HasDefault`. Present: types equal, or writer `int` and reader `long`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoV1 = new List<Field> { new(\"orderId\", \"string\", false), new(\"total\", \"int\", false) };",
+        "var dojoV2 = new List<Field> { new(\"orderId\", \"string\", false), new(\"total\", \"int\", false), new(\"currency\", \"string\", true) };",
+        "var dojoNeedsChannel = new List<Field> { new(\"orderId\", \"string\", false), new(\"total\", \"int\", false), new(\"channel\", \"string\", false) };",
+        "var dojoTotalLong = new List<Field> { new(\"orderId\", \"string\", false), new(\"total\", \"long\", false) };",
+        "var dojoTotalString = new List<Field> { new(\"orderId\", \"string\", false), new(\"total\", \"string\", false) };",
+        "var dojoRenamed = new List<Field> { new(\"orderId\", \"string\", false), new(\"amount\", \"int\", false) };",
+        "Dojo.Eq(\"same schema\", true, CanRead(dojoV1, dojoV1));",
+        "Dojo.Eq(\"new reader with a defaulted field reads old data\", true, CanRead(dojoV2, dojoV1));",
+        "Dojo.Eq(\"old reader ignores the new field\", true, CanRead(dojoV1, dojoV2));",
+        "Dojo.Eq(\"new required field cannot be filled from old data\", false, CanRead(dojoNeedsChannel, dojoV1));",
+        "Dojo.Eq(\"int written, long read: promotion\", true, CanRead(dojoTotalLong, dojoV1));",
+        "Dojo.Eq(\"long written, int read: no\", false, CanRead(dojoV1, dojoTotalLong));",
+        "Dojo.Eq(\"int to string: no\", false, CanRead(dojoTotalString, dojoV1));",
+        "Dojo.Eq(\"a rename is a remove plus an add\", false, CanRead(dojoRenamed, dojoV1));",
+        "",
+        "record Field(string Name, string Type, bool HasDefault);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A compatibility checker",
+      "prompt": [
+        "Now the registry's check. Write `string Check(string mode, List<List<Field>> history, List<Field> candidate)`:",
+        "",
+        "- `history` holds the registered versions, oldest first (`history[0]` is version 1).",
+        "- `mode` is `BACKWARD`, `FORWARD`, `FULL`, `NONE`, or one of the first three with `_TRANSITIVE`.",
+        "  - `BACKWARD`: `CanRead(candidate, old)`; `FORWARD`: `CanRead(old, candidate)`; `FULL`: both.",
+        "  - Without `_TRANSITIVE`, `old` is only the latest version; with it, every version, checked **from the newest",
+        "    back to the oldest**.",
+        "- Return `\"compatible\"`, or `\"incompatible with version {n}\"` for the first version that fails.",
+        "- `NONE`, or an empty history, is always `\"compatible\"`. An unknown mode throws `ArgumentException`.",
+        "",
+        "Your `CanRead` from the previous step is already in the editor."
+      ],
+      "starter": [
+        "bool CanRead(List<Field> reader, List<Field> writer)",
+        "{",
+        "    foreach (var r in reader)",
+        "    {",
+        "        var w = writer.FirstOrDefault(f => f.Name == r.Name);",
+        "        if (w is null)",
+        "        {",
+        "            if (!r.HasDefault) return false;   // the reader needs a value the writer never wrote",
+        "            continue;",
+        "        }",
+        "        if (w.Type != r.Type && !(w.Type == \"int\" && r.Type == \"long\")) return false;",
+        "    }",
+        "    return true;                               // writer fields the reader does not know are skipped",
+        "}",
+        "",
+        "",
+        "string Check(string mode, List<List<Field>> history, List<Field> candidate)",
+        "{",
+        "    return \"compatible\";",
+        "}"
+      ],
+      "solution": [
+        "bool CanRead(List<Field> reader, List<Field> writer)",
+        "{",
+        "    foreach (var r in reader)",
+        "    {",
+        "        var w = writer.FirstOrDefault(f => f.Name == r.Name);",
+        "        if (w is null)",
+        "        {",
+        "            if (!r.HasDefault) return false;   // the reader needs a value the writer never wrote",
+        "            continue;",
+        "        }",
+        "        if (w.Type != r.Type && !(w.Type == \"int\" && r.Type == \"long\")) return false;",
+        "    }",
+        "    return true;                               // writer fields the reader does not know are skipped",
+        "}",
+        "",
+        "",
+        "string Check(string mode, List<List<Field>> history, List<Field> candidate)",
+        "{",
+        "    if (mode == \"NONE\" || history.Count == 0) return \"compatible\";",
+        "    bool transitive = mode.EndsWith(\"_TRANSITIVE\");",
+        "    var baseMode = transitive ? mode[..^\"_TRANSITIVE\".Length] : mode;",
+        "    if (baseMode is not (\"BACKWARD\" or \"FORWARD\" or \"FULL\")) throw new ArgumentException($\"unknown mode {mode}\");",
+        "    int oldest = transitive ? 0 : history.Count - 1;",
+        "    for (int v = history.Count - 1; v >= oldest; v--)",
+        "    {",
+        "        bool backward = CanRead(candidate, history[v]);",
+        "        bool forward = CanRead(history[v], candidate);",
+        "        bool ok = baseMode switch { \"BACKWARD\" => backward, \"FORWARD\" => forward, _ => backward && forward };",
+        "        if (!ok) return $\"incompatible with version {v + 1}\";",
+        "    }",
+        "    return \"compatible\";",
+        "}"
+      ],
+      "hints": [
+        "Strip a trailing `_TRANSITIVE` to get the base mode, and remember whether it was there.",
+        "Loop `v` from `history.Count - 1` down to `0` (transitive) or only the last index.",
+        "`BACKWARD` asks whether the candidate can read old data: `CanRead(candidate, history[v])`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoV1 = new List<Field> { new(\"orderId\", \"string\", false), new(\"total\", \"int\", false) };",
+        "var dojoV2 = new List<Field> { new(\"orderId\", \"string\", false), new(\"total\", \"int\", false), new(\"currency\", \"string\", true) };",
+        "var dojoHistory = new List<List<Field>> { dojoV1, dojoV2 };",
+        "var dojoAddCoupon = new List<Field>(dojoV2) { new(\"coupon\", \"string\", true) };",
+        "var dojoAddRequired = new List<Field>(dojoV2) { new(\"channel\", \"string\", false) };",
+        "var dojoRemoveTotal = new List<Field> { new(\"orderId\", \"string\", false), new(\"currency\", \"string\", true) };",
+        "var dojoCurrencyRequired = new List<Field> { new(\"orderId\", \"string\", false), new(\"total\", \"int\", false), new(\"currency\", \"string\", false) };",
+        "Dojo.Eq(\"optional field with a default passes FULL\", \"compatible\", Check(\"FULL\", dojoHistory, dojoAddCoupon));",
+        "Dojo.Eq(\"new required field fails BACKWARD\", \"incompatible with version 2\", Check(\"BACKWARD\", dojoHistory, dojoAddRequired));",
+        "Dojo.Eq(\"new required field passes FORWARD\", \"compatible\", Check(\"FORWARD\", dojoHistory, dojoAddRequired));",
+        "Dojo.Eq(\"removing a required field passes BACKWARD\", \"compatible\", Check(\"BACKWARD\", dojoHistory, dojoRemoveTotal));",
+        "Dojo.Eq(\"removing a required field fails FORWARD\", \"incompatible with version 2\", Check(\"FORWARD\", dojoHistory, dojoRemoveTotal));",
+        "Dojo.Eq(\"dropping a default passes BACKWARD against v2 only\", \"compatible\", Check(\"BACKWARD\", dojoHistory, dojoCurrencyRequired));",
+        "Dojo.Eq(\"...but not BACKWARD_TRANSITIVE: v1 has no currency\", \"incompatible with version 1\", Check(\"BACKWARD_TRANSITIVE\", dojoHistory, dojoCurrencyRequired));",
+        "Dojo.Eq(\"NONE accepts anything\", \"compatible\", Check(\"NONE\", dojoHistory, dojoRemoveTotal));",
+        "Dojo.Eq(\"the first version of a subject\", \"compatible\", Check(\"BACKWARD\", new List<List<Field>>(), dojoV1));",
+        "Dojo.Throws<ArgumentException>(\"unknown mode\", () => Check(\"SIDEWAYS\", dojoHistory, dojoV2));",
+        "",
+        "record Field(string Name, string Type, bool HasDefault);"
+      ]
+    }
+  ]
+}

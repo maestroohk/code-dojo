@@ -1,0 +1,470 @@
+{
+  "title": "Capacity, runbooks and safe operations",
+  "summary": "Size disks and consumer fleets from numbers, work the classic incidents (lag, DLQ pile-up, full disk, rebalance storm) from a runbook, and run offset resets, reassignments and rolling restarts without making things worse.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Capacity planning with numbers",
+      "body": [
+        "Capacity questions have arithmetic answers. Do the sums before the incident does them for you.",
+        "",
+        "**Kafka disk per broker**",
+        "",
+        "```text",
+        "ingress 20 MB/s  x  retention 7 days (604 800 s)  x  replication factor 3  /  6 brokers",
+        "  = 6 048 000 MB = 6 048 GB of data per broker",
+        "keep disks at most ~70% full (headroom for a broker loss, rebalancing, retention lag)",
+        "  -> provision 6 048 / 0.70 = 8 640 GB per broker",
+        "```",
+        "",
+        "- Retention is **time-based but deletes whole segments**, so add one `segment.bytes` per partition on top.",
+        "- When a broker dies, its partitions' traffic moves to the others: plan for N-1 brokers carrying the load.",
+        "",
+        "**Consumers**",
+        "",
+        "```text",
+        "peak 3 000 msg/s, one consumer handles 400 msg/s  ->  ceil(3000 / 400) = 8 consumers",
+        "8 consumers need >= 8 partitions; 15 consumers on 12 partitions = 3 idle",
+        "```",
+        "",
+        "**RabbitMQ**: queues are meant to be short. Size memory and disk for the **worst backlog you accept** (a consumer",
+        "outage of N minutes x the publish rate x message size), remember that quorum queues keep every message on disk on 3",
+        "nodes, and set `disk_free_limit` to at least the size of your biggest expected backlog burst, not the 50 MB default."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "long ingressMBps = 20, retentionSec = 7 * 24 * 3600, rf = 3, brokers = 6;",
+        "var perBrokerGb = ingressMBps * retentionSec * rf / brokers / 1000;",
+        "Console.WriteLine($\"per broker: {perBrokerGb} GB, provision {perBrokerGb * 10 / 7} GB at 70% full\");"
+      ],
+      "answer": "per broker: 6048 GB, provision 8640 GB at 70% full",
+      "explain": [
+        "20 x 604 800 x 3 / 6 = 6 048 000 MB, which is 6 048 GB. Dividing by 0.7 (here `* 10 / 7` in integer maths) gives",
+        "the disk to buy so the data fills it to 70%."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A capacity calculator",
+      "prompt": [
+        "Write the two calculations from the card.",
+        "",
+        "- `long DiskPerBrokerGb(double ingressMBps, double retentionHours, int replicationFactor, int brokers, int maxFillPercent)`:",
+        "  `ingress x hours x 3600 x RF / brokers / 1000`, scaled to `maxFillPercent` (`x 100 / maxFillPercent`), rounded **up**.",
+        "  Compute it in exactly that order.",
+        "- `string ConsumerPlan(double peakPerSec, double perConsumerPerSec, int partitions)`: `need = ceil(peak / perConsumer)`,",
+        "  at least 1. If `need <= partitions` â†’ `\"run {need} consumers\"`, otherwise",
+        "  `\"need {need} consumers but only {partitions} partitions: add partitions or make the handler faster\"`."
+      ],
+      "starter": [
+        "long DiskPerBrokerGb(double ingressMBps, double retentionHours, int replicationFactor, int brokers, int maxFillPercent)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "string ConsumerPlan(double peakPerSec, double perConsumerPerSec, int partitions)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "long DiskPerBrokerGb(double ingressMBps, double retentionHours, int replicationFactor, int brokers, int maxFillPercent)",
+        "{",
+        "    var gb = ingressMBps * retentionHours * 3600 * replicationFactor / brokers / 1000;",
+        "    return (long)Math.Ceiling(gb * 100 / maxFillPercent);",
+        "}",
+        "",
+        "string ConsumerPlan(double peakPerSec, double perConsumerPerSec, int partitions)",
+        "{",
+        "    var need = Math.Max(1, (int)Math.Ceiling(peakPerSec / perConsumerPerSec));",
+        "    return need <= partitions",
+        "        ? $\"run {need} consumers\"",
+        "        : $\"need {need} consumers but only {partitions} partitions: add partitions or make the handler faster\";",
+        "}"
+      ],
+      "hints": [
+        "`Math.Ceiling` both results; for the disk, multiply by 100 before dividing by the percentage.",
+        "`Math.Max(1, ...)` so a quiet topic still gets one consumer."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the worked example\", 8640L, DiskPerBrokerGb(20, 168, 3, 6, 70));",
+        "Dojo.Eq(\"three days, 80% fill\", 1620L, DiskPerBrokerGb(5, 72, 3, 3, 80));",
+        "Dojo.Eq(\"rounds up\", 139L, DiskPerBrokerGb(1.5, 24, 3, 4, 70));",
+        "Dojo.Eq(\"enough partitions\", \"run 8 consumers\", ConsumerPlan(3000, 400, 12));",
+        "Dojo.Eq(\"partitions are the ceiling\", \"need 15 consumers but only 12 partitions: add partitions or make the handler faster\", ConsumerPlan(6000, 400, 12));",
+        "Dojo.Eq(\"exactly at the ceiling\", \"run 12 consumers\", ConsumerPlan(4800, 400, 12));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Runbooks: lag incident and rebalance storm",
+      "body": [
+        "**Lag incident** (alert: lag in time above SLO and growing)",
+        "",
+        "1. Scope it: `kafka-consumer-groups.sh --describe --group billing`. Lag on **one** partition with a CURRENT-OFFSET that",
+        "   does not move â†’ a stuck record (poison message, hung call). Lag on **all** partitions â†’ not enough capacity or a",
+        "   slow dependency.",
+        "2. Check the consumer logs and the dependency (database, HTTP API) latency before touching Kafka.",
+        "3. Capacity: scale consumers **up to the partition count**; beyond it they idle.",
+        "4. Poison record: fix the handler or dead-letter it. Skipping with `--reset-offsets --shift-by 1` is the last resort,",
+        "   only with the group stopped, and it is a data-loss decision someone owns.",
+        "5. Never reset offsets of a group with active members, and never \"fix\" lag by moving to `--to-latest`.",
+        "",
+        "**Rebalance storm** (the group keeps rebalancing, lag climbs, logs full of revokes)",
+        "",
+        "```text",
+        "%4|1764123247.112|MAXPOLL|rdkafka#consumer-1| [thrd:main]: Application maximum poll interval (300000ms) exceeded",
+        "by 312ms (adjust max.poll.interval.ms for long-running message processing): leaving group",
+        "```",
+        "",
+        "- The handler took longer than `max.poll.interval.ms` between two `Consume` calls, so the client **left** the group;",
+        "  its partitions moved, the slow record is redelivered to another member, which also times out: a storm.",
+        "- Fixes: put timeouts on every call in the handler; make the slow work smaller or hand it to workers and `Pause`",
+        "  the partition; raise `MaxPollIntervalMs` consciously when processing really is long; use cooperative-sticky or the",
+        "  consumer protocol so a single leave does not stop everyone; static membership (`GroupInstanceId`) for restarts."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "billing's lag climbs every few minutes and the logs show the lines below again and again, on different pods. What is the most likely cause?",
+      "code": [
+        "%4|1764123247.112|MAXPOLL|rdkafka#consumer-1| [thrd:main]: Application maximum poll interval (300000ms) exceeded by 312ms (adjust max.poll.interval.ms for long-running message processing): leaving group",
+        "info: Billing.Worker[0] Partitions revoked: [orders [[2]], orders [[3]]]",
+        "info: Billing.Worker[0] Partitions assigned: [orders [[2]], orders [[3]]]",
+        "warn: Billing.Worker[0] Handling orders [[3]] @41877 took 312.4 s (pdf-renderer timeout, retrying)"
+      ],
+      "options": [
+        "Some records take longer than `max.poll.interval.ms` to handle, so the consumer leaves the group, the partitions move, and the next member hits the same slow records",
+        "The brokers are down",
+        "`session.timeout.ms` is too high",
+        "The topic has too many partitions"
+      ],
+      "answer": 0,
+      "explain": [
+        "`MAXPOLL ... leaving group` is the client itself giving up its membership because the application did not call",
+        "`Consume` in time. Heartbeats run on a background thread, so this is not a network problem: it is handler time. Bound",
+        "the handler (timeouts, smaller batches, `Pause`/`Resume`), then tune `MaxPollIntervalMs` if processing is legitimately",
+        "long."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: operating RabbitMQ and Kafka",
+      "body": "Reach for these during maintenance and incidents: health and memory checks, safe offset resets, throttled reassignments and rolling restarts.",
+      "toolkit": [
+        {
+          "cmd": "rabbitmq-diagnostics check_running && rabbitmq-diagnostics check_local_alarms",
+          "what": "Is it up, and are publishers blocked?"
+        },
+        {
+          "cmd": "rabbitmq-diagnostics memory_breakdown",
+          "what": "What holds the memory (queues, connections, binaries)."
+        },
+        {
+          "cmd": "rabbitmq-diagnostics listeners",
+          "what": "Ports: 5672 AMQP, 15672 management, 15692 Prometheus."
+        },
+        {
+          "cmd": "rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers",
+          "what": "Backlog and consumers per queue."
+        },
+        {
+          "cmd": "rabbitmqctl list_consumers queue_name prefetch_count ack_required",
+          "what": "Prefetch and ack mode per consumer."
+        },
+        {
+          "cmd": "rabbitmq-queues quorum_status orders",
+          "what": "Raft members, leader, who lags."
+        },
+        {
+          "cmd": "rabbitmq-queues check_if_node_is_quorum_critical",
+          "what": "Would stopping this node cost a quorum queue its majority?",
+          "when": "Run it BEFORE stopping a node."
+        },
+        {
+          "cmd": "rabbitmq-upgrade drain",
+          "what": "Maintenance mode before a restart.",
+          "when": "rabbitmq-upgrade revive undoes it."
+        },
+        {
+          "cmd": "curl -s http://rabbit:15692/metrics | grep rabbitmq_alarms",
+          "what": "Alarm metrics from Prometheus."
+        },
+        {
+          "cmd": "curl -s -u ops:\"$RABBIT_PASS\" http://rabbit:15672/api/queues/%2F/orders | jq '.messages_ready, .messages_unacknowledged'",
+          "what": "One queue's backlog from the management API."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders --reset-offsets --to-datetime 2026-11-26T01:00:00.000 --dry-run",
+          "what": "Offset reset, step one.",
+          "flags": [
+            [
+              "--dry-run",
+              "read the NEW-OFFSET column first, then run it again with --execute"
+            ]
+          ],
+          "when": "The group must be inactive."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders:3 --reset-offsets --shift-by 1 --execute",
+          "what": "Skip one record on partition 3."
+        },
+        {
+          "cmd": "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json --execute --throttle 50000000",
+          "what": "Move replicas between brokers.",
+          "flags": [
+            [
+              "--throttle 50000000",
+              "bytes/s, so moving replicas does not starve clients"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json --verify",
+          "what": "Check the reassignment finished.",
+          "flags": [
+            [
+              "--verify",
+              "also removes the throttle"
+            ]
+          ],
+          "when": "At the end of every reassignment."
+        },
+        {
+          "cmd": "kafka-leader-election.sh --bootstrap-server kafka:9092 --election-type PREFERRED --all-topic-partitions",
+          "what": "Move leadership back to the preferred replicas."
+        },
+        {
+          "cmd": "kafka-log-dirs.sh --bootstrap-server kafka:9092 --describe --broker-list 2",
+          "what": "Who fills the disk."
+        },
+        {
+          "cmd": "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name orders --alter --add-config retention.ms=86400000",
+          "what": "Change a topic's retention.",
+          "flags": [
+            [
+              "retention.ms=86400000",
+              "keep one day"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --describe --under-replicated-partitions",
+          "what": "Are all replicas back in sync?",
+          "when": "Rolling restart: one broker at a time; wait until this is empty before the next."
+        },
+        {
+          "cmd": "kafka-metadata-quorum.sh --bootstrap-server kafka:9092 describe --replication",
+          "what": "The KRaft controllers and which one is active.",
+          "when": "Restart KRaft controllers one at a time, the active one last."
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each flag or command to what it does.",
+      "pairs": [
+        [
+          "`--throttle 50000000`",
+          "Caps replica movement at 50 MB/s"
+        ],
+        [
+          "`--verify`",
+          "Checks the move finished and removes the throttle"
+        ],
+        [
+          "`--election-type PREFERRED`",
+          "Moves leadership back to the preferred replicas"
+        ],
+        [
+          "`rabbitmq-upgrade drain`",
+          "Puts a node in maintenance mode before a restart"
+        ],
+        [
+          "`check_if_node_is_quorum_critical`",
+          "Tells you if stopping the node costs a quorum queue its majority"
+        ],
+        [
+          "`retention.ms=86400000`",
+          "Keeps one day of data"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Move replicas without starving clients, then confirm the move and clear the throttle.",
+      "code": [
+        "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json __1__ __2__ 50000000",
+        "# ... when it is done:",
+        "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json __3__"
+      ],
+      "blanks": [
+        "--execute",
+        "--throttle",
+        "--verify"
+      ],
+      "bank": [
+        "--generate",
+        "--cancel"
+      ],
+      "explain": "`--generate` only proposes a plan and `--cancel` stops a running move. Forgetting `--verify` leaves the throttle in place long after the move."
+    },
+    {
+      "type": "order",
+      "prompt": "Put the safe replay procedure in order (billing must reprocess everything since 01:00).",
+      "lines": [
+        "Scale the billing consumers to zero",
+        "Confirm the group has no active members (`--describe --group billing --state` shows Empty)",
+        "Run `--reset-offsets --to-datetime 2026-11-26T01:00:00.000 --dry-run` and read the NEW-OFFSET column",
+        "Run the same command with `--execute`",
+        "Start the consumers again",
+        "Watch lag drain and the handler's error rate"
+      ],
+      "explain": [
+        "The reset only works on an inactive group, and the dry run is your chance to catch a wrong topic, partition or",
+        "timestamp before it moves anything. The handler must be idempotent: a replay redelivers everything since 01:00."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Runbooks: DLQ pile-up and disk full",
+      "body": [
+        "**DLQ pile-up** (`orders.dlq` depth rising)",
+        "",
+        "1. Stop the bleeding: is one release or one dependency causing it? Roll back first, investigate second.",
+        "2. Look without losing anything:",
+        "   ```bash",
+        "   curl -s -u ops:\"$RABBIT_PASS\" -H 'content-type: application/json' -X POST \\",
+        "     http://rabbit:15672/api/queues/%2F/orders.dlq/get \\",
+        "     -d '{\"count\":5,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}' | jq '.[].properties.headers[\"x-death\"]'",
+        "   ```",
+        "   `x-death` tells you the original queue, the reason (`rejected`, `expired`, `maxlen`, `delivery_limit`) and the count.",
+        "3. Fix the cause, then replay **slowly** with a shovel back to the original exchange:",
+        "   `rabbitmqctl set_parameter shovel dlq-replay '{\"src-uri\":\"amqp://\",\"src-queue\":\"orders.dlq\",\"dest-uri\":\"amqp://\",\"dest-exchange\":\"orders\",\"src-delete-after\":\"queue-length\"}'`.",
+        "4. Messages that are wrong for good go to a parking-lot queue with a ticket, not back into the loop.",
+        "",
+        "**Broker disk full**",
+        "",
+        "- Kafka: find the biggest partitions with `kafka-log-dirs.sh --describe`; lower `retention.ms` **temporarily** on the",
+        "  topic that grew (and put it back); add disk or brokers. Never delete segment files by hand on a running broker.",
+        "  Check for topics with `retention.ms=-1` and for a stalled log cleaner on compacted topics.",
+        "- RabbitMQ: the disk alarm blocks all publishers. Free space, drain or purge the queue that grew (after saving what",
+        "  matters), and set a realistic `disk_free_limit`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the symptom to the first command you run.",
+      "pairs": [
+        [
+          "Publishers hang, consumers still work (RabbitMQ)",
+          "`rabbitmq-diagnostics check_local_alarms`"
+        ],
+        [
+          "Lag on one partition, offset not moving",
+          "`kafka-consumer-groups.sh --describe --group billing`"
+        ],
+        [
+          "`NOT_ENOUGH_REPLICAS` on produce",
+          "`kafka-topics.sh --describe --under-min-isr-partitions`"
+        ],
+        [
+          "`orders.dlq` keeps growing",
+          "`POST /api/queues/%2F/orders.dlq/get` with `ack_requeue_true`"
+        ],
+        [
+          "Broker disk at 92%",
+          "`kafka-log-dirs.sh --describe`"
+        ]
+      ],
+      "explain": "Each first command narrows the problem to one cause without changing anything. Look first, act second."
+    },
+    {
+      "type": "code",
+      "title": "A safe offset reset",
+      "prompt": [
+        "Write the logic of `kafka-consumer-groups.sh --reset-offsets`, so the team's ops bot can show a dry run in chat.",
+        "",
+        "Write `List<string> ResetOffsets(string group, string topic, string state, Dictionary<int, long> current, Dictionary<int, long> logStart, Dictionary<int, long> logEnd, string spec, bool execute)`.",
+        "",
+        "- If `state` is not `\"Empty\"` or `\"Dead\"`, return only",
+        "  `\"Error: Assignments can only be reset if the group '{group}' is inactive, but the current state is {state}.\"`",
+        "- `spec` is one of `\"--to-earliest\"`, `\"--to-latest\"`, `\"--shift-by N\"` (N may be negative), `\"--to-offset N\"`;",
+        "  anything else throws `ArgumentException`.",
+        "- For every partition of `current`, ascending: compute the target, **clamp** it into `[logStart, logEnd]`, and add",
+        "  `\"{group} {topic} {partition} {newOffset}\"`.",
+        "- Only when `execute` is true, write the new offsets into `current`. A dry run changes nothing."
+      ],
+      "starter": [
+        "List<string> ResetOffsets(string group, string topic, string state, Dictionary<int, long> current,",
+        "    Dictionary<int, long> logStart, Dictionary<int, long> logEnd, string spec, bool execute)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> ResetOffsets(string group, string topic, string state, Dictionary<int, long> current,",
+        "    Dictionary<int, long> logStart, Dictionary<int, long> logEnd, string spec, bool execute)",
+        "{",
+        "    if (state is not (\"Empty\" or \"Dead\"))",
+        "        return new List<string> { $\"Error: Assignments can only be reset if the group '{group}' is inactive, but the current state is {state}.\" };",
+        "    var words = spec.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "    Func<int, long> target = words switch",
+        "    {",
+        "        [\"--to-earliest\"] => p => logStart[p],",
+        "        [\"--to-latest\"] => p => logEnd[p],",
+        "        [\"--shift-by\", var n] when long.TryParse(n, out var shift) => p => current[p] + shift,",
+        "        [\"--to-offset\", var n] when long.TryParse(n, out var offset) => p => offset,",
+        "        _ => throw new ArgumentException($\"unsupported reset spec: {spec}\"),",
+        "    };",
+        "    var lines = new List<string>();",
+        "    var plan = new Dictionary<int, long>();",
+        "    foreach (var p in current.Keys.OrderBy(p => p))",
+        "    {",
+        "        var next = Math.Clamp(target(p), logStart[p], logEnd[p]);",
+        "        plan[p] = next;",
+        "        lines.Add($\"{group} {topic} {p} {next}\");",
+        "    }",
+        "    if (execute)",
+        "        foreach (var (p, next) in plan) current[p] = next;",
+        "    return lines;",
+        "}"
+      ],
+      "hints": [
+        "Check the state first and return the error line before parsing anything.",
+        "Turn the spec into a `Func<int, long>` that gives the raw target for a partition, then `Math.Clamp(target, start, end)`.",
+        "Build the whole plan first; only copy it into `current` when `execute` is true."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dictionary<int, long> DojoCurrent() => new() { [0] = 100, [1] = 5000, [2] = 900 };",
+        "var dojoStart = new Dictionary<int, long> { [0] = 50, [1] = 1000, [2] = 900 };",
+        "var dojoEnd = new Dictionary<int, long> { [0] = 200, [1] = 6000, [2] = 1000 };",
+        "var dojoC = DojoCurrent();",
+        "Dojo.Eq(\"an active group is refused\", new List<string> { \"Error: Assignments can only be reset if the group 'billing' is inactive, but the current state is Stable.\" },",
+        "    ResetOffsets(\"billing\", \"orders\", \"Stable\", dojoC, dojoStart, dojoEnd, \"--to-earliest\", true));",
+        "Dojo.Eq(\"refused means untouched\", 5000L, dojoC[1]);",
+        "Dojo.Eq(\"shift-by is clamped to the log\", new List<string> { \"billing orders 0 50\", \"billing orders 1 4900\", \"billing orders 2 900\" },",
+        "    ResetOffsets(\"billing\", \"orders\", \"Empty\", dojoC, dojoStart, dojoEnd, \"--shift-by -100\", false));",
+        "Dojo.Eq(\"a dry run changes nothing\", 5000L, dojoC[1]);",
+        "Dojo.Eq(\"to-latest\", new List<string> { \"billing orders 0 200\", \"billing orders 1 6000\", \"billing orders 2 1000\" },",
+        "    ResetOffsets(\"billing\", \"orders\", \"Empty\", dojoC, dojoStart, dojoEnd, \"--to-latest\", true));",
+        "Dojo.Eq(\"execute writes the new offsets\", 200L, dojoC[0]);",
+        "dojoC = DojoCurrent();",
+        "Dojo.Eq(\"to-earliest on a dead group\", new List<string> { \"billing orders 0 50\", \"billing orders 1 1000\", \"billing orders 2 900\" },",
+        "    ResetOffsets(\"billing\", \"orders\", \"Dead\", dojoC, dojoStart, dojoEnd, \"--to-earliest\", false));",
+        "Dojo.Eq(\"to-offset, clamped both ways\", new List<string> { \"billing orders 0 200\", \"billing orders 1 1000\", \"billing orders 2 950\" },",
+        "    ResetOffsets(\"billing\", \"orders\", \"Empty\", dojoC, dojoStart, dojoEnd, \"--to-offset 950\", false));",
+        "Dojo.Eq(\"skip one poison record\", new List<string> { \"billing orders 0 101\", \"billing orders 1 5001\", \"billing orders 2 901\" },",
+        "    ResetOffsets(\"billing\", \"orders\", \"Empty\", dojoC, dojoStart, dojoEnd, \"--shift-by 1\", false));",
+        "Dojo.Throws<ArgumentException>(\"unknown spec\", () => ResetOffsets(\"billing\", \"orders\", \"Empty\", DojoCurrent(), dojoStart, dojoEnd, \"--to-datetime 2026-11-26\", false));"
+      ]
+    }
+  ]
+}

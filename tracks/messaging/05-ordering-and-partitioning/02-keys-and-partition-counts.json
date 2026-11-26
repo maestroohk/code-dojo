@@ -1,0 +1,627 @@
+{
+  "title": "Choosing keys and partition counts",
+  "summary": "Pick the key that defines your ordered lane, spot hot keys and skew, size the partition count from throughput, and avoid the C#/Java partitioner mismatch and the remap that adding partitions causes.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The key decides the partition",
+      "body": [
+        "For a keyed record the producer computes `partition = hash(key) % partitionCount`. Same key, same hash, same",
+        "partition, same order. Choosing the key is choosing **what stays in order** and **how the load spreads**:",
+        "",
+        "```text",
+        "key = orderId           A1 A1 A1 | B7 B7 | C4 ...     many keys, even spread, per-order order     (usual choice)",
+        "key = customerId        all orders of one customer in order          good when a customer's events interact",
+        "key = tenantId          tenant-7 = 70% of traffic -> one hot partition, one overloaded consumer   (skew)",
+        "key = null              sticky partitioner: fill a batch for one partition, then switch          no order at all",
+        "key = \"orders\"          everything on one partition: global order, zero parallelism",
+        "```",
+        "",
+        "- Use the id of the **entity whose events must stay ordered**: usually the aggregate id (order, account, device).",
+        "- Watch for **hot keys**: one huge tenant or a default value like `\"unknown\"` or `\"\"` puts a big share of the traffic",
+        "  on one partition, and lag grows on that one partition only.",
+        "- A partition holds many keys; you only need their **events per key** in order, not the partition as a whole.",
+        "- Never use `string.GetHashCode()` for routing in .NET: it is **randomised per process**, so every restart sends",
+        "  the same key somewhere else.",
+        "",
+        "> **See it:** in **Labs → Messaging builder → Kafka**, play *Same key, same partition*."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A multi-tenant SaaS keys `invoice-events` by `tenantId`. Tenant `northwind` produces 70% of all events. What will on-call see?",
+      "options": [
+        "One partition with growing lag and one consumer at full CPU while the others idle; adding consumers does not help",
+        "Evenly spread lag, fixed by adding consumers",
+        "Kafka rebalances the hot key across partitions automatically",
+        "Producer errors, because a key may only use 10% of a topic"
+      ],
+      "answer": 0,
+      "explain": [
+        "All of one tenant's records land on one partition, and one partition is consumed by one group member: that is your",
+        "throughput ceiling for that tenant. Options: a finer key (`tenantId:invoiceId`) when per-invoice order is enough, or a",
+        "dedicated topic for the big tenant. Kafka never splits a key across partitions."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the partitioner that moves keys on every deploy",
+      "prompt": [
+        "**Bug report:** after each deploy of orders-api, events of the same order land on a **different partition** than before",
+        "the deploy, the Java stock service disagrees with us about where an order lives, and once a week a send fails with",
+        "`System.OverflowException: Negating the minimum value of a twos complement number is invalid`.",
+        "",
+        "The code below routes with `key.GetHashCode()` (randomised per process in .NET) and `Math.Abs` (which throws for",
+        "`int.MinValue`). Fix `int PartitionFor(string key, int partitions)` so it does what the Java client does:",
+        "",
+        "`partition = (Murmur2(UTF-8 bytes of key) & 0x7fffffff) % partitions`",
+        "",
+        "`Murmur2` is given and correct. The `& 0x7fffffff` clears the sign bit, which is how Kafka makes the hash positive",
+        "without the `Math.Abs` trap."
+      ],
+      "starter": [
+        "// Kafka's murmur2 (org.apache.kafka.common.utils.Utils.murmur2), given: do not change it",
+        "int Murmur2(byte[] data)",
+        "{",
+        "    const int seed = unchecked((int)0x9747b28c);",
+        "    const int m = 0x5bd1e995;",
+        "    const int r = 24;",
+        "    var length = data.Length;",
+        "    var h = seed ^ length;",
+        "    for (var i = 0; i < length / 4; i++)",
+        "    {",
+        "        var i4 = i * 4;",
+        "        var k = (data[i4] & 0xff) + ((data[i4 + 1] & 0xff) << 8) + ((data[i4 + 2] & 0xff) << 16) + ((data[i4 + 3] & 0xff) << 24);",
+        "        k *= m;",
+        "        k ^= k >>> r;",
+        "        k *= m;",
+        "        h *= m;",
+        "        h ^= k;",
+        "    }",
+        "    switch (length % 4)",
+        "    {",
+        "        case 3:",
+        "            h ^= (data[(length & ~3) + 2] & 0xff) << 16;",
+        "            goto case 2;",
+        "        case 2:",
+        "            h ^= (data[(length & ~3) + 1] & 0xff) << 8;",
+        "            goto case 1;",
+        "        case 1:",
+        "            h ^= data[length & ~3] & 0xff;",
+        "            h *= m;",
+        "            break;",
+        "    }",
+        "    h ^= h >>> 13;",
+        "    h *= m;",
+        "    h ^= h >>> 15;",
+        "    return h;",
+        "}",
+        "",
+        "int PartitionFor(string key, int partitions)",
+        "{",
+        "    return Math.Abs(key.GetHashCode()) % partitions;",
+        "}"
+      ],
+      "solution": [
+        "// Kafka's murmur2 (org.apache.kafka.common.utils.Utils.murmur2), given: do not change it",
+        "int Murmur2(byte[] data)",
+        "{",
+        "    const int seed = unchecked((int)0x9747b28c);",
+        "    const int m = 0x5bd1e995;",
+        "    const int r = 24;",
+        "    var length = data.Length;",
+        "    var h = seed ^ length;",
+        "    for (var i = 0; i < length / 4; i++)",
+        "    {",
+        "        var i4 = i * 4;",
+        "        var k = (data[i4] & 0xff) + ((data[i4 + 1] & 0xff) << 8) + ((data[i4 + 2] & 0xff) << 16) + ((data[i4 + 3] & 0xff) << 24);",
+        "        k *= m;",
+        "        k ^= k >>> r;",
+        "        k *= m;",
+        "        h *= m;",
+        "        h ^= k;",
+        "    }",
+        "    switch (length % 4)",
+        "    {",
+        "        case 3:",
+        "            h ^= (data[(length & ~3) + 2] & 0xff) << 16;",
+        "            goto case 2;",
+        "        case 2:",
+        "            h ^= (data[(length & ~3) + 1] & 0xff) << 8;",
+        "            goto case 1;",
+        "        case 1:",
+        "            h ^= data[length & ~3] & 0xff;",
+        "            h *= m;",
+        "            break;",
+        "    }",
+        "    h ^= h >>> 13;",
+        "    h *= m;",
+        "    h ^= h >>> 15;",
+        "    return h;",
+        "}",
+        "",
+        "int PartitionFor(string key, int partitions)",
+        "{",
+        "    return (Murmur2(Encoding.UTF8.GetBytes(key)) & 0x7fffffff) % partitions;",
+        "}"
+      ],
+      "hints": [
+        "`Encoding.UTF8.GetBytes(key)` gives the bytes Kafka hashes.",
+        "`(Murmur2(bytes) & 0x7fffffff) % partitions`: no `Math.Abs`, no `GetHashCode`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"Murmur2 is intact (Kafka's own test vector)\", -973932308, Murmur2(Encoding.UTF8.GetBytes(\"21\")));",
+        "Dojo.Eq(\"A1 goes to partition 3 of 6, like the Java client\", 3, PartitionFor(\"A1\", 6));",
+        "Dojo.Eq(\"B7 goes to partition 4 of 6, like the Java client\", 4, PartitionFor(\"B7\", 6));",
+        "Dojo.Eq(\"order-1042 goes to partition 0 of 6, like the Java client\", 0, PartitionFor(\"order-1042\", 6));",
+        "Dojo.Eq(\"tenant-7 goes to partition 0 of 6, like the Java client\", 0, PartitionFor(\"tenant-7\", 6));",
+        "Dojo.Eq(\"C4 goes to partition 2 of 6, like the Java client\", 2, PartitionFor(\"C4\", 6));",
+        "Dojo.Eq(\"A1 with 12 partitions\", 3, PartitionFor(\"A1\", 12));",
+        "Dojo.Eq(\"B7 with 12 partitions\", 10, PartitionFor(\"B7\", 12));"
+      ],
+      "forbid": [
+        {
+          "pattern": "GetHashCode",
+          "message": "Does not use GetHashCode (randomised per process)"
+        },
+        {
+          "pattern": "Math\\.Abs",
+          "message": "Does not use Math.Abs (throws for int.MinValue)"
+        }
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Two clients, two partitioners",
+      "body": [
+        "The hash is part of the contract between **every producer of a topic** (and Kafka Streams or Flink jobs that join",
+        "topics by key). The clients do **not** agree by default:",
+        "",
+        "| Client | Default for keyed records | Null keys |",
+        "|---|---|---|",
+        "| Java (also Kafka Streams, Spring Kafka, the console producer) | murmur2 | sticky partitioner |",
+        "| librdkafka: Confluent.Kafka (.NET), confluent-kafka-python, Go | `consistent_random`: **CRC32** of the key | random, made sticky by `sticky.partitioning.linger.ms` |",
+        "",
+        "So a C# producer and a Java producer writing `A1` to the same topic can put it on **different partitions**: events of",
+        "one order on two partitions, consumed by two members, in no particular order. Make .NET match Java:",
+        "",
+        "```csharp",
+        "var pc = new ProducerConfig",
+        "{",
+        "    BootstrapServers = \"kafka:9092\",",
+        "    Partitioner = Partitioner.Murmur2Random,   // murmur2 for keys like Java, random (sticky) for null keys",
+        "    EnableIdempotence = true,",
+        "};",
+        "```",
+        "",
+        "Do it on day one: changing the partitioner of an existing topic moves keys, exactly like adding partitions does."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "A C# service starts producing to a topic that Java services already write to, keyed by `orderId`. Complete the config.",
+      "code": [
+        "var pc = new ProducerConfig",
+        "{",
+        "    BootstrapServers = \"kafka:9092\",",
+        "    Partitioner = Partitioner.__1__,",
+        "    Acks = Acks.All,",
+        "    EnableIdempotence = __2__,",
+        "};",
+        "using var producer = new ProducerBuilder<string, string>(pc).Build();",
+        "await producer.ProduceAsync(\"order-events\", new Message<string, string> { Key = __3__, Value = json });"
+      ],
+      "blanks": [
+        "Murmur2Random",
+        "true",
+        "orderId"
+      ],
+      "bank": [
+        "ConsistentRandom",
+        "Random",
+        "false",
+        "null"
+      ],
+      "explain": [
+        "`Murmur2Random` matches the Java client for keyed records; `ConsistentRandom` (the librdkafka default) uses CRC32 and",
+        "disagrees. The key must be the entity id: a `null` key gives up ordering entirely."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "How many partitions?",
+      "body": [
+        "Size the partition count from **throughput** and **parallelism**, with room to grow:",
+        "",
+        "```text",
+        "target 60 MB/s  ·  one partition sustains ~20 MB/s produce  ·  one consumer handles ~5 MB/s",
+        "partitions >= max( 60 / 20 , 60 / 5 , planned consumers ) = max( 3, 12, 6 ) = 12",
+        "```",
+        "",
+        "- The slowest side wins, and it is usually the **consumer** (your handler calls a database).",
+        "- A group can use at most **one consumer per partition**: the count is the ceiling on parallelism.",
+        "- **Adding partitions remaps keys.** `hash % 6` and `hash % 8` differ for most keys, so after",
+        "  `kafka-topics.sh --alter --topic orders --partitions 8` new events of order A1 may land on a new partition while",
+        "  its old events are still being processed from the old one: a window of out-of-order processing. You **cannot**",
+        "  reduce the count at all. So pick a count with headroom (for example 2-3 times today's need) at creation time.",
+        "- Too many partitions cost too: more files and memory per broker, longer leader elections, more consumer overhead.",
+        "  KRaft clusters handle far more partitions than the ZooKeeper era, but hundreds per topic still need a reason.",
+        "",
+        "If you must grow a keyed topic: pause producers or drain consumers before `--alter`, or create a new topic with the",
+        "right count and migrate."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Hashes 0 to 23 are spread over 6 partitions, then the topic grows to 8. How many keep their partition?",
+      "code": [
+        "var moved = 0;",
+        "for (var hash = 0; hash < 24; hash++)",
+        "    if (hash % 6 != hash % 8) moved++;",
+        "Console.WriteLine($\"moved {moved} of 24\");"
+      ],
+      "answer": "moved 18 of 24",
+      "explain": [
+        "Only hashes whose remainder by 6 and by 8 agree stay put: 0 to 5 in every block of 24. Three quarters of all keys",
+        "move. With real murmur2 hashes it is the same story: about 75% of keys change partition going from 6 to 8, and",
+        "about half going from 6 to 12."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: ordering and partitions",
+      "body": "Reach for these to answer \"where did this key go, and why is it out of order?\" and before you plan or change a partition count.",
+      "toolkit": [
+        {
+          "cmd": "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic order-events --from-beginning --formatter-property print.key=true --formatter-property print.partition=true --formatter-property print.offset=true | grep 'A1'",
+          "what": "Does one key really live on one partition?",
+          "flags": [
+            [
+              "print.partition=true",
+              "show which partition each record came from"
+            ],
+            [
+              "grep 'A1'",
+              "keep only the key you are chasing"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-console-producer.sh --bootstrap-server kafka:9092 --topic order-events --reader-property parse.key=true --reader-property key.separator=:",
+          "what": "Produce keyed records with the Java partitioner, to compare with what your C# service did.",
+          "flags": [
+            [
+              "parse.key=true",
+              "each input line carries a key"
+            ],
+            [
+              "key.separator=:",
+              "A1:payload means key A1"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic order-events",
+          "what": "PartitionCount before you plan."
+        },
+        {
+          "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --alter --topic order-events --partitions 24",
+          "what": "Grow the topic.",
+          "when": "It remaps keys to new partitions, and it cannot shrink."
+        },
+        {
+          "cmd": "kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic order-events",
+          "what": "Records per partition: skew."
+        },
+        {
+          "cmd": "kafka-log-dirs.sh --bootstrap-server kafka:9092 --describe --topic-list order-events",
+          "what": "Bytes per partition: skew."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group projector",
+          "what": "Lag per partition.",
+          "when": "Lag on ONE partition means a hot key."
+        },
+        {
+          "cmd": "rabbitmqctl list_consumers queue_name prefetch_count ack_required",
+          "what": "Who consumes each queue.",
+          "when": "More than one consumer on a queue means no order."
+        },
+        {
+          "cmd": "rabbitmqctl list_queues name consumers messages_ready messages_unacknowledged",
+          "what": "Consumers and backlog per queue."
+        },
+        {
+          "cmd": "new ProducerConfig { Partitioner = Partitioner.Murmur2Random }",
+          "what": "Java-compatible partitioning.",
+          "flags": [
+            [
+              "Partitioner.Murmur2Random",
+              "the Java client's murmur2 for keyed records"
+            ]
+          ],
+          "when": "Any .NET producer on a topic that Java code also writes or joins.",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ProducerConfig { EnableIdempotence = true, StickyPartitioningLingerMs = 10 }",
+          "what": "Order that survives retries.",
+          "flags": [
+            [
+              "EnableIdempotence = true",
+              "caps MaxInFlight at 5: order survives retries without giving up throughput"
+            ],
+            [
+              "MaxInFlight = 1",
+              "only when idempotence is impossible and order matters more than speed"
+            ],
+            [
+              "StickyPartitioningLingerMs",
+              "how long null-key records stick to one partition (bigger batches)"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "await channel.QueueDeclareAsync(\"orders\", durable: true, exclusive: false, autoDelete: false, arguments: new Dictionary<string, object?> { [\"x-single-active-consumer\"] = true });",
+          "what": "RabbitMQ: one active consumer with hot standbys.",
+          "flags": [
+            [
+              "x-single-active-consumer: true",
+              "a queue argument: only one consumer receives at a time"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ServiceBusSessionProcessorOptions { MaxConcurrentSessions = 8 }",
+          "what": "Azure Service Bus: order per session.",
+          "flags": [
+            [
+              "SessionId (on ServiceBusMessage)",
+              "messages with the same SessionId are processed in order"
+            ],
+            [
+              "MaxConcurrentSessions",
+              "how many sessions are processed in parallel"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new SendMessageRequest { QueueUrl = queueUrl, MessageBody = body, MessageGroupId = \"A1\", MessageDeduplicationId = \"evt-1\" }",
+          "what": "SQS FIFO: order per group.",
+          "flags": [
+            [
+              "MessageGroupId",
+              "order holds within a group"
+            ],
+            [
+              "MessageDeduplicationId",
+              "a repeat with the same id is dropped"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "gcloud pubsub subscriptions create order-events-sub --topic=order-events --enable-message-ordering",
+          "what": "Google Pub/Sub: order per ordering key.",
+          "flags": [
+            [
+              "--enable-message-ordering",
+              "message ordering on the subscription; publishers set an ordering key"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each reading or setting to what it means for ordering.",
+      "pairs": [
+        [
+          "Lag grows on one partition only",
+          "A hot key"
+        ],
+        [
+          "Two consumers on one RabbitMQ queue",
+          "No ordering guarantee"
+        ],
+        [
+          "`--alter --partitions 24`",
+          "Keys move to new partitions; you cannot shrink back"
+        ],
+        [
+          "`Partitioner.Murmur2Random`",
+          "Same partition as the Java client for the same key"
+        ],
+        [
+          "`MaxInFlight = 1`",
+          "Order without idempotence, at the cost of throughput"
+        ],
+        [
+          "`x-single-active-consumer: true`",
+          "One active consumer, the rest standing by"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which question does each command answer?",
+      "buckets": [
+        "Is the data skewed?",
+        "Where did this key go?",
+        "Plan or change the partition count"
+      ],
+      "items": [
+        [
+          "`kafka-get-offsets.sh --topic order-events`",
+          0
+        ],
+        [
+          "`kafka-log-dirs.sh --describe --topic-list order-events`",
+          0
+        ],
+        [
+          "`kafka-console-consumer.sh ... --formatter-property print.partition=true | grep 'A1'`",
+          1
+        ],
+        [
+          "`kafka-console-producer.sh ... --reader-property parse.key=true --reader-property key.separator=:`",
+          1
+        ],
+        [
+          "`kafka-topics.sh --describe --topic order-events`",
+          2
+        ],
+        [
+          "`kafka-topics.sh --alter --topic order-events --partitions 24`",
+          2
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Plan the partitions",
+      "prompt": [
+        "Write the planning helpers you would use before creating or growing a topic. `Murmur2` is given.",
+        "",
+        "- `int PartitionFor(string key, int partitions)`: the Java-compatible partitioner from the bug fix.",
+        "- `int PartitionsFor(double targetMBps, double producerMBpsPerPartition, double consumerMBpsPerPartition, int plannedConsumers)`:",
+        "  the largest of `ceil(target / producerPerPartition)`, `ceil(target / consumerPerPartition)` and `plannedConsumers`.",
+        "- `double MovedFraction(IEnumerable<string> keys, int from, int to)`: the share of keys whose partition changes when the",
+        "  count goes from `from` to `to` (0 for no keys)."
+      ],
+      "starter": [
+        "// Kafka's murmur2 (org.apache.kafka.common.utils.Utils.murmur2), given: do not change it",
+        "int Murmur2(byte[] data)",
+        "{",
+        "    const int seed = unchecked((int)0x9747b28c);",
+        "    const int m = 0x5bd1e995;",
+        "    const int r = 24;",
+        "    var length = data.Length;",
+        "    var h = seed ^ length;",
+        "    for (var i = 0; i < length / 4; i++)",
+        "    {",
+        "        var i4 = i * 4;",
+        "        var k = (data[i4] & 0xff) + ((data[i4 + 1] & 0xff) << 8) + ((data[i4 + 2] & 0xff) << 16) + ((data[i4 + 3] & 0xff) << 24);",
+        "        k *= m;",
+        "        k ^= k >>> r;",
+        "        k *= m;",
+        "        h *= m;",
+        "        h ^= k;",
+        "    }",
+        "    switch (length % 4)",
+        "    {",
+        "        case 3:",
+        "            h ^= (data[(length & ~3) + 2] & 0xff) << 16;",
+        "            goto case 2;",
+        "        case 2:",
+        "            h ^= (data[(length & ~3) + 1] & 0xff) << 8;",
+        "            goto case 1;",
+        "        case 1:",
+        "            h ^= data[length & ~3] & 0xff;",
+        "            h *= m;",
+        "            break;",
+        "    }",
+        "    h ^= h >>> 13;",
+        "    h *= m;",
+        "    h ^= h >>> 15;",
+        "    return h;",
+        "}",
+        "",
+        "int PartitionFor(string key, int partitions)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "int PartitionsFor(double targetMBps, double producerMBpsPerPartition, double consumerMBpsPerPartition, int plannedConsumers)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double MovedFraction(IEnumerable<string> keys, int from, int to)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "// Kafka's murmur2 (org.apache.kafka.common.utils.Utils.murmur2), given: do not change it",
+        "int Murmur2(byte[] data)",
+        "{",
+        "    const int seed = unchecked((int)0x9747b28c);",
+        "    const int m = 0x5bd1e995;",
+        "    const int r = 24;",
+        "    var length = data.Length;",
+        "    var h = seed ^ length;",
+        "    for (var i = 0; i < length / 4; i++)",
+        "    {",
+        "        var i4 = i * 4;",
+        "        var k = (data[i4] & 0xff) + ((data[i4 + 1] & 0xff) << 8) + ((data[i4 + 2] & 0xff) << 16) + ((data[i4 + 3] & 0xff) << 24);",
+        "        k *= m;",
+        "        k ^= k >>> r;",
+        "        k *= m;",
+        "        h *= m;",
+        "        h ^= k;",
+        "    }",
+        "    switch (length % 4)",
+        "    {",
+        "        case 3:",
+        "            h ^= (data[(length & ~3) + 2] & 0xff) << 16;",
+        "            goto case 2;",
+        "        case 2:",
+        "            h ^= (data[(length & ~3) + 1] & 0xff) << 8;",
+        "            goto case 1;",
+        "        case 1:",
+        "            h ^= data[length & ~3] & 0xff;",
+        "            h *= m;",
+        "            break;",
+        "    }",
+        "    h ^= h >>> 13;",
+        "    h *= m;",
+        "    h ^= h >>> 15;",
+        "    return h;",
+        "}",
+        "",
+        "int PartitionFor(string key, int partitions)",
+        "{",
+        "    return (Murmur2(Encoding.UTF8.GetBytes(key)) & 0x7fffffff) % partitions;",
+        "}",
+        "",
+        "int PartitionsFor(double targetMBps, double producerMBpsPerPartition, double consumerMBpsPerPartition, int plannedConsumers)",
+        "{",
+        "    var byProducer = (int)Math.Ceiling(targetMBps / producerMBpsPerPartition);",
+        "    var byConsumer = (int)Math.Ceiling(targetMBps / consumerMBpsPerPartition);",
+        "    return Math.Max(plannedConsumers, Math.Max(byProducer, byConsumer));",
+        "}",
+        "",
+        "double MovedFraction(IEnumerable<string> keys, int from, int to)",
+        "{",
+        "    var list = keys.ToList();",
+        "    if (list.Count == 0) return 0;",
+        "    return (double)list.Count(k => PartitionFor(k, from) != PartitionFor(k, to)) / list.Count;",
+        "}"
+      ],
+      "hints": [
+        "`(int)Math.Ceiling(target / perPartition)` for each side, then `Math.Max` of the three.",
+        "`MovedFraction`: count the keys with `PartitionFor(k, from) != PartitionFor(k, to)` and divide by the count as a `double`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the worked example\", 12, PartitionsFor(60, 20, 5, 6));",
+        "Dojo.Eq(\"planned consumers can be the largest\", 6, PartitionsFor(10, 10, 10, 6));",
+        "Dojo.Eq(\"round up\", 13, PartitionsFor(100, 25, 8, 3));",
+        "Dojo.Eq(\"A1 with 6 partitions\", 3, PartitionFor(\"A1\", 6));",
+        "var dojoKeys = Enumerable.Range(1, 1000).Select(i => $\"order-{i}\").ToList();",
+        "Dojo.Eq(\"6 -> 8 moves 747 of 1000 keys\", 747, (int)Math.Round(MovedFraction(dojoKeys, 6, 8) * 1000));",
+        "Dojo.Eq(\"6 -> 12 moves 493 of 1000 keys\", 493, (int)Math.Round(MovedFraction(dojoKeys, 6, 12) * 1000));",
+        "Dojo.Eq(\"same count moves nothing\", 0.0, MovedFraction(dojoKeys, 6, 6));",
+        "Dojo.Eq(\"no keys\", 0.0, MovedFraction(new List<string>(), 6, 8));"
+      ]
+    }
+  ]
+}

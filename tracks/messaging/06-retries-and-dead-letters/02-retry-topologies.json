@@ -1,0 +1,400 @@
+{
+  "title": "Retry topologies",
+  "summary": "Delayed retries with TTL and dead-letter exchanges in RabbitMQ, retry topics and a DLT in Kafka and what they do to ordering, delivery limits across brokers and the parking lot.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Delayed retry in RabbitMQ: TTL + DLX",
+      "body": [
+        "RabbitMQ has no \"deliver this in 10 seconds\". You build it from two features: a **wait queue** with a message",
+        "TTL and no consumers, whose dead-letter target is the work queue.",
+        "",
+        "```text",
+        "          nack(requeue: false)                       TTL 10 s expires",
+        "orders ─────────────────────────> orders.retry.10s ────────────────────> back to orders",
+        "  │      (DLX \"\" → routing key         no consumers            (DLX \"\" → routing key \"orders\")",
+        "  │       \"orders.retry.10s\")",
+        "  └─ after 3 attempts the consumer publishes to orders.parking-lot and acks instead",
+        "```",
+        "",
+        "```csharp",
+        "await channel.QueueDeclareAsync(\"orders\", durable: true, exclusive: false, autoDelete: false,",
+        "    arguments: new Dictionary<string, object?>",
+        "    {",
+        "        [\"x-queue-type\"] = \"quorum\",",
+        "        [\"x-dead-letter-exchange\"] = \"\",",
+        "        [\"x-dead-letter-routing-key\"] = \"orders.retry.10s\",",
+        "    });",
+        "await channel.QueueDeclareAsync(\"orders.retry.10s\", durable: true, exclusive: false, autoDelete: false,",
+        "    arguments: new Dictionary<string, object?>",
+        "    {",
+        "        [\"x-queue-type\"] = \"quorum\",",
+        "        [\"x-message-ttl\"] = 10_000,",
+        "        [\"x-dead-letter-exchange\"] = \"\",",
+        "        [\"x-dead-letter-routing-key\"] = \"orders\",",
+        "    });",
+        "```",
+        "",
+        "Each trip adds to the message's `x-death` header; the entry for `orders.retry.10s` with reason `expired`",
+        "counts the retries so far. For backoff, use one wait queue **per delay tier** (10 s, 1 min, 10 min).",
+        "Quorum queues dead-letter *at most once* by default; set `dead-letter-strategy: at-least-once` (with",
+        "`overflow: reject-publish`) when a retry must not vanish during a failover.",
+        "",
+        "> **See it:** **Labs → Messaging builder → RabbitMQ**, challenge *Retry later, not now*."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the life of a message that fails three times in order (3 attempts allowed).",
+      "lines": [
+        "Attempt 1 fails; the consumer nacks with `requeue: false`",
+        "`orders` dead-letters it to `orders.retry.10s`",
+        "It waits there, unconsumed, until its 10 s TTL expires",
+        "`orders.retry.10s` dead-letters it back to `orders`; its `x-death` count for that queue is now 1",
+        "Attempt 2 fails and the same cycle runs again",
+        "Attempt 3 fails; the consumer publishes it to `orders.parking-lot` and acks the original"
+      ],
+      "explain": "The wait happens inside the broker, so the consumer never sleeps and the rest of the queue keeps flowing. The consumer reads the attempt number from `x-death` to know when to stop."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A team uses **one** retry queue and sets the delay per message with `Expiration` (`\"300000\"` for some messages, `\"5000\"` for others). The 5-second retries take up to 5 minutes. Why?",
+      "options": [
+        "Messages only expire when they reach the head of the queue, so a 5 s message waits behind a 5 min one",
+        "Per-message TTL is rounded up to the largest TTL in the queue",
+        "`Expiration` is in seconds, not milliseconds",
+        "The retry queue has no consumer, so expiry is paused"
+      ],
+      "answer": 0,
+      "explain": "RabbitMQ expires messages from the head. Mixed per-message TTLs in one queue block each other: use one queue per delay tier with a queue-level `x-message-ttl`. (A delayed-message exchange plugin exists, with its own limits; the tiered queues are the portable answer.)"
+    },
+    {
+      "type": "learn",
+      "title": "Retries in Kafka: retry topics and a DLT",
+      "body": [
+        "Kafka has no per-message ack or requeue: committing offset 42 means \"everything before 42 is done\". A failing",
+        "record leaves two choices:",
+        "",
+        "```text",
+        "orders            P0 | 40 | 41 | 42 | 43 |       the consumer fails on 41",
+        "                           │",
+        "                           └─> orders.retry-1   consumer waits until record time + 10 s",
+        "                                     └─> orders.retry-2   + 1 min",
+        "                                               └─> orders.dlt   people look, replay later",
+        "```",
+        "",
+        "- **Blocking retry**: retry 41 in place (`consumer.Seek` back to it, `consumer.Pause` the partition while you",
+        "  wait). Order is kept, but the whole partition stalls behind one record.",
+        "- **Non-blocking retry**: produce 41 to `orders.retry-1`, commit, carry on with 42. The partition keeps",
+        "  flowing, but **order for that key is broken**: a later update for the same order may be applied first.",
+        "",
+        "A retry-topic consumer must not sleep in its poll loop longer than `max.poll.interval.ms` (5 minutes by",
+        "default) or the group evicts it; it pauses the partition and resumes when the record is due. Spring's",
+        "`@RetryableTopic` implements this pattern; in .NET you write it (or use a messaging framework). When order",
+        "matters, route **later records for a key already in retry** to the retry topic too.",
+        "",
+        "> **See it:** **Labs → Messaging builder → Kafka**, challenge *Committed, then crashed*."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Blocking or non-blocking retries?",
+      "buckets": [
+        "Blocking (keep order, stall the partition)",
+        "Non-blocking (retry topic)"
+      ],
+      "items": [
+        [
+          "Ledger postings for an account",
+          0
+        ],
+        [
+          "Sending marketing emails",
+          1
+        ],
+        [
+          "Resizing uploaded images",
+          1
+        ],
+        [
+          "Order status changes applied with no version check",
+          0
+        ],
+        [
+          "Search index updates that carry a version and skip older ones",
+          1
+        ],
+        [
+          "Seat reservations where the first request wins",
+          0
+        ]
+      ],
+      "explain": "If applying two records for the same key in the wrong order gives a wrong result, keep order. If the handler is order-independent (or a version check makes it so), keep the partition flowing."
+    },
+    {
+      "type": "predict",
+      "prompt": "The first attempt at `o17:v1` fails and it goes to a retry topic, which succeeds later. What is applied, in order?",
+      "code": [
+        "var main = new[] { \"o17:v1\", \"o17:v2\", \"o18:v1\" };",
+        "var retry = new Queue<string>();",
+        "var applied = new List<string>();",
+        "foreach (var r in main)",
+        "{",
+        "    if (r == \"o17:v1\") { retry.Enqueue(r); continue; }",
+        "    applied.Add(r);",
+        "}",
+        "while (retry.Count > 0) applied.Add(retry.Dequeue());",
+        "Console.WriteLine(string.Join(\" \", applied));"
+      ],
+      "answer": "o17:v2 o18:v1 o17:v1",
+      "explain": "Order 17 ends at version 1: the stale update arrived last and overwrote the newer one. That is the price of non-blocking retries without a version check."
+    },
+    {
+      "type": "learn",
+      "title": "Delivery limits and parking lots, broker by broker",
+      "body": [
+        "Every platform has a knob that says \"stop trying\":",
+        "",
+        "| Platform | Knob | Where the message goes |",
+        "|---|---|---|",
+        "| RabbitMQ quorum queue | `delivery-limit` policy (default 20 since 4.0) | its DLX, or dropped without one |",
+        "| Azure Service Bus | `MaxDeliveryCount` (default 10) | the entity's `$DeadLetterQueue` sub-queue, with `DeadLetterReason` |",
+        "| AWS SQS | redrive policy `maxReceiveCount` | the DLQ in `deadLetterTargetArn`; the visibility timeout decides when a receive counts again |",
+        "| Google Cloud Pub/Sub | dead-letter policy `maxDeliveryAttempts` (5 to 100) | the dead-letter topic |",
+        "| Kafka | nothing built in | your own retry topics and DLT; count attempts in a header |",
+        "",
+        "A **DLQ** catches what the broker gave up on. A **parking lot** is where *your* code puts a message after its",
+        "retries are used up or the error is permanent. Neither has an automatic consumer: people triage them, fix the",
+        "cause, and redrive (next lesson). Keep the original body plus headers that explain it: the error, the",
+        "exception type, the attempt count and the original queue or topic."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each platform to its \"stop retrying\" knob.",
+      "pairs": [
+        [
+          "RabbitMQ quorum queue",
+          "`delivery-limit` (default 20)"
+        ],
+        [
+          "Azure Service Bus",
+          "`MaxDeliveryCount` (default 10)"
+        ],
+        [
+          "AWS SQS",
+          "Redrive policy `maxReceiveCount`"
+        ],
+        [
+          "Google Cloud Pub/Sub",
+          "`maxDeliveryAttempts` on a dead-letter policy"
+        ],
+        [
+          "Kafka",
+          "None: count in a header and produce to a DLT yourself"
+        ]
+      ],
+      "explain": "The names differ, the idea does not: a bounded number of attempts, then a place where a person will look."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Read the retry count from x-death",
+      "prompt": [
+        "**Symptom first.** After a client upgrade the order consumer crashes on every retried message:",
+        "",
+        "```text",
+        "System.InvalidCastException: Unable to cast object of type 'System.Byte[]' to type 'System.String'.",
+        "   at Orders.Retry.RetryCount(IDictionary`2 headers, String retryQueue)",
+        "```",
+        "",
+        "AMQP sends header strings as bytes, and RabbitMQ.Client hands them to you as `byte[]` (UTF-8), not `string`.",
+        "Arrays arrive as lists, tables as dictionaries, numbers such as `count` as `long`.",
+        "",
+        "Fix `long RetryCount(IDictionary<string, object?>? headers, string retryQueue)`: return the `count` of the",
+        "`x-death` entry whose `queue` is `retryQueue` and whose `reason` is `\"expired\"`; `0` if there are no headers,",
+        "no `x-death`, or no such entry. Accept `queue` and `reason` as either `byte[]` or `string`."
+      ],
+      "starter": [
+        "long RetryCount(IDictionary<string, object?>? headers, string retryQueue)",
+        "{",
+        "    if (headers is null || !headers.TryGetValue(\"x-death\", out var raw)) return 0;",
+        "    foreach (var item in (List<object>)raw!)",
+        "    {",
+        "        var death = (Dictionary<string, object?>)item;",
+        "        if ((string)death[\"queue\"]! == retryQueue && (string)death[\"reason\"]! == \"expired\")",
+        "            return (long)death[\"count\"]!;",
+        "    }",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "long RetryCount(IDictionary<string, object?>? headers, string retryQueue)",
+        "{",
+        "    if (headers is null || !headers.TryGetValue(\"x-death\", out var raw) || raw is not IEnumerable<object> deaths) return 0;",
+        "    foreach (var item in deaths)",
+        "    {",
+        "        if (item is not IDictionary<string, object?> death) continue;",
+        "        if (Text(death, \"queue\") == retryQueue && Text(death, \"reason\") == \"expired\")",
+        "            return death.TryGetValue(\"count\", out var c) && c is long n ? n : 0;",
+        "    }",
+        "    return 0;",
+        "",
+        "    static string? Text(IDictionary<string, object?> d, string key) =>",
+        "        d.TryGetValue(key, out var v) ? v switch { byte[] b => Encoding.UTF8.GetString(b), string s => s, _ => null } : null;",
+        "",
+        "}"
+      ],
+      "hints": [
+        "Do not cast; test the type: `v switch { byte[] b => Encoding.UTF8.GetString(b), string s => s, _ => null }`.",
+        "Use `raw is not IEnumerable<object> deaths` and `item is not IDictionary<string, object?> death` to skip anything unexpected."
+      ],
+      "template": [
+        "{{CODE}}",
+        "byte[] DojoBytes(string s) => Encoding.UTF8.GetBytes(s);",
+        "var dojoHeaders = new Dictionary<string, object?>",
+        "{",
+        "    [\"x-death\"] = new List<object?>",
+        "    {",
+        "        new Dictionary<string, object?> { [\"queue\"] = DojoBytes(\"orders.retry.10s\"), [\"reason\"] = DojoBytes(\"expired\"), [\"count\"] = 3L, [\"exchange\"] = DojoBytes(\"\") },",
+        "        new Dictionary<string, object?> { [\"queue\"] = DojoBytes(\"orders\"), [\"reason\"] = DojoBytes(\"rejected\"), [\"count\"] = 3L, [\"exchange\"] = DojoBytes(\"\") },",
+        "    },",
+        "    [\"x-first-death-reason\"] = DojoBytes(\"rejected\"),",
+        "};",
+        "Dojo.Eq(\"reads the count from byte[] values\", 3L, RetryCount(dojoHeaders, \"orders.retry.10s\"));",
+        "Dojo.Eq(\"no entry for another wait queue\", 0L, RetryCount(dojoHeaders, \"orders.retry.1m\"));",
+        "Dojo.Eq(\"a rejected entry is not a retry\", 0L, RetryCount(dojoHeaders, \"orders\"));",
+        "Dojo.Eq(\"no headers at all\", 0L, RetryCount(null, \"orders.retry.10s\"));",
+        "Dojo.Eq(\"first delivery: no x-death yet\", 0L, RetryCount(new Dictionary<string, object?>(), \"orders.retry.10s\"));",
+        "var dojoText = new Dictionary<string, object?>",
+        "{",
+        "    [\"x-death\"] = new List<object?> { new Dictionary<string, object?> { [\"queue\"] = \"orders.retry.10s\", [\"reason\"] = \"expired\", [\"count\"] = 1L } },",
+        "};",
+        "Dojo.Eq(\"string values work too\", 1L, RetryCount(dojoText, \"orders.retry.10s\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A tiered retry consumer on a fake clock",
+      "prompt": [
+        "Simulate TTL retry tiers and a parking lot, deterministically.",
+        "",
+        "Write a class `RetryingConsumer`:",
+        "",
+        "- `RetryingConsumer(Func<string, int, string> handler, long[] tierDelaysMs)`: `handler(id, attempt)` returns",
+        "  `\"ok\"`, `\"transient\"` or `\"permanent\"`. Tier `i` is the wait before attempt `i + 2`.",
+        "- `void Publish(string id, long atMs)`: the message is due at `atMs`, as attempt 1.",
+        "- `List<string> RunUntil(long untilMs)`: repeatedly take the due message (due time `<= untilMs`) with the",
+        "  **earliest due time**, ties in the order they were scheduled, and call the handler at its due time `t`:",
+        "  - `\"ok\"` → log `\"{t} {id} #{attempt} ok\"`;",
+        "  - `\"transient\"` with a tier left (`attempt <= tiers`) → schedule attempt + 1 at `t + delay` and log",
+        "    `\"{t} {id} #{attempt} transient -> retry in {delay} ms\"`;",
+        "  - `\"transient\"` with no tier left, or `\"permanent\"` → add the id to `ParkingLot` and log",
+        "    `\"{t} {id} #{attempt} {outcome} -> parking lot\"`.",
+        "",
+        "  Return the log of this run. Messages due later stay scheduled for the next run.",
+        "- `List<string> ParkingLot` (get-only)."
+      ],
+      "starter": [
+        "class RetryingConsumer",
+        "{",
+        "    public RetryingConsumer(Func<string, int, string> handler, long[] tierDelaysMs) { }",
+        "",
+        "    public List<string> ParkingLot { get; } = new();",
+        "",
+        "    public void Publish(string id, long atMs) { }",
+        "",
+        "    public List<string> RunUntil(long untilMs) => new();",
+        "}"
+      ],
+      "solution": [
+        "class RetryingConsumer",
+        "{",
+        "    readonly Func<string, int, string> handler;",
+        "    readonly long[] tiers;",
+        "    readonly List<(long At, long Seq, string Id, int Attempt)> scheduled = new();",
+        "    long seq;",
+        "",
+        "    public RetryingConsumer(Func<string, int, string> handler, long[] tierDelaysMs)",
+        "    {",
+        "        this.handler = handler;",
+        "        tiers = tierDelaysMs;",
+        "    }",
+        "",
+        "    public List<string> ParkingLot { get; } = new();",
+        "",
+        "    public void Publish(string id, long atMs) => scheduled.Add((atMs, seq++, id, 1));",
+        "",
+        "    public List<string> RunUntil(long untilMs)",
+        "    {",
+        "        var log = new List<string>();",
+        "        while (true)",
+        "        {",
+        "            var due = scheduled.Where(s => s.At <= untilMs).OrderBy(s => s.At).ThenBy(s => s.Seq).ToList();",
+        "            if (due.Count == 0) return log;",
+        "            var m = due[0];",
+        "            scheduled.Remove(m);",
+        "            var outcome = handler(m.Id, m.Attempt);",
+        "            var head = $\"{m.At} {m.Id} #{m.Attempt} {outcome}\";",
+        "            if (outcome == \"ok\")",
+        "            {",
+        "                log.Add(head);",
+        "            }",
+        "            else if (outcome == \"transient\" && m.Attempt <= tiers.Length)",
+        "            {",
+        "                var delay = tiers[m.Attempt - 1];",
+        "                scheduled.Add((m.At + delay, seq++, m.Id, m.Attempt + 1));",
+        "                log.Add($\"{head} -> retry in {delay} ms\");",
+        "            }",
+        "            else",
+        "            {",
+        "                ParkingLot.Add(m.Id);",
+        "                log.Add($\"{head} -> parking lot\");",
+        "            }",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep a list of `(long At, long Seq, string Id, int Attempt)` and a running sequence number for ties.",
+        "Each loop: pick the earliest due entry with `OrderBy(At).ThenBy(Seq)`, remove it, handle it, maybe reschedule."
+      ],
+      "template": [
+        "string DojoHandler(string id, int attempt) => id switch",
+        "{",
+        "    \"b\" => attempt == 1 ? \"transient\" : \"ok\",",
+        "    \"c\" => \"transient\",",
+        "    \"d\" => \"permanent\",",
+        "    _ => \"ok\",",
+        "};",
+        "var dojoC = new RetryingConsumer(DojoHandler, new long[] { 1000, 5000 });",
+        "dojoC.Publish(\"a\", 0);",
+        "dojoC.Publish(\"b\", 0);",
+        "dojoC.Publish(\"c\", 10);",
+        "dojoC.Publish(\"d\", 20);",
+        "Dojo.Eq(\"the whole timeline\", new List<string>",
+        "{",
+        "    \"0 a #1 ok\",",
+        "    \"0 b #1 transient -> retry in 1000 ms\",",
+        "    \"10 c #1 transient -> retry in 1000 ms\",",
+        "    \"20 d #1 permanent -> parking lot\",",
+        "    \"1000 b #2 ok\",",
+        "    \"1010 c #2 transient -> retry in 5000 ms\",",
+        "    \"6010 c #3 transient -> parking lot\",",
+        "}, dojoC.RunUntil(10_000));",
+        "Dojo.Eq(\"parked in the order they gave up\", new List<string> { \"d\", \"c\" }, dojoC.ParkingLot);",
+        "var dojoP = new RetryingConsumer(DojoHandler, new long[] { 1000 });",
+        "dojoP.Publish(\"b\", 0);",
+        "Dojo.Eq(\"a run stops at its time limit\", new List<string> { \"0 b #1 transient -> retry in 1000 ms\" }, dojoP.RunUntil(500));",
+        "Dojo.Eq(\"nothing due yet\", new List<string>(), dojoP.RunUntil(999));",
+        "Dojo.Eq(\"the retry runs when it is due\", new List<string> { \"1000 b #2 ok\" }, dojoP.RunUntil(2000));",
+        "var dojoN = new RetryingConsumer(DojoHandler, new long[0]);",
+        "dojoN.Publish(\"c\", 5);",
+        "Dojo.Eq(\"no tiers: a transient failure is parked at once\", new List<string> { \"5 c #1 transient -> parking lot\" }, dojoN.RunUntil(5));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

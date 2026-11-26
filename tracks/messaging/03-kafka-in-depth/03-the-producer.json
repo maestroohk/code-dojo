@@ -1,0 +1,325 @@
+{
+  "title": "The producer: batching, retries and idempotence",
+  "summary": "How a record travels from ProduceAsync to the leader, what linger.ms, batch.size and compression buy you, and how the idempotent producer stops retries from writing duplicates.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "From ProduceAsync to the leader",
+      "body": [
+        "A producer does not send one network request per record. It **batches** per partition:",
+        "",
+        "```text",
+        "ProduceAsync(key, value)",
+        "   |",
+        "   v",
+        "serializer -> partitioner -> accumulator: one open batch per partition",
+        "                               P0 [r r r r . . ]   <- sent when full (batch.size) ...",
+        "                               P1 [r . . . . . ]   <- ... or when linger.ms has passed",
+        "                                       |",
+        "                                       v   background sender (librdkafka threads)",
+        "                               ProduceRequest to each partition's leader",
+        "                               (up to max.in.flight requests per connection)",
+        "                                       |",
+        "                                       v",
+        "                               leader + ISR write it (acks=all) -> DeliveryResult { Partition, Offset }",
+        "```",
+        "",
+        "| Setting | Default | Why you change it |",
+        "|---|---|---|",
+        "| `linger.ms` | 5 ms (librdkafka; the Java client since Kafka 4.0, it was 0) | wait a little longer (10-50 ms) for fuller batches: higher throughput, a few ms more latency |",
+        "| `batch.size` | 16 KiB (Java) / 1 MB (librdkafka, plus `batch.num.messages` 10000) | bigger batches for high-volume topics |",
+        "| `compression.type` | `none` | `zstd` or `lz4`: the **whole batch** is compressed, stored compressed and sent compressed to consumers, so bigger batches compress better |",
+        "| `acks` | `all` | keep it |",
+        "",
+        "`ProduceAsync` completes when the batch holding the record is acknowledged, so awaiting each call one by one in a",
+        "loop sends one record per round trip. For throughput, start many and await them together, or use `Produce` with a",
+        "delivery handler, and call `producer.Flush(timeout)` before shutting down so nothing is left in the accumulator."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Ten records for one partition arrive 2 ms apart. A batch holds 4 records and `linger.ms` is 5. What does this print?",
+      "code": [
+        "var batchSize = 4;",
+        "var lingerMs = 5;",
+        "var batch = new List<int>();",
+        "long opened = 0;",
+        "var requests = 0;",
+        "for (int i = 0; i < 10; i++)",
+        "{",
+        "    long now = i * 2;",
+        "    if (batch.Count > 0 && now - opened >= lingerMs) { requests++; batch.Clear(); }",
+        "    if (batch.Count == 0) opened = now;",
+        "    batch.Add(i);",
+        "    if (batch.Count == batchSize) { requests++; batch.Clear(); }",
+        "}",
+        "if (batch.Count > 0) requests++;",
+        "Console.WriteLine($\"{requests} requests\");"
+      ],
+      "answer": "4 requests",
+      "explain": [
+        "Every batch is opened, gets two more records in the next 4 ms, and is sent when the third record would arrive 6 ms",
+        "after it opened: linger wins every time and batches of 3 go out (0-2, 3-5, 6-8), then the last record alone. Ten",
+        "records in four requests instead of ten. A longer `linger.ms` would fill batches of 4."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A record accumulator",
+      "prompt": [
+        "Write a class `Accumulator` that batches records per partition the way the producer does.",
+        "",
+        "- `Accumulator(int batchSize, long lingerMs)`.",
+        "- `string? Add(int partition, string record, long nowMs)`: adds the record to that partition's open batch (opening",
+        "  one, stamped with `nowMs`, if there is none). If the batch now holds `batchSize` records it is sent at once: remove it",
+        "  and return it as `\"P{partition}[{records joined with ','}]\"`. Otherwise return `null`.",
+        "- `List<string> Drain(long nowMs)`: removes and returns every open batch that has lingered long enough",
+        "  (`nowMs - opened >= lingerMs`), in ascending partition order.",
+        "- `List<string> Flush()`: removes and returns **every** open batch, in ascending partition order (what",
+        "  `producer.Flush()` does on shutdown)."
+      ],
+      "starter": [
+        "class Accumulator",
+        "{",
+        "    public Accumulator(int batchSize, long lingerMs) { }",
+        "",
+        "    public string? Add(int partition, string record, long nowMs) => null;",
+        "",
+        "    public List<string> Drain(long nowMs) => new();",
+        "",
+        "    public List<string> Flush() => new();",
+        "}"
+      ],
+      "solution": [
+        "class Accumulator",
+        "{",
+        "    readonly int batchSize;",
+        "    readonly long lingerMs;",
+        "    readonly SortedDictionary<int, (long Opened, List<string> Records)> open = new();",
+        "",
+        "    public Accumulator(int batchSize, long lingerMs)",
+        "    {",
+        "        this.batchSize = batchSize;",
+        "        this.lingerMs = lingerMs;",
+        "    }",
+        "",
+        "    static string Format(int partition, List<string> records) => $\"P{partition}[{string.Join(\",\", records)}]\";",
+        "",
+        "    public string? Add(int partition, string record, long nowMs)",
+        "    {",
+        "        if (!open.TryGetValue(partition, out var batch))",
+        "            open[partition] = batch = (nowMs, new List<string>());",
+        "        batch.Records.Add(record);",
+        "        if (batch.Records.Count < batchSize) return null;",
+        "        open.Remove(partition);",
+        "        return Format(partition, batch.Records);",
+        "    }",
+        "",
+        "    public List<string> Drain(long nowMs)",
+        "    {",
+        "        var ready = open.Where(kv => nowMs - kv.Value.Opened >= lingerMs).Select(kv => kv.Key).ToList();",
+        "        var result = ready.Select(p => Format(p, open[p].Records)).ToList();",
+        "        foreach (var p in ready) open.Remove(p);",
+        "        return result;",
+        "    }",
+        "",
+        "    public List<string> Flush()",
+        "    {",
+        "        var result = open.Select(kv => Format(kv.Key, kv.Value.Records)).ToList();",
+        "        open.Clear();",
+        "        return result;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `SortedDictionary<int, (long Opened, List<string> Records)>` keeps partitions in order for you.",
+        "In `Drain`, collect the ready partitions first, then remove them (you cannot remove while enumerating)."
+      ],
+      "template": [
+        "var dojoA = new Accumulator(3, 5);",
+        "Dojo.Check(\"a record opens a batch and waits\", dojoA.Add(0, \"a\", 0) is null, \"Add should return null until the batch is full\");",
+        "dojoA.Add(1, \"x\", 1);",
+        "dojoA.Add(0, \"b\", 2);",
+        "Dojo.Eq(\"a full batch is sent at once\", \"P0[a,b,c]\", dojoA.Add(0, \"c\", 3));",
+        "Dojo.Eq(\"nothing has lingered long enough at t=4\", new List<string>(), dojoA.Drain(4));",
+        "Dojo.Eq(\"P1 goes once linger.ms has passed\", new List<string> { \"P1[x]\" }, dojoA.Drain(6));",
+        "dojoA.Add(2, \"m\", 10);",
+        "dojoA.Add(0, \"d\", 11);",
+        "Dojo.Eq(\"drain returns batches in partition order\", new List<string> { \"P0[d]\", \"P2[m]\" }, dojoA.Drain(20));",
+        "dojoA.Add(1, \"y\", 30);",
+        "dojoA.Add(3, \"z\", 31);",
+        "Dojo.Eq(\"Flush sends whatever is open\", new List<string> { \"P1[y]\", \"P3[z]\" }, dojoA.Flush());",
+        "Dojo.Eq(\"after Flush nothing is left\", new List<string>(), dojoA.Drain(1000));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Retries make duplicates; idempotence removes them",
+      "body": [
+        "A producer retries failed sends (`retries` is effectively unlimited, bounded by `delivery.timeout.ms`, which is",
+        "120 s in Java; librdkafka calls it `message.timeout.ms`, 300 s). The dangerous failure is the **lost answer**:",
+        "",
+        "```text",
+        "producer --- batch [A2] ---> leader writes A2 at offset 1180",
+        "producer <--- response lost (timeout, connection reset)",
+        "producer --- retry  [A2] ---> leader writes A2 AGAIN at offset 1181      without idempotence",
+        "```",
+        "",
+        "The **idempotent producer** fixes this inside Kafka. The producer gets a **producer id (PID)** and numbers every batch",
+        "per partition with a **sequence number**. The leader remembers the last sequences per PID and partition (the last 5",
+        "batches), so a retry of a sequence it already wrote is answered \"ok\" **without appending**, and a sequence that skips",
+        "ahead is rejected with `OUT_OF_ORDER_SEQUENCE`.",
+        "",
+        "- It requires `acks=all`, retries, and at most 5 requests in flight per connection, which is also what keeps order",
+        "  during retries (next module).",
+        "- **Confluent.Kafka / librdkafka defaults `enable.idempotence` to false.** The Java client defaults it to true since",
+        "  Kafka 3.0. In .NET always set `EnableIdempotence = true`.",
+        "- It covers retries **inside one producer session**. A restarted service gets a new PID, and your own code resending",
+        "  after a crash is a new record: for that you need transactions or an idempotent consumer.",
+        "",
+        "Exactly-once read-process-write uses **transactions**: `TransactionalId`, `producer.InitTransactions(t)`,",
+        "`BeginTransaction()`, produce, `SendOffsetsToTransaction(offsets, consumer.ConsumerGroupMetadata, t)`,",
+        "`CommitTransaction()`; downstream consumers set `IsolationLevel = IsolationLevel.ReadCommitted`.",
+        "",
+        "> **See it:** in **Labs → Messaging builder → Kafka**, play *Duplicates from retries*."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "orders-api uses Confluent.Kafka with `Acks = Acks.All` and no other delivery settings. A network blip loses the broker's answer to a batch that was written. What can the topic end up with?",
+      "options": [
+        "The same order twice: `EnableIdempotence` defaults to false in librdkafka, so the retry is appended again",
+        "Exactly one copy: `acks=all` prevents duplicates",
+        "No copy: the write is rolled back when the answer is lost",
+        "An exception and no retry: retries are off by default"
+      ],
+      "answer": 0,
+      "explain": [
+        "`acks` is about **durability**, not duplicates. Retries are on by default, so a lost answer leads to a second copy",
+        "unless the broker can recognise the retry, which is exactly what the PID and sequence numbers of",
+        "`EnableIdempotence = true` give it."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the idempotent retry in the order it happens.",
+      "lines": [
+        "The producer (PID 42) sends batch seq 7 for orders-0",
+        "The leader appends it at offset 1180 and the ISR copies it",
+        "The response is lost and the request times out",
+        "The producer retries the same batch, still seq 7",
+        "The leader sees seq 7 was already written for PID 42 on orders-0",
+        "The leader answers success with offset 1180 and appends nothing"
+      ],
+      "explain": [
+        "The retry carries the **same** sequence number, which is how the leader tells a retry from a new record. A new",
+        "record from the same producer would carry seq 8."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete a production-ready Confluent.Kafka producer.",
+      "code": [
+        "var pc = new ProducerConfig",
+        "{",
+        "    BootstrapServers = \"kafka:9092\",",
+        "    Acks = Acks.All,",
+        "    EnableIdempotence = __1__,",
+        "    LingerMs = __2__,",
+        "    CompressionType = CompressionType.__3__,",
+        "};",
+        "using var producer = new ProducerBuilder<string, string>(pc).Build();",
+        "var r = await producer.__4__(\"orders\", new Message<string, string> { Key = orderId, Value = json });",
+        "logger.LogInformation(\"written to {TopicPartitionOffset}\", r.TopicPartitionOffset);"
+      ],
+      "blanks": [
+        "true",
+        "10",
+        "Zstd",
+        "ProduceAsync"
+      ],
+      "bank": [
+        "false",
+        "Produce",
+        "Deflate",
+        "SendAsync"
+      ],
+      "explain": [
+        "`EnableIdempotence = true` (not the librdkafka default), a slightly longer linger for fuller batches, zstd for",
+        "compression. `ProduceAsync` returns a `DeliveryResult` with `Partition`, `Offset` and `TopicPartitionOffset`, and",
+        "throws `ProduceException<TKey, TValue>` when delivery fails for good."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The leader's duplicate check",
+      "prompt": [
+        "Write the check the partition leader runs for the idempotent producer.",
+        "",
+        "Write a class `IdempotentLog`:",
+        "",
+        "- `List<string> Records` (get): the records in the log, in offset order.",
+        "- `string Append(long producerId, int sequence, string value)`:",
+        "  - for a producer id seen for the first time, the expected sequence is `0`; afterwards it is the last written",
+        "    sequence + 1;",
+        "  - `sequence` equal to the expected one: append, return `\"appended at {offset}\"`;",
+        "  - `sequence` lower than expected (a retry): do **not** append, return `\"duplicate of {offset}\"`, the offset where that",
+        "    sequence was written;",
+        "  - `sequence` higher than expected: do not append, return `\"OUT_OF_ORDER_SEQUENCE (expected {expected})\"`."
+      ],
+      "starter": [
+        "class IdempotentLog",
+        "{",
+        "    public List<string> Records { get; } = new();",
+        "",
+        "    public string Append(long producerId, int sequence, string value)",
+        "    {",
+        "        return \"\";",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class IdempotentLog",
+        "{",
+        "    readonly Dictionary<long, List<long>> offsetsBySequence = new();",
+        "",
+        "    public List<string> Records { get; } = new();",
+        "",
+        "    public string Append(long producerId, int sequence, string value)",
+        "    {",
+        "        if (!offsetsBySequence.TryGetValue(producerId, out var written))",
+        "            offsetsBySequence[producerId] = written = new List<long>();",
+        "        var expected = written.Count;",
+        "        if (sequence < expected) return $\"duplicate of {written[sequence]}\";",
+        "        if (sequence > expected) return $\"OUT_OF_ORDER_SEQUENCE (expected {expected})\";",
+        "        Records.Add(value);",
+        "        written.Add(Records.Count - 1);",
+        "        return $\"appended at {Records.Count - 1}\";",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Per producer id keep the list of offsets its sequences were written at: its `Count` is the expected next sequence.",
+        "Compare `sequence` with `written.Count`: lower is a duplicate (`written[sequence]`), higher is a gap."
+      ],
+      "template": [
+        "var dojoL = new IdempotentLog();",
+        "Dojo.Eq(\"first batch\", \"appended at 0\", dojoL.Append(42, 0, \"A1\"));",
+        "Dojo.Eq(\"next sequence\", \"appended at 1\", dojoL.Append(42, 1, \"A2\"));",
+        "Dojo.Eq(\"a retry after a lost answer is not written again\", \"duplicate of 1\", dojoL.Append(42, 1, \"A2\"));",
+        "Dojo.Eq(\"another producer has its own sequences\", \"appended at 2\", dojoL.Append(7, 0, \"B1\"));",
+        "Dojo.Eq(\"a gap is rejected\", \"OUT_OF_ORDER_SEQUENCE (expected 2)\", dojoL.Append(42, 3, \"A4\"));",
+        "Dojo.Eq(\"the missing batch arrives\", \"appended at 3\", dojoL.Append(42, 2, \"A3\"));",
+        "Dojo.Eq(\"then the retried later batch fits\", \"appended at 4\", dojoL.Append(42, 3, \"A4\"));",
+        "Dojo.Eq(\"an old retry still points at its offset\", \"duplicate of 0\", dojoL.Append(42, 0, \"A1\"));",
+        "Dojo.Eq(\"a restarted service gets a new PID, so its resend is a new record\", \"appended at 5\", dojoL.Append(43, 0, \"A4\"));",
+        "Dojo.Eq(\"a new PID must start at sequence 0\", \"OUT_OF_ORDER_SEQUENCE (expected 0)\", dojoL.Append(44, 5, \"x\"));",
+        "Dojo.Eq(\"the log has one copy per accepted batch\", new List<string> { \"A1\", \"A2\", \"B1\", \"A3\", \"A4\", \"A4\" }, dojoL.Records);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

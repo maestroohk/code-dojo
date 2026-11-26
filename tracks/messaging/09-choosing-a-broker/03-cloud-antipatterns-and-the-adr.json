@@ -1,0 +1,392 @@
+{
+  "title": "Cloud services, anti-patterns and the ADR",
+  "summary": "The managed options and their exact semantics, the designs reviewers push back on, and writing the decision down as an architecture decision record.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The managed options",
+      "body": [
+        "| Service | Shape | The semantics you must know |",
+        "|---|---|---|",
+        "| **Azure Service Bus** | queues; topics with subscriptions (filters) | peek-lock with a lock duration; **sessions** (`SessionId`) for FIFO per key; `MaxDeliveryCount` (default 10) then the built-in dead-letter subqueue; duplicate detection window; scheduled messages |",
+        "| **Azure Event Hubs** | partitioned log | consumer groups; **checkpoints** (the processor stores them in Blob Storage); time-based retention; a **Kafka-compatible endpoint** (port 9093) for Kafka clients |",
+        "| **Amazon SQS** | queue | **standard**: at-least-once, best-effort order; **FIFO**: `MessageGroupId` for order, `MessageDeduplicationId` (5-minute window); **visibility timeout** (default 30 s); redrive policy with `maxReceiveCount` to a DLQ; long polling up to 20 s |",
+        "| **Amazon SNS** | pub/sub | fans out to SQS queues (one per subscriber), Lambda, HTTP; filter policies; FIFO topics pair with FIFO queues |",
+        "| **Amazon Kinesis Data Streams** | partitioned log | shards with per-shard write limits; partition key to shard; retention from 24 hours up to 365 days; consumers checkpoint (KCL uses DynamoDB) |",
+        "| **Amazon MSK** | managed Kafka | real Kafka (provisioned or serverless); your Kafka skills and clients apply |",
+        "| **Google Cloud Pub/Sub** | topics and subscriptions | **ack deadline** (default 10 s, extendable); **ordering keys**; dead-letter topics with max delivery attempts; seek to a timestamp or snapshot to replay retained messages |",
+        "",
+        "Google Cloud also offers a managed Apache Kafka service, and Confluent Cloud runs Kafka on all three clouds. Read the",
+        "quotas page of whichever you pick: per-partition, per-shard and per-group throughput limits decide your sizing."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each setting to what it controls.",
+      "pairs": [
+        [
+          "Service Bus `SessionId`",
+          "FIFO per key; one receiver holds a session at a time"
+        ],
+        [
+          "SQS visibility timeout",
+          "How long a received message stays hidden before another consumer can receive it"
+        ],
+        [
+          "SQS redrive `maxReceiveCount`",
+          "Receives before the message moves to the dead-letter queue"
+        ],
+        [
+          "Event Hubs checkpoint",
+          "A consumer's saved position in a partition, like a committed offset"
+        ],
+        [
+          "Pub/Sub ack deadline",
+          "Time to ack before Pub/Sub delivers the message again"
+        ],
+        [
+          "SQS FIFO `MessageDeduplicationId`",
+          "Drops a resend with the same id within 5 minutes"
+        ]
+      ],
+      "explain": [
+        "The same four ideas recur in every product under different names: a lease (lock duration, visibility timeout, ack",
+        "deadline), a retry limit, a dead-letter destination and a position (offset, checkpoint)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Every video is transcoded about three times. Jobs take around 90 s. What is the cause and the fix?",
+      "code": [
+        "$ aws sqs get-queue-attributes --queue-url https://sqs.eu-west-1.amazonaws.com/111122223333/transcode \\",
+        "    --attribute-names VisibilityTimeout RedrivePolicy ApproximateNumberOfMessagesNotVisible",
+        "{",
+        "    \"Attributes\": {",
+        "        \"VisibilityTimeout\": \"30\",",
+        "        \"RedrivePolicy\": \"{\\\"deadLetterTargetArn\\\":\\\"arn:aws:sqs:eu-west-1:111122223333:transcode-dlq\\\",\\\"maxReceiveCount\\\":5}\",",
+        "        \"ApproximateNumberOfMessagesNotVisible\": \"412\"",
+        "    }",
+        "}",
+        "",
+        "worker-2  transcode v-1182 started (ApproximateReceiveCount=3)"
+      ],
+      "options": [
+        "The visibility timeout (30 s) is shorter than the job, so the message reappears and another worker takes it; raise it above the worst-case job time or extend it with `ChangeMessageVisibility` while working, and keep the worker idempotent",
+        "SQS standard queues always deliver three copies; switch to FIFO",
+        "`maxReceiveCount` 5 makes SQS deliver each message five times",
+        "Long polling causes duplicate receives"
+      ],
+      "answer": 0,
+      "explain": [
+        "The receive count of 3 and 412 messages \"not visible\" give it away: workers keep re-receiving jobs that are still",
+        "running. FIFO would not help; the lease is simply too short. The same bug exists as a Service Bus lock that expires",
+        "(`MessageLockLostException`) and a Pub/Sub ack deadline that passes."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Anti-patterns a reviewer will catch",
+      "body": [
+        "- **Kafka as a task queue with per-message acks.** Committing each record by hand does not make Kafka a queue: a",
+        "  slow record still blocks its partition, parallelism stops at the partition count, and jobs longer than",
+        "  `max.poll.interval.ms` trigger rebalances. Use a queue (or evaluate share groups on a version that supports them).",
+        "- **RabbitMQ as a long-term event store.** Millions of messages parked in a queue \"for later\" eat memory and disk,",
+        "  trigger alarms that block publishers, and still cannot be replayed once acked. Use a stream or a log.",
+        "- **A database table as a queue without `SKIP LOCKED`.** Workers that `SELECT ... LIMIT 1` then `UPDATE` take the",
+        "  same row; with plain `FOR UPDATE` they queue up behind each other. Done right it is a perfectly good queue at",
+        "  moderate volume, and it pairs naturally with the outbox:",
+        "",
+        "```sql",
+        "UPDATE jobs SET status = 'running', locked_by = 'worker-3', locked_at = now()",
+        "WHERE id = (",
+        "    SELECT id FROM jobs",
+        "    WHERE status = 'ready'",
+        "    ORDER BY id",
+        "    FOR UPDATE SKIP LOCKED",
+        "    LIMIT 1)",
+        "RETURNING id, payload;",
+        "```",
+        "",
+        "  Add an index on `(status, id)` and a sweeper that resets rows whose `locked_at` is older than the job timeout.",
+        "- **One queue or topic per customer** (millions of them): every broker has per-queue or per-partition overhead.",
+        "  Use a key, a session or a header instead."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Anti-pattern, or a reasonable design?",
+      "buckets": [
+        "Anti-pattern",
+        "Reasonable"
+      ],
+      "items": [
+        [
+          "A Kafka topic of 20-minute video jobs, committing each offset by hand",
+          0
+        ],
+        [
+          "A RabbitMQ queue holding 90 days of events for consumers that do not exist yet",
+          0
+        ],
+        [
+          "A Postgres `jobs` table claimed with `FOR UPDATE SKIP LOCKED` at 50 jobs per second",
+          1
+        ],
+        [
+          "Workers that `SELECT ... WHERE status = 'ready' LIMIT 1`, then `UPDATE` the row",
+          0
+        ],
+        [
+          "A 7-day Kafka event stream that three teams consume",
+          1
+        ],
+        [
+          "An SQS standard queue for thumbnail jobs with idempotent workers",
+          1
+        ],
+        [
+          "One RabbitMQ queue per customer, two million queues",
+          0
+        ]
+      ],
+      "explain": [
+        "Most anti-patterns are a reasonable tool used for the other shape: a log used as a queue, a queue used as a log, a",
+        "table used as a queue without the one clause that makes it safe."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Write it down: the ADR",
+      "body": [
+        "A design review ends in an **architecture decision record**: a short Markdown file in the repository",
+        "(`docs/adr/0057-messaging-backbone.md`) that says what was decided and why, so the next engineer does not reopen the",
+        "debate without new facts.",
+        "",
+        "```text",
+        "# ADR-57: Messaging backbone for the returns platform",
+        "Status: Proposed",
+        "",
+        "## Context        what we need, with numbers: 4,000 msg/s peak, 6 consumer teams, 30-day replay,",
+        "                  per-return ordering, label jobs of 2-4 minutes, Azure, two engineers know RabbitMQ",
+        "## Options        the candidates, scored with the SAME weights and knock-outs",
+        "## Decision       one or two sentences: \"Event Hubs for return events; Service Bus queues for label jobs.\"",
+        "## Consequences   what gets easier, what gets harder, what it costs, who runs it",
+        "## Revisit when   the signal that changes the answer: \"replay needs beyond 90 days\", \"a second cloud\"",
+        "```",
+        "",
+        "A good ADR is honest about the losing options and the costs of the winner. \"We chose Kafka because it is the",
+        "industry standard\" is not a reason; \"replay for 30 days by six teams, which queues cannot do\" is."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the sections of the ADR in order.",
+      "lines": [
+        "Title, number and status (Proposed)",
+        "Context: the requirements, with numbers and constraints",
+        "Options considered, scored against the same criteria",
+        "Decision: what we will do, in one or two sentences",
+        "Consequences: what gets easier, what gets harder, what it costs",
+        "Revisit when: the signal that would change the decision"
+      ],
+      "explain": "Context before options keeps the scoring honest: the criteria come from the requirements, not from the favourite."
+    },
+    {
+      "type": "code",
+      "title": "Pick the managed service",
+      "prompt": [
+        "Map a requirement set to a managed service, with reasons. The tests define",
+        "",
+        "```csharp",
+        "record Need(string Cloud, bool Log, bool OrderedPerKey, bool KafkaApi, bool FanOut);",
+        "```",
+        "",
+        "Write `(string Service, List<string> Reasons) PickManaged(Need n)`. `Cloud` is `\"aws\"`, `\"azure\"` or `\"gcp\"`;",
+        "anything else throws `ArgumentException`. Reasons are added only when their condition is true, in the order listed.",
+        "",
+        "**aws**",
+        "- `KafkaApi` → `\"Amazon MSK\"`: `\"Kafka protocol: existing clients work unchanged\"`",
+        "- else `Log` → `\"Amazon Kinesis Data Streams\"`: `\"partitioned log with replay\"`; `OrderedPerKey` → `\"ordering per partition key\"`",
+        "- else `FanOut` → `\"Amazon SNS FIFO + SQS FIFO\"` if `OrderedPerKey`, otherwise `\"Amazon SNS + SQS\"`:",
+        "  `\"SNS fans out to one SQS queue per subscriber\"`; `OrderedPerKey` → `\"message group id keeps per-key order\"`",
+        "- else → `\"Amazon SQS FIFO\"` if `OrderedPerKey`, otherwise `\"Amazon SQS\"`: `OrderedPerKey` →",
+        "  `\"message group id keeps per-key order\"`; always `\"redrive to a dead-letter queue after maxReceiveCount\"`",
+        "",
+        "**azure**",
+        "- `KafkaApi` or `Log` → `\"Azure Event Hubs\"`: `KafkaApi` → `\"Kafka endpoint: existing clients work with a config change\"`;",
+        "  `Log` → `\"partitioned log with consumer groups and checkpoints\"`; `OrderedPerKey` → `\"ordering per partition key\"`",
+        "- else → `\"Azure Service Bus\"`: `FanOut` → `\"topic with one subscription per consumer\"`; `OrderedPerKey` →",
+        "  `\"sessions keep per-key order\"`; always `\"dead-letter queue after MaxDeliveryCount\"`",
+        "",
+        "**gcp**",
+        "- `KafkaApi` → `\"Google Cloud Managed Service for Apache Kafka\"`: `\"Kafka protocol: existing clients work unchanged\"`",
+        "- else → `\"Google Cloud Pub/Sub\"`: `FanOut` → `\"one subscription per consumer\"`; `OrderedPerKey` → `\"ordering keys\"`;",
+        "  `Log` → `\"seek to a timestamp to replay retained messages\"`; always `\"dead-letter topic after max delivery attempts\"`"
+      ],
+      "starter": [
+        "(string Service, List<string> Reasons) PickManaged(Need n)",
+        "{",
+        "    return (\"\", new List<string>());",
+        "}"
+      ],
+      "solution": [
+        "(string Service, List<string> Reasons) PickManaged(Need n)",
+        "{",
+        "    var reasons = new List<string>();",
+        "    switch (n.Cloud)",
+        "    {",
+        "        case \"aws\":",
+        "            if (n.KafkaApi)",
+        "                return (\"Amazon MSK\", new List<string> { \"Kafka protocol: existing clients work unchanged\" });",
+        "            if (n.Log)",
+        "            {",
+        "                reasons.Add(\"partitioned log with replay\");",
+        "                if (n.OrderedPerKey) reasons.Add(\"ordering per partition key\");",
+        "                return (\"Amazon Kinesis Data Streams\", reasons);",
+        "            }",
+        "            if (n.FanOut)",
+        "            {",
+        "                reasons.Add(\"SNS fans out to one SQS queue per subscriber\");",
+        "                if (n.OrderedPerKey) reasons.Add(\"message group id keeps per-key order\");",
+        "                return (n.OrderedPerKey ? \"Amazon SNS FIFO + SQS FIFO\" : \"Amazon SNS + SQS\", reasons);",
+        "            }",
+        "            if (n.OrderedPerKey) reasons.Add(\"message group id keeps per-key order\");",
+        "            reasons.Add(\"redrive to a dead-letter queue after maxReceiveCount\");",
+        "            return (n.OrderedPerKey ? \"Amazon SQS FIFO\" : \"Amazon SQS\", reasons);",
+        "",
+        "        case \"azure\":",
+        "            if (n.KafkaApi || n.Log)",
+        "            {",
+        "                if (n.KafkaApi) reasons.Add(\"Kafka endpoint: existing clients work with a config change\");",
+        "                if (n.Log) reasons.Add(\"partitioned log with consumer groups and checkpoints\");",
+        "                if (n.OrderedPerKey) reasons.Add(\"ordering per partition key\");",
+        "                return (\"Azure Event Hubs\", reasons);",
+        "            }",
+        "            if (n.FanOut) reasons.Add(\"topic with one subscription per consumer\");",
+        "            if (n.OrderedPerKey) reasons.Add(\"sessions keep per-key order\");",
+        "            reasons.Add(\"dead-letter queue after MaxDeliveryCount\");",
+        "            return (\"Azure Service Bus\", reasons);",
+        "",
+        "        case \"gcp\":",
+        "            if (n.KafkaApi)",
+        "                return (\"Google Cloud Managed Service for Apache Kafka\", new List<string> { \"Kafka protocol: existing clients work unchanged\" });",
+        "            if (n.FanOut) reasons.Add(\"one subscription per consumer\");",
+        "            if (n.OrderedPerKey) reasons.Add(\"ordering keys\");",
+        "            if (n.Log) reasons.Add(\"seek to a timestamp to replay retained messages\");",
+        "            reasons.Add(\"dead-letter topic after max delivery attempts\");",
+        "            return (\"Google Cloud Pub/Sub\", reasons);",
+        "",
+        "        default:",
+        "            throw new ArgumentException($\"unknown cloud {n.Cloud}\");",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `switch (n.Cloud)` with one case per cloud, each checking the conditions in the listed order.",
+        "Build a `reasons` list as you go and return it with the service name.",
+        "The `default:` case throws `ArgumentException`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoA = PickManaged(new Need(\"aws\", Log: false, OrderedPerKey: true, KafkaApi: false, FanOut: false));",
+        "Dojo.Eq(\"aws ordered work queue\", \"Amazon SQS FIFO\", dojoA.Service);",
+        "Dojo.Eq(\"aws ordered work queue: reasons\", new List<string> { \"message group id keeps per-key order\", \"redrive to a dead-letter queue after maxReceiveCount\" }, dojoA.Reasons);",
+        "var dojoB = PickManaged(new Need(\"aws\", false, false, false, true));",
+        "Dojo.Eq(\"aws fan-out\", \"Amazon SNS + SQS\", dojoB.Service);",
+        "Dojo.Eq(\"aws fan-out: reasons\", new List<string> { \"SNS fans out to one SQS queue per subscriber\" }, dojoB.Reasons);",
+        "Dojo.Eq(\"aws ordered fan-out\", \"Amazon SNS FIFO + SQS FIFO\", PickManaged(new Need(\"aws\", false, true, false, true)).Service);",
+        "var dojoC = PickManaged(new Need(\"aws\", true, true, false, true));",
+        "Dojo.Eq(\"aws log wins over fan-out\", \"Amazon Kinesis Data Streams\", dojoC.Service);",
+        "Dojo.Eq(\"aws log: reasons\", new List<string> { \"partitioned log with replay\", \"ordering per partition key\" }, dojoC.Reasons);",
+        "Dojo.Eq(\"aws Kafka API\", \"Amazon MSK\", PickManaged(new Need(\"aws\", true, true, true, true)).Service);",
+        "var dojoD = PickManaged(new Need(\"azure\", true, true, true, false));",
+        "Dojo.Eq(\"azure Kafka clients and a log\", \"Azure Event Hubs\", dojoD.Service);",
+        "Dojo.Eq(\"azure Event Hubs: reasons\", new List<string> { \"Kafka endpoint: existing clients work with a config change\", \"partitioned log with consumer groups and checkpoints\", \"ordering per partition key\" }, dojoD.Reasons);",
+        "var dojoE = PickManaged(new Need(\"azure\", false, true, false, true));",
+        "Dojo.Eq(\"azure ordered fan-out\", \"Azure Service Bus\", dojoE.Service);",
+        "Dojo.Eq(\"azure Service Bus: reasons\", new List<string> { \"topic with one subscription per consumer\", \"sessions keep per-key order\", \"dead-letter queue after MaxDeliveryCount\" }, dojoE.Reasons);",
+        "var dojoF = PickManaged(new Need(\"gcp\", true, true, false, true));",
+        "Dojo.Eq(\"gcp\", \"Google Cloud Pub/Sub\", dojoF.Service);",
+        "Dojo.Eq(\"gcp: reasons\", new List<string> { \"one subscription per consumer\", \"ordering keys\", \"seek to a timestamp to replay retained messages\", \"dead-letter topic after max delivery attempts\" }, dojoF.Reasons);",
+        "Dojo.Eq(\"gcp Kafka API\", \"Google Cloud Managed Service for Apache Kafka\", PickManaged(new Need(\"gcp\", false, false, true, false)).Service);",
+        "Dojo.Throws<ArgumentException>(\"unknown cloud\", () => PickManaged(new Need(\"onprem\", false, false, false, false)));",
+        "",
+        "record Need(string Cloud, bool Log, bool OrderedPerKey, bool KafkaApi, bool FanOut);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A design-review linter",
+      "prompt": [
+        "The architecture group wants the anti-patterns caught before the review meeting. The tests define",
+        "",
+        "```csharp",
+        "record Design(string Broker, int JobSeconds, int Consumers, int Partitions, int RetentionDays, bool AutoAck, bool DbTableQueue, bool SkipLocked);",
+        "```",
+        "",
+        "Write `List<string> Review(Design d)` returning every finding, in this order:",
+        "",
+        "1. `Broker == \"kafka\"` and `JobSeconds > 300` →",
+        "   `\"kafka: {n}s jobs exceed max.poll.interval.ms (300s) and block their partition; use a queue\"`",
+        "2. `Broker == \"kafka\"` and `Consumers > Partitions` →",
+        "   `\"kafka: {Consumers - Partitions} of {Consumers} consumers will sit idle with {Partitions} partitions\"`",
+        "3. `Broker == \"rabbitmq\"` and `RetentionDays > 1` →",
+        "   `\"rabbitmq: a queue is not an event store; use a stream or a log for {n}-day retention\"`",
+        "4. `Broker == \"rabbitmq\"` and `AutoAck` → `\"rabbitmq: autoAck loses in-flight messages on a crash; ack after processing\"`",
+        "5. `DbTableQueue` and not `SkipLocked` →",
+        "   `\"db queue: claim rows with FOR UPDATE SKIP LOCKED, or workers block each other and take the same row\"`",
+        "",
+        "No findings → `[\"no findings\"]`."
+      ],
+      "starter": [
+        "List<string> Review(Design d)",
+        "{",
+        "    return new List<string> { \"no findings\" };",
+        "}"
+      ],
+      "solution": [
+        "List<string> Review(Design d)",
+        "{",
+        "    var findings = new List<string>();",
+        "    if (d.Broker == \"kafka\" && d.JobSeconds > 300)",
+        "        findings.Add($\"kafka: {d.JobSeconds}s jobs exceed max.poll.interval.ms (300s) and block their partition; use a queue\");",
+        "    if (d.Broker == \"kafka\" && d.Consumers > d.Partitions)",
+        "        findings.Add($\"kafka: {d.Consumers - d.Partitions} of {d.Consumers} consumers will sit idle with {d.Partitions} partitions\");",
+        "    if (d.Broker == \"rabbitmq\" && d.RetentionDays > 1)",
+        "        findings.Add($\"rabbitmq: a queue is not an event store; use a stream or a log for {d.RetentionDays}-day retention\");",
+        "    if (d.Broker == \"rabbitmq\" && d.AutoAck)",
+        "        findings.Add(\"rabbitmq: autoAck loses in-flight messages on a crash; ack after processing\");",
+        "    if (d.DbTableQueue && !d.SkipLocked)",
+        "        findings.Add(\"db queue: claim rows with FOR UPDATE SKIP LOCKED, or workers block each other and take the same row\");",
+        "    return findings.Count > 0 ? findings : new List<string> { \"no findings\" };",
+        "}"
+      ],
+      "hints": [
+        "Five independent `if` statements, each adding one message.",
+        "Return `[\"no findings\"]` only when the list is empty."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the pdf-render design\", new List<string>",
+        "{",
+        "    \"kafka: 600s jobs exceed max.poll.interval.ms (300s) and block their partition; use a queue\",",
+        "    \"kafka: 4 of 10 consumers will sit idle with 6 partitions\",",
+        "}, Review(new Design(\"kafka\", JobSeconds: 600, Consumers: 10, Partitions: 6, RetentionDays: 7, AutoAck: false, DbTableQueue: false, SkipLocked: false)));",
+        "Dojo.Eq(\"a healthy Kafka stream\", new List<string> { \"no findings\" }, Review(new Design(\"kafka\", 1, 6, 12, 7, false, false, false)));",
+        "Dojo.Eq(\"RabbitMQ as an archive with autoAck\", new List<string>",
+        "{",
+        "    \"rabbitmq: a queue is not an event store; use a stream or a log for 90-day retention\",",
+        "    \"rabbitmq: autoAck loses in-flight messages on a crash; ack after processing\",",
+        "}, Review(new Design(\"rabbitmq\", 2, 20, 0, 90, true, false, false)));",
+        "Dojo.Eq(\"a jobs table without SKIP LOCKED\", new List<string> { \"db queue: claim rows with FOR UPDATE SKIP LOCKED, or workers block each other and take the same row\" },",
+        "    Review(new Design(\"postgres\", 30, 4, 0, 0, false, true, false)));",
+        "Dojo.Eq(\"a jobs table done right\", new List<string> { \"no findings\" }, Review(new Design(\"postgres\", 30, 4, 0, 0, false, true, true)));",
+        "Dojo.Eq(\"long jobs on RabbitMQ are fine\", new List<string> { \"no findings\" }, Review(new Design(\"rabbitmq\", 1200, 8, 0, 0, false, false, false)));",
+        "",
+        "record Design(string Broker, int JobSeconds, int Consumers, int Partitions, int RetentionDays, bool AutoAck, bool DbTableQueue, bool SkipLocked);"
+      ]
+    }
+  ]
+}

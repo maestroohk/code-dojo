@@ -1,0 +1,307 @@
+{
+  "title": "The synchronous chain",
+  "summary": "Why a call chain fails together: temporal coupling, multiplied availability, added latency and pool exhaustion under a traffic spike.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The synchronous chain",
+      "body": [
+        "A checkout in a typical shop calls one service, which calls the next, which calls the next. Every caller",
+        "**waits**, holding a thread, a socket and a slot in a connection pool, until the whole chain answers:",
+        "",
+        "```text",
+        "browser ──> checkout-api ──> orders-api ──> billing-api ──> email-svc",
+        "             waits            waits          waits          slow today (2 s)",
+        "```",
+        "",
+        "This is **temporal coupling**: every hop must be up, and fast, *at the same moment*. Two rules fall out of it:",
+        "",
+        "- **Availability multiplies.** Four hops at 99.5 % each give you about 98 %, not 99.5 %.",
+        "- **Latency adds.** The caller's response time is the sum of every hop (plus every retry).",
+        "",
+        "The weakest, slowest service sets the experience for everything upstream of it, even when its work",
+        "(a confirmation email) has nothing to do with the answer the user is waiting for."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Four hops are called in a row. Each one is up for the fraction of time shown. What does this print?",
+      "code": [
+        "double[] hops = { 0.999, 0.995, 0.995, 0.99 };",
+        "var total = 1.0;",
+        "foreach (var a in hops) total *= a;",
+        "Console.WriteLine($\"{total * 100:F2}%\");"
+      ],
+      "answer": "97.91%",
+      "explain": "The chain is only up when every hop is up, so the probabilities multiply: about 15 hours of failed checkouts a month, from four services that each look fine on their own dashboard."
+    },
+    {
+      "type": "learn",
+      "title": "Little's law: why a spike exhausts the pool",
+      "body": [
+        "How many requests are **in flight** at once? Little's law: *in flight = arrival rate × time in the system*.",
+        "",
+        "At 100 requests per second and 300 ms per request, 30 requests are waiting at any moment. A flash sale",
+        "brings 800 per second: now 240 are in flight, more than a pool of 200 connections or threads can hold.",
+        "New requests queue **inside your process**, their latency grows, which raises the in-flight count again:",
+        "a feedback loop that ends in timeouts everywhere upstream.",
+        "",
+        "Step through it: the latency stays the same, only the traffic grows."
+      ],
+      "trace": {
+        "code": [
+          "int poolSize = 200;",
+          "int latencyMs = 300;",
+          "int[] rps = { 100, 400, 800 };",
+          "foreach (var r in rps)",
+          "{",
+          "    var inFlight = r * latencyMs / 1000;",
+          "    var status = inFlight > poolSize ? \"EXHAUSTED\" : \"ok\";",
+          "    Console.WriteLine($\"{r} rps x {latencyMs} ms = {inFlight} in flight ({status})\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "order",
+      "prompt": "A flash sale starts. Put the cascade in the order it happens.",
+      "lines": [
+        "Traffic jumps from 100 to 800 requests per second",
+        "email-svc slows down under the extra load",
+        "orders-api requests wait longer for email-svc, so more of them are in flight",
+        "orders-api exhausts its connection pool and requests queue inside the process",
+        "checkout-api calls to orders-api hit their timeout and return 504",
+        "Clients retry the failed checkouts, adding even more load"
+      ],
+      "explain": "A slow dependency turns into a full outage through waiting, not through crashing. The retries at the end are why a cascade rarely recovers on its own."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** During a sale the checkout page fails for a third of users. You find this. What is the",
+        "root cause, and what is the best fix?"
+      ],
+      "code": [
+        "12:04:17 WRN checkout-api  POST /checkout -> 504 after 10002 ms",
+        "12:04:17 ERR orders-api    System.Threading.Tasks.TaskCanceledException: The request was canceled due to the",
+        "                           configured HttpClient.Timeout of 10 seconds elapsing.",
+        "                             at OrdersApi.Email.EmailClient.SendConfirmationAsync(Order order)",
+        "                             at OrdersApi.Orders.PlaceOrderHandler.Handle(PlaceOrder cmd)",
+        "12:04:18 INF email-svc     smtp relay: 4812 pending, p99 9.6 s",
+        "",
+        "$ dotnet-counters monitor -n orders-api --counters System.Runtime",
+        "  ThreadPool Queue Length          512",
+        "  ThreadPool Thread Count          188"
+      ],
+      "options": [
+        "Checkout waits for the confirmation email on the request path. Publish an `OrderPlaced` event and let an email consumer send it at its own pace.",
+        "The 10-second `HttpClient.Timeout` is too short. Raise it to 60 seconds.",
+        "Add three retries to the email call so transient failures recover.",
+        "Scale checkout-api from 4 to 12 pods."
+      ],
+      "answer": 0,
+      "explain": [
+        "The stack trace shows the request thread waiting on `SendConfirmationAsync`, and the email relay is the slow",
+        "part. A longer timeout keeps threads waiting even longer, retries add load to the struggling service, and more",
+        "checkout pods just means more callers waiting on the same bottleneck. The email is not part of the answer the",
+        "user needs, so take it off the synchronous path."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which calls must stay synchronous because the user needs the answer now, and which can move behind a message?",
+      "buckets": [
+        "Keep synchronous",
+        "Move behind a message"
+      ],
+      "items": [
+        [
+          "Authorise the card before showing \"order placed\"",
+          0
+        ],
+        [
+          "Show the current price of a product",
+          0
+        ],
+        [
+          "Send the confirmation email",
+          1
+        ],
+        [
+          "Generate the invoice PDF",
+          1
+        ],
+        [
+          "Tell the warehouse to pick the order",
+          1
+        ],
+        [
+          "Update the recommendation model",
+          1
+        ],
+        [
+          "Check the username is free on sign-up",
+          0
+        ]
+      ],
+      "explain": "Ask: does the response to *this* request depend on the result? If not, the work can happen a moment later, and a broker can hold it while the worker is slow or down."
+    },
+    {
+      "type": "learn",
+      "title": "What a broker changes",
+      "body": [
+        "Put a broker between the two sides and the caller only needs the **broker** to be up:",
+        "",
+        "```text",
+        "orders-api ──publish OrderPlaced──> [ broker: email queue ] ──> email-worker (its own pace)",
+        "    │                                   stores the message",
+        "    └── returns 201 as soon as the broker confirms it has the message",
+        "```",
+        "",
+        "- **email-worker down?** Messages wait in the queue; nothing upstream fails. When it comes back it drains the backlog.",
+        "- **Spike?** The queue grows instead of the error rate. Workers keep their steady rate.",
+        "- **orders-api** no longer knows the address of email-svc, only the name of the exchange or topic.",
+        "",
+        "The broker must be durable and *confirm* the publish (RabbitMQ publisher confirms, Kafka `acks=all`),",
+        "otherwise \"the broker has it\" is a hope, not a fact. Modules 2 and 3 show how.",
+        "",
+        "> **See it:** open **Labs → Messaging builder → RabbitMQ** and play the challenge *Drain the backlog*."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each kind of coupling to what a broker does about it.",
+      "pairs": [
+        [
+          "Temporal: both sides must be up at once",
+          "The broker stores the message until the consumer is back"
+        ],
+        [
+          "Rate: the consumer must keep up with every peak",
+          "The queue absorbs the spike; consumers drain it at their own rate"
+        ],
+        [
+          "Location: the caller knows the callee's address",
+          "The publisher only knows an exchange or topic name"
+        ],
+        [
+          "Format: both sides read the same fields",
+          "Nothing: the message schema is still a contract (module 5)"
+        ]
+      ],
+      "explain": "Messaging removes the time and rate coupling, not the contract. A renamed field breaks an async consumer just as surely as a sync one, only later and more quietly."
+    },
+    {
+      "type": "code",
+      "title": "How many are in flight?",
+      "prompt": [
+        "Write two methods based on Little's law:",
+        "",
+        "- `int InFlight(int requestsPerSecond, int latencyMs)`: requests in flight at once, **rounded up**",
+        "  (`InFlight(3, 500)` is `2`, not `1`: you cannot hold half a connection).",
+        "- `bool Saturated(int requestsPerSecond, int latencyMs, int poolSize)`: `true` when the in-flight count is",
+        "  **greater than** the pool size."
+      ],
+      "starter": [
+        "int InFlight(int requestsPerSecond, int latencyMs)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "bool Saturated(int requestsPerSecond, int latencyMs, int poolSize)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "int InFlight(int requestsPerSecond, int latencyMs)",
+        "{",
+        "    return (int)Math.Ceiling(requestsPerSecond * (long)latencyMs / 1000.0);",
+        "}",
+        "",
+        "bool Saturated(int requestsPerSecond, int latencyMs, int poolSize)",
+        "{",
+        "    return InFlight(requestsPerSecond, latencyMs) > poolSize;",
+        "}"
+      ],
+      "hints": [
+        "in flight = rate × seconds = `requestsPerSecond * latencyMs / 1000`.",
+        "Divide as a `double` and use `Math.Ceiling`, then cast back to `int`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"InFlight(100, 300) is 30\", 30, InFlight(100, 300));",
+        "Dojo.Eq(\"InFlight(800, 300) is 240\", 240, InFlight(800, 300));",
+        "Dojo.Eq(\"InFlight(3, 500) rounds up to 2\", 2, InFlight(3, 500));",
+        "Dojo.Eq(\"InFlight(0, 900) is 0\", 0, InFlight(0, 900));",
+        "Dojo.Eq(\"a 2.5 s hop at 650 rps\", 1625, InFlight(650, 2500));",
+        "Dojo.Eq(\"Saturated(800, 300, 200) is true\", true, Saturated(800, 300, 200));",
+        "Dojo.Eq(\"Saturated(400, 300, 200) is false\", false, Saturated(400, 300, 200));",
+        "Dojo.Eq(\"exactly the pool size still fits\", false, Saturated(200, 1000, 200));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Diagnose the chain",
+      "prompt": [
+        "Write the diagnosis an on-call engineer gives in the incident channel.",
+        "",
+        "`string Diagnose(int rps, int poolSize, int timeoutMs, (string Name, int LatencyMs, bool NeededForReply)[] hops)`",
+        "",
+        "Today every hop is called **synchronously, one after the other**.",
+        "",
+        "1. `latency` = the sum of all hop latencies; `inFlight` = Little's law, rounded up (as in the last step).",
+        "2. The status, checked in this order:",
+        "   - `latency > timeoutMs` → `\"timeout: {latency} ms > {timeoutMs} ms\"`",
+        "   - `inFlight > poolSize` → `\"saturated: {inFlight} in flight > pool {poolSize}\"`",
+        "   - otherwise → `\"ok: {latency} ms, {inFlight} in flight\"` and stop here.",
+        "3. If the status is not ok and some hops are **not** needed for the reply, append",
+        "   `\"; publish an event for: {names} (sync path {syncLatency} ms)\"`: the names in the given order joined with",
+        "   `\", \"`, and `syncLatency` the sum of the hops that **are** needed.",
+        "",
+        "```text",
+        "Diagnose(400, 200, 2000, [inventory 40 needed, billing 120 needed, email 900, analytics 200])",
+        "→ \"saturated: 504 in flight > pool 200; publish an event for: email, analytics (sync path 160 ms)\"",
+        "```"
+      ],
+      "starter": [
+        "string Diagnose(int rps, int poolSize, int timeoutMs, (string Name, int LatencyMs, bool NeededForReply)[] hops)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Diagnose(int rps, int poolSize, int timeoutMs, (string Name, int LatencyMs, bool NeededForReply)[] hops)",
+        "{",
+        "    var latency = hops.Sum(h => h.LatencyMs);",
+        "    var inFlight = (int)Math.Ceiling(rps * (long)latency / 1000.0);",
+        "    string status;",
+        "    if (latency > timeoutMs) status = $\"timeout: {latency} ms > {timeoutMs} ms\";",
+        "    else if (inFlight > poolSize) status = $\"saturated: {inFlight} in flight > pool {poolSize}\";",
+        "    else return $\"ok: {latency} ms, {inFlight} in flight\";",
+        "",
+        "    var movable = hops.Where(h => !h.NeededForReply).Select(h => h.Name).ToList();",
+        "    if (movable.Count == 0) return status;",
+        "    var sync = hops.Where(h => h.NeededForReply).Sum(h => h.LatencyMs);",
+        "    return $\"{status}; publish an event for: {string.Join(\", \", movable)} (sync path {sync} ms)\";",
+        "}"
+      ],
+      "hints": [
+        "Compute `latency` with `hops.Sum(h => h.LatencyMs)` and return early for the ok case.",
+        "Collect `hops.Where(h => !h.NeededForReply)` names; only append the advice when there are some."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoShop = new (string, int, bool)[] { (\"inventory\", 40, true), (\"billing\", 120, true), (\"email\", 900, false), (\"analytics\", 200, false) };",
+        "Dojo.Eq(\"quiet day is ok\", \"ok: 1260 ms, 126 in flight\", Diagnose(100, 200, 2000, dojoShop));",
+        "Dojo.Eq(\"flash sale saturates the pool\", \"saturated: 504 in flight > pool 200; publish an event for: email, analytics (sync path 160 ms)\", Diagnose(400, 200, 2000, dojoShop));",
+        "Dojo.Eq(\"timeout is checked first\", \"timeout: 1260 ms > 1000 ms; publish an event for: email, analytics (sync path 160 ms)\", Diagnose(5000, 10, 1000, dojoShop));",
+        "var dojoAllNeeded = new (string, int, bool)[] { (\"auth\", 300, true), (\"pricing\", 900, true) };",
+        "Dojo.Eq(\"nothing can move off the sync path\", \"timeout: 1200 ms > 1000 ms\", Diagnose(10, 50, 1000, dojoAllNeeded));",
+        "Dojo.Eq(\"saturated, nothing to move\", \"saturated: 600 in flight > pool 100\", Diagnose(500, 100, 5000, dojoAllNeeded));"
+      ]
+    }
+  ]
+}

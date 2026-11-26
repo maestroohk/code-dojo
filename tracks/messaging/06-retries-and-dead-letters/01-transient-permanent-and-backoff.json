@@ -1,0 +1,308 @@
+{
+  "title": "Transient, permanent and backoff",
+  "summary": "Which failures deserve a retry, why an immediate requeue is a loop and not a retry, and exponential backoff with full jitter you can test.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two kinds of failure",
+      "body": [
+        "Before deciding **how** to retry, decide **whether** to:",
+        "",
+        "| | Transient | Permanent |",
+        "|---|---|---|",
+        "| Meaning | the same message will probably succeed later | it fails the same way every time |",
+        "| Examples | timeout, `503`, `429` with `Retry-After`, SQL deadlock victim, broker connection reset, failover in progress | invalid JSON, failed validation, unknown schema version, a referenced customer that does not exist, a bug (`NullReferenceException`) |",
+        "| Right move | retry **later**, with backoff, a bounded number of times | do not retry: dead-letter it with the reason, alert, fix, redrive |",
+        "",
+        "A message that fails every time is a **poison message**. Retrying it costs CPU, floods logs and, on a queue",
+        "that redelivers in order, blocks every message behind it.",
+        "",
+        "A bug is \"permanent until the next deploy\": retries will not fix it, but a **redrive** after the fix will.",
+        "That is why dead letters must keep the original message and the error, not just a counter."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Retry it later, or dead-letter it?",
+      "buckets": [
+        "Transient: retry later",
+        "Permanent: dead-letter"
+      ],
+      "items": [
+        [
+          "`SqlException` 1205: chosen as the deadlock victim",
+          0
+        ],
+        [
+          "`JsonException`: 'x' is an invalid start of a value",
+          1
+        ],
+        [
+          "`HttpRequestException`: 503 Service Unavailable",
+          0
+        ],
+        [
+          "`TaskCanceledException`: HttpClient.Timeout elapsed",
+          0
+        ],
+        [
+          "`ValidationException`: quantity must be at least 1",
+          1
+        ],
+        [
+          "`NullReferenceException` in `OrderMapper.Map`",
+          1
+        ],
+        [
+          "`429 Too Many Requests`, `Retry-After: 30`",
+          0
+        ],
+        [
+          "`UnsupportedSchemaVersion`: v7 (consumer knows up to v5)",
+          1
+        ]
+      ],
+      "explain": "Ask \"will the same bytes succeed in a minute?\". A newer schema version or a bug needs a deploy, not a retry; a deadlock or a 503 usually clears up by itself."
+    },
+    {
+      "type": "learn",
+      "title": "The immediate requeue loop",
+      "body": [
+        "The simplest \"retry\" is `BasicNackAsync(tag, multiple: false, requeue: true)`. On a classic queue the message",
+        "goes back to its original place, the **front**, and comes straight back:",
+        "",
+        "```text",
+        "  queue ──deliver──> consumer ──throws──> nack(requeue: true) ──┐",
+        "    ^                                                            │  thousands of times a second:",
+        "    └────────────────────────────────────────────────────────────┘  CPU 100 %, logs flood, the rest waits",
+        "```",
+        "",
+        "A quorum queue's **delivery limit** (20 by default since RabbitMQ 4.0) ends the loop, but 20 attempts in",
+        "50 ms still give a struggling dependency no time to recover. An immediate requeue is not a retry policy.",
+        "A retry needs **time between attempts**.",
+        "",
+        "> **See it:** **Labs → Messaging builder → RabbitMQ**, challenge *The poison loop*."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** payments-consumer is at 100 % CPU and its log grows by 4,000 lines a minute, all for one",
+        "message. 52,000 payments wait behind it. What is going on, and what is the fix?"
+      ],
+      "code": [
+        "10:02:11.004 WRN payments-consumer MessageId=pay-381 Redelivered=True JsonException: 'x' is an invalid start of a value. Path: $.amount",
+        "10:02:11.006 WRN payments-consumer MessageId=pay-381 Redelivered=True JsonException: 'x' is an invalid start of a value. Path: $.amount",
+        "10:02:11.009 WRN payments-consumer MessageId=pay-381 Redelivered=True JsonException: 'x' is an invalid start of a value. Path: $.amount",
+        "",
+        "$ rabbitmqctl list_queues name type messages_ready messages_unacknowledged consumers",
+        "payments  classic  52114  1  1"
+      ],
+      "options": [
+        "A poison message is nacked with `requeue: true` and comes straight back to the front of the classic queue. `JsonException` is permanent: nack it with `requeue: false` to a DLX, and move the queue to a quorum queue with a delivery limit as a safety net.",
+        "Prefetch is too low; raise it to 500 so the other messages get through.",
+        "Add ten more consumers to work through the backlog.",
+        "Purge the queue and ask the producer to resend."
+      ],
+      "answer": 0,
+      "explain": [
+        "Same `MessageId`, `Redelivered=True`, milliseconds apart: that is a requeue loop, not traffic. More consumers",
+        "or more prefetch let some other messages past, but the poison message keeps burning a consumer forever.",
+        "Purging throws away 52,000 good payments."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Exponential backoff with full jitter",
+      "body": [
+        "Wait longer after each failure, up to a cap, and pick a **random** point inside that window:",
+        "",
+        "```text",
+        "no jitter     sleep = min(cap, base × 2^n)",
+        "full jitter   sleep = random(0, min(cap, base × 2^n))         spreads clients evenly; the usual default",
+        "equal jitter  sleep = c/2 + random(0, c/2),  c = min(cap, base × 2^n)",
+        "```",
+        "",
+        "Without jitter, every client that failed together retries together: 3,000 consumers hit a database that just",
+        "came back at exactly 1 s, 2 s, 4 s... and knock it over again. Full jitter turns those spikes into a smooth",
+        "load. Polly does this with `BackoffType = DelayBackoffType.Exponential, UseJitter = true`.",
+        "",
+        "**Testing it:** inject the `Random` (or a seed) and never sleep in a test. `new Random(42)` gives the same",
+        "sequence every run, so the schedule is checkable. Step through one: the ceiling doubles, the wait is random",
+        "below it."
+      ],
+      "trace": {
+        "code": [
+          "var rng = new Random(7);",
+          "int baseMs = 200, capMs = 10_000;",
+          "for (var n = 0; n < 6; n++)",
+          "{",
+          "    var ceiling = (int)Math.Min(capMs, (long)baseMs << n);",
+          "    var wait = rng.Next(0, ceiling + 1);",
+          "    Console.WriteLine($\"attempt {n + 1}: ceiling {ceiling} ms, wait {wait} ms\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "What ceilings does this print (base 500 ms, cap 8 s)?",
+      "code": [
+        "int baseMs = 500, capMs = 8000;",
+        "for (var n = 0; n < 6; n++)",
+        "    Console.Write(Math.Min(capMs, baseMs * (1 << n)) + \" \");"
+      ],
+      "answer": "500 1000 2000 4000 8000 8000",
+      "explain": "The ceiling doubles until it reaches the cap and then stays there. Without the cap, attempt 20 would wait 6 days, and `1 << 31` overflows an `int`."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the full-jitter schedule.",
+      "code": [
+        "var rng = new Random(seed);",
+        "for (var n = 0; n < attempts; n++)",
+        "{",
+        "    var ceiling = Math.Min(capMs, baseMs * (1 __1__ n));",
+        "    var delay = rng.__2__(0, ceiling + 1);",
+        "    delays.Add(delay);",
+        "}"
+      ],
+      "blanks": [
+        "<<",
+        "Next"
+      ],
+      "bank": [
+        ">>",
+        "NextDouble",
+        "*",
+        "Shuffle"
+      ],
+      "explain": "`1 << n` is 2ⁿ. `Next(0, ceiling + 1)` returns 0 to `ceiling` inclusive, because the upper bound of `Next` is exclusive."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A database fails over for 20 seconds. 3,000 consumer instances fail at the same moment and retry with exponential backoff **without jitter** (1 s, 2 s, 4 s, ...). What do the database graphs show when it is back?",
+      "options": [
+        "Spikes of about 3,000 requests at the same instants, which can knock it over again",
+        "A smooth ramp, because the backoff already spreads the retries",
+        "Nothing: retries only start after the database is healthy",
+        "One request per instance per second"
+      ],
+      "answer": 0,
+      "explain": "Backoff reduces how often each client retries; only jitter stops them retrying in lockstep. This is the \"thundering herd\", and it turns a 20-second failover into a much longer outage."
+    },
+    {
+      "type": "code",
+      "title": "A seeded full-jitter schedule",
+      "prompt": [
+        "Write `List<int> Schedule(int attempts, int baseMs, int capMs, int seed)`:",
+        "",
+        "- create **one** `new Random(seed)`;",
+        "- for `n` from `0` to `attempts - 1`: `ceiling = min(capMs, baseMs × 2ⁿ)` (compute it in `long` so a big `n`",
+        "  cannot overflow), then `delay = rng.Next(0, ceiling + 1)`;",
+        "- return the delays in order.",
+        "",
+        "The tests compare against the same formula with the same seed, so draw exactly one number per attempt."
+      ],
+      "starter": [
+        "List<int> Schedule(int attempts, int baseMs, int capMs, int seed)",
+        "{",
+        "    return new List<int>();",
+        "}"
+      ],
+      "solution": [
+        "List<int> Schedule(int attempts, int baseMs, int capMs, int seed)",
+        "{",
+        "    var rng = new Random(seed);",
+        "    var delays = new List<int>();",
+        "    for (var n = 0; n < attempts; n++)",
+        "    {",
+        "        var ceiling = (int)Math.Min(capMs, baseMs * (long)Math.Pow(2, n));",
+        "        delays.Add(rng.Next(0, ceiling + 1));",
+        "    }",
+        "    return delays;",
+        "}"
+      ],
+      "hints": [
+        "Create the `Random` once, outside the loop.",
+        "`(int)Math.Min(capMs, baseMs * (long)Math.Pow(2, n))`, then `rng.Next(0, ceiling + 1)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "List<int> DojoExpected(int attempts, int baseMs, int capMs, int seed)",
+        "{",
+        "    var r = new Random(seed);",
+        "    var list = new List<int>();",
+        "    for (var i = 0; i < attempts; i++) list.Add(r.Next(0, (int)Math.Min(capMs, (long)baseMs << i) + 1));",
+        "    return list;",
+        "}",
+        "Dojo.Eq(\"seed 42, six attempts\", DojoExpected(6, 200, 10_000, 42), Schedule(6, 200, 10_000, 42));",
+        "Dojo.Eq(\"seed 7, capped at 5 s\", DojoExpected(10, 200, 5000, 7), Schedule(10, 200, 5000, 7));",
+        "var dojoS = Schedule(12, 200, 5000, 7);",
+        "Dojo.Check(\"every delay is within its ceiling\", dojoS.Select((d, i) => d >= 0 && d <= Math.Min(5000L, 200L << i)).All(x => x), string.Join(\", \", dojoS));",
+        "Dojo.Eq(\"same seed, same schedule\", Schedule(5, 100, 1000, 3), Schedule(5, 100, 1000, 3));",
+        "Dojo.Eq(\"zero attempts\", new List<int>(), Schedule(0, 100, 1000, 1));",
+        "Dojo.Eq(\"a cap of 0 means no wait\", new List<int> { 0, 0, 0 }, Schedule(3, 100, 0, 1));",
+        "Dojo.Eq(\"a large attempt count does not overflow\", 40, Schedule(40, 1000, 30_000, 5).Count);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A retry policy for a consumer",
+      "prompt": [
+        "Put the lesson together: one decision per failed delivery.",
+        "",
+        "Write `string Decide(string errorKind, int attempt, int maxAttempts, int baseMs, int capMs, Random rng)`",
+        "where `attempt` is the number of the attempt that just failed (1 for the first):",
+        "",
+        "- `\"permanent\"` → `\"dead-letter: permanent\"`;",
+        "- `\"transient\"` and `attempt >= maxAttempts` → `\"dead-letter: gave up after {attempt} attempts\"`;",
+        "- `\"transient\"` otherwise → `\"retry in {delay} ms\"`, with full jitter:",
+        "  `ceiling = min(capMs, baseMs × 2^(attempt − 1))`, `delay = rng.Next(0, ceiling + 1)`;",
+        "- anything else throws `ArgumentException`.",
+        "",
+        "Draw a random number **only** when you retry, so the tests can follow the same seeded sequence."
+      ],
+      "starter": [
+        "string Decide(string errorKind, int attempt, int maxAttempts, int baseMs, int capMs, Random rng)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Decide(string errorKind, int attempt, int maxAttempts, int baseMs, int capMs, Random rng)",
+        "{",
+        "    switch (errorKind)",
+        "    {",
+        "        case \"permanent\":",
+        "            return \"dead-letter: permanent\";",
+        "        case \"transient\":",
+        "            if (attempt >= maxAttempts) return $\"dead-letter: gave up after {attempt} attempts\";",
+        "            var ceiling = (int)Math.Min(capMs, (long)baseMs << (attempt - 1));",
+        "            return $\"retry in {rng.Next(0, ceiling + 1)} ms\";",
+        "        default:",
+        "            throw new ArgumentException($\"unknown error kind '{errorKind}'\", nameof(errorKind));",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `switch` on `errorKind`; check `attempt >= maxAttempts` before drawing.",
+        "The exponent is `attempt - 1`: `(long)baseMs << (attempt - 1)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRng = new Random(42);",
+        "var dojoRef = new Random(42);",
+        "Dojo.Eq(\"first failure: up to 200 ms\", $\"retry in {dojoRef.Next(0, 201)} ms\", Decide(\"transient\", 1, 10, 200, 5000, dojoRng));",
+        "Dojo.Eq(\"second failure: up to 400 ms\", $\"retry in {dojoRef.Next(0, 401)} ms\", Decide(\"transient\", 2, 10, 200, 5000, dojoRng));",
+        "Dojo.Eq(\"permanent: straight to the dead letters\", \"dead-letter: permanent\", Decide(\"permanent\", 1, 10, 200, 5000, dojoRng));",
+        "Dojo.Eq(\"seventh failure: capped at 5000 ms\", $\"retry in {dojoRef.Next(0, 5001)} ms\", Decide(\"transient\", 7, 10, 200, 5000, dojoRng));",
+        "Dojo.Eq(\"the last attempt gives up\", \"dead-letter: gave up after 10 attempts\", Decide(\"transient\", 10, 10, 200, 5000, dojoRng));",
+        "Dojo.Eq(\"no random number was drawn when giving up\", $\"retry in {dojoRef.Next(0, 201)} ms\", Decide(\"transient\", 1, 10, 200, 5000, dojoRng));",
+        "Dojo.Throws<ArgumentException>(\"unknown error kind\", () => Decide(\"weird\", 1, 3, 100, 1000, new Random(1)));"
+      ]
+    }
+  ]
+}
