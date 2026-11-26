@@ -8,19 +8,21 @@ import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
 import { sqlGrid } from './sqlgrid.js';
 import { overTime, clock } from './pacing.js';
+import { regexStep } from './regexstep.js';
+import { regexCard } from './regex-ui.js';
 
 export const DRAG_TYPES = new Set(['order', 'blanks', 'match', 'sort']);
 
 export const TYPE_LABEL = {
   learn: 'Learn', mcq: 'Quiz', predict: 'Predict the output', order: 'Put in order',
-  blanks: 'Fill the gaps', match: 'Match', sort: 'Sort', code: 'Code',
+  blanks: 'Fill the gaps', match: 'Match', sort: 'Sort', code: 'Code', regex: 'Regex',
 };
 
 const rich = text => (/\n|```/.test(text) ? md(text) : inline(text));
 const prompt = step => h('div.prompt', { html: md(step.prompt || '') });
 
 export function renderStep(step, ctx) {
-  const make = { learn, mcq, predict, order, blanks, match, sort, code }[step.type];
+  const make = { learn, mcq, predict, order, blanks, match, sort, code, regex: regexStep }[step.type];
   if (!make) return { el: h('div.callout.warn', `Unknown step type "${step.type}".`), ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {} };
   return make(step, ctx);
 }
@@ -129,7 +131,7 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.regex && regexCard(step.regex)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }

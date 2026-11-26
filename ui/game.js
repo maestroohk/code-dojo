@@ -109,7 +109,7 @@ export function levelInfo(xp = state.xp) {
 
 // ---------------------------------------------------------------- XP rules
 
-const BASE_XP = { mcq: 10, predict: 12, order: 14, blanks: 14, match: 14, sort: 14, code: 30 };
+const BASE_XP = { mcq: 10, predict: 12, order: 14, blanks: 14, match: 14, sort: 14, code: 30, regex: 18 };
 
 /** XP for solving a step, given how it went. */
 export function stepXp(step, { attempts, hints, revealed, combo, replay, boss }) {

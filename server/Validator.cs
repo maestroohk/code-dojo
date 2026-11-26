@@ -79,6 +79,13 @@ public static class Validator
                                 if (t.Error is not null) Error(where, "trace: " + t.Error + " " + string.Join(" ", t.Diagnostics.Where(d => d.Severity == "error").Select(d => $"line {d.Line}: {d.Message}")));
                                 else if (t.Truncated) Warn(where, "trace: stopped after the step limit; use a smaller example");
                             }
+                            if (step["regex"] is JsonObject rxCard)
+                            {
+                                var (rxOptions, rxFlagError) = RegexLab.ParseFlags((string?)rxCard["flags"]);
+                                var rxBuilt = rxFlagError is null ? RegexLab.Build((string?)rxCard["pattern"] ?? "", rxOptions, 1000) : default;
+                                if (rxFlagError is not null) Error(where, "regex card: " + rxFlagError);
+                                else if (rxBuilt.Regex is null) Error(where, "regex card: the pattern does not parse in .NET: " + rxBuilt.Error);
+                            }
                             if (step["linq"] is JsonObject linq)
                             {
                                 var q = await LinqViz.Run(runner, new((string?)linq["source"], (string?)linq["query"], (string?)linq["setup"]));

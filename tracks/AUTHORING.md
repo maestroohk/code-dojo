@@ -99,6 +99,62 @@ through each stage, showing streaming (`Where`, `Select`) against buffering (`Or
 ```
 `setup` is optional C# type declarations. At most 8 operators; keep sources to about a dozen items.
 
+**`"regex"` — a live regex card.** A small regex lab under the text: the pattern coloured by part, the text with
+every match and group highlighted by real .NET `Regex`, an "Explain this pattern" tree, and (with `"debug": true`)
+the step debugger that shows the engine trying, failing and backtracking. The learner can edit everything and
+open it in the full lab (`#/labs/regex`).
+```json
+"regex": { "pattern": "(?<y>\\d{4})-(?<m>\\d{2})", "flags": "m", "text": ["line one 2026-11", "line two"], "replace": "${m}/${y}", "debug": true }
+```
+`flags` are letters: `i` IgnoreCase, `m` Multiline, `s` Singleline, `x` IgnorePatternWhitespace, `n` ExplicitCapture.
+`text` may be an array of lines. `replace` (optional) shows the replacement result. `dojo validate` fails a card whose
+pattern does not parse in .NET.
+
+### regex — write a pattern, checked by .NET
+The learner types a pattern (and may toggle flags, and type a replacement). While they type, every sample the
+checks use is shown with what .NET finds in it. **Run checks** grades it on the server with
+`System.Text.RegularExpressions` and a 250 ms match timeout; each failed check shows its input highlighted.
+```json
+{ "type": "regex", "title": "Ticket keys", "prompt": "Find every key like `OPS-311` ...",
+  "flags": "", "starter": "", "solution": "\\b[A-Z]{2,5}-\\d+\\b",
+  "tests": {
+    "match":    ["OPS-7"],                         "reject": ["ops-7", "TOOLONG-1"],
+    "find":     ["see OPS-7 now"],                 "noFind": ["no key here"],
+    "all":      [{ "input": "OPS-1 and PAY-22", "matches": ["OPS-1", "PAY-22"] }],
+    "captures": [{ "input": "OPS-1", "groups": { "1": "OPS", "num": "1" }, "match": 0 }],
+    "replace":  [{ "input": "a,b", "output": "a;b" }],
+    "split":    [{ "input": "a, b,c", "parts": ["a", "b", "c"] }],
+    "fast":     [{ "repeat": "a", "times": 5000, "suffix": "!" }]
+  } }
+```
+
+| Test | Passes when |
+|---|---|
+| `match` / `reject` | the pattern matches / does not match the **whole** string (like Python's `re.fullmatch`; the learner need not write `^...$`) |
+| `find` / `noFind` | there is a match somewhere / no match anywhere (`Regex.IsMatch`) |
+| `all` | `Regex.Matches` gives exactly these values, in order |
+| `captures` | in match number `match` (default 0), each group (by number or name) has this value; `null` means the group must not take part |
+| `replace` | `Regex.Replace(input, replacement)` gives `output` |
+| `split` | `Regex.Split(input)` gives `parts` |
+| `fast` | the pattern answers within the timeout on this (long) input: catastrophic backtracking fails it |
+
+Any input may be a string, an array of lines, or `{ "repeat": "ab", "times": 3000, "prefix": "", "suffix": "!" }`.
+
+Other fields:
+- `flags` (letters as above) is where the step starts; the learner may change them unless `"lockFlags": true`.
+  `solutionFlags` overrides `flags` for the reference.
+- Replace steps: the learner types the replacement too, and `solutionReplacement` is the reference. Or give a fixed
+  `"replacement"` and only the pattern is the learner's. `starterReplacement` pre-fills the box.
+- `require` / `forbid`: `[{ "pattern": "...", "message": "..." }]` regexes run on the **pattern text** ("uses a lazy
+  quantifier", "no `.*`"). `maxLength` caps the pattern length (golf).
+- `nonBacktracking: true` compiles with `RegexOptions.NonBacktracking`; `timeoutMs` (50-2000) changes the timeout.
+- Hints, `explain` and "Show answer" work as on other steps; the answer fills in `solution` (and its flags/replacement).
+
+`dojo validate` runs the reference through the same grader, and fails the step if it does not pass, or if the empty
+pattern or `.*` would pass too (warns for `.+` and `\w+`). Give every step at least one `reject` or `noFind` (or exact
+`all`/`captures`/`replace` results), so a lazy pattern cannot slip through. Write `solution` as a JSON string: every
+backslash doubled (`"\\d+"` is the pattern `\d+`).
+
 ### mcq — multiple choice
 ```json
 { "type": "mcq", "prompt": "Which ...?", "code": "optional code shown under the prompt",
