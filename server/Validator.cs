@@ -201,6 +201,12 @@ public static class Validator
                                 if ((await Grade(starter)).Passed) Warn(where + label, "the starter code already passes");
                             }
                             break;
+                        case "regex":
+                            // Graded by .NET's Regex (RegexLab.cs): the reference passes, an empty or naive pattern does not.
+                            code++;
+                            foreach (var (isError, message) in RegexLab.Validate(step))
+                                if (isError) Error(where, message); else Warn(where, message);
+                            break;
                         default:
                             throw new($"unknown step type '{type}'");
                     }
