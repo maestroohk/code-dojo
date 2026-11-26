@@ -69,6 +69,9 @@ public static class CodeIntel
         var support = runner.SupportTrees.ToList();
         if (files.Any(f => (f.Code ?? "").Contains("DbContext") || (f.Code ?? "").Contains("EntityFrameworkCore")) && runner.EfSupportTree is { } ef)
             support.Add(ef);
+        // xUnit lessons: `global using Xunit;`, as a real v3 test project has (the test assemblies are in IntelReferences).
+        if (files.Any(f => (f.Code ?? "") is var c && (c.Contains("[Fact") || c.Contains("[Theory") || c.Contains("Assert."))))
+            support.Add(CSharpRunner.XunitUsingTree);
         var comp = CSharpCompilation.Create("Intel", [.. trees, .. support], refs,
             new CSharpCompilationOptions(OutputKind.ConsoleApplication, nullableContextOptions: NullableContextOptions.Enable));
         var model = comp.GetSemanticModel(tree);

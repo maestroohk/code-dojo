@@ -37,7 +37,7 @@ public static class Validator
         foreach (var meta in (module["lessons"] as JsonArray ?? []).OfType<JsonObject>())
         {
             var key = $"{track["id"]}/{module["id"]}/{meta["id"]}";
-            var language = (string?)track["language"] ?? "csharp";
+            var language = (string?)module["language"] ?? (string?)track["language"] ?? "csharp";   // a module may run another language
             if (filter is not null && !key.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
             lessons++;
             Console.WriteLine(key);
@@ -62,6 +62,8 @@ public static class Validator
                     foreach (var issue in Pacing.CheckStep(lesson, step, where))
                         if (issue.Error) Error(issue.Where, issue.Message); else Warn(issue.Where, issue.Message);
                     foreach (var msg in SqlViz.Check(step)) Error(where, msg);   // sqlflow / sqlplan / pgplan / txtimeline visuals
+                    foreach (var msg in XunitCheck.Lint(step)) Error(where, msg);   // "xunit": tests against planted bugs
+                    foreach (var msg in TestViz.Check(step)) Error(where, msg);     // "testviz" learn-card visuals
                     if (step["build"] is { } build)
                     {
                         if (type != "code") throw new("\"build\" only works on code steps");
