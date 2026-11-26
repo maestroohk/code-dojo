@@ -8,6 +8,7 @@ import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
 import { memoryTrace, eventLoop } from './polyviz.js';
 import { sqlGrid } from './sqlgrid.js';
+import { attachExplain } from './explain.js';
 import { overTime, clock } from './pacing.js';
 // "terminal" (a real shell in a container) and "lab" (a visual or live lab challenge): labsteps.js.
 import { EXTRA_STEPS, EXTRA_LABELS } from './labsteps.js';
@@ -578,7 +579,13 @@ function sort(step, ctx) {
 
 // ---------------------------------------------------------------- code
 
-export function renderRunOutput(panel, r, { stdin } = {}) {
+/** Draws a run or check result; with an error in it, adds "Explain this error" (explain.js). opts: { stdin, code, task, graded, lang } */
+export function renderRunOutput(panel, r, opts = {}) {
+  drawRunOutput(panel, r, opts);
+  attachExplain(panel, r, opts);
+}
+
+function drawRunOutput(panel, r, { stdin } = {}) {
   panel.innerHTML = '';
   panel.hidden = false;
   const errors = (r.diagnostics || []).filter(d => d.severity === 'error');
@@ -696,7 +703,7 @@ function code(step, ctx) {
     try {
       const r = await api('run', { track: ctx.track, code: editor.value, stdin: firstInput || step.stdin || '', template: step.template, framework: step.framework, setup: step.setup });
       editor.mark(r.diagnostics);
-      renderRunOutput(panel, r, { stdin: firstInput });
+      renderRunOutput(panel, r, { stdin: firstInput, code: editor.value, task: step.prompt });
     } catch (e) {
       panel.hidden = false;
       panel.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?'));
@@ -749,7 +756,7 @@ function code(step, ctx) {
       try {
         const r = await api('check', { track: ctx.track, module: ctx.module, lesson: ctx.lesson, step: ctx.idx, code: editor.value, dream: step.variant, uses: ctx.uses?.(step) });
         editor.mark(r.diagnostics);
-        renderRunOutput(panel, r);
+        renderRunOutput(panel, r, { code: editor.value, task: step.prompt });
         passed = r.passed;
         const ms = Date.now() - started;
         const late = cold && overTime(ms, step.timeLimit);

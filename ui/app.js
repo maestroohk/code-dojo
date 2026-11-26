@@ -28,6 +28,9 @@ import * as builds from './builds.js';
 import { welcomeView, pathPanel, shouldWelcome } from './welcome.js';
 import * as gamify from './gamify.js';
 import * as pacing from './pacing.js';
+import * as flashcards from './flashcards.js';
+import * as katas from './katas.js';
+import { tutorSetting } from './explain.js';
 
 const app = document.getElementById('app');
 let tracks = [];
@@ -75,7 +78,7 @@ function header(active) {
   const today = game.todayXp();
   const days = game.streak();
   const link = (hash, label, id) => h(`a.nav-link${active === id ? '.active' : ''}`, { href: hash }, label);
-  const due = game.dueReviews().length;
+  const due = game.dueReviews().length + flashcards.dueCount();   // questions to review + flashcards due
   return h('header.top',
     h('a.brand', { href: '#/' }, h('span.brand-mark', '{ }'), h('span', 'code-dojo')),
     h('nav.nav',
@@ -84,7 +87,7 @@ function header(active) {
       h(`a.nav-link${active === 'practice' ? '.active' : ''}`, { href: '#/practice' }, 'Practice', due > 0 && h('span.badge', due)),
       link('#/projects', 'Projects', 'projects'),
       link('#/builds', 'Builds', 'builds'),
-      moreMenu(active, [['#/workbench', 'Workbench', 'workbench'], ['#/spaces', 'Code spaces', 'spaces'], ['#/db', 'Databases', 'db'],
+      moreMenu(active, [['#/katas', 'Katas', 'katas'], ['#/workbench', 'Workbench', 'workbench'], ['#/spaces', 'Code spaces', 'spaces'], ['#/db', 'Databases', 'db'],
         ['#/playground', 'Playground', 'playground'], ['#/features', "What's in the dojo", 'features'], ['#/profile', 'Profile', 'profile']])),
     h('div.stats',
       h(`div.stat.streak${days > 0 && game.state.days[game.dayKey()] ? '.lit' : ''}`, { title: `${days}-day streak${gamify.freezes() ? ` · ${gamify.freezes()} streak freeze${gamify.freezes() === 1 ? '' : 's'}` : ''}` },
@@ -1061,7 +1064,9 @@ async function practiceView() {
       h('div.card', h('b.card-num', game.state.review.length), h('span.muted', 'questions in review')),
       h('div.card', h('b.card-num', due.length), h('span.muted', 'due today')),
       h('div.card', h('b.card-num', game.state.stats.reviewed), h('span.muted', 'mastered')),
-      h('div.card', h('b.card-num', game.state.stats.practice), h('span.muted', 'sessions done'))));
+      h('div.card', h('b.card-num', game.state.stats.practice), h('span.muted', 'sessions done'))),
+    flashcards.practicePanel(),
+    katas.practicePanel());
 }
 
 // ---------------------------------------------------------------- playground
@@ -1269,6 +1274,7 @@ function profile() {
       setting('Type instead of drag', 'Fill-the-gap and ordering puzzles open in typing mode: you write the code yourself for a little extra XP. You can still switch on each puzzle.', toggle('typing')),
       setting('Free roam', 'Unlock every lesson. By default the first lesson of each module is open and the rest unlock in order.', toggle('freeRoam')),
       setting('Sound effects', 'Short tones for right and wrong answers.', toggle('sound')),
+      tutorSetting(),
       setting('Reset progress', 'Erase XP, stars, streak and drafts on this machine.', h('button.btn.danger', {
         type: 'button',
         onclick: async () => { if (await ask('Erase all progress? This cannot be undone.', { ok: 'Erase everything', danger: true })) { await game.reset(); profile(); } },
@@ -1295,6 +1301,8 @@ function route() {
     case 'db': leave = dbStudio(page); return;
     case 'lesson': return lessonView(parts[1], parts[2], parts[3]);
     case 'practice': return practiceView();
+    case 'cards': leave = flashcards.cardsView(page); return;
+    case 'katas': return katas.katasView(page, parts[1]);
     case 'quick': return quickView();
     case 'challenge': return challengeView();
     case 'projects': return projectsView();

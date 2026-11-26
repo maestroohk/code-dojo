@@ -1,0 +1,93 @@
+{
+  "title": "Sessionize events in SQL",
+  "summary": "Split each user's event stream into sessions after 30 minutes of inactivity.",
+  "language": "sql",
+  "difficulty": "hard",
+  "minutes": 15,
+  "tags": [
+    "window functions",
+    "analytics",
+    "sessions"
+  ],
+  "prompt": [
+    "Product analytics wants sessions. A user's session ends when **more than 30 minutes** pass without an event",
+    "from that user; an event exactly 30:00 after the previous one continues the session.",
+    "",
+    "Return `user_id`, `session_start`, `session_end` (the first and last event's `at`) and `events`",
+    "(how many events), ordered by `user_id`, `session_start`.",
+    "",
+    "Table: `events(id, user_id, at)`, `at` is `YYYY-MM-DD HH:MM:SS`.",
+    "`CAST(strftime('%s', at) AS INTEGER)` turns it into seconds, which avoids rounding trouble.",
+    "Gaps are per user: another user's events must never join or split your sessions."
+  ],
+  "starter": [
+    "-- Write your query below",
+    ""
+  ],
+  "setup": [
+    "CREATE TABLE events (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, at TEXT NOT NULL);",
+    "INSERT INTO events (user_id, at) VALUES",
+    "  (1, '2026-11-26 09:00:00'), (2, '2026-11-26 09:05:00'), (1, '2026-11-26 09:10:00'),",
+    "  (1, '2026-11-26 09:40:00'), (2, '2026-11-26 10:00:00'), (1, '2026-11-26 10:11:00'),",
+    "  (1, '2026-11-26 10:20:00'), (2, '2026-11-26 13:00:00'), (2, '2026-11-26 13:29:59'),",
+    "  (3, '2026-11-26 23:50:00'), (3, '2026-11-27 00:15:00'), (1, '2026-11-27 08:00:00');"
+  ],
+  "check": "ordered",
+  "solution": [
+    "WITH timed AS (",
+    "  SELECT user_id, at, CAST(strftime('%s', at) AS INTEGER) AS t FROM events",
+    "), marked AS (",
+    "  SELECT user_id, at, t,",
+    "         CASE WHEN t - LAG(t) OVER (PARTITION BY user_id ORDER BY t) <= 1800 THEN 0 ELSE 1 END AS is_new",
+    "  FROM timed",
+    "), numbered AS (",
+    "  SELECT user_id, at,",
+    "         SUM(is_new) OVER (PARTITION BY user_id ORDER BY t ROWS UNBOUNDED PRECEDING) AS session_no",
+    "  FROM marked",
+    ")",
+    "SELECT user_id, MIN(at) AS session_start, MAX(at) AS session_end, COUNT(*) AS events",
+    "FROM numbered",
+    "GROUP BY user_id, session_no",
+    "ORDER BY user_id, session_start;"
+  ],
+  "wrong": [
+    [
+      "WITH timed AS (",
+      "  SELECT user_id, at, CAST(strftime('%s', at) AS INTEGER) AS t FROM events",
+      "), marked AS (",
+      "  SELECT user_id, at, t,",
+      "         CASE WHEN t - LAG(t) OVER (PARTITION BY user_id ORDER BY t) < 1800 THEN 0 ELSE 1 END AS is_new",
+      "  FROM timed",
+      "), numbered AS (",
+      "  SELECT user_id, at, SUM(is_new) OVER (PARTITION BY user_id ORDER BY t ROWS UNBOUNDED PRECEDING) AS session_no FROM marked",
+      ")",
+      "SELECT user_id, MIN(at) AS session_start, MAX(at) AS session_end, COUNT(*) AS events",
+      "FROM numbered GROUP BY user_id, session_no ORDER BY user_id, session_start;"
+    ],
+    [
+      "WITH timed AS (",
+      "  SELECT user_id, at, CAST(strftime('%s', at) AS INTEGER) AS t FROM events",
+      "), marked AS (",
+      "  SELECT user_id, at, t,",
+      "         CASE WHEN t - LAG(t) OVER (ORDER BY t) <= 1800 THEN 0 ELSE 1 END AS is_new",
+      "  FROM timed",
+      "), numbered AS (",
+      "  SELECT user_id, at, SUM(is_new) OVER (PARTITION BY user_id ORDER BY t ROWS UNBOUNDED PRECEDING) AS session_no FROM marked",
+      ")",
+      "SELECT user_id, MIN(at) AS session_start, MAX(at) AS session_end, COUNT(*) AS events",
+      "FROM numbered GROUP BY user_id, session_no ORDER BY user_id, session_start;"
+    ],
+    [
+      "SELECT user_id,",
+      "       MIN(at) AS session_start, MAX(at) AS session_end, COUNT(*) AS events",
+      "FROM events",
+      "GROUP BY user_id, CAST(strftime('%s', at) AS INTEGER) / 1800",
+      "ORDER BY user_id, session_start;"
+    ]
+  ],
+  "hints": [
+    "Work in three steps: flag each event that starts a session, number the sessions with a running sum of the flags, then group.",
+    "An event starts a session when it is the user's first (`LAG` is NULL) or `t - LAG(t) OVER (PARTITION BY user_id ORDER BY t)` is over 1800.",
+    "`SUM(is_new) OVER (PARTITION BY user_id ORDER BY t ROWS UNBOUNDED PRECEDING)` gives every event its session number; `GROUP BY user_id, session_no`."
+  ]
+}

@@ -240,6 +240,11 @@ CodeSpaces.Map(app, runner);
 Builds.Map(app, content, CodeSpaces.DefaultRoot());
 // Database studio: SQLite files plus PostgreSQL / SQL Server / MySQL in Docker, one query UI (DbStudio.cs).
 DbStudio.Map(app, stateDir);
+// Practice: flashcards from finished lessons, timed katas, and "Explain this error" (offline knowledge base + optional AI tutor).
+Flashcards.Map(app, content, json);
+Katas.Map(app, new Katas(root), checker, langs, json);
+ErrorKb.Map(app, new ErrorKb(Path.Combine(root, "content", "errors")), json);
+Tutor.Map(app, stateDir, json);
 app.Lifetime.ApplicationStopping.Register(apps.Dispose);
 
 app.Lifetime.ApplicationStarted.Register(() =>

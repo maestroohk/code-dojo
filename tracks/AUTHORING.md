@@ -840,3 +840,57 @@ and its `cold` lessons have a cold step.
 The welcome answers are kept in `.state/profile.json` (`GET`/`PUT /api/profile`) as well as in the progress file
 (`state.profile`, the cache). The newer of the two wins on load. Reordering "Your path" on the home page (Reorder,
 then drag or the arrows) saves `path` to the profile.
+
+## Flashcards, katas and error explanations
+
+### Flashcards: made from your lessons
+
+Practice → **Flashcards** reviews cards from every lesson the learner has finished, scheduled with SM-2 spaced
+repetition (Again / Hard / Good / Easy; `ui/srs.js`). Most cards are made automatically (`server/Flashcards.cs`), so
+good content gives good cards:
+
+- every **senior's toolkit** entry: "What does `cmd` do?" (its `what` and `when`), the reverse "You need to: ...
+  Which command?" (shell commands, `lang` bash or powershell, can be **typed** from memory and are compared token by
+  token, flags in any order), and one card per entry in `flags`;
+- **glossary-style definitions** in learn cards: a line `- **Term**: definition` or a sentence `A **term** is ...`
+  (not inside code blocks or tables). Write definitions this way when a term is worth remembering;
+- every `match` pair, with the step's prompt as context.
+
+Hand-written cards go in the lesson file, next to `steps`:
+
+```json
+"cards": [
+  { "front": "Undo the last commit but keep its changes staged?", "back": "git reset --soft HEAD~1", "type": "command" },
+  { "front": "Why is `SELECT *` risky in a view?", "back": ["Columns added later change its shape;", "list the columns."] }
+]
+```
+
+`front` and `back` are Markdown (a string or an array of lines). `"type": "command"` lets the learner type the answer
+(one command on one line). Optional `context` (shown above the front) and `lang` (highlighting). `dojo validate`
+checks the fields, the lengths (front 600, back 1200 characters) and that no two cards share a front.
+
+### Katas: `content/katas/<id>.json`
+
+Short timed exercises on the **Katas** page (`#/katas`), one picked per day. A kata is a code step with a few more
+fields; the format is at the top of `server/Katas.cs` and `content/katas/cs-parse-log-line.json` is the reference.
+`title`, `summary`, `language` (`csharp`, `python`, `typescript`, `sql`), `difficulty` (`easy`, `medium`, `hard`),
+`minutes` (5-15), `tags`, `prompt`, `starter`, `solution`, `hints`, the grading fields of a code step (`template`,
+`tests`, `require`/`forbid`, `pytest`; SQL: `setup`, `check`, `stateQuery`), and `wrong`: plausible broken solutions
+that the hidden tests must reject. File names start with the language (`cs-`, `py-`, `ts-`, `sql-`).
+
+`dojo validate katas` (or `katas/<id>`) proves each one: the reference passes, the starter fails, every `wrong`
+answer fails, and it warns below 3 check rows. The learner never receives the solution, template, tests or wrong
+answers; checks run on the server.
+
+### Explain this error: `content/errors/*.json`
+
+Any failed run or check that holds a compiler or runtime error gets an **Explain this error** button. The entry is
+picked by compiler code (`CS0165`, `TS2322`), by exception type (`KeyNotFoundException`, `KeyError`, `TypeError`),
+narrowed by a `message` regex, or for SQLite by the message alone. The format is at the top of `server/ErrorKb.cs`;
+every entry needs `title`, `explain`, `causes`, `fix`, `before`, `after`, and a `specific` sentence with `{name}`
+groups from `message`/`capture` (`{onLine}` adds " on line N"). `hunt` finds the likely line when an exception
+arrives without one. `dojo validate errors/` lints the whole knowledge base.
+
+With an Anthropic API key saved in Profile → Settings (kept in the state folder as `tutor.json`, never sent to the
+browser), the button can also ask the tutor (`server/Tutor.cs`), which explains and hints but never writes the
+solution of a graded step.
