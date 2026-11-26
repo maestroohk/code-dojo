@@ -1,0 +1,240 @@
+{
+  "title": "Choosing a database and indexing it",
+  "summary": "SQL or NoSQL by access pattern, not by hype. B-tree indexes, composite column order, covering indexes and the write cost of each one, and reading EXPLAIN (ANALYZE, BUFFERS) to find the sequential scan.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Start from the queries",
+      "body": [
+        "\"SQL or NoSQL?\" is the wrong first question. Write down the **access patterns** first: which queries, how",
+        "often, by which key, with what consistency. Then pick the store that serves them.",
+        "",
+        "| Store | Good at | Pay for it with |",
+        "|---|---|---|",
+        "| Relational (PostgreSQL, MySQL) | transactions across rows, constraints, joins, ad-hoc queries | one primary for writes; scaling writes past one machine needs sharding |",
+        "| Key-value / wide-column (DynamoDB, Cassandra, ScyllaDB) | huge write rates and data sizes when every read knows its partition key | queries you did not design for are slow or impossible; joins are your job |",
+        "| Document (MongoDB, PostgreSQL `jsonb`) | reading and writing a whole aggregate (an order with its lines) | cross-document constraints and reporting |",
+        "| Search index (OpenSearch, Elasticsearch) | full text, relevance, facets | not a source of truth: rebuilt from the database |",
+        "",
+        "A common default for a new service is PostgreSQL: it does relational work well, stores JSON, and one",
+        "large machine goes a long way. Move a workload elsewhere when a **requirement** forces it (write rate,",
+        "data size, latency at a key), not because the other store is fashionable."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which store fits each workload best?",
+      "buckets": [
+        "Relational",
+        "Key-value / wide-column",
+        "Search index"
+      ],
+      "items": [
+        ["Orders and payments that must commit together, plus monthly finance reports", 0],
+        ["Ad-hoc questions from analysts joining customers, orders and refunds", 0],
+        ["Session lookups by session id at 200,000 reads/s", 1],
+        ["2 million sensor readings a second, always read by device and time range", 1],
+        ["Product search with typo tolerance and facets", 2],
+        ["\"Find tickets mentioning *refund* and *late*\" ranked by relevance", 2]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Indexes: what they buy and what they cost",
+      "body": [
+        "A **B-tree index** keeps a column's values sorted with pointers to the rows, so finding one value is a",
+        "few page reads instead of a scan of the whole table.",
+        "",
+        "- **Composite index**: an index on several columns, sorted by the first, then the second. It serves",
+        "  queries on a **leftmost prefix**: `(customer_id, created_at)` helps `WHERE customer_id = 7` and",
+        "  `WHERE customer_id = 7 AND created_at > ...`, but not `WHERE created_at > ...` alone.",
+        "- Put **equality** columns first and the **range** (or sort) column last. After a range condition, later",
+        "  columns cannot narrow the search.",
+        "- **Covering index**: holds every column the query needs (`INCLUDE (total)` in PostgreSQL), so the plan",
+        "  is an Index Only Scan and never touches the table.",
+        "- **Selectivity**: an index on `status` with three values rarely helps; the planner prefers a scan when a",
+        "  condition matches a large share of rows.",
+        "",
+        "Every index costs on **every write**: one more B-tree to update, more WAL, more memory to keep hot.",
+        "Ten indexes on a hot table can make inserts several times slower. Index for the queries you run, check",
+        "`pg_stat_user_indexes.idx_scan` for indexes nobody uses, and drop them."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The busiest query on the orders page is below. Which index serves it best?",
+      "code": [
+        "SELECT id, total, created_at",
+        "FROM orders",
+        "WHERE customer_id = $1 AND created_at > now() - interval '30 days'",
+        "ORDER BY created_at DESC",
+        "LIMIT 20;"
+      ],
+      "options": [
+        "`(customer_id, created_at)`",
+        "`(created_at, customer_id)`",
+        "`(created_at)`",
+        "Two separate indexes on `customer_id` and on `created_at`"
+      ],
+      "answer": 0,
+      "explain": "Equality first, range last: the index jumps to this customer, then reads their last 30 days already sorted by `created_at`, and stops after 20 rows. Starting with `created_at` scans everyone's last 30 days. Add `INCLUDE (total)` to make it covering."
+    },
+    {
+      "type": "learn",
+      "title": "Reading the plan",
+      "body": [
+        "`EXPLAIN (ANALYZE, BUFFERS)` runs the query and shows what the planner chose, with real row counts,",
+        "times and pages read. Read it from the most indented line outwards:",
+        "",
+        "```text",
+        "Limit  (actual time=2131.4..2131.5 rows=20 loops=1)",
+        "  ->  Sort  (actual time=2131.4..2131.4 rows=20 loops=1)",
+        "        Sort Key: created_at DESC",
+        "        ->  Seq Scan on orders  (actual time=0.03..2129.8 rows=41 loops=1)",
+        "              Filter: ((customer_id = 7) AND (created_at > ...))",
+        "              Rows Removed by Filter: 11999959",
+        "              Buffers: shared hit=2210 read=148790",
+        "Execution Time: 2131.9 ms",
+        "```",
+        "",
+        "- **Seq Scan** with a huge **Rows Removed by Filter**: it read 12 million rows to keep 41. A missing index.",
+        "- **Buffers: read=148790**: 148,790 pages (8 KB each, about 1.2 GB) came from disk or the OS cache, not",
+        "  from PostgreSQL's shared buffers.",
+        "- Compare **estimated** rows (plain `EXPLAIN`) with **actual** rows: a big gap means stale statistics",
+        "  (`ANALYZE orders;`)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** After a feature launch, p99 for `GET /orders` went from 30 ms to 2.2 s and database CPU",
+        "is at 100 %. App CPU is 25 %. The plan above is for the new query. What do you do?"
+      ],
+      "options": [
+        "`CREATE INDEX CONCURRENTLY` on `orders (customer_id, created_at)`, then confirm the new plan with EXPLAIN (ANALYZE, BUFFERS)",
+        "Move the database to a machine with twice the CPUs",
+        "Add app servers",
+        "Add a cache in front of the query and leave the plan alone"
+      ],
+      "answer": 0,
+      "explain": "A bigger machine halves a 2-second scan at best; an index makes it a few milliseconds. `CONCURRENTLY` builds the index without blocking writes (it takes longer and cannot run inside a transaction). A cache hides the problem until the first miss storm."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each plan node to what it tells you.",
+      "pairs": [
+        ["`Seq Scan`", "Every row of the table was read"],
+        ["`Index Scan`", "The index found the rows, then the table was read for their columns"],
+        ["`Index Only Scan`", "The index alone had every column needed"],
+        ["`Bitmap Heap Scan`", "Matching row locations were collected from an index, then the table pages read in order"],
+        ["`Sort Method: external merge  Disk`", "The sort did not fit in `work_mem` and spilled to disk"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Add the index for the orders page without blocking writes on a busy table.",
+      "code": [
+        "CREATE INDEX __1__ orders_customer_created",
+        "    ON orders (customer_id, __2__)",
+        "    INCLUDE (total);"
+      ],
+      "blanks": ["CONCURRENTLY", "created_at"],
+      "bank": ["ONLINE", "UNIQUE", "total", "status"],
+      "explain": "`ONLINE` is SQL Server and Oracle syntax; PostgreSQL says `CONCURRENTLY`. If a concurrent build fails it leaves an INVALID index behind: drop it and try again."
+    },
+    {
+      "type": "code",
+      "title": "Which index can the query use?",
+      "prompt": [
+        "Model the leftmost-prefix rule. Write:",
+        "",
+        "- `int UsefulPrefix(string[] indexColumns, string[] equalityColumns, string? rangeColumn)`: walk the index",
+        "  columns in order. Count each column that is in `equalityColumns`. The first column that is not: if it is",
+        "  `rangeColumn`, count it too; either way, stop there.",
+        "- `string? BestIndex(Dictionary<string, string[]> indexes, string[] equalityColumns, string? rangeColumn)`:",
+        "  the index name with the largest useful prefix (`0` means unusable). Ties go to the index with **fewer**",
+        "  columns, then to the name in ordinal order. Return `null` if no index is usable.",
+        "",
+        "`(customer_id, created_at)` with `customer_id = ...` and a range on `created_at` gives `2`;",
+        "`(created_at, customer_id)` gives `1`."
+      ],
+      "starter": [
+        "int UsefulPrefix(string[] indexColumns, string[] equalityColumns, string? rangeColumn)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "string? BestIndex(Dictionary<string, string[]> indexes, string[] equalityColumns, string? rangeColumn)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "int UsefulPrefix(string[] indexColumns, string[] equalityColumns, string? rangeColumn)",
+        "{",
+        "    var count = 0;",
+        "    foreach (var column in indexColumns)",
+        "    {",
+        "        if (equalityColumns.Contains(column)) { count++; continue; }",
+        "        if (column == rangeColumn) count++;",
+        "        break;",
+        "    }",
+        "    return count;",
+        "}",
+        "",
+        "string? BestIndex(Dictionary<string, string[]> indexes, string[] equalityColumns, string? rangeColumn)",
+        "{",
+        "    var best = indexes",
+        "        .Select(kv => (Name: kv.Key, Columns: kv.Value.Length, Prefix: UsefulPrefix(kv.Value, equalityColumns, rangeColumn)))",
+        "        .Where(x => x.Prefix > 0)",
+        "        .OrderByDescending(x => x.Prefix)",
+        "        .ThenBy(x => x.Columns)",
+        "        .ThenBy(x => x.Name, StringComparer.Ordinal)",
+        "        .FirstOrDefault();",
+        "    return best.Name;",
+        "}"
+      ],
+      "hints": [
+        "In `UsefulPrefix`, `continue` after an equality column; `break` at the first column that is not one (after counting it if it is the range column).",
+        "For `BestIndex`, compute the prefix of every index, drop the zeros, and sort: prefix descending, column count ascending, name ordinal."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoEq = new[] { \"customer_id\" };",
+        "Dojo.Eq(\"equality then range: both columns\", 2, UsefulPrefix(new[] { \"customer_id\", \"created_at\" }, dojoEq, \"created_at\"));",
+        "Dojo.Eq(\"range first: it stops after the range\", 1, UsefulPrefix(new[] { \"created_at\", \"customer_id\" }, dojoEq, \"created_at\"));",
+        "Dojo.Eq(\"an unrelated leading column: unusable\", 0, UsefulPrefix(new[] { \"status\" }, dojoEq, \"created_at\"));",
+        "Dojo.Eq(\"a gap in the middle stops the prefix\", 1, UsefulPrefix(new[] { \"customer_id\", \"status\", \"created_at\" }, dojoEq, \"created_at\"));",
+        "Dojo.Eq(\"no gap with status filtered too\", 3, UsefulPrefix(new[] { \"customer_id\", \"status\", \"created_at\" }, new[] { \"customer_id\", \"status\" }, \"created_at\"));",
+        "Dojo.Eq(\"a second column alone is not a prefix\", 0, UsefulPrefix(new[] { \"a\", \"b\" }, new[] { \"b\" }, null));",
+        "var dojoIdx = new Dictionary<string, string[]>",
+        "{",
+        "    [\"orders_pkey\"] = new[] { \"id\" },",
+        "    [\"orders_created\"] = new[] { \"created_at\" },",
+        "    [\"orders_customer\"] = new[] { \"customer_id\" },",
+        "    [\"orders_customer_created\"] = new[] { \"customer_id\", \"created_at\" },",
+        "};",
+        "Dojo.Eq(\"the orders page picks the composite index\", \"orders_customer_created\", BestIndex(dojoIdx, dojoEq, \"created_at\"));",
+        "Dojo.Eq(\"a lookup by id picks the primary key\", \"orders_pkey\", BestIndex(dojoIdx, new[] { \"id\" }, null));",
+        "Dojo.Eq(\"a filter on an unindexed column: no index\", (string?)null, BestIndex(dojoIdx, new[] { \"total\" }, null));",
+        "var dojoTie = new Dictionary<string, string[]> { [\"a_wide\"] = new[] { \"customer_id\", \"note\" }, [\"b_narrow\"] = new[] { \"customer_id\" } };",
+        "Dojo.Eq(\"a tie goes to the narrower index\", \"b_narrow\", BestIndex(dojoTie, dojoEq, null));"
+      ],
+      "explain": "Real planners also weigh selectivity, sort order and cost estimates, but the leftmost-prefix rule explains most \"why is my index not used?\" questions in review."
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "slow-query",
+      "title": "Build it: the slow query",
+      "prompt": [
+        "In the **System design board**, open *The slow query*. p99 is measured in seconds and the database is at",
+        "100 % while the app servers are idle. The budget does not allow a much bigger database. Find the cause in",
+        "the database settings and fix it, then run the load test until the goals are met."
+      ],
+      "explain": "A missing index multiplies the work of every query. No amount of hardware is as cheap as the index."
+    }
+  ]
+}

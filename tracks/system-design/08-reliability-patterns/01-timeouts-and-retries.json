@@ -1,0 +1,368 @@
+{
+  "title": "Timeouts, deadlines and retries that help",
+  "summary": "Pick timeouts from the dependency's tail, pass a deadline down the chain, retry only what is safe to repeat, back off with full jitter, cap retries with a budget, and count how retries multiply across layers.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Every call needs a timeout, and the request needs a deadline",
+      "body": [
+        "A call without a timeout waits as long as the other side takes, holding a thread, a connection and memory.",
+        "When a dependency hangs, those pile up until your service falls over too. Two rules:",
+        "",
+        "- **Set a timeout on every network call**, from the dependency's measured tail: a little above its p99.9 in",
+        "  normal operation, never \"30 seconds because that is the default\".",
+        "- **Give the whole request a deadline** and pass the *remaining* budget down. A call that cannot finish",
+        "  before the deadline should not start.",
+        "",
+        "```text",
+        "user budget 800 ms",
+        "gateway ── 790 ms left ──> api ── 700 ms left ──> orders ── 640 ms left ──> db (query timeout 300 ms)",
+        "                                     api spent 90 ms; orders reserves 40 ms to build its answer",
+        "```",
+        "",
+        "gRPC propagates deadlines for you (`grpc-timeout`). Over HTTP you pass the remaining budget yourself (a",
+        "header) or a `CancellationToken` inside one process. The **Integration** topic shows timeouts in route code;",
+        "here we size them across the system."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "The pricing service's latency, measured over a normal week: p50 18 ms, p99 120 ms, p99.9 290 ms, and the",
+        "odd outlier at 9 s. Your endpoint's whole budget is 1 s and it makes one pricing call. Which timeout?"
+      ],
+      "options": [
+        "About 350 ms: above the p99.9, well inside the budget, leaving time for one retry or a fallback",
+        "30 s, the HTTP client's default, so no request ever fails",
+        "130 ms, just above the p99",
+        "10 s, so the outliers succeed too"
+      ],
+      "answer": 0,
+      "explain": "Just above p99.9 gives up on roughly one call in a thousand while normal slowness still succeeds. Just above p99 fails one in a hundred. 30 s or 10 s ties up resources long after the user has given up, which is how one slow dependency takes the caller down."
+    },
+    {
+      "type": "learn",
+      "title": "Retry only what is safe, and spread the retries out",
+      "body": [
+        "Retries hide **transient** failures: a connection reset, a 503 during a deploy, a timeout on a read. They",
+        "make **permanent** failures worse and **non-idempotent** ones dangerous:",
+        "",
+        "| Retry | Do not retry |",
+        "|---|---|",
+        "| 502, 503, 504, connection refused or reset | 400, 401, 403, 404, 409, 422: the answer will not change |",
+        "| a timed-out GET, PUT or DELETE | a timed-out POST without an idempotency key: it may have worked |",
+        "| 429, after waiting at least `Retry-After` | anything once the deadline is nearly spent |",
+        "",
+        "**Exponential backoff with full jitter** (from the AWS Architecture Blog's well-known analysis):",
+        "",
+        "```text",
+        "ceiling(attempt) = min(cap, base × 2^attempt)",
+        "delay            = random(0, ceiling)        full jitter: anywhere from 0 to the ceiling",
+        "```",
+        "",
+        "Without jitter, a thousand clients that failed together retry together, in waves. A **retry budget** caps",
+        "retries at a share of normal traffic (for example 10%), so a dependency that is really down sees at most",
+        "1.1x the load, not 3x."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Should the client retry automatically?",
+      "buckets": [
+        "Retry, with backoff",
+        "Do not retry automatically"
+      ],
+      "items": [
+        [
+          "`503 Service Unavailable` on `GET /orders/42`",
+          0
+        ],
+        [
+          "A timeout on `GET /prices?sku=LAMP-01`",
+          0
+        ],
+        [
+          "`429` with `Retry-After: 2`, after waiting 2 s",
+          0
+        ],
+        [
+          "`400 Bad Request`: \"quantity must be positive\"",
+          1
+        ],
+        [
+          "A timeout on `POST /payments` with no idempotency key",
+          1
+        ],
+        [
+          "`403 Forbidden`",
+          1
+        ],
+        [
+          "A timeout on `POST /payments` with an `Idempotency-Key` header",
+          0
+        ]
+      ],
+      "explain": "Client errors will fail the same way again. A timed-out payment without a key may already have charged the card, so a blind retry can charge twice. With an idempotency key the server returns the first result instead of doing it again, which makes the retry safe."
+    },
+    {
+      "type": "learn",
+      "title": "Retries multiply across layers",
+      "body": [
+        "Each layer that retries multiplies the attempts of the layer below. Three attempts at each of three layers",
+        "is **27 calls** to the database for one user click, exactly when the database is already struggling.",
+        "Step through it:",
+        "",
+        "Retry at **one** layer (usually the one closest to the failing call), give it a budget, and let the others",
+        "fail fast and pass the error up."
+      ],
+      "trace": {
+        "code": [
+          "var attemptsPerLayer = 3;",
+          "var calls = 1;",
+          "foreach (var layer in new[] { \"gateway\", \"api\", \"orders\", \"db\" })",
+          "{",
+          "    Console.WriteLine($\"{layer}: {calls} call(s)\");",
+          "    calls *= attemptsPerLayer;",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Base 100 ms, cap 1,000 ms. What ceilings does this print for the first six attempts?",
+      "code": [
+        "for (var attempt = 0; attempt < 6; attempt++)",
+        "    Console.Write(Math.Min(1000, 100 * (1 << attempt)) + \" \");"
+      ],
+      "answer": "100 200 400 800 1000 1000",
+      "explain": "The ceiling doubles until the cap stops it. With full jitter the real delay is a random number between 0 and that ceiling, so the clients spread out instead of arriving in waves."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to what it means.",
+      "pairs": [
+        [
+          "Deadline",
+          "The absolute time by which the whole request must be answered"
+        ],
+        [
+          "Full jitter",
+          "Wait a random time between zero and the backoff ceiling"
+        ],
+        [
+          "Retry budget",
+          "Retries allowed only up to a share of normal requests"
+        ],
+        [
+          "Idempotency key",
+          "Lets the server return the first result instead of acting twice"
+        ],
+        [
+          "`Retry-After`",
+          "The server says how long to wait before trying again"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** After a 20-second database restart, the API's request graph shows sharp spikes at",
+        "regular steps for the next minute, each one causing a fresh burst of timeouts. A sample from the client",
+        "logs:"
+      ],
+      "code": [
+        "12:00:20.100  retry 1 for 4,180 requests",
+        "12:00:20.300  retry 2 for 3,950 requests",
+        "12:00:20.700  retry 3 for 3,870 requests",
+        "12:00:21.500  retry 4 for 3,790 requests"
+      ],
+      "options": [
+        "Backoff without jitter: every client retries at the same instant. Add full jitter so the retries spread out",
+        "The backoff is too short: use a fixed 5 s delay",
+        "The database is still restarting: wait longer",
+        "Too few retries: allow 10"
+      ],
+      "answer": 0,
+      "explain": "The times are exactly base × 2^n after the restart, for thousands of clients at once: a thundering herd in waves. A fixed delay keeps the waves, just later. Random jitter turns each wave into a smooth trickle."
+    },
+    {
+      "type": "code",
+      "title": "How much load do retries add?",
+      "prompt": [
+        "If each attempt fails independently with probability `p`, a request with up to `attempts` tries makes on",
+        "average `1 + p + p² + ... + p^(attempts-1)` calls.",
+        "",
+        "- `double ExpectedCalls(double failureRate, int attempts)`: that sum.",
+        "- `long WorstCase(int[] attemptsPerLayer)`: the most calls the bottom layer can see for one request: the",
+        "  product of every layer's attempts.",
+        "",
+        "At 50% failures and 3 attempts each request makes 1.75 calls; at 100% it makes 3. Layers of 3, 3 and 3 give 27."
+      ],
+      "starter": [
+        "double ExpectedCalls(double failureRate, int attempts)",
+        "{",
+        "    return 1;",
+        "}",
+        "",
+        "long WorstCase(int[] attemptsPerLayer)",
+        "{",
+        "    return 1;",
+        "}"
+      ],
+      "solution": [
+        "double ExpectedCalls(double failureRate, int attempts)",
+        "{",
+        "    var total = 0.0;",
+        "    var chance = 1.0;",
+        "    for (var i = 0; i < attempts; i++)",
+        "    {",
+        "        total += chance;",
+        "        chance *= failureRate;",
+        "    }",
+        "    return total;",
+        "}",
+        "",
+        "long WorstCase(int[] attemptsPerLayer)",
+        "{",
+        "    long calls = 1;",
+        "    foreach (var a in attemptsPerLayer) calls *= a;",
+        "    return calls;",
+        "}"
+      ],
+      "hints": [
+        "Attempt `i` happens only if all `i` earlier attempts failed, with probability `p^i`.",
+        "`WorstCase` multiplies; use a `long` so deep stacks do not overflow."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"healthy: one call\", 1.0, ExpectedCalls(0, 3));",
+        "Dojo.Eq(\"half failing, 3 attempts\", 1.75, ExpectedCalls(0.5, 3));",
+        "Dojo.Eq(\"all failing: every attempt is used\", 3.0, ExpectedCalls(1, 3));",
+        "Dojo.Eq(\"10% failing, 4 attempts\", 1.111, Math.Round(ExpectedCalls(0.1, 4), 3));",
+        "Dojo.Eq(\"three layers of three\", 27L, WorstCase(new[] { 3, 3, 3 }));",
+        "Dojo.Eq(\"retry at one layer only\", 3L, WorstCase(new[] { 1, 3, 1 }));",
+        "Dojo.Eq(\"five layers of five does not overflow\", 3125L, WorstCase(new[] { 5, 5, 5, 5, 5 }));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Backoff with full jitter",
+      "prompt": [
+        "Write `double Ceiling(int attempt, double baseMs, double capMs)`: `min(capMs, baseMs × 2^attempt)`, with",
+        "`attempt` counting from 0.",
+        "",
+        "Then write `double[] Delays(int attempts, double baseMs, double capMs, int seed)`: one delay per attempt,",
+        "each `random.NextDouble() × Ceiling(i, ...)`, drawn in order from **one** `new Random(seed)`, so the same seed",
+        "always gives the same delays (tests and replays need that)."
+      ],
+      "starter": [
+        "double Ceiling(int attempt, double baseMs, double capMs)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double[] Delays(int attempts, double baseMs, double capMs, int seed)",
+        "{",
+        "    return new double[attempts];",
+        "}"
+      ],
+      "solution": [
+        "double Ceiling(int attempt, double baseMs, double capMs)",
+        "    => Math.Min(capMs, baseMs * Math.Pow(2, attempt));",
+        "",
+        "double[] Delays(int attempts, double baseMs, double capMs, int seed)",
+        "{",
+        "    var random = new Random(seed);",
+        "    var delays = new double[attempts];",
+        "    for (var i = 0; i < attempts; i++)",
+        "        delays[i] = random.NextDouble() * Ceiling(i, baseMs, capMs);",
+        "    return delays;",
+        "}"
+      ],
+      "hints": [
+        "`Math.Pow(2, attempt)` grows fast; `Math.Min` with the cap keeps it bounded (and avoids overflow for large attempts).",
+        "Create the `Random` once, before the loop, and call `NextDouble()` once per attempt."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"attempt 0 is the base\", 100.0, Ceiling(0, 100, 1000));",
+        "Dojo.Eq(\"attempt 3 is base x 8\", 800.0, Ceiling(3, 100, 1000));",
+        "Dojo.Eq(\"the cap holds\", 1000.0, Ceiling(4, 100, 1000));",
+        "Dojo.Eq(\"a huge attempt is still capped\", 1000.0, Ceiling(60, 100, 1000));",
+        "var dojoD = Delays(8, 100, 1000, 42);",
+        "Dojo.Eq(\"one delay per attempt\", 8, dojoD.Length);",
+        "Dojo.Check(\"each delay is between 0 and its ceiling\", dojoD.Select((d, i) => d >= 0 && d <= Ceiling(i, 100, 1000)).All(ok => ok), string.Join(\", \", dojoD.Select(d => Math.Round(d))));",
+        "Dojo.Eq(\"the same seed gives the same delays\", dojoD, Delays(8, 100, 1000, 42));",
+        "Dojo.Check(\"another seed gives other delays\", !dojoD.SequenceEqual(Delays(8, 100, 1000, 7)), \"seeds 42 and 7 gave the same delays\");",
+        "var dojoR = new Random(42);",
+        "Dojo.Eq(\"drawn in order from one Random(seed)\", dojoR.NextDouble() * 100, dojoD[0]);",
+        "Dojo.Check(\"delays are spread out, not all at the ceiling\", Delays(200, 100, 100, 3).Distinct().Count() > 150, \"too many identical delays: is it really random?\");"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Pass the deadline down",
+      "prompt": [
+        "Write a class `Deadline` (times in milliseconds, passed in so tests do not depend on the clock):",
+        "",
+        "- `Deadline(long startMs, long budgetMs)`: the request must be answered by `startMs + budgetMs`;",
+        "- `long Remaining(long nowMs)`: what is left, never below 0;",
+        "- `bool Expired(long nowMs)`: true once nothing is left;",
+        "- `long TimeoutFor(long nowMs, long perCallMaxMs, long reserveMs)`: the timeout to use for the next call:",
+        "  the remaining budget minus `reserveMs` (time this service needs afterwards to build its answer), and",
+        "  never more than `perCallMaxMs`. If that is 0 or less, throw `TimeoutException`: do not start a call that",
+        "  cannot finish.",
+        "",
+        "With an 800 ms budget started at 0, at 90 ms with a 300 ms per-call cap and 40 ms reserved, the timeout is 300 ms;",
+        "at 600 ms it is 160 ms."
+      ],
+      "starter": [
+        "class Deadline",
+        "{",
+        "    public Deadline(long startMs, long budgetMs) { }",
+        "    public long Remaining(long nowMs) => 0;",
+        "    public bool Expired(long nowMs) => false;",
+        "    public long TimeoutFor(long nowMs, long perCallMaxMs, long reserveMs) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class Deadline",
+        "{",
+        "    readonly long dueMs;",
+        "",
+        "    public Deadline(long startMs, long budgetMs) => dueMs = startMs + budgetMs;",
+        "",
+        "    public long Remaining(long nowMs) => Math.Max(0, dueMs - nowMs);",
+        "",
+        "    public bool Expired(long nowMs) => Remaining(nowMs) == 0;",
+        "",
+        "    public long TimeoutFor(long nowMs, long perCallMaxMs, long reserveMs)",
+        "    {",
+        "        var timeout = Math.Min(perCallMaxMs, Remaining(nowMs) - reserveMs);",
+        "        if (timeout <= 0) throw new TimeoutException(\"Not enough of the deadline left to start this call.\");",
+        "        return timeout;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Store one number: the time the request is due, `startMs + budgetMs`.",
+        "`TimeoutFor` is `Math.Min(perCallMaxMs, Remaining(nowMs) - reserveMs)`, then the check for 0 or less."
+      ],
+      "template": [
+        "var dojoDl = new Deadline(0, 800);",
+        "Dojo.Eq(\"remaining at 90 ms\", 710L, dojoDl.Remaining(90));",
+        "Dojo.Eq(\"early on, the per-call cap wins\", 300L, dojoDl.TimeoutFor(90, 300, 40));",
+        "Dojo.Eq(\"later, the deadline wins\", 160L, dojoDl.TimeoutFor(600, 300, 40));",
+        "Dojo.Check(\"not expired at 799 ms\", !dojoDl.Expired(799));",
+        "Dojo.Check(\"expired at 800 ms\", dojoDl.Expired(800));",
+        "Dojo.Eq(\"remaining never goes negative\", 0L, dojoDl.Remaining(5000));",
+        "Dojo.Throws<TimeoutException>(\"no call starts inside the reserve\", () => dojoDl.TimeoutFor(770, 300, 40));",
+        "Dojo.Throws<TimeoutException>(\"no call starts after the deadline\", () => dojoDl.TimeoutFor(900, 300, 0));",
+        "Dojo.Eq(\"a deadline that started later\", 450L, new Deadline(1000, 500).TimeoutFor(1050, 1000, 0));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

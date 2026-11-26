@@ -1,0 +1,291 @@
+{
+  "title": "Design a notification service",
+  "summary": "Push, email and SMS for 20 M users: priority queues, preferences and quiet hours, a dedupe window, per-user caps, provider failover and retries that never send twice.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** one service every team calls to tell users things: \"your order shipped\", \"your login code is 4821\",",
+        "\"this week's digest\". It picks the channel, respects the user's settings and talks to the providers.",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | send to a user by event type; channels: mobile push, email, SMS; preferences and quiet hours; templates per language |",
+        "| Non-functional | one-time codes delivered within seconds; marketing can wait; **never send the same notification twice**; survive a provider outage |",
+        "| Out of scope | the marketing campaign editor, in-app inbox UI |",
+        "",
+        "```text",
+        "users          20 M",
+        "normal load    5 notifications / user / day = 100 M / day   ≈ 1,200 / s average",
+        "campaigns      a 10 M email campaign sent over 1 hour     ≈ 2,800 / s on top",
+        "providers      each has its own rate limit and its own outages",
+        "```",
+        "",
+        "The design problem is not volume: it is **mixing urgent and bulk traffic**, and **retrying safely** through",
+        "providers you do not control."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A campaign of 30 M emails must finish within 2 hours. What send rate must the email path sustain, on top of normal traffic?",
+      "options": [
+        "About 4,200 per second",
+        "About 15,000 per second",
+        "About 420 per second",
+        "About 250 per second"
+      ],
+      "answer": 0,
+      "explain": "30,000,000 / 7,200 s ≈ 4,167 per second. If one provider account accepts 2,000 per second you need three accounts or two providers, and the campaign must not starve the one-time codes."
+    },
+    {
+      "type": "learn",
+      "title": "The pipeline",
+      "body": [
+        "```text",
+        " callers --> POST /notify --> validate, look up user + preferences",
+        "                                 |",
+        "              +------------------+------------------+",
+        "              v                                     v",
+        "      [ high-priority queue ]               [ bulk queue ]",
+        "        codes, security alerts                digests, marketing",
+        "              |                                     |",
+        "      channel workers (push / email / SMS), each with its own rate limit",
+        "              |                |                  |",
+        "          APNs, FCM      email provider A      SMS provider A",
+        "                         email provider B      SMS provider B   (failover)",
+        "              |",
+        "      delivery log: (notification_id, channel, status, provider, attempts)",
+        "```",
+        "",
+        "- **Separate queues and workers per priority.** A bulk campaign then cannot sit in front of a login code.",
+        "- **Workers own the provider limits** (push services, email and SMS providers all throttle). Back off on their",
+        "  `429`s instead of hammering them.",
+        "- The **delivery log** is the source of truth for \"was this sent?\" and the analytics behind it."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which queue should each notification go to?",
+      "buckets": [
+        "High priority",
+        "Bulk"
+      ],
+      "items": [
+        [
+          "Login one-time code",
+          0
+        ],
+        [
+          "Password reset link",
+          0
+        ],
+        [
+          "\"New sign-in from an unknown device\"",
+          0
+        ],
+        [
+          "Weekly digest email",
+          1
+        ],
+        [
+          "Spring sale newsletter",
+          1
+        ],
+        [
+          "\"3 people viewed your profile this week\"",
+          1
+        ]
+      ],
+      "explain": "Anything a user is actively waiting for, or that protects their account, is high priority. Everything else can wait minutes or hours and should be throttled so it never delays the first group."
+    },
+    {
+      "type": "learn",
+      "title": "Dedupe, quiet hours and caps",
+      "body": [
+        "- **Idempotency key.** Every request carries a key (`order-81723:shipped`). The service records it; the same key",
+        "  again within the **dedupe window** is dropped. Callers retry; users should not notice.",
+        "- **Pass the key to the provider too.** If a provider call times out you do not know whether it was sent. Retry",
+        "  with the same key where the provider supports one, and record the outcome before acking the queue message.",
+        "- **Quiet hours** are in the user's own time zone and wrap past midnight (22:00 to 07:00). Non-urgent messages",
+        "  are **deferred**, not dropped. Security messages bypass them.",
+        "- **Per-user caps** (say 3 marketing pushes a day) stop teams from spamming the same user from different",
+        "  services: this service is the one place that sees all of them."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Quiet hours can wrap past midnight. What does this print?",
+      "code": [
+        "bool Quiet(int hour, int start, int end) =>",
+        "    start > end ? hour >= start || hour < end : hour >= start && hour < end;",
+        "Console.WriteLine($\"{Quiet(23, 22, 7)} {Quiet(7, 22, 7)} {Quiet(3, 1, 5)}\");"
+      ],
+      "answer": "True False True",
+      "explain": "When start > end the window wraps: quiet if the hour is late (>= 22) or early (< 7). 07:00 itself is the end, so it is no longer quiet. Without the wrap case, a 22-to-7 window would never match."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** After a 20-minute slowdown at the push provider, support gets complaints: some users received",
+        "the same \"Your order shipped\" push three times. The worker log:",
+        "",
+        "```text",
+        "12:01:07 notif=8812 push attempt=1 timeout after 10s -> requeue",
+        "12:01:19 notif=8812 push attempt=2 timeout after 10s -> requeue",
+        "12:01:33 notif=8812 push attempt=3 status=200",
+        "```",
+        "",
+        "What is the most likely cause?"
+      ],
+      "options": [
+        "The timed-out attempts had actually been delivered. Timeouts were retried as failures with no idempotency key or dedupe check before resending",
+        "The provider has a bug that duplicates pushes",
+        "Three workers consumed the same queue message at once",
+        "The user has three devices"
+      ],
+      "answer": 0,
+      "explain": "A timeout means \"unknown\", not \"failed\". The fix: record attempts in the delivery log, pass an idempotency key to the provider where it supports one, collapse duplicates on the device (a collapse key), and check the dedupe window before every resend."
+    },
+    {
+      "type": "order",
+      "prompt": "Put one worker's steps for a notification in order.",
+      "lines": [
+        "Take the next message from the priority queue",
+        "Drop it if the same idempotency key was sent within the dedupe window",
+        "Check the user's preferences and quiet hours for this channel",
+        "Render the template in the user's language",
+        "Call the provider with the idempotency key and record the result in the delivery log",
+        "Ack the queue message only after the result is recorded"
+      ],
+      "also": [
+        [
+          "Take the next message from the priority queue",
+          "Check the user's preferences and quiet hours for this channel",
+          "Drop it if the same idempotency key was sent within the dedupe window",
+          "Render the template in the user's language",
+          "Call the provider with the idempotency key and record the result in the delivery log",
+          "Ack the queue message only after the result is recorded"
+        ]
+      ],
+      "explain": "Acking last gives at-least-once processing: a crash before the ack redelivers the message, and the dedupe check makes that safe."
+    },
+    {
+      "type": "code",
+      "title": "Provider failover",
+      "prompt": [
+        "Write `string PickProvider(string[] providers, Dictionary<string, double> errorRate, double maxError)`:",
+        "",
+        "- `providers` are in order of preference.",
+        "- Return the first one whose recent error rate is at most `maxError`. A provider missing from `errorRate` has no",
+        "  recent errors (rate `0`).",
+        "- If none qualifies, return `\"none\"` (the worker then parks the message and alerts)."
+      ],
+      "starter": [
+        "string PickProvider(string[] providers, Dictionary<string, double> errorRate, double maxError)",
+        "{",
+        "    return \"none\";",
+        "}"
+      ],
+      "solution": [
+        "string PickProvider(string[] providers, Dictionary<string, double> errorRate, double maxError)",
+        "{",
+        "    foreach (var p in providers)",
+        "        if (errorRate.GetValueOrDefault(p) <= maxError) return p;",
+        "    return \"none\";",
+        "}"
+      ],
+      "hints": [
+        "`errorRate.GetValueOrDefault(p)` gives 0 for a missing provider."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoP = new[] { \"mail-a\", \"mail-b\" };",
+        "Dojo.Eq(\"the preferred provider when it is healthy\", \"mail-a\", PickProvider(dojoP, new Dictionary<string, double> { [\"mail-a\"] = 0.01 }, 0.05));",
+        "Dojo.Eq(\"fail over when it is not\", \"mail-b\", PickProvider(dojoP, new Dictionary<string, double> { [\"mail-a\"] = 0.4, [\"mail-b\"] = 0.02 }, 0.05));",
+        "Dojo.Eq(\"no data means healthy\", \"mail-a\", PickProvider(dojoP, new Dictionary<string, double>(), 0.05));",
+        "Dojo.Eq(\"exactly at the limit is fine\", \"mail-a\", PickProvider(dojoP, new Dictionary<string, double> { [\"mail-a\"] = 0.05 }, 0.05));",
+        "Dojo.Eq(\"everything is failing\", \"none\", PickProvider(dojoP, new Dictionary<string, double> { [\"mail-a\"] = 0.9, [\"mail-b\"] = 0.7 }, 0.05));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Dedupe and quiet hours",
+      "prompt": [
+        "Write a class `Notifier` that decides what to do with each notification. Time is in whole minutes since a",
+        "midnight in the user's time zone (`nowMinute`), so the hour of the day is `nowMinute % 1440 / 60`.",
+        "",
+        "- `Notifier(int dedupeWindowMinutes, int quietStartHour, int quietEndHour)`: hours outside 0-23 throw",
+        "  `ArgumentOutOfRangeException`. The quiet window may wrap past midnight; start equal to end means no quiet hours.",
+        "- `string Decide(string user, string key, bool critical, long nowMinute)`, checked in this order:",
+        "  1. `\"dup\"` if this user got this key **sent** less than `dedupeWindowMinutes` ago.",
+        "  2. `\"defer\"` if it is not critical and the hour is in quiet hours (nothing is recorded: it will come back).",
+        "  3. Otherwise `\"send\"`, and remember the time it was sent for this user and key."
+      ],
+      "starter": [
+        "class Notifier",
+        "{",
+        "    public Notifier(int dedupeWindowMinutes, int quietStartHour, int quietEndHour) { }",
+        "",
+        "    public string Decide(string user, string key, bool critical, long nowMinute) => \"send\";",
+        "}"
+      ],
+      "solution": [
+        "class Notifier",
+        "{",
+        "    readonly int window, start, end;",
+        "    readonly Dictionary<(string User, string Key), long> sent = new();",
+        "",
+        "    public Notifier(int dedupeWindowMinutes, int quietStartHour, int quietEndHour)",
+        "    {",
+        "        if (quietStartHour is < 0 or > 23) throw new ArgumentOutOfRangeException(nameof(quietStartHour));",
+        "        if (quietEndHour is < 0 or > 23) throw new ArgumentOutOfRangeException(nameof(quietEndHour));",
+        "        window = dedupeWindowMinutes;",
+        "        start = quietStartHour;",
+        "        end = quietEndHour;",
+        "    }",
+        "",
+        "    bool Quiet(long nowMinute)",
+        "    {",
+        "        var hour = (int)(nowMinute % 1440 / 60);",
+        "        if (start == end) return false;",
+        "        return start > end ? hour >= start || hour < end : hour >= start && hour < end;",
+        "    }",
+        "",
+        "    public string Decide(string user, string key, bool critical, long nowMinute)",
+        "    {",
+        "        if (sent.TryGetValue((user, key), out var at) && nowMinute - at < window) return \"dup\";",
+        "        if (!critical && Quiet(nowMinute)) return \"defer\";",
+        "        sent[(user, key)] = nowMinute;",
+        "        return \"send\";",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Remember sends in a `Dictionary<(string User, string Key), long>`.",
+        "The quiet check is the one from the predict step, with `hour = (int)(nowMinute % 1440 / 60)`."
+      ],
+      "template": [
+        "var dojoN = new Notifier(60, 22, 7);",
+        "Dojo.Eq(\"10:00, first time: send\", \"send\", dojoN.Decide(\"ana\", \"like:42\", false, 600));",
+        "Dojo.Eq(\"30 minutes later: duplicate\", \"dup\", dojoN.Decide(\"ana\", \"like:42\", false, 630));",
+        "Dojo.Eq(\"another user is not a duplicate\", \"send\", dojoN.Decide(\"bo\", \"like:42\", false, 630));",
+        "Dojo.Eq(\"60 minutes later the window has passed\", \"send\", dojoN.Decide(\"ana\", \"like:42\", false, 660));",
+        "Dojo.Eq(\"23:00, not critical: defer\", \"defer\", dojoN.Decide(\"ana\", \"digest\", false, 1380));",
+        "Dojo.Eq(\"23:00, critical: send\", \"send\", dojoN.Decide(\"ana\", \"otp:9\", true, 1380));",
+        "Dojo.Eq(\"critical repeats are still deduped\", \"dup\", dojoN.Decide(\"ana\", \"otp:9\", true, 1390));",
+        "Dojo.Eq(\"06:40 next day: still quiet\", \"defer\", dojoN.Decide(\"ana\", \"digest\", false, 1440 + 400));",
+        "Dojo.Eq(\"07:00 next day: send the deferred digest\", \"send\", dojoN.Decide(\"ana\", \"digest\", false, 1440 + 420));",
+        "var dojoDay = new Notifier(10, 9, 17);",
+        "Dojo.Eq(\"a daytime quiet window (no wrap)\", \"defer\", dojoDay.Decide(\"cy\", \"x\", false, 600));",
+        "Dojo.Eq(\"after it ends\", \"send\", dojoDay.Decide(\"cy\", \"x\", false, 17 * 60));",
+        "var dojoNone = new Notifier(10, 0, 0);",
+        "Dojo.Eq(\"start equal to end: never quiet\", \"send\", dojoNone.Decide(\"dee\", \"x\", false, 120));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"hour 24 is invalid\", () => new Notifier(10, 24, 7));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

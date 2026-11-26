@@ -1,0 +1,279 @@
+{
+  "title": "Design ticket booking without overselling",
+  "summary": "An on-sale where two million fans want fifty thousand seats: seat holds with expiry, optimistic concurrency versus SELECT FOR UPDATE, idempotent payment and a waiting room.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** fans pick seats for an event and pay. Big events sell out in minutes.",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | browse the seat map; hold seats while paying (10 minutes); pay; receive tickets |",
+        "| Non-functional | **never sell a seat twice** (correctness beats availability here); fair to fans who came first; survive the on-sale spike |",
+        "| Out of scope | dynamic pricing, resale marketplace, bot detection (mention it) |",
+        "",
+        "```text",
+        "seats        50,000 for one event",
+        "fans         2 M arrive within the first minutes of the on-sale",
+        "seat map     2 M x refreshes: tens of thousands of reads / s, all for one event",
+        "bookings     at most 25,000 (2 seats each): small writes, but all on the same rows",
+        "```",
+        "",
+        "The volume of **writes** is tiny. The problem is **contention**: everyone wants the same few thousand front",
+        "seats at the same second, and reads of one event's seat map are a hot key."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The database can confirm 500 bookings per second, and each booking is 2 seats. What is the fastest the 50,000 seats can sell out?",
+      "options": [
+        "50 seconds",
+        "100 seconds",
+        "25 seconds",
+        "10 minutes"
+      ],
+      "answer": 0,
+      "explain": "50,000 seats / 2 = 25,000 bookings; / 500 per second = 50 s. Letting 2 M fans hammer the database in those 50 seconds gains nothing: the rate is fixed. Admitting fans at a controlled rate (a waiting room) gives the same sell-out time with a calm database."
+    },
+    {
+      "type": "learn",
+      "title": "Data model and the design",
+      "body": [
+        "```sql",
+        "CREATE TABLE seats (",
+        "  event_id        bigint,",
+        "  seat_id         text,",
+        "  status          text NOT NULL,        -- available | held | sold",
+        "  holder          bigint,               -- user holding or owning it",
+        "  hold_expires_at timestamptz,",
+        "  version         int NOT NULL DEFAULT 0,",
+        "  PRIMARY KEY (event_id, seat_id)",
+        ");",
+        "```",
+        "",
+        "```text",
+        " fans --> CDN (seat map snapshot, refreshed every few s)",
+        "      --> waiting room (queue tokens, admits N fans / s) --> booking API --> seats DB (one event per shard)",
+        "                                                              |--> payment provider (idempotency key)",
+        "                                                              '--> hold sweeper (releases expired holds)",
+        "```",
+        "",
+        "- A **hold** reserves the seat for 10 minutes while the fan pays. Expired holds count as available again.",
+        "- The seat map that 2 M people refresh is served from a **cached snapshot**; only the hold itself must hit the",
+        "  database and be exact."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Two fans both read the seat at version 3, then both try a conditional update. What does this print?",
+      "code": [
+        "var version = 3;",
+        "int Update(int expected)",
+        "{",
+        "    if (version != expected) return 0;",
+        "    version++;",
+        "    return 1;",
+        "}",
+        "var a = Update(3);",
+        "var b = Update(3);",
+        "Console.WriteLine($\"{a} {b} {version}\");"
+      ],
+      "answer": "1 0 4",
+      "explain": "This is `UPDATE ... WHERE version = 3`: the first one matches and bumps the version, so the second matches zero rows. The application reads the affected-row count and tells the second fan the seat is gone."
+    },
+    {
+      "type": "learn",
+      "title": "Optimistic or pessimistic?",
+      "body": [
+        "| | Optimistic: version check | Pessimistic: `SELECT ... FOR UPDATE` |",
+        "|---|---|---|",
+        "| How | `UPDATE seats SET ..., version = version + 1 WHERE seat_id = $1 AND version = $2`; 0 rows means someone else won | lock the row in a transaction, check, update, commit |",
+        "| Contention | losers fail fast and retry with fresh data | losers **wait** for the lock, holding connections |",
+        "| Good for | a specific seat chosen by the fan | \"any 2 seats in section B\": `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 2` hands different rows to concurrent buyers |",
+        "| Danger | none for correctness; many retries under heavy contention | lock waits and deadlocks (lock rows in a fixed order) |",
+        "",
+        "Both are correct. What is **not** correct is reading the status, checking it in application code, and then",
+        "writing without a condition: two requests both see \"available\" and both write \"held\"."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the hold so it only succeeds if nobody changed the seat since the fan read it, and an expired hold counts as free.",
+      "code": [
+        "UPDATE seats",
+        "SET status = 'held', holder = $3, hold_expires_at = now() + interval '10 minutes', version = version + 1",
+        "WHERE event_id = $1 AND seat_id = $2",
+        "  AND __1__ = $4",
+        "  AND (status = 'available' OR (status = 'held' AND hold_expires_at < __2__));"
+      ],
+      "blanks": [
+        "version",
+        "now()"
+      ],
+      "bank": [
+        "holder",
+        "updated_at",
+        "current_date",
+        "status"
+      ],
+      "explain": "The version guard makes it a compare-and-set. The application must check that exactly 1 row was affected; 0 rows means the seat was taken or changed, so show the fan the fresh state."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** From the on-sale postmortem: \"312 seats were sold twice.\" The booking code:",
+        "",
+        "```csharp",
+        "var status = await db.QuerySingleAsync<string>(\"SELECT status FROM seats WHERE seat_id = @id\", new { id });",
+        "if (status == \"available\")",
+        "    await db.ExecuteAsync(\"UPDATE seats SET status = 'held', holder = @user WHERE seat_id = @id\", new { id, user });",
+        "```",
+        "",
+        "Why did it oversell, and what is the fix?"
+      ],
+      "options": [
+        "Check-then-act race: two requests read 'available' before either wrote. Make the write conditional (WHERE status/version, check rows affected) or lock with FOR UPDATE",
+        "The database lost writes under load: add a replica",
+        "The cache served a stale seat map: lower its TTL",
+        "The holds expired too early: make them 20 minutes"
+      ],
+      "answer": 0,
+      "explain": "Under PostgreSQL's default READ COMMITTED level the two statements are separate, so both requests pass the check. A stale seat map only changes what fans click; the database write must be the guard."
+    },
+    {
+      "type": "learn",
+      "title": "Payment, holds and the waiting room",
+      "body": [
+        "- **Idempotent payment.** Create the order first (`PENDING`), then charge with an **idempotency key** derived from",
+        "  the order id. A retry after a timeout returns the original charge instead of charging twice; payment",
+        "  providers widely support such keys.",
+        "- **Confirm in one transaction:** seat `sold` and order `PAID` together, and only if the hold is still yours.",
+        "- **Expired holds** are free by the rule in the `WHERE` clause; a sweeper tidies them for the seat map.",
+        "- **Waiting room.** At the on-sale, fans get a queue position (randomised among those who arrived before the",
+        "  start, then first come first served) and are admitted at a rate the booking path can take. That turns a",
+        "  stampede into a steady flow, and nobody gets an error page."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the purchase in order.",
+      "lines": [
+        "Pass the waiting room and get an admission token",
+        "Hold the seat with a conditional update (version check)",
+        "Create the order as PENDING with an idempotency key",
+        "Charge the card through the payment provider with that key",
+        "Mark the seat sold and the order PAID in one transaction",
+        "Email the tickets"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Seat holds with compare-and-set",
+      "prompt": [
+        "Write a class `SeatMap` (time passed in, in ms):",
+        "",
+        "- `SeatMap(IEnumerable<string> seatIds, long holdMs)`: every seat starts `available` at version `0`.",
+        "- `int Version(string seat)`.",
+        "- `string Status(string seat, long now)`: `\"available\"`, `\"held\"` or `\"sold\"`. A hold whose expiry has passed",
+        "  (`now >= expires`) reads as `\"available\"`.",
+        "- `bool Hold(string seat, string user, int expectedVersion, long now)`: succeeds only if the version is still",
+        "  `expectedVersion` **and** the seat is available at `now`. On success it is held by `user` until `now + holdMs`",
+        "  and the version goes up by one.",
+        "- `bool Confirm(string seat, string user, long now)`: succeeds only if the seat is held by this `user` and the hold",
+        "  has not expired. It becomes `sold` and the version goes up by one."
+      ],
+      "starter": [
+        "class SeatMap",
+        "{",
+        "    public SeatMap(IEnumerable<string> seatIds, long holdMs) { }",
+        "",
+        "    public int Version(string seat) => 0;",
+        "",
+        "    public string Status(string seat, long now) => \"available\";",
+        "",
+        "    public bool Hold(string seat, string user, int expectedVersion, long now) => false;",
+        "",
+        "    public bool Confirm(string seat, string user, long now) => false;",
+        "}"
+      ],
+      "solution": [
+        "class SeatMap",
+        "{",
+        "    record Seat(string State, string? User, long Expires, int Version);",
+        "",
+        "    readonly long holdMs;",
+        "    readonly Dictionary<string, Seat> seats = new();",
+        "",
+        "    public SeatMap(IEnumerable<string> seatIds, long holdMs)",
+        "    {",
+        "        this.holdMs = holdMs;",
+        "        foreach (var id in seatIds) seats[id] = new Seat(\"available\", null, 0, 0);",
+        "    }",
+        "",
+        "    public int Version(string seat) => seats[seat].Version;",
+        "",
+        "    public string Status(string seat, long now)",
+        "    {",
+        "        var s = seats[seat];",
+        "        return s.State == \"held\" && now >= s.Expires ? \"available\" : s.State;",
+        "    }",
+        "",
+        "    public bool Hold(string seat, string user, int expectedVersion, long now)",
+        "    {",
+        "        var s = seats[seat];",
+        "        if (s.Version != expectedVersion || Status(seat, now) != \"available\") return false;",
+        "        seats[seat] = new Seat(\"held\", user, now + holdMs, s.Version + 1);",
+        "        return true;",
+        "    }",
+        "",
+        "    public bool Confirm(string seat, string user, long now)",
+        "    {",
+        "        var s = seats[seat];",
+        "        if (s.State != \"held\" || s.User != user || now >= s.Expires) return false;",
+        "        seats[seat] = s with { State = \"sold\", Version = s.Version + 1 };",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep one small record per seat: state, holder, expiry and version.",
+        "`Hold` checks the version and `Status(seat, now) == \"available\"`; `Confirm` checks holder, state and expiry."
+      ],
+      "template": [
+        "var dojoM = new SeatMap(new[] { \"A1\", \"A2\" }, 600_000);",
+        "Dojo.Eq(\"new seats are at version 0\", 0, dojoM.Version(\"A1\"));",
+        "Dojo.Eq(\"ana holds A1\", true, dojoM.Hold(\"A1\", \"ana\", 0, 0));",
+        "Dojo.Eq(\"bo read version 0 too: his hold fails\", false, dojoM.Hold(\"A1\", \"bo\", 0, 0));",
+        "Dojo.Eq(\"the hold bumped the version\", 1, dojoM.Version(\"A1\"));",
+        "Dojo.Eq(\"bo with fresh data still cannot take a held seat\", false, dojoM.Hold(\"A1\", \"bo\", 1, 1000));",
+        "Dojo.Eq(\"A1 is held\", \"held\", dojoM.Status(\"A1\", 1000));",
+        "Dojo.Eq(\"bo cannot confirm ana's hold\", false, dojoM.Confirm(\"A1\", \"bo\", 2000));",
+        "Dojo.Eq(\"ana confirms\", true, dojoM.Confirm(\"A1\", \"ana\", 2000));",
+        "Dojo.Eq(\"A1 is sold\", \"sold\", dojoM.Status(\"A1\", 900_000));",
+        "Dojo.Eq(\"a sold seat stays sold\", false, dojoM.Hold(\"A1\", \"bo\", 2, 900_000));",
+        "Dojo.Eq(\"ana holds A2\", true, dojoM.Hold(\"A2\", \"ana\", 0, 0));",
+        "Dojo.Eq(\"the hold expires after 10 minutes\", \"available\", dojoM.Status(\"A2\", 600_000));",
+        "Dojo.Eq(\"an expired hold cannot be confirmed\", false, dojoM.Confirm(\"A2\", \"ana\", 600_000));",
+        "Dojo.Eq(\"bo takes the expired seat\", true, dojoM.Hold(\"A2\", \"bo\", 1, 600_000));",
+        "Dojo.Eq(\"A2 is at version 2\", 2, dojoM.Version(\"A2\"));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "write-burst",
+      "title": "Build it: absorb the on-sale burst",
+      "prompt": [
+        "In the **System design board**, an on-sale sends a burst of writes that the database cannot take synchronously.",
+        "Put a queue and workers in the write path (no more workers than partitions), answer quickly, keep the database",
+        "under its goal and drain the backlog in time."
+      ],
+      "explain": "A queue turns a burst into a backlog. The database then works at its own steady rate, and the drain time (backlog / (consume rate - arrival rate)) tells you whether fans wait seconds or minutes."
+    }
+  ]
+}

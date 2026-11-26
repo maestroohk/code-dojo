@@ -1,0 +1,192 @@
+{
+  "title": "Boss: the shortener's launch review",
+  "summary": "A load-test report and a capacity sheet for short.example.com land in your design review. Find the last safe stage, explain the database surge, check five years of storage and pick the code length.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The artefact: a load-test report",
+      "body": [
+        "The team ran a stepped load test against the new redirect tier (constant arrival rate, `wrk2 -R`, 10 minutes per",
+        "stage). Their SLO: **p99 at most 250 ms and at most 0.1% errors**. The report, as attached to the review:",
+        "",
+        "```text",
+        "stage  rps    p50_ms p99_ms errors cache_hit",
+        "1      5000   4      18     0.00   0.97",
+        "2      20000  5      35     0.00   0.96",
+        "3      40000  6      410    0.02   0.71",
+        "4      60000  9      2300   0.11   0.52",
+        "```",
+        "",
+        "The capacity sheet asks for 100 M new links a month, kept 5 years, about 500 bytes each, 3 copies.",
+        "",
+        "Reviewers do not eyeball tables like this: they compute. Each step below is one question the review asks.",
+        "Notice the cache hit rate falling as load rises: the cache is evicting the hot set (it was sized for stage 2),",
+        "so the database takes far more reads at exactly the moment traffic peaks."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The last stage that met the SLO",
+      "prompt": [
+        "Write `int LastPassingStage(string[] report, int maxP99Ms, double maxErrors)`.",
+        "",
+        "- `report[0]` is the header; each other line is `stage rps p50_ms p99_ms errors cache_hit`, separated by one or",
+        "  more spaces.",
+        "- Walk the stages in order. Return the number of the last stage before the first one that breaks the SLO",
+        "  (`p99 > maxP99Ms` or `errors > maxErrors`). If stage 1 already breaks it, return `0`; if none do, return the",
+        "  last stage number."
+      ],
+      "starter": [
+        "int LastPassingStage(string[] report, int maxP99Ms, double maxErrors)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int LastPassingStage(string[] report, int maxP99Ms, double maxErrors)",
+        "{",
+        "    var passed = 0;",
+        "    foreach (var line in report.Skip(1))",
+        "    {",
+        "        var f = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        var stage = int.Parse(f[0]);",
+        "        var p99 = int.Parse(f[3]);",
+        "        var errors = double.Parse(f[4]);",
+        "        if (p99 > maxP99Ms || errors > maxErrors) break;",
+        "        passed = stage;",
+        "    }",
+        "    return passed;",
+        "}"
+      ],
+      "hints": [
+        "`line.Split(' ', StringSplitOptions.RemoveEmptyEntries)` copes with the extra spaces.",
+        "p99 is column 3 and errors column 4 (counting from 0). Stop at the first failure."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoReport = new[] {",
+        "    \"stage  rps    p50_ms p99_ms errors cache_hit\",",
+        "    \"1      5000   4      18     0.00   0.97\",",
+        "    \"2      20000  5      35     0.00   0.96\",",
+        "    \"3      40000  6      410    0.02   0.71\",",
+        "    \"4      60000  9      2300   0.11   0.52\" };",
+        "Dojo.Eq(\"the team's SLO: stage 2 is the last safe one\", 2, LastPassingStage(dojoReport, 250, 0.001));",
+        "Dojo.Eq(\"a looser SLO passes stage 3\", 3, LastPassingStage(dojoReport, 500, 0.05));",
+        "Dojo.Eq(\"every stage passes a very loose SLO\", 4, LastPassingStage(dojoReport, 5000, 0.5));",
+        "Dojo.Eq(\"stage 1 already fails a 10 ms p99\", 0, LastPassingStage(dojoReport, 10, 0.0));",
+        "Dojo.Eq(\"a later pass does not count after a failure\", 1, LastPassingStage(new[] { \"h\", \"1 1 1 10 0\", \"2 1 1 900 0\", \"3 1 1 10 0\" }, 100, 0.0));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Why the database surged",
+      "prompt": [
+        "Write `long DbReadsPerSecond(long rps, double cacheHit)`: the reads that miss the cache and reach the database,",
+        "rounded to the nearest whole number. A hit rate below `0` or above `1` throws `ArgumentOutOfRangeException`.",
+        "",
+        "Run it on the report: going from stage 2 to stage 3 doubles the traffic but multiplies database reads by 14.5."
+      ],
+      "starter": [
+        "long DbReadsPerSecond(long rps, double cacheHit)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "long DbReadsPerSecond(long rps, double cacheHit)",
+        "{",
+        "    if (cacheHit < 0 || cacheHit > 1) throw new ArgumentOutOfRangeException(nameof(cacheHit));",
+        "    return (long)Math.Round(rps * (1 - cacheHit));",
+        "}"
+      ],
+      "hints": [
+        "Misses are `rps * (1 - cacheHit)`.",
+        "`(long)Math.Round(...)` rounds to the nearest whole number."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"stage 2\", 800L, DbReadsPerSecond(20000, 0.96));",
+        "Dojo.Eq(\"stage 3\", 11600L, DbReadsPerSecond(40000, 0.71));",
+        "Dojo.Eq(\"stage 4\", 28800L, DbReadsPerSecond(60000, 0.52));",
+        "Dojo.Eq(\"no cache at all\", 5000L, DbReadsPerSecond(5000, 0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"a hit rate above 1 is a bug\", () => DbReadsPerSecond(10, 1.5));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Five years of storage",
+      "prompt": [
+        "Write `double StorageTb(long linksPerMonth, int bytesPerLink, int years, int copies)`: the total stored after",
+        "`years`, in decimal terabytes (1 TB = 10^12 bytes), counting every copy.",
+        "",
+        "The capacity sheet's numbers give 9 TB."
+      ],
+      "starter": [
+        "double StorageTb(long linksPerMonth, int bytesPerLink, int years, int copies)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double StorageTb(long linksPerMonth, int bytesPerLink, int years, int copies)",
+        "{",
+        "    var links = linksPerMonth * 12.0 * years;",
+        "    return links * bytesPerLink * copies / 1e12;",
+        "}"
+      ],
+      "hints": [
+        "Links = per month x 12 x years. Multiply in `double` to avoid overflow.",
+        "Then x bytes x copies, divided by `1e12`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the capacity sheet\", 9.0, Math.Round(StorageTb(100_000_000, 500, 5, 3), 2));",
+        "Dojo.Eq(\"a smaller service\", 2.16, Math.Round(StorageTb(40_000_000, 750, 3, 2), 2));",
+        "Dojo.Eq(\"one copy\", 3.0, Math.Round(StorageTb(100_000_000, 500, 5, 1), 2));",
+        "Dojo.Eq(\"no overflow at large scale\", 1080.0, Math.Round(StorageTb(3_000_000_000, 1000, 10, 3), 2));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "How long must the codes be?",
+      "prompt": [
+        "Write `int CodeLength(long totalLinks, double maxFill)`: the smallest number of base62 characters `L` (at least 1)",
+        "such that `totalLinks <= 62^L x maxFill`. `maxFill` is how full the keyspace may get: `0.01` means at most 1% of",
+        "possible codes are in use, so a random guess finds a real link about 1 time in 100. A `maxFill` of `0` or less, or",
+        "above `1`, throws `ArgumentOutOfRangeException`.",
+        "",
+        "For 6 billion links (5 years at 100 M a month), a 1% fill needs 7 characters and a 0.1% fill needs 8."
+      ],
+      "starter": [
+        "int CodeLength(long totalLinks, double maxFill)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int CodeLength(long totalLinks, double maxFill)",
+        "{",
+        "    if (maxFill <= 0 || maxFill > 1) throw new ArgumentOutOfRangeException(nameof(maxFill));",
+        "    var length = 1;",
+        "    while (Math.Pow(62, length) * maxFill < totalLinks) length++;",
+        "    return length;",
+        "}"
+      ],
+      "hints": [
+        "Start at 1 and grow while the keyspace times `maxFill` is still smaller than `totalLinks`.",
+        "`Math.Pow(62, length)` is exact for these sizes."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"6 B links at 1% fill\", 7, CodeLength(6_000_000_000, 0.01));",
+        "Dojo.Eq(\"6 B links at 0.1% fill\", 8, CodeLength(6_000_000_000, 0.001));",
+        "Dojo.Eq(\"exactly 62^2 links, completely full\", 2, CodeLength(3844, 1.0));",
+        "Dojo.Eq(\"one link\", 1, CodeLength(1, 1.0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"fill must be above 0\", () => CodeLength(10, 0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"fill cannot exceed 1\", () => CodeLength(10, 1.5));"
+      ]
+    }
+  ]
+}

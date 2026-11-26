@@ -1,0 +1,204 @@
+{
+  "title": "DNS and the CDN",
+  "summary": "The first two hops of every request: DNS with its TTLs, latency routing and health-checked failover, then the CDN edge with cache keys, Cache-Control, stale-while-revalidate, origin shield and purges.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The path in front of your servers",
+      "body": [
+        "Before a request reaches your code it passes through several layers, each of which can cache, route or fail:",
+        "",
+        "```text",
+        "  browser / app",
+        "      | 1. DNS: shop.example.com -> which address?   (cached for the TTL)",
+        "      v",
+        "  CDN edge (near the user)   2. cached? answer in ~10-30 ms : else go to the origin",
+        "      |",
+        "      v",
+        "  load balancer (your region)   3. pick a healthy server",
+        "      |",
+        "      v",
+        "  app servers -> caches, databases, queues",
+        "```",
+        "",
+        "**DNS** answers carry a **TTL**: resolvers and clients cache the answer for that many seconds. DNS can route:",
+        "",
+        "- **Latency-based or geo routing**: answer with the region closest to the user.",
+        "- **Weighted**: send 5% of lookups to a new region.",
+        "- **Health-checked failover**: stop handing out an address whose health check fails.",
+        "",
+        "DNS failover is slow and leaky: the change takes effect only as cached answers expire, some resolvers and",
+        "clients keep answers longer than the TTL, and long-lived connections never look again. Short TTLs (30 to 60 s)",
+        "help but cost more lookups. Use DNS to steer between regions; use load balancers for fast failover inside one."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "Region A fails. The DNS health check runs every 30 s and marks an endpoint down after 3 failures in a row.",
+        "The record's TTL is 300 s. Roughly how long until **most** users are sent to region B?"
+      ],
+      "options": [
+        "Up to about 6.5 minutes: 90 s to detect, then up to 300 s for cached answers to expire, and a tail that takes longer",
+        "About 30 seconds: one health-check interval",
+        "Immediately: DNS updates are pushed to every client",
+        "About 90 seconds: detection is the only delay"
+      ],
+      "answer": 0,
+      "explain": [
+        "Detection (3 x 30 s) plus the TTL (300 s) is the worst case for well-behaved resolvers. Some clients cache",
+        "longer or hold open connections, so a tail of traffic keeps hitting region A. That is why multi-region",
+        "designs lower the TTL ahead of time and still expect stragglers."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The CDN and Cache-Control",
+      "body": [
+        "A **CDN** keeps copies of responses at edge locations near users. A hit is fast and costs your origin nothing.",
+        "The origin decides what may be cached with response headers:",
+        "",
+        "| Header directive | Meaning for a shared cache (the CDN) |",
+        "|---|---|",
+        "| `max-age=600` | fresh for 600 s (browsers and shared caches) |",
+        "| `s-maxage=60` | fresh for 60 s in **shared** caches only; overrides `max-age` there |",
+        "| `private` | only the user's own browser may store it, never the CDN |",
+        "| `no-store` | nobody may store it |",
+        "| `no-cache` | may be stored, but must be revalidated with the origin before each use |",
+        "| `stale-while-revalidate=30` | after expiry, serve the stale copy for up to 30 s while refreshing in the background |",
+        "| `stale-if-error=600` | serve a stale copy for up to 600 s if the origin is failing |",
+        "| `immutable` | the content never changes at this URL: do not even revalidate |",
+        "",
+        "- **Cache key**: what the CDN uses to decide two requests are \"the same\" (by default the URL; often plus some headers or cookies). Every extra part in the key splits the cache and lowers the hit rate.",
+        "- **Origin shield**: a middle tier of CDN caches, so a miss in 200 edge locations becomes one request to your origin, not 200.",
+        "- **Purge**: telling the CDN to drop a cached object early. It takes time to reach every edge: prefer versioned URLs (`app.3f9a1c.js`) with a one-year `max-age` and `immutable`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each Cache-Control directive to its effect on the CDN.",
+      "pairs": [
+        [ "`s-maxage=60`", "The CDN may serve it for 60 s, whatever `max-age` says" ],
+        [ "`private`", "The CDN must not store it; the browser may" ],
+        [ "`no-store`", "Nobody stores it at all" ],
+        [ "`stale-while-revalidate=30`", "Serve the old copy for 30 s while fetching a fresh one" ],
+        [ "`immutable`", "Never revalidate: the URL's content will not change" ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which responses should the CDN cache?",
+      "buckets": [
+        "Cache at the edge",
+        "Do not cache at the edge"
+      ],
+      "items": [
+        [ "`/static/app.3f9a1c.js` (versioned file name)", 0 ],
+        [ "A product photo", 0 ],
+        [ "A public price list sent with `s-maxage=60`", 0 ],
+        [ "`GET /account/orders` for the signed-in user", 1 ],
+        [ "`POST /checkout`", 1 ],
+        [ "A response that sets a session cookie", 1 ]
+      ],
+      "explain": "Public, identical-for-everyone content belongs at the edge. Anything per user, any write, and anything that sets a cookie must not be cached there: caching it can show one user's data to another."
+    },
+    {
+      "type": "predict",
+      "prompt": "Worst-case seconds before a failed region stops getting new lookups from a well-behaved resolver. What does this print?",
+      "code": [
+        "var checkIntervalSec = 10;",
+        "var failuresToMarkDown = 3;",
+        "var ttlSec = 60;",
+        "Console.WriteLine(checkIntervalSec * failuresToMarkDown + ttlSec);"
+      ],
+      "answer": "90",
+      "explain": "30 s to notice plus 60 s for the cached answer to expire. A TTL of 60 instead of 300 cuts the worst case from 330 to 90 s."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Headers for a versioned JavaScript bundle that must be cached for a year and never revalidated.",
+      "code": "Cache-Control: public, __1__=31536000, __2__",
+      "blanks": [ "max-age", "immutable" ],
+      "bank": [ "no-store", "private", "no-cache" ],
+      "explain": "31,536,000 s is 365 days. `immutable` tells browsers not to revalidate on reload. This only works because a new release gets a new file name."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Bug report after a release.** Some users see the new HTML but the old JavaScript, and the page breaks.",
+        "The bundle is served as `/static/app.js` with `Cache-Control: public, max-age=86400`. What is the fix?"
+      ],
+      "options": [
+        "Put a content hash in the file name (`app.3f9a1c.js`) and reference it from the HTML, which itself gets a short TTL",
+        "Purge the CDN after every release and hope it reaches every edge in time",
+        "Set `no-store` on every static file",
+        "Lower the TTL to 60 seconds"
+      ],
+      "answer": 0,
+      "explain": [
+        "The same URL served two different files. Versioned names make each release a new URL, so old and new copies",
+        "can never mix and you can cache for a year. Purging and short TTLs still leave a window; `no-store` throws away",
+        "the CDN entirely."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "How long may the CDN keep it?",
+      "prompt": [
+        "Write `int? EdgeTtl(string cacheControl)`: how many seconds a **shared cache** may serve a response, from its",
+        "`Cache-Control` header value. Directives are separated by commas; ignore spaces and case. Rules, in this order:",
+        "",
+        "1. `no-store` or `private` present -> `null` (must not store).",
+        "2. `no-cache` present -> `0` (store, but revalidate every time).",
+        "3. `s-maxage=N` present -> `N`.",
+        "4. `max-age=N` present -> `N`.",
+        "5. otherwise -> `null` (no explicit freshness; we do not guess).",
+        "",
+        "Careful: `s-maxage` and `max-age` are different directive names. `EdgeTtl(\"s-maxage=60, max-age=0\")` is `60`."
+      ],
+      "starter": [
+        "int? EdgeTtl(string cacheControl)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "int? EdgeTtl(string cacheControl)",
+        "{",
+        "    var directives = new Dictionary<string, string>();",
+        "    foreach (var part in cacheControl.Split(','))",
+        "    {",
+        "        var d = part.Trim().ToLowerInvariant();",
+        "        if (d.Length == 0) continue;",
+        "        var eq = d.IndexOf('=');",
+        "        var name = eq < 0 ? d : d[..eq].Trim();",
+        "        var value = eq < 0 ? \"\" : d[(eq + 1)..].Trim();",
+        "        directives[name] = value;",
+        "    }",
+        "    if (directives.ContainsKey(\"no-store\") || directives.ContainsKey(\"private\")) return null;",
+        "    if (directives.ContainsKey(\"no-cache\")) return 0;",
+        "    if (directives.TryGetValue(\"s-maxage\", out var s) && int.TryParse(s, out var sv)) return sv;",
+        "    if (directives.TryGetValue(\"max-age\", out var m) && int.TryParse(m, out var mv)) return mv;",
+        "    return null;",
+        "}"
+      ],
+      "hints": [
+        "Split on `,`, then `Trim()` and `ToLowerInvariant()` each part. Split each part at the first `=` into a name and a value.",
+        "Keep the names in a `Dictionary<string, string>` and check the rules in order. `int.TryParse` reads the number."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"versioned bundle\", (int?)31536000, EdgeTtl(\"public, max-age=31536000, immutable\"));",
+        "Dojo.Eq(\"s-maxage wins for the CDN\", (int?)60, EdgeTtl(\"s-maxage=60, max-age=0\"));",
+        "Dojo.Eq(\"private is never at the edge\", (int?)null, EdgeTtl(\"private, max-age=600\"));",
+        "Dojo.Eq(\"no-store\", (int?)null, EdgeTtl(\"no-store\"));",
+        "Dojo.Eq(\"no-cache means revalidate\", (int?)0, EdgeTtl(\"no-cache\"));",
+        "Dojo.Eq(\"case and spaces do not matter\", (int?)30, EdgeTtl(\"  Max-Age=30 \"));",
+        "Dojo.Eq(\"no freshness given\", (int?)null, EdgeTtl(\"public\"));",
+        "Dojo.Eq(\"other directives are ignored\", (int?)120, EdgeTtl(\"max-age=120 , stale-while-revalidate=30\"));"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,503 @@
+{
+  "title": "Rate limiting: algorithms and where they live",
+  "summary": "Why and where to limit, token bucket, leaky bucket, fixed and sliding windows, 429 with Retry-After, sharing a limit across instances, and the .NET and Polly APIs seniors configure for it.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Why limit, and where",
+      "body": [
+        "A rate limit caps how much one caller may ask for. It exists to:",
+        "",
+        "- **protect** the backend from spikes, bugs and abuse (a client stuck in a loop);",
+        "- keep things **fair** between tenants, so one big customer cannot starve the rest;",
+        "- control **cost** (an expensive search, a paid third-party API behind you).",
+        "",
+        "Where it runs:",
+        "",
+        "```text",
+        "client ──> CDN / edge ──> API gateway ──> service ──> dependency",
+        "            per IP        per API key      per caller    the client side: stay under the",
+        "            (abuse)       (plans, tenants)  (protect me)  partner's limit before they 429 you",
+        "```",
+        "",
+        "Reject with **`429 Too Many Requests`** and a **`Retry-After`** header (seconds), so well-behaved clients wait",
+        "the right time. Many APIs also send remaining-quota headers; the IETF is standardising `RateLimit` headers,",
+        "but formats still differ between products, so document yours."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your public API sells plans: Free gets 10 requests per second, Pro gets 200, per API key. Where should that limit be enforced?",
+      "options": [
+        "At the API gateway, partitioned by API key, before requests reach the services",
+        "In each backend service, by client IP address",
+        "In the database, with a connection limit",
+        "In the client SDK, trusting customers to call it"
+      ],
+      "answer": 0,
+      "explain": "The gateway sees every request and the key that identifies the plan, and rejecting there costs almost nothing. IP addresses are shared (offices, mobile carriers) and spoofable for this purpose; client-side limits are a courtesy, not enforcement."
+    },
+    {
+      "type": "learn",
+      "title": "Five algorithms",
+      "body": [
+        "| Algorithm | How it works | Good at | Watch out |",
+        "|---|---|---|---|",
+        "| **Token bucket** | tokens refill at rate `r` up to capacity `b`; a request takes one | allows bursts up to `b`, average `r` | burst size is a real choice |",
+        "| **Leaky bucket** | requests join a queue drained at a fixed rate | perfectly smooth output | adds queueing delay; full queue rejects |",
+        "| **Fixed window** | count per calendar window (`12:00:00-12:00:59`) | one counter, trivial in Redis | up to 2x the limit across a window boundary |",
+        "| **Sliding window log** | keep every request's timestamp for the last window | exact | memory per request |",
+        "| **Sliding window counter** | `previous × (1 − elapsed/window) + current` | close to exact, two counters | an estimate, not exact |",
+        "",
+        "Token bucket is the usual default for APIs: it lets a client send a short burst (page load) while holding",
+        "the average. Step through one with capacity 5 that refills 2 tokens a second."
+      ],
+      "trace": {
+        "code": [
+          "double tokens = 5, capacity = 5, ratePerSec = 2;",
+          "double last = 0;",
+          "foreach (var t in new[] { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.5 })",
+          "{",
+          "    tokens = Math.Min(capacity, tokens + (t - last) * ratePerSec);",
+          "    last = t;",
+          "    var ok = tokens >= 1;",
+          "    if (ok) tokens -= 1;",
+          "    Console.WriteLine($\"t={t}  {(ok ? \"accept\" : \"429\")}  tokens left {tokens}\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "The same bucket: capacity 5, 2 tokens per second. Seven requests arrive at t=0 and three at t=1. What does this print?",
+      "code": [
+        "double tokens = 5, capacity = 5, ratePerSec = 2;",
+        "double last = 0;",
+        "var accepted = 0;",
+        "foreach (var t in new[] { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0 })",
+        "{",
+        "    tokens = Math.Min(capacity, tokens + (t - last) * ratePerSec);",
+        "    last = t;",
+        "    if (tokens >= 1) { tokens -= 1; accepted++; }",
+        "}",
+        "Console.WriteLine(accepted);"
+      ],
+      "answer": "7",
+      "explain": "At t=0 the full bucket lets 5 through and refuses 2. One second later 2 tokens have refilled: 2 more are accepted and the third is refused. 5 + 2 = 7."
+    },
+    {
+      "type": "learn",
+      "title": "One limit, many instances",
+      "body": [
+        "A limiter that counts in memory counts **per instance**. Twelve gateway pods with \"100 per second\" each let",
+        "a client through at up to 1,200 per second. Options:",
+        "",
+        "- **A shared counter** in Redis: fixed window with `INCR` plus `EXPIRE` on a key like `rl:{apiKey}:{minute}`,",
+        "  or a token bucket in a small Lua script so the read-modify-write is atomic. Costs one round trip per",
+        "  request (sub-millisecond in the same zone).",
+        "- **Local limits divided by the instance count**, refreshed as you scale. No extra hop; rough when traffic",
+        "  is uneven across pods.",
+        "- **Local plus periodic sync**: count locally, push and pull totals every few hundred ms.",
+        "",
+        "Decide what happens when the shared store is down: **fail open** (allow traffic, protect availability) for",
+        "most APIs, **fail closed** where the limit guards money or abuse. Write it in the design."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each algorithm to its behaviour.",
+      "pairs": [
+        [
+          "Token bucket",
+          "Short bursts up to the capacity, then the refill rate"
+        ],
+        [
+          "Leaky bucket",
+          "A queue drained at a constant rate: smooth output, added delay"
+        ],
+        [
+          "Fixed window",
+          "Up to twice the limit around a window boundary"
+        ],
+        [
+          "Sliding window log",
+          "Exact, but stores a timestamp per request"
+        ],
+        [
+          "Sliding window counter",
+          "Weights the previous window's count by how much of it still overlaps"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: rate limits and resilience in .NET",
+      "body": "The real APIs: ASP.NET Core's rate limiting middleware (in the box since .NET 7), Polly v8 resilience pipelines, and the standard resilience handler for HttpClient.",
+      "toolkit": [
+        {
+          "cmd": "AddRateLimiter + AddTokenBucketLimiter",
+          "what": "Registers the rate limiting middleware with a named token bucket policy; endpoints opt in with `RequireRateLimiting`.",
+          "flags": [
+            [
+              "TokenLimit",
+              "bucket capacity: the largest burst"
+            ],
+            [
+              "TokensPerPeriod / ReplenishmentPeriod",
+              "the refill rate"
+            ],
+            [
+              "QueueLimit = 0",
+              "reject at once instead of queueing"
+            ],
+            [
+              "RejectionStatusCode",
+              "the default is 503; set 429"
+            ]
+          ],
+          "example": "builder.Services.AddRateLimiter(o => { o.RejectionStatusCode = StatusCodes.Status429TooManyRequests; o.AddTokenBucketLimiter(\"api\", b => { b.TokenLimit = 100; b.TokensPerPeriod = 50; b.ReplenishmentPeriod = TimeSpan.FromSeconds(1); b.QueueLimit = 0; }); });\napp.UseRateLimiter();\napp.MapGet(\"/orders\", GetOrders).RequireRateLimiting(\"api\");",
+          "when": "protecting an ASP.NET Core API",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "PartitionedRateLimiter.Create",
+          "what": "One limiter per partition key (an API key, a tenant, a user), so each caller gets its own bucket.",
+          "flags": [
+            [
+              "RateLimitPartition.GetTokenBucketLimiter(key, _ => options)",
+              "a token bucket per key"
+            ],
+            [
+              "GetNoLimiter(key)",
+              "exempt a partition (internal health checks)"
+            ]
+          ],
+          "example": "o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>\n    RateLimitPartition.GetTokenBucketLimiter(ctx.Request.Headers[\"X-Api-Key\"].ToString(), _ =>\n        new TokenBucketRateLimiterOptions { TokenLimit = 20, TokensPerPeriod = 10, ReplenishmentPeriod = TimeSpan.FromSeconds(1), QueueLimit = 0 }));",
+          "when": "per-plan or per-tenant limits",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "AddSlidingWindowLimiter",
+          "what": "A sliding window split into segments, so a window boundary cannot double the limit.",
+          "flags": [
+            [
+              "PermitLimit",
+              "requests allowed per window"
+            ],
+            [
+              "Window",
+              "the window length"
+            ],
+            [
+              "SegmentsPerWindow",
+              "how finely the window slides"
+            ]
+          ],
+          "example": "o.AddSlidingWindowLimiter(\"search\", w => { w.PermitLimit = 600; w.Window = TimeSpan.FromMinutes(1); w.SegmentsPerWindow = 6; w.QueueLimit = 0; });",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "OnRejected + MetadataName.RetryAfter",
+          "what": "Runs when a request is rejected: the place to set `Retry-After` from the lease's metadata.",
+          "flags": [
+            [
+              "ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var wait)",
+              "how long until a permit is likely"
+            ]
+          ],
+          "example": "o.OnRejected = (ctx, ct) => { if (ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var wait)) ctx.HttpContext.Response.Headers.RetryAfter = ((int)wait.TotalSeconds).ToString(); return ValueTask.CompletedTask; };",
+          "when": "every limiter that clients are expected to respect",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "AddStandardResilienceHandler()",
+          "what": "From `Microsoft.Extensions.Http.Resilience`: adds a Polly pipeline to an HttpClient: rate limiter, total request timeout, retry with backoff and jitter, circuit breaker, per-attempt timeout.",
+          "flags": [
+            [
+              "o.Retry.MaxRetryAttempts",
+              "how many retries"
+            ],
+            [
+              "o.AttemptTimeout.Timeout",
+              "each attempt's timeout"
+            ],
+            [
+              "o.TotalRequestTimeout.Timeout",
+              "the whole call, retries included"
+            ]
+          ],
+          "example": "builder.Services.AddHttpClient(\"pricing\", c => c.BaseAddress = new Uri(\"https://pricing.example.com\"))\n    .AddStandardResilienceHandler(o => { o.AttemptTimeout.Timeout = TimeSpan.FromMilliseconds(350); o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(1); });",
+          "when": "any outgoing HttpClient: start from the standard handler and tune its timeouts to your budget",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ResiliencePipelineBuilder()",
+          "what": "Polly v8: build your own pipeline of strategies, applied outside-in in the order added.",
+          "flags": [
+            [
+              "AddRetry(new RetryStrategyOptions { ... })",
+              "`BackoffType = DelayBackoffType.Exponential`, `UseJitter = true`"
+            ],
+            [
+              "AddCircuitBreaker(new CircuitBreakerStrategyOptions { ... })",
+              "`FailureRatio`, `SamplingDuration`, `MinimumThroughput`, `BreakDuration`"
+            ],
+            [
+              "AddTimeout(TimeSpan)",
+              "a timeout around what follows it"
+            ]
+          ],
+          "example": "var pipeline = new ResiliencePipelineBuilder()\n    .AddRetry(new RetryStrategyOptions { MaxRetryAttempts = 2, BackoffType = DelayBackoffType.Exponential, UseJitter = true, Delay = TimeSpan.FromMilliseconds(100) })\n    .AddCircuitBreaker(new CircuitBreakerStrategyOptions { FailureRatio = 0.5, SamplingDuration = TimeSpan.FromSeconds(30), MinimumThroughput = 20, BreakDuration = TimeSpan.FromSeconds(15) })\n    .AddTimeout(TimeSpan.FromMilliseconds(300))\n    .Build();\nawait pipeline.ExecuteAsync(async ct => await db.QueryAsync(ct), cancellationToken);",
+          "when": "resilience around something that is not an HttpClient (a database call, a queue publish)",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "redis-cli INCR / EXPIRE",
+          "what": "A shared fixed-window counter: increment the key for this caller and minute, set it to expire, compare with the limit.",
+          "flags": [
+            [
+              "INCR key",
+              "atomically add one and return the new count"
+            ],
+            [
+              "EXPIRE key 120 NX",
+              "set a time to live only if none is set yet (Redis 7+)"
+            ]
+          ],
+          "example": "redis-cli INCR rl:key_3f9a:2026-11-27T14:05 && redis-cli EXPIRE rl:key_3f9a:2026-11-27T14:05 120 NX",
+          "when": "checking by hand what a shared limiter has counted",
+          "lang": "bash"
+        },
+        {
+          "cmd": "curl -i (watch for 429)",
+          "what": "Shows the status and headers, so you can see the 429 and its `Retry-After` and quota headers.",
+          "flags": [
+            [
+              "-i",
+              "include response headers"
+            ],
+            [
+              "-o /dev/null -w '%{http_code}\\n'",
+              "only print the status, for a quick loop"
+            ]
+          ],
+          "example": "for i in $(seq 1 30); do curl -sS -o /dev/null -w '%{http_code}\\n' -H 'X-Api-Key: test-key' https://api.example.com/orders; done | sort | uniq -c",
+          "when": "proving that a limit is really enforced, and at what rate",
+          "lang": "bash"
+        }
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Configure a token bucket that allows bursts of 100, refills 50 per second, rejects at once with the right status, and turn the middleware on.",
+      "code": [
+        "builder.Services.AddRateLimiter(options =>",
+        "{",
+        "    options.RejectionStatusCode = __1__;",
+        "    options.AddTokenBucketLimiter(\"api\", o =>",
+        "    {",
+        "        o.__2__ = 100;",
+        "        o.TokensPerPeriod = 50;",
+        "        o.ReplenishmentPeriod = TimeSpan.FromSeconds(1);",
+        "        o.QueueLimit = 0;",
+        "    });",
+        "});",
+        "var app = builder.Build();",
+        "app.__3__();"
+      ],
+      "blanks": [
+        "StatusCodes.Status429TooManyRequests",
+        "TokenLimit",
+        "UseRateLimiter"
+      ],
+      "bank": [
+        "StatusCodes.Status503ServiceUnavailable",
+        "PermitLimit",
+        "UseRequestTimeouts",
+        "Window"
+      ],
+      "explain": "The middleware rejects with 503 unless you say otherwise; 429 tells the client it is being limited rather than that the server is broken. `TokenLimit` is the bucket's capacity (`PermitLimit` belongs to the window limiters). Without `UseRateLimiter` nothing is enforced."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** The contract says 100 requests per second per customer. The pricing backend fell over",
+        "during a customer's batch job, and the gateway logs show that customer at 1,150 requests per second with",
+        "almost no 429s. The gateway config:"
+      ],
+      "code": [
+        "gateway replicas: 12   (autoscaled from 3 this morning)",
+        "limiter: in-memory token bucket per API key, TokenLimit 100, 100 per second"
+      ],
+      "options": [
+        "Each of the 12 replicas counts separately, so the real limit is about 1,200 per second: share the counter (Redis) or divide the limit by the replica count",
+        "The token bucket's capacity is too large: set it to 1",
+        "The customer is spoofing API keys",
+        "429 responses are being cached by the CDN"
+      ],
+      "answer": 0,
+      "explain": "In-memory limits are per process. With 3 replicas the leak was 3x and nobody noticed; autoscaling to 12 made it 12x. A shared counter costs a sub-millisecond round trip; a local limit divided by the replica count must be updated whenever you scale."
+    },
+    {
+      "type": "code",
+      "title": "A token bucket with an injected clock",
+      "prompt": [
+        "Write a class `TokenBucket` (time in seconds is passed in):",
+        "",
+        "- `TokenBucket(double capacity, double refillPerSec)`: starts **full**;",
+        "- `bool TryTake(double nowSec, double cost = 1)`: refill first (`refillPerSec` per second since the last",
+        "  call, never above `capacity`), then take `cost` tokens if there are enough;",
+        "- `double Tokens(double nowSec)`: refill, then return the tokens left;",
+        "- if `nowSec` is **earlier** than the last time seen (clocks do jump), do not refill and do not move the last",
+        "  time backwards.",
+        "",
+        "Capacity 5 at 2 per second: seven requests at t=0 give five `true` and two `false`; at t=1 two more pass."
+      ],
+      "starter": [
+        "class TokenBucket",
+        "{",
+        "    public TokenBucket(double capacity, double refillPerSec) { }",
+        "    public bool TryTake(double nowSec, double cost = 1) => true;",
+        "    public double Tokens(double nowSec) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class TokenBucket",
+        "{",
+        "    readonly double capacity;",
+        "    readonly double refillPerSec;",
+        "    double tokens;",
+        "    double last;",
+        "    bool started;",
+        "",
+        "    public TokenBucket(double capacity, double refillPerSec)",
+        "    {",
+        "        this.capacity = capacity;",
+        "        this.refillPerSec = refillPerSec;",
+        "        tokens = capacity;",
+        "    }",
+        "",
+        "    void Refill(double nowSec)",
+        "    {",
+        "        if (!started) { started = true; last = nowSec; return; }",
+        "        if (nowSec <= last) return;",
+        "        tokens = Math.Min(capacity, tokens + (nowSec - last) * refillPerSec);",
+        "        last = nowSec;",
+        "    }",
+        "",
+        "    public bool TryTake(double nowSec, double cost = 1)",
+        "    {",
+        "        Refill(nowSec);",
+        "        if (tokens < cost) return false;",
+        "        tokens -= cost;",
+        "        return true;",
+        "    }",
+        "",
+        "    public double Tokens(double nowSec)",
+        "    {",
+        "        Refill(nowSec);",
+        "        return tokens;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep the tokens and the last time; refill by `(now - last) × rate`, capped with `Math.Min`.",
+        "The very first call has nothing to refill from: just remember its time. A time earlier than `last` changes nothing."
+      ],
+      "template": [
+        "var dojoTb = new TokenBucket(5, 2);",
+        "var dojoFirst = Enumerable.Range(0, 7).Select(_ => dojoTb.TryTake(0)).ToList();",
+        "Dojo.Eq(\"a full bucket passes a burst of 5, then refuses\", new List<bool> { true, true, true, true, true, false, false }, dojoFirst);",
+        "var dojoSecond = Enumerable.Range(0, 3).Select(_ => dojoTb.TryTake(1)).ToList();",
+        "Dojo.Eq(\"one second later, two tokens have refilled\", new List<bool> { true, true, false }, dojoSecond);",
+        "Dojo.Eq(\"empty now\", 0.0, dojoTb.Tokens(1));",
+        "Dojo.Eq(\"refill never passes the capacity\", 5.0, dojoTb.Tokens(10));",
+        "Dojo.Check(\"a request can cost more than one token\", dojoTb.TryTake(10, 3));",
+        "Dojo.Eq(\"three were taken\", 2.0, dojoTb.Tokens(10));",
+        "Dojo.Check(\"too expensive is refused\", !dojoTb.TryTake(10, 3));",
+        "Dojo.Check(\"a clock that jumps back still works\", dojoTb.TryTake(9));",
+        "Dojo.Eq(\"but refills nothing\", 1.0, dojoTb.Tokens(10));",
+        "Dojo.Eq(\"half a second later: one more token\", 2.0, dojoTb.Tokens(10.5));",
+        "Dojo.Eq(\"a new bucket starts full\", 3.0, new TokenBucket(3, 1).Tokens(100));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A sliding window counter",
+      "prompt": [
+        "Write a class `SlidingWindowCounter` (time in ms is passed in):",
+        "",
+        "- `SlidingWindowCounter(int limit, long windowMs)`;",
+        "- windows are aligned: the current one starts at `nowMs - nowMs % windowMs`;",
+        "- when a request falls into a new window, the old current count becomes the **previous** count if the new",
+        "  window directly follows it, and `0` if one or more whole windows were skipped;",
+        "- `bool TryAcquire(long nowMs)`: estimate",
+        "  `previous × (windowMs − elapsed) / windowMs + current`, where `elapsed` is the time since the current window",
+        "  started. Accept (and count it) when `estimate + 1 <= limit`.",
+        "",
+        "Limit 10 per 1,000 ms: ten requests at t=100 pass. At t=1500 half of the previous window still overlaps, so",
+        "it counts as 5 and only 5 more pass."
+      ],
+      "starter": [
+        "class SlidingWindowCounter",
+        "{",
+        "    public SlidingWindowCounter(int limit, long windowMs) { }",
+        "    public bool TryAcquire(long nowMs) => true;",
+        "}"
+      ],
+      "solution": [
+        "class SlidingWindowCounter",
+        "{",
+        "    readonly int limit;",
+        "    readonly long windowMs;",
+        "    long windowStart;",
+        "    int current;",
+        "    int previous;",
+        "",
+        "    public SlidingWindowCounter(int limit, long windowMs)",
+        "    {",
+        "        this.limit = limit;",
+        "        this.windowMs = windowMs;",
+        "    }",
+        "",
+        "    public bool TryAcquire(long nowMs)",
+        "    {",
+        "        var start = nowMs - nowMs % windowMs;",
+        "        if (start != windowStart)",
+        "        {",
+        "            previous = start - windowStart == windowMs ? current : 0;",
+        "            current = 0;",
+        "            windowStart = start;",
+        "        }",
+        "        var elapsed = nowMs - windowStart;",
+        "        var estimate = (double)previous * (windowMs - elapsed) / windowMs + current;",
+        "        if (estimate + 1 > limit) return false;",
+        "        current++;",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep three numbers: the current window's start, its count, and the previous window's count.",
+        "Roll over when `nowMs - nowMs % windowMs` changes; the previous count survives only if exactly one window passed."
+      ],
+      "template": [
+        "var dojoSw = new SlidingWindowCounter(10, 1000);",
+        "int dojoCount(long at, int tries) { var n = 0; for (var i = 0; i < tries; i++) if (dojoSw.TryAcquire(at)) n++; return n; }",
+        "Dojo.Eq(\"ten pass in the first window\", 10, dojoCount(100, 12));",
+        "Dojo.Eq(\"at t=1500 the old window still counts as 5\", 5, dojoCount(1500, 8));",
+        "Dojo.Eq(\"at t=2100 the previous 5 count as 4.5\", 5, dojoCount(2100, 8));",
+        "Dojo.Eq(\"after skipped windows nothing carries over\", 10, dojoCount(5000, 12));",
+        "var dojoFw = new SlidingWindowCounter(10, 1000);",
+        "var dojoEdge = 0;",
+        "for (var i = 0; i < 10; i++) if (dojoFw.TryAcquire(999)) dojoEdge++;",
+        "for (var i = 0; i < 10; i++) if (dojoFw.TryAcquire(1000)) dojoEdge++;",
+        "Dojo.Eq(\"no double burst across the boundary (a fixed window would allow 20)\", 10, dojoEdge);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

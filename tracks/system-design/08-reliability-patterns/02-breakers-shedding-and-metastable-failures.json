@@ -1,0 +1,371 @@
+{
+  "title": "Breakers, bulkheads, shedding and metastable failures",
+  "summary": "Circuit breakers that fail fast, bulkheads that contain a slow dependency, admission control that sheds the least important work first, graceful degradation, and the retry storm that keeps a system down after its trigger is gone.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The circuit breaker",
+      "body": [
+        "When a dependency is failing, calling it anyway wastes your threads and adds load to something already",
+        "on its knees. A **circuit breaker** sits around the call and remembers recent results:",
+        "",
+        "```text",
+        "            failures pass the threshold",
+        "  CLOSED  ───────────────────────────────>  OPEN      every call fails fast, no network",
+        "    ^                                        │",
+        "    │ the probe succeeds                     │ the break time is over",
+        "    │                                        v",
+        "    └──────────────────────────────────  HALF-OPEN   let one probe (or a few) through",
+        "                 the probe fails: back to OPEN",
+        "```",
+        "",
+        "Real breakers (Polly's, for example) trip on a **failure ratio** over a sampling window with a **minimum",
+        "throughput**, so two failures at 3 a.m. do not open it. While open, the caller uses a **fallback**: a cached",
+        "value, a default, or a clear error. The breaker protects the caller (no threads stuck waiting) and gives the",
+        "dependency room to recover. The **Integration** topic shows breakers in route code; here we care about",
+        "what they do to a whole system."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "A breaker with a threshold of 3 consecutive failures and a 10 s break. Put what happens in order.",
+      "lines": [
+        "Three calls in a row time out while the breaker is closed",
+        "The breaker opens; for 10 s every call fails at once without touching the network",
+        "The break time ends and the breaker goes half-open",
+        "One probe call is let through and succeeds",
+        "The breaker closes and traffic flows normally again"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Bulkheads, shedding and back-pressure",
+      "body": [
+        "- **Bulkhead**: separate pools (threads, connections, concurrency limits) per dependency, like the watertight",
+        "  compartments of a ship. If recommendations hang, they use up *their* 20 slots, not the 200 that checkout needs.",
+        "- **Load shedding / admission control**: when you are at capacity, refuse new work **early and cheaply**",
+        "  (429 or 503 in a millisecond) instead of queueing it until it times out. A request that waits longer than",
+        "  the client will wait is pure waste: you do the work and nobody reads the answer.",
+        "- **Shed by priority**: drop best-effort work first (prefetch, analytics beacons), then normal, keep",
+        "  critical (checkout, login) to the end.",
+        "- **Back-pressure**: let the slow end push back (bounded queues, `reject-publish`, 429 with `Retry-After`)",
+        "  so producers slow down instead of buffers growing until something runs out of memory.",
+        "",
+        "Adaptive concurrency limits (the idea behind TCP congestion control, applied to requests) lower the",
+        "number of in-flight requests when latency rises and raise it when things are healthy."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each pattern to what it protects against.",
+      "pairs": [
+        [
+          "Circuit breaker",
+          "Waiting on, and adding load to, a dependency that is already failing"
+        ],
+        [
+          "Bulkhead",
+          "One slow dependency using up the threads every other feature needs"
+        ],
+        [
+          "Load shedding",
+          "Queueing work you cannot finish before the client gives up"
+        ],
+        [
+          "Back-pressure",
+          "Buffers growing without limit between a fast producer and a slow consumer"
+        ],
+        [
+          "Retry budget",
+          "Retries multiplying the load during an outage"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Degrade gracefully",
+      "body": [
+        "Decide, per feature, what happens when its dependency is gone. Most pages are made of parts that matter",
+        "very differently:",
+        "",
+        "```text",
+        "product page                         dependency down → what the user sees",
+        "  title, price, stock, Buy button    catalog, pricing → error page (cannot sell without them)",
+        "  reviews                            reviews          → last cached copy, or hidden",
+        "  \"customers also bought\"           recommendations  → a generic best-sellers list",
+        "  delivery estimate                  shipping         → \"usually 2-4 days\"",
+        "```",
+        "",
+        "**Serving stale** is often the best fallback: a cache that keeps expired entries and serves them while the",
+        "origin is down (`stale-if-error` on a CDN does exactly this). Write the fallback down in the design, and",
+        "test it, or it will not work on the day."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Its dependency is down. Should the feature degrade or fail clearly?",
+      "buckets": [
+        "Degrade gracefully",
+        "Fail clearly"
+      ],
+      "items": [
+        [
+          "The recommendations widget",
+          0
+        ],
+        [
+          "Product reviews",
+          0
+        ],
+        [
+          "A personalised homepage",
+          0
+        ],
+        [
+          "Payment authorisation at checkout",
+          1
+        ],
+        [
+          "The stock check before an order is accepted",
+          1
+        ],
+        [
+          "Checking a password at login",
+          1
+        ]
+      ],
+      "explain": "Degrade where an older or generic answer is still useful. Fail clearly where a guess would be wrong: taking an order without stock or payment, or logging someone in without checking."
+    },
+    {
+      "type": "learn",
+      "title": "Metastable failures: when the trigger is not the cause",
+      "body": [
+        "Some outages keep going after their trigger is gone. Researchers named these **metastable failures**",
+        "(Bronson et al., HotOS 2021): a trigger pushes the system into a bad state, and a **sustaining effect** keeps",
+        "it there.",
+        "",
+        "```text",
+        "14:00  a slow query makes the DB 4x slower                    the trigger",
+        "14:00  requests time out; clients retry 3x                    load x3",
+        "14:01  the slow query is killed: DB back to normal speed      trigger gone",
+        "14:01  load is still 3x capacity, so requests still time out, so clients still retry ...",
+        "14:40  someone sheds load at the gateway; the DB recovers in 30 s",
+        "```",
+        "",
+        "Here the sustaining effect is **retries plus timeouts**: work done for requests the client already gave up",
+        "on is wasted, so goodput collapses while the DB is 100% busy. Other sustaining effects: a cold cache that",
+        "cannot warm because the DB is overloaded, and GC thrash from deep queues. The fix is to make load drop",
+        "below capacity: shed at the edge, open breakers, cap retries with budgets, bound queues. Adding capacity",
+        "works too, but usually takes longer than shedding."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** From a postmortem timeline. Why did the outage last 37 more minutes after the trigger was",
+        "removed at 14:03?"
+      ],
+      "code": [
+        "14:00:10  orders-db p99 rises from 8 ms to 900 ms (a migration locks a hot table)",
+        "14:00:40  api error rate 45%; api retries: 3 per request, no backoff",
+        "14:03:00  migration cancelled; lock released",
+        "14:03:30  orders-db cpu 100%, active connections 800/800, error rate 52%",
+        "14:20:00  api pods scaled from 20 to 40; error rate 61%",
+        "14:40:00  gateway rate limit set to 60% of normal traffic",
+        "14:40:40  orders-db cpu 55%; error rate 0.3%",
+        "14:45:00  rate limit removed; normal"
+      ],
+      "options": [
+        "Retries kept the offered load above the database's capacity, so it stayed overloaded after the lock was gone; shedding load let it recover",
+        "The migration was not really cancelled until 14:40",
+        "40 API pods were still too few",
+        "The rate limit fixed a bug in the database"
+      ],
+      "answer": 0,
+      "explain": "The trigger ended at 14:03, but every timed-out request became three, so the database never got below 100%. Doubling the API pods made it worse: more callers, more retries, more connections. Only cutting the offered load broke the loop. Action items: retry budgets with jitter, a breaker on the DB calls, admission control at the gateway."
+    },
+    {
+      "type": "code",
+      "title": "A circuit breaker",
+      "prompt": [
+        "Write a class `CircuitBreaker` with an injected clock (times in ms are passed in):",
+        "",
+        "- `CircuitBreaker(int failureThreshold, long breakMs)`, starting `\"Closed\"`;",
+        "- `string State`: `\"Closed\"`, `\"Open\"` or `\"HalfOpen\"`;",
+        "- `bool Allow(long nowMs)`: Closed → true. Open → if `breakMs` have passed since it opened, become HalfOpen",
+        "  and return true (that is the one probe); otherwise false. HalfOpen → false (the probe is still out);",
+        "- `void Success()`: HalfOpen → Closed; in Closed it resets the failure count;",
+        "- `void Failure(long nowMs)`: HalfOpen → Open again from `nowMs`; Closed → count it, and on reaching",
+        "  `failureThreshold` **consecutive** failures open from `nowMs`.",
+        "",
+        "Production breakers use a failure ratio over a time window with a minimum throughput; consecutive",
+        "failures keep this one small."
+      ],
+      "starter": [
+        "class CircuitBreaker",
+        "{",
+        "    public CircuitBreaker(int failureThreshold, long breakMs) { }",
+        "    public string State => \"Closed\";",
+        "    public bool Allow(long nowMs) => true;",
+        "    public void Success() { }",
+        "    public void Failure(long nowMs) { }",
+        "}"
+      ],
+      "solution": [
+        "class CircuitBreaker",
+        "{",
+        "    readonly int failureThreshold;",
+        "    readonly long breakMs;",
+        "    int failures;",
+        "    long openedAt;",
+        "",
+        "    public CircuitBreaker(int failureThreshold, long breakMs)",
+        "    {",
+        "        this.failureThreshold = failureThreshold;",
+        "        this.breakMs = breakMs;",
+        "    }",
+        "",
+        "    public string State { get; private set; } = \"Closed\";",
+        "",
+        "    public bool Allow(long nowMs)",
+        "    {",
+        "        if (State == \"Closed\") return true;",
+        "        if (State == \"Open\" && nowMs - openedAt >= breakMs) { State = \"HalfOpen\"; return true; }",
+        "        return false;",
+        "    }",
+        "",
+        "    public void Success()",
+        "    {",
+        "        failures = 0;",
+        "        State = \"Closed\";",
+        "    }",
+        "",
+        "    public void Failure(long nowMs)",
+        "    {",
+        "        if (State == \"HalfOpen\") { Open(nowMs); return; }",
+        "        if (State == \"Closed\" && ++failures >= failureThreshold) Open(nowMs);",
+        "    }",
+        "",
+        "    void Open(long nowMs)",
+        "    {",
+        "        State = \"Open\";",
+        "        openedAt = nowMs;",
+        "        failures = 0;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep the state, a consecutive-failure counter and the time it opened.",
+        "Only `Allow` moves Open to HalfOpen (when the break is over); only `Success` and `Failure` leave HalfOpen."
+      ],
+      "template": [
+        "var dojoB = new CircuitBreaker(3, 10_000);",
+        "Dojo.Eq(\"starts closed\", \"Closed\", dojoB.State);",
+        "dojoB.Failure(100); dojoB.Failure(200);",
+        "Dojo.Eq(\"two failures: still closed\", \"Closed\", dojoB.State);",
+        "dojoB.Success(); dojoB.Failure(300); dojoB.Failure(400);",
+        "Dojo.Eq(\"a success resets the count\", \"Closed\", dojoB.State);",
+        "dojoB.Failure(500);",
+        "Dojo.Eq(\"three in a row: open\", \"Open\", dojoB.State);",
+        "Dojo.Check(\"open: calls fail fast\", !dojoB.Allow(5_000));",
+        "Dojo.Check(\"after the break: one probe is allowed\", dojoB.Allow(10_500));",
+        "Dojo.Eq(\"and the breaker is half-open\", \"HalfOpen\", dojoB.State);",
+        "Dojo.Check(\"no second call while the probe is out\", !dojoB.Allow(10_600));",
+        "dojoB.Failure(10_700);",
+        "Dojo.Eq(\"a failed probe opens it again\", \"Open\", dojoB.State);",
+        "Dojo.Check(\"the new break counts from the failed probe\", !dojoB.Allow(20_600));",
+        "Dojo.Check(\"and ends 10 s after it\", dojoB.Allow(20_700));",
+        "dojoB.Success();",
+        "Dojo.Eq(\"a good probe closes it\", \"Closed\", dojoB.State);",
+        "Dojo.Check(\"closed: calls flow\", dojoB.Allow(20_800));",
+        "dojoB.Failure(21_000); dojoB.Failure(21_100);",
+        "Dojo.Eq(\"closing reset the count\", \"Closed\", dojoB.State);",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Admission control by priority",
+      "prompt": [
+        "Write a class `AdmissionControl` that sheds the least important work first:",
+        "",
+        "- `AdmissionControl(int maxInFlight)`;",
+        "- `bool TryStart(int priority)`: priority `0` is critical (checkout), `1` normal, `2` best-effort (prefetch).",
+        "  Admit when the requests **already in flight** are below a share of `maxInFlight`: 100% for critical, 90%",
+        "  for normal, 50% for best-effort. Admitted requests count as in flight; refused ones do not.",
+        "- `void Done()`: one admitted request finished.",
+        "- `int InFlight` and `int Shed` (how many were refused).",
+        "",
+        "With `maxInFlight` 10: best-effort is refused from 5 in flight, normal from 9, critical only at 10."
+      ],
+      "starter": [
+        "class AdmissionControl",
+        "{",
+        "    public AdmissionControl(int maxInFlight) { }",
+        "    public int InFlight { get; }",
+        "    public int Shed { get; }",
+        "    public bool TryStart(int priority) => true;",
+        "    public void Done() { }",
+        "}"
+      ],
+      "solution": [
+        "class AdmissionControl",
+        "{",
+        "    readonly int maxInFlight;",
+        "",
+        "    public AdmissionControl(int maxInFlight) => this.maxInFlight = maxInFlight;",
+        "",
+        "    public int InFlight { get; private set; }",
+        "    public int Shed { get; private set; }",
+        "",
+        "    public bool TryStart(int priority)",
+        "    {",
+        "        var percent = priority switch { 0 => 100, 1 => 90, _ => 50 };",
+        "        if (InFlight * 100 < maxInFlight * percent) { InFlight++; return true; }",
+        "        Shed++;",
+        "        return false;",
+        "    }",
+        "",
+        "    public void Done() { if (InFlight > 0) InFlight--; }",
+        "}"
+      ],
+      "hints": [
+        "Map the priority to a percentage with a `switch` expression and compare in whole numbers, `InFlight * 100 < maxInFlight * percent`, so no floating-point rounding sneaks in.",
+        "Only admitted requests increase `InFlight`; `Done` decreases it, never below 0."
+      ],
+      "template": [
+        "var dojoA = new AdmissionControl(10);",
+        "for (var dojoI = 0; dojoI < 5; dojoI++) dojoA.TryStart(2);",
+        "Dojo.Eq(\"five best-effort requests fit\", 5, dojoA.InFlight);",
+        "Dojo.Check(\"the sixth best-effort request is shed\", !dojoA.TryStart(2));",
+        "for (var dojoI = 0; dojoI < 4; dojoI++) dojoA.TryStart(1);",
+        "Dojo.Eq(\"normal work fits up to 9\", 9, dojoA.InFlight);",
+        "Dojo.Check(\"the tenth normal request is shed\", !dojoA.TryStart(1));",
+        "Dojo.Check(\"critical work still gets the last slot\", dojoA.TryStart(0));",
+        "Dojo.Check(\"at the limit even critical work is refused\", !dojoA.TryStart(0));",
+        "Dojo.Eq(\"three were shed\", 3, dojoA.Shed);",
+        "dojoA.Done(); dojoA.Done(); dojoA.Done(); dojoA.Done(); dojoA.Done(); dojoA.Done();",
+        "Dojo.Check(\"after requests finish, best-effort is let in again\", dojoA.TryStart(2));",
+        "var dojoE = new AdmissionControl(1);",
+        "dojoE.Done();",
+        "Dojo.Eq(\"Done never goes below zero\", 0, dojoE.InFlight);",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "retry-storm",
+      "title": "Build it: the retry storm",
+      "prompt": [
+        "In the **System design board**, open *The retry storm*. A one-minute database slowdown plus clients that",
+        "retry three times at once leaves the system down long after the database is healthy again. Watch the",
+        "dashboard stay red after the slowdown ends, then make the system recover within the goal: a circuit",
+        "breaker on the database calls, load shedding at the load balancer, or a retry budget."
+      ],
+      "explain": "The slowdown is only the trigger. Retries and timeouts are what keep the database above 100%. Anything that makes the offered load drop below capacity (shedding, a breaker, a budget) lets it drain and recover; more app servers alone just add callers."
+    }
+  ]
+}

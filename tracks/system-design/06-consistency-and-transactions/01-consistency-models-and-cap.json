@@ -1,0 +1,257 @@
+{
+  "title": "Consistency models, CAP and PACELC",
+  "summary": "What a read may return once data has copies: linearizable to eventual on a timeline, the session guarantees users notice, and CAP and PACELC without the myths.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Copies make reads interesting",
+      "body": [
+        "As soon as data lives on more than one machine (replicas, caches, regions), a read can return an **older**",
+        "value than the latest write. A **consistency model** is the promise about which values a read may return.",
+        "",
+        "```text",
+        "time ->        0 ms           50 ms            800 ms",
+        "primary   W(x=2) ok",
+        "replica   ......................................  x=2 applied (lag 800 ms)",
+        "Alice                   R(x) from replica -> 1   <- stale: she just wrote 2",
+        "```",
+        "",
+        "| Model | A read returns... |",
+        "|---|---|",
+        "| **Linearizable** (strong) | the latest completed write, as if there were one copy and one clock |",
+        "| **Sequential** | some single order of all writes that every client agrees on, keeping each client's own order |",
+        "| **Causal** | anything a write depended on before the write itself (a reply never shows before its question) |",
+        "| **Read-your-writes** | at least your own latest write |",
+        "| **Monotonic reads** | never something older than what you already saw |",
+        "| **Eventual** | the latest value *eventually*, once writes stop; anything until then |",
+        "",
+        "Stronger models cost latency (wait for copies) or availability (refuse when copies cannot be reached).",
+        "Most products need strong consistency for a few things and session guarantees for the rest."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each model to its promise.",
+      "pairs": [
+        [
+          "Linearizable",
+          "behaves like one copy: every read sees the latest completed write"
+        ],
+        [
+          "Causal",
+          "a reply is never visible before the message it answers"
+        ],
+        [
+          "Read-your-writes",
+          "you always see your own latest write"
+        ],
+        [
+          "Monotonic reads",
+          "time never goes backwards for one reader"
+        ],
+        [
+          "Eventual",
+          "copies agree once writes stop, with no promise about when"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Support tickets: \"I post a comment, the page reloads, my comment is gone; it shows up a",
+        "few seconds later.\" Writes go to the primary; reads go to any replica. The dashboard shows:"
+      ],
+      "code": [
+        "pg_stat_replication (primary)",
+        "application_name  state      replay_lag",
+        "replica-1         streaming  00:00:00.4",
+        "replica-2         streaming  00:00:03.1",
+        "replica-3         streaming  00:00:00.6"
+      ],
+      "options": [
+        "A read-your-writes violation: the reload hits a lagging replica (replica-2 is 3 s behind) before it has the comment",
+        "The comment insert is failing and being retried",
+        "The cache TTL is too long",
+        "Clock skew between the replicas"
+      ],
+      "answer": 0,
+      "explain": "Async replicas lag. The author's next read must see their own write: route that user's reads to the primary for a short window after a write, or wait until the replica has replayed past the write's position (LSN)."
+    },
+    {
+      "type": "learn",
+      "title": "Giving users their session guarantees",
+      "body": [
+        "You rarely need linearizability everywhere. You almost always need users to see **their own** changes, and",
+        "never to watch data go backwards. Common ways to get there with async replicas:",
+        "",
+        "- **Stick to the primary after a write.** For N seconds (more than the usual lag) after a user writes, send",
+        "  their reads to the primary. Simple; costs primary load.",
+        "- **Carry a position token.** After the write, return the primary's WAL position (PostgreSQL",
+        "  `pg_current_wal_lsn()`). Before reading on a replica, check `pg_last_wal_replay_lsn()` is at least that far;",
+        "  else wait a little or go to the primary.",
+        "- **Pin a session to one replica** for monotonic reads, so a reader never hops to a replica that is further behind.",
+        "- **Commit with `synchronous_commit = remote_apply`** on a synchronous standby, so reads there see the commit.",
+        "  It makes every write wait for that standby.",
+        "",
+        "- **Read-your-writes**: a session guarantee that a client always sees its own latest write, even when reads go to replicas."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "How strong does each operation need to be?",
+      "buckets": [
+        "Linearizable",
+        "Read-your-writes is enough",
+        "Eventual is fine"
+      ],
+      "items": [
+        [
+          "Claiming a unique username",
+          0
+        ],
+        [
+          "Selling the last seat on a flight",
+          0
+        ],
+        [
+          "Electing the leader that holds a lock",
+          0
+        ],
+        [
+          "A user editing their own profile and reloading",
+          1
+        ],
+        [
+          "Showing a shopper their own cart",
+          1
+        ],
+        [
+          "The like count on someone else's post",
+          2
+        ],
+        [
+          "A video's view counter",
+          2
+        ]
+      ],
+      "explain": "Uniqueness, the last unit of stock and locks break if two clients see different \"latest\" values. A user's own data needs read-your-writes. Counters other people glance at can lag."
+    },
+    {
+      "type": "learn",
+      "title": "CAP and PACELC, honestly",
+      "body": [
+        "**CAP** says: when a **network partition** happens (some nodes cannot talk to others), a replicated system must",
+        "choose for each request between **consistency** (refuse or wait, so nobody reads stale data) and",
+        "**availability** (answer from the side you can reach, possibly stale).",
+        "",
+        "What CAP is **not**: a menu where you \"pick two of three\". Partitions are not optional; they happen. And with",
+        "no partition, CAP says nothing at all. \"C\" in CAP means linearizable, not the C in ACID.",
+        "",
+        "**PACELC** fills the gap: if **P**artition, choose **A** or **C**; **E**lse (normal running), choose **L**atency",
+        "or **C**onsistency, because waiting for copies costs time on every request.",
+        "",
+        "| System (as usually configured) | Partition | Else |",
+        "|---|---|---|",
+        "| Single primary with a synchronous standby (PostgreSQL, MySQL) | C: writes stop without the primary | C: every commit waits for the standby |",
+        "| Dynamo-style store at consistency ONE (Cassandra's cqlsh default) | A: any replica answers | L: one replica is enough |",
+        "| The same store at QUORUM | C (for the minority side) | C: wait for a majority |",
+        "| A globally replicated database with consensus per write | C | C: writes pay a cross-region round trip |",
+        "",
+        "Most stores let you choose **per request**. Say which choice you made and why."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which statement about CAP is correct?",
+      "options": [
+        "During a partition, each request either gets a possibly stale answer or no answer; with no partition, CAP does not constrain you",
+        "You can build a system that is consistent, available and partition tolerant if you buy good enough networks",
+        "A CA system is one that gives up partition tolerance, which is the usual choice for relational databases",
+        "CAP's C means the same as the C in ACID"
+      ],
+      "answer": 0,
+      "explain": "Partitions are a fact, not a choice, so \"CA\" is not a real option for a distributed system. CAP only constrains behaviour during a partition, and its C is linearizability. PACELC adds the everyday latency trade-off."
+    },
+    {
+      "type": "predict",
+      "prompt": "A write lands on the primary at t = 0. The replica applies it after 800 ms of lag. A read hits the replica at t = 300 ms. What does this print?",
+      "code": [
+        "var primary = new List<string> { \"hello\" };",
+        "var replica = new List<string>();",
+        "var lagMs = 800;",
+        "var readAtMs = 300;",
+        "var seen = readAtMs >= lagMs ? string.Join(\",\", primary) : string.Join(\",\", replica);",
+        "Console.WriteLine(seen == \"\" ? \"(nothing)\" : seen);"
+      ],
+      "answer": "(nothing)",
+      "explain": "300 ms is before the replica caught up, so the read sees the replica's old state: no comment at all. That is eventual consistency, and exactly the support ticket from earlier."
+    },
+    {
+      "type": "code",
+      "title": "Check a session's guarantees",
+      "prompt": [
+        "Given one user's session as events, find the first violation. `\"W 5\"` means the session wrote version 5;",
+        "`\"R 4\"` means a read returned version 4.",
+        "",
+        "Write `string CheckSession(string[] events)`:",
+        "",
+        "- a read **older than the newest version this session wrote** breaks read-your-writes:",
+        "  return `\"read-your-writes at <i>\"`;",
+        "- else a read **older than the newest version this session has already read** breaks monotonic reads:",
+        "  return `\"monotonic reads at <i>\"`;",
+        "- otherwise `\"ok\"`. `<i>` is the 0-based index of the event. Read-your-writes wins when both are broken."
+      ],
+      "starter": [
+        "string CheckSession(string[] events)",
+        "{",
+        "    return \"ok\";",
+        "}"
+      ],
+      "solution": [
+        "string CheckSession(string[] events)",
+        "{",
+        "    var wrote = -1;",
+        "    var read = -1;",
+        "    for (var i = 0; i < events.Length; i++)",
+        "    {",
+        "        var parts = events[i].Split(' ');",
+        "        var version = int.Parse(parts[1]);",
+        "        if (parts[0] == \"W\") { wrote = Math.Max(wrote, version); continue; }",
+        "        if (version < wrote) return $\"read-your-writes at {i}\";",
+        "        if (version < read) return $\"monotonic reads at {i}\";",
+        "        read = Math.Max(read, version);",
+        "    }",
+        "    return \"ok\";",
+        "}"
+      ],
+      "hints": [
+        "Keep two numbers: the newest version this session wrote, and the newest it has read.",
+        "Check the read-your-writes rule before the monotonic rule, and only update the newest read after both pass."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a healthy session\", \"ok\", CheckSession(new[] { \"W 5\", \"R 5\", \"R 6\" }));",
+        "Dojo.Eq(\"the missing comment\", \"read-your-writes at 1\", CheckSession(new[] { \"W 5\", \"R 4\" }));",
+        "Dojo.Eq(\"time goes backwards\", \"monotonic reads at 1\", CheckSession(new[] { \"R 7\", \"R 6\" }));",
+        "Dojo.Eq(\"a later violation\", \"monotonic reads at 3\", CheckSession(new[] { \"R 3\", \"W 5\", \"R 6\", \"R 5\" }));",
+        "Dojo.Eq(\"read-your-writes wins a tie\", \"read-your-writes at 2\", CheckSession(new[] { \"R 8\", \"W 9\", \"R 7\" }));",
+        "Dojo.Eq(\"reading other people's newer data is fine\", \"ok\", CheckSession(new[] { \"W 2\", \"R 9\", \"W 3\", \"R 9\" }));",
+        "Dojo.Eq(\"an empty session\", \"ok\", CheckSession(new string[0]));"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "read-replicas",
+      "title": "Build it: read replicas and lag",
+      "prompt": [
+        "In the **System design board**, open *Read replicas and lag*. Reads that cannot be cached overload the",
+        "primary. Add read replicas to take them, and keep replica lag low enough that read-your-writes tricks stay",
+        "cheap. The board shows the exact goals."
+      ],
+      "explain": "Replicas scale reads, not writes, and every replica is a little behind. The lag you see on the board is the window in which a user could miss their own write."
+    }
+  ]
+}

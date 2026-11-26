@@ -1,0 +1,260 @@
+{
+  "title": "Static stability, game days and postmortems",
+  "summary": "Failover that needs nothing new during the failure, failover you have actually tested, the commands to check zone spread and replication, and the blameless postmortem that turns an outage into fixes.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Static stability: need nothing new during the failure",
+      "body": [
+        "A design is **statically stable** when it keeps working through a failure without having to *change*",
+        "anything: no new instances, no new DNS records, no config pushes, no calls to a control plane.",
+        "",
+        "- **Data plane**: the parts that serve requests (load balancers, app servers, databases).",
+        "- **Control plane**: the parts that create and change them (cloud APIs, the autoscaler, the deploy system, the DNS management API).",
+        "",
+        "Control planes are more complex and often fail *during* big outages, exactly when everyone calls them at once.",
+        "So:",
+        "",
+        "| Fragile | Statically stable |",
+        "|---|---|",
+        "| \"When a zone fails, the autoscaler launches replacements\" | capacity for a lost zone is already running (N+1) |",
+        "| failover script edits the DNS record through an API | health-checked DNS records were configured in advance; the switch is automatic |",
+        "| every request fetches feature flags from a central service | flags are cached locally and served stale if the service is down |",
+        "| certificates or secrets are fetched at start-up only | the last good copy is kept, so restarts still work |",
+        "",
+        "The test: imagine the cloud console and every management API are unreachable for an hour. What still works?"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which design keeps serving through a zone failure even if the cloud provider's management APIs are down?",
+      "options": [
+        "Three zones with enough instances already running that two zones carry the peak, behind a load balancer with health checks",
+        "Two zones at 80% each, with an autoscaler that adds instances when one zone fails",
+        "One zone, and a runbook to recreate the stack in another zone from templates",
+        "Two zones, with a Lambda-style function that updates DNS when it detects a failure"
+      ],
+      "answer": 0,
+      "explain": [
+        "Only the first needs nothing new: health checks are data-plane, the capacity already exists. The others need",
+        "a launch, a template deployment or a DNS API call at the worst possible moment."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Test it: game days and chaos experiments",
+      "body": [
+        "Failover that has never run does not work. The standby region has an expired certificate, the runbook",
+        "names a host that was renamed, the replica is too small. You find out by **practising**:",
+        "",
+        "- **Game day**: a planned exercise where the team causes a failure (drain a zone, fail over the database) and practises the response.",
+        "- **Chaos experiment**: a controlled test of a hypothesis about steady state under a fault, with a limited blast radius and abort conditions.",
+        "",
+        "The shape of a chaos experiment:",
+        "",
+        "```text",
+        "1. steady state     \"checkout p99 < 300 ms, 5xx < 0.1%\"",
+        "2. hypothesis       \"losing one zone's app servers keeps us inside steady state\"",
+        "3. blast radius     one zone, staging first, then 5% of production",
+        "4. abort conditions \"5xx > 1% for 2 minutes, or p99 > 800 ms\": stop and roll back",
+        "5. inject the fault  drain the zone's nodes, block its traffic",
+        "6. observe, then restore, then write down what you learned",
+        "```",
+        "",
+        "Tools exist for this (Chaos Mesh and LitmusChaos on Kubernetes, the fault injection services of the big",
+        "clouds), but `kubectl drain` on every node of one zone is already a real zone-loss test."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the steps of a chaos experiment in order.",
+      "lines": [
+        "Define the steady state you can measure",
+        "State the hypothesis about what the fault will not break",
+        "Limit the blast radius and agree the abort conditions",
+        "Inject the fault",
+        "Observe the metrics against the steady state",
+        "Restore, then record the findings as action items"
+      ],
+      "explain": "Abort conditions come before the fault, not after you are already in trouble. Without a measurable steady state you cannot tell whether the experiment passed."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: zones, replication and failover",
+      "body": "The commands to check that copies really are in different failure domains, that replicas are keeping up, and to practise a failover on purpose.",
+      "toolkit": [
+        { "cmd": "dig +noall +answer <name>", "what": "Shows just the answer records, with the TTL each resolver will cache them for. Run it before a failover test to know how long clients may keep the old address.",
+          "flags": [ [ "+noall +answer", "only the answer section" ], [ "+ttlunits", "print the TTL as 1m30s instead of seconds" ], [ "@1.1.1.1", "ask this resolver instead of the default one" ] ],
+          "example": "dig +noall +answer +ttlunits api.example.com @1.1.1.1", "when": "checking a health-checked failover record", "lang": "bash" },
+        { "cmd": "pg_stat_replication", "what": "PostgreSQL's view of every standby connected to this primary: whether it is synchronous, and how far behind it is.",
+          "flags": [ [ "sync_state", "`sync`, `async` or `quorum`" ], [ "replay_lag", "time until the standby has applied what the primary wrote" ], [ "state", "`streaming` when healthy" ] ],
+          "example": "psql -c \"SELECT client_addr, state, sync_state, replay_lag FROM pg_stat_replication\"", "when": "before trusting a failover to lose nothing", "lang": "bash" },
+        { "cmd": "patronictl list", "what": "Shows a Patroni-managed PostgreSQL cluster: which member is the leader, the replicas, their lag and the timeline.",
+          "flags": [ [ "-c /etc/patroni.yml", "the Patroni config to read" ], [ "-e", "extended output (pending restart, tags)" ] ],
+          "example": "patronictl -c /etc/patroni.yml list", "when": "the first command in any database failover incident", "lang": "bash" },
+        { "cmd": "patronictl switchover", "what": "A planned, clean change of leader: the safe way to practise failover and to patch the primary.",
+          "flags": [ [ "--leader pg-a", "the current leader" ], [ "--candidate pg-b", "the replica to promote" ], [ "--scheduled 2026-12-01T02:00", "run it later" ], [ "--force", "do not ask for confirmation" ] ],
+          "example": "patronictl -c /etc/patroni.yml switchover --leader pg-a --candidate pg-b", "when": "game days and maintenance windows", "lang": "bash" },
+        { "cmd": "kubectl get nodes -L topology.kubernetes.io/zone", "what": "Lists the nodes with their zone label as a column, so you see how many nodes each zone has.",
+          "flags": [ [ "-L <label>", "add a column with this label's value" ], [ "-l <selector>", "only nodes matching a label" ] ],
+          "example": "kubectl get nodes -L topology.kubernetes.io/zone", "lang": "bash" },
+        { "cmd": "kubectl get pods -o wide", "what": "Shows which node each pod runs on; together with the node zones above, whether replicas are really spread.",
+          "flags": [ [ "-o wide", "add node, IP and more columns" ], [ "-l app=checkout", "only this app's pods" ] ],
+          "example": "kubectl get pods -l app=checkout -o wide", "when": "after a deploy, and before trusting a zone failure test", "lang": "bash" },
+        { "cmd": "kubectl drain <node>", "what": "Cordons a node and evicts its pods, respecting PodDisruptionBudgets: a real \"this machine is gone\" test.",
+          "flags": [ [ "--ignore-daemonsets", "do not fail because of DaemonSet pods" ], [ "--delete-emptydir-data", "allow evicting pods with emptyDir volumes (their data is lost)" ], [ "--timeout=5m", "give up after this long" ] ],
+          "example": "kubectl drain node-b-1 --ignore-daemonsets --delete-emptydir-data", "when": "game days: drain every node of one zone", "lang": "bash" },
+        { "cmd": "topologySpreadConstraints", "what": "Tells the Kubernetes scheduler to spread a Deployment's pods evenly across zones, so one zone never holds most of them.",
+          "flags": [ [ "maxSkew: 1", "zone pod counts may differ by at most 1" ], [ "topologyKey: topology.kubernetes.io/zone", "spread across zones (`kubernetes.io/hostname` spreads across nodes)" ], [ "whenUnsatisfiable: DoNotSchedule", "refuse rather than pile up (`ScheduleAnyway` is only a preference)" ] ],
+          "example": "topologySpreadConstraints:\n  - maxSkew: 1\n    topologyKey: topology.kubernetes.io/zone\n    whenUnsatisfiable: DoNotSchedule\n    labelSelector:\n      matchLabels: { app: checkout }", "lang": "yaml" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command or field to what it tells you.",
+      "pairs": [
+        [ "`replay_lag` in `pg_stat_replication`", "How far behind a standby is in applying changes" ],
+        [ "`patronictl switchover`", "Moves the leader to a chosen replica, on purpose" ],
+        [ "`kubectl drain --ignore-daemonsets`", "Evicts a node's pods to simulate losing the machine" ],
+        [ "`kubectl get nodes -L topology.kubernetes.io/zone`", "How many nodes each zone has" ],
+        [ "`dig +noall +answer +ttlunits`", "How long resolvers may cache the current answer" ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Spread the checkout pods across **zones** so that zone counts differ by at most one, and refuse to schedule a pod rather than break that.",
+      "code": [
+        "spec:",
+        "  topologySpreadConstraints:",
+        "    - maxSkew: __1__",
+        "      topologyKey: __2__",
+        "      whenUnsatisfiable: __3__",
+        "      labelSelector:",
+        "        matchLabels:",
+        "          app: checkout"
+      ],
+      "blanks": [ "1", "topology.kubernetes.io/zone", "DoNotSchedule" ],
+      "bank": [ "3", "kubernetes.io/hostname", "ScheduleAnyway" ],
+      "explain": "`kubernetes.io/hostname` would spread across nodes, which can still put most of them in one zone. `ScheduleAnyway` is a soft preference: under pressure the scheduler ignores it, which is exactly when you lose a zone."
+    },
+    {
+      "type": "learn",
+      "title": "The blameless postmortem",
+      "body": [
+        "After an incident, write down what happened so it does not happen again. A good postmortem has:",
+        "",
+        "- **impact**: who was hurt, how much, for how long, and how much error budget it used;",
+        "- a **timeline** with times: when it started, when it was detected, when it was mitigated, when it was resolved;",
+        "- **contributing factors** (rarely one root cause): \"the page fired 6 minutes late *and* draining a zone needed a human *and* the primary had no automatic failover\";",
+        "- **action items**, each with an owner and a date, that change the system.",
+        "",
+        "From the timeline come the numbers seniors track: **time to detect** (start to alert), **time to mitigate**",
+        "(start to users OK), **time to resolve**.",
+        "",
+        "**Blameless** means asking \"why did the system let a reasonable person do this?\" instead of \"who did it?\".",
+        "People who fear blame hide details, and the details are what you need. \"Be more careful\" is not an action",
+        "item: a guard rail, an alert or an automation is."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Strong or weak action item?",
+      "buckets": [ "Strong: changes the system", "Weak: changes nothing you can check" ],
+      "items": [
+        [ "Add a 14.4x burn-rate page on checkout availability (owner: payments on-call, due 12 Dec)", 0 ],
+        [ "Be more careful with config changes", 1 ],
+        [ "Automate draining a failed zone from the load balancer (owner: platform, due 9 Jan)", 0 ],
+        [ "Retrain the engineer who deployed", 1 ],
+        [ "Add a zone topology spread constraint to the checkout Deployment (owner: checkout team, due 5 Dec)", 0 ],
+        [ "Monitor things better", 1 ]
+      ],
+      "explain": "A strong action item is specific, has an owner and a date, and you can check it is done. Blaming a person teaches everyone to hide the next mistake."
+    },
+    {
+      "type": "code",
+      "title": "Abort conditions for a game day",
+      "prompt": [
+        "A game day needs an automatic stop. Write a class `AbortGuard` that watches one metric sample per minute.",
+        "",
+        "- `AbortGuard(double maxErrorRate, double maxP99Ms, int patience)`: `patience` below 1 throws `ArgumentException`.",
+        "- `bool Observe(double errorRate, double p99Ms)`: a minute is **bad** when `errorRate > maxErrorRate` or",
+        "  `p99Ms > maxP99Ms`. A good minute resets the count. After `patience` bad minutes **in a row**, the experiment",
+        "  is aborted. Once aborted it stays aborted. Returns `Aborted`.",
+        "- `bool Aborted` and `string Reason` (get-only). `Reason` is `\"\"` until it aborts, then `\"error rate\"` if the",
+        "  minute that tripped it breached the error rate (check that first), otherwise `\"p99\"`.",
+        "",
+        "With `new AbortGuard(0.01, 400, 2)`, the samples (0.03, 200) then (0.004, 190) do not abort (the bad minute",
+        "was not followed by another), but (0.02, 210) then (0.005, 650) do, with reason `\"p99\"`."
+      ],
+      "starter": [
+        "class AbortGuard",
+        "{",
+        "    public AbortGuard(double maxErrorRate, double maxP99Ms, int patience) { }",
+        "",
+        "    public bool Aborted { get; }",
+        "    public string Reason { get; } = \"\";",
+        "",
+        "    public bool Observe(double errorRate, double p99Ms) => false;",
+        "}"
+      ],
+      "solution": [
+        "class AbortGuard",
+        "{",
+        "    readonly double maxErrorRate;",
+        "    readonly double maxP99Ms;",
+        "    readonly int patience;",
+        "    int bad;",
+        "",
+        "    public AbortGuard(double maxErrorRate, double maxP99Ms, int patience)",
+        "    {",
+        "        if (patience < 1) throw new ArgumentException(\"patience must be at least 1\", nameof(patience));",
+        "        this.maxErrorRate = maxErrorRate;",
+        "        this.maxP99Ms = maxP99Ms;",
+        "        this.patience = patience;",
+        "    }",
+        "",
+        "    public bool Aborted { get; private set; }",
+        "    public string Reason { get; private set; } = \"\";",
+        "",
+        "    public bool Observe(double errorRate, double p99Ms)",
+        "    {",
+        "        if (Aborted) return true;",
+        "        var errors = errorRate > maxErrorRate;",
+        "        var slow = p99Ms > maxP99Ms;",
+        "        if (!errors && !slow) { bad = 0; return false; }",
+        "        bad++;",
+        "        if (bad >= patience)",
+        "        {",
+        "            Aborted = true;",
+        "            Reason = errors ? \"error rate\" : \"p99\";",
+        "        }",
+        "        return Aborted;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep a counter of bad minutes in a row; reset it on a good minute.",
+        "Return early when already aborted, so later good minutes cannot un-abort it."
+      ],
+      "template": [
+        "var dojoG = new AbortGuard(0.01, 400, 2);",
+        "Dojo.Eq(\"a healthy minute\", false, dojoG.Observe(0.002, 180));",
+        "Dojo.Eq(\"one bad minute is not enough\", false, dojoG.Observe(0.03, 200));",
+        "Dojo.Eq(\"a good minute resets the count\", false, dojoG.Observe(0.004, 190));",
+        "Dojo.Eq(\"bad again: one in a row\", false, dojoG.Observe(0.02, 210));",
+        "Dojo.Eq(\"second bad minute in a row aborts\", true, dojoG.Observe(0.005, 650));",
+        "Dojo.Eq(\"the minute that tripped it was slow\", \"p99\", dojoG.Reason);",
+        "Dojo.Eq(\"aborted stays aborted\", true, dojoG.Observe(0.0, 100));",
+        "Dojo.Eq(\"Aborted is set\", true, dojoG.Aborted);",
+        "var dojoH = new AbortGuard(0.01, 400, 1);",
+        "Dojo.Eq(\"no reason before aborting\", \"\", dojoH.Reason);",
+        "Dojo.Eq(\"patience 1 aborts at once\", true, dojoH.Observe(0.5, 900));",
+        "Dojo.Eq(\"error rate is checked first\", \"error rate\", dojoH.Reason);",
+        "Dojo.Throws<ArgumentException>(\"patience 0 is an error\", () => new AbortGuard(0.01, 400, 0));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

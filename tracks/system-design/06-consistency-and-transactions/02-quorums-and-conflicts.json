@@ -1,0 +1,416 @@
+{
+  "title": "Quorums and conflicts",
+  "summary": "N, R and W and the overlap rule, what quorums still do not promise (sloppy quorums, partial writes, clocks), and how to resolve conflicting writes with last-writer-wins, version vectors and CRDTs.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "N, R and W",
+      "body": [
+        "Leaderless stores (Dynamo-style, such as Cassandra) write every key to **N** replicas. A write succeeds when",
+        "**W** of them confirm; a read asks **R** of them and takes the newest answer.",
+        "",
+        "```text",
+        "N = 3, W = 2, R = 2                       R + W = 4 > N = 3",
+        "",
+        "write x=7   ->  [r1: 7]  [r2: 7]  [r3: 6]    two confirmed: success",
+        "read  x     ->           [r2: 7]  [r3: 6]    any 2 of 3 include a 7",
+        "```",
+        "",
+        "- **R + W > N**: every read set overlaps every write set in at least one replica, so a read can see the",
+        "  latest successful write.",
+        "- **W > N / 2**: any two writes share a replica, so two conflicting writes cannot both succeed unnoticed.",
+        "- **Availability**: writes keep working while at most `N - W` replicas are down; reads while at most `N - R` are.",
+        "",
+        "Tuning: `W = N, R = 1` makes reads cheap and writes fragile; `W = 1, R = N` the opposite; `R = W = majority`",
+        "balances both. `N = 3` with quorum reads and writes survives one replica down."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Five replicas, writes wait for 2, reads ask 3. What does this print?",
+      "code": [
+        "int n = 5, w = 2, r = 3;",
+        "Console.WriteLine(r + w > n ? \"overlap\" : \"may be stale\");"
+      ],
+      "answer": "may be stale",
+      "explain": "2 + 3 = 5 is not more than 5, so a read of three replicas can miss both that took the write. Raise R or W by one."
+    },
+    {
+      "type": "mcq",
+      "prompt": "N = 3, R = 2, W = 2. Two of the three replicas for a key are down. What still works?",
+      "options": [
+        "Neither reads nor writes reach a quorum",
+        "Reads and writes both work",
+        "Reads work, writes fail",
+        "Writes work, reads fail"
+      ],
+      "answer": 0,
+      "explain": "Only one replica answers, and both R and W need two. A strict quorum chooses consistency here; a sloppy quorum would accept the write elsewhere, as the next card explains."
+    },
+    {
+      "type": "learn",
+      "title": "What quorums still do not give you",
+      "body": [
+        "R + W > N sounds like strong consistency. It is not, for several reasons seniors know by name:",
+        "",
+        "- **Sloppy quorums and hinted handoff.** When home replicas are down, some stores accept the write on *other*",
+        "  nodes and hand it back later. Availability goes up, but the overlap guarantee is gone until the handoff.",
+        "- **Partial writes.** A write that reached one replica and then failed is not rolled back. Some later reads",
+        "  see it, some do not.",
+        "- **Concurrent writes.** Two clients write the same key at once; the replicas may apply them in different",
+        "  orders. Something must decide the winner.",
+        "- **Clocks.** \"Newest\" is usually a timestamp. Clocks drift, so the newest write can lose.",
+        "",
+        "Repair happens in the background: **read repair** fixes stale replicas a read noticed, and **anti-entropy**",
+        "compares replicas (with Merkle trees) and copies what is missing. For linearizable operations (a unique",
+        "username) these stores offer a consensus path instead, such as Cassandra's lightweight transactions",
+        "(`IF NOT EXISTS`, consistency `SERIAL`)."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to its meaning.",
+      "pairs": [
+        [
+          "Sloppy quorum",
+          "accept a write on nodes outside the key's home replicas when those are down"
+        ],
+        [
+          "Hinted handoff",
+          "a stand-in node passes the write back to its home replica later"
+        ],
+        [
+          "Read repair",
+          "a read that saw a stale replica writes the newer value back to it"
+        ],
+        [
+          "Anti-entropy",
+          "background comparison of replicas (Merkle trees) to copy what is missing"
+        ],
+        [
+          "Last-writer-wins",
+          "keep the write with the highest timestamp and silently drop the other"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Resolving conflicts",
+      "body": [
+        "When two writes really are concurrent, the store needs a rule.",
+        "",
+        "**Last-writer-wins (LWW)** keeps the highest timestamp. Simple, and it **loses data**: with clocks 2 s apart,",
+        "a write made one second *later* on the slow-clock node is thrown away.",
+        "",
+        "**Version vectors** detect concurrency instead of guessing. Each replica counts its own writes:",
+        "",
+        "```text",
+        "a = {A:2, B:1}   b = {A:2, B:2}   ->  a happened before b (b saw everything a saw, and more)",
+        "a = {A:2, B:1}   b = {A:1, B:2}   ->  concurrent: each saw something the other did not",
+        "```",
+        "",
+        "On \"concurrent\" the store keeps both versions (siblings) and the application merges them, for example the",
+        "union of two carts.",
+        "",
+        "**CRDTs** (conflict-free replicated data types) are structures whose merge always converges: a G-counter keeps",
+        "one count per replica and merges by taking the maximum of each; an OR-set lets adds and removes commute.",
+        "",
+        "- **Version vector**: one counter per replica, used to tell whether two versions are ordered or concurrent."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Version vectors `a = {A:3, B:0, C:1}` and `b = {A:2, B:1, C:1}`. What is their relation?",
+      "options": [
+        "Concurrent",
+        "a happened before b",
+        "b happened before a",
+        "Equal"
+      ],
+      "answer": 0,
+      "explain": "a is ahead on A (3 > 2) and b is ahead on B (1 > 0). Neither saw everything the other saw, so the writes are concurrent and need a merge."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: choosing consistency per request",
+      "body": "Most stores let you pick the trade-off per call or per session. These are the switches you will actually flip.",
+      "toolkit": [
+        {
+          "cmd": "CONSISTENCY <level> (cqlsh)",
+          "what": "Sets the consistency level for the following requests in cqlsh. Drivers set it per statement.",
+          "flags": [
+            [
+              "ONE",
+              "any one replica (cqlsh's default): fast, may be stale"
+            ],
+            [
+              "QUORUM",
+              "a majority of all replicas"
+            ],
+            [
+              "LOCAL_QUORUM",
+              "a majority in the local data centre: no cross-region wait"
+            ],
+            [
+              "SERIAL",
+              "the Paxos read level for lightweight transactions (IF NOT EXISTS)"
+            ]
+          ],
+          "example": "CONSISTENCY LOCAL_QUORUM;",
+          "lang": "sql"
+        },
+        {
+          "cmd": "aws dynamodb get-item --consistent-read",
+          "what": "DynamoDB reads are eventually consistent by default. This flag asks for a strongly consistent read, which costs twice the read capacity and is not available on global secondary indexes.",
+          "flags": [
+            [
+              "--consistent-read",
+              "read the latest committed value"
+            ],
+            [
+              "--key",
+              "the item's primary key as JSON"
+            ]
+          ],
+          "example": "aws dynamodb get-item --table-name carts --key '{\"user_id\":{\"S\":\"u42\"}}' --consistent-read",
+          "lang": "bash"
+        },
+        {
+          "cmd": "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+          "what": "PostgreSQL's strongest isolation (serializable snapshot isolation): transactions behave as if run one at a time. Conflicts abort with SQLSTATE 40001, and the application must retry.",
+          "flags": [
+            [
+              "READ COMMITTED",
+              "the default: each statement sees data committed before it began"
+            ],
+            [
+              "REPEATABLE READ",
+              "one snapshot for the whole transaction"
+            ],
+            [
+              "40001",
+              "serialization_failure: retry the whole transaction"
+            ]
+          ],
+          "example": "BEGIN ISOLATION LEVEL SERIALIZABLE; UPDATE seats SET held_by = 42 WHERE id = 7 AND held_by IS NULL; COMMIT;",
+          "when": "invariants that span rows, such as \"at most one doctor goes off call\"",
+          "lang": "sql"
+        },
+        {
+          "cmd": "synchronous_commit",
+          "what": "How long a PostgreSQL commit waits before reporting success.",
+          "flags": [
+            [
+              "off",
+              "do not even wait for the local WAL flush (may lose the last commits on a crash)"
+            ],
+            [
+              "local",
+              "local flush only"
+            ],
+            [
+              "on",
+              "plus the synchronous standby has flushed it"
+            ],
+            [
+              "remote_apply",
+              "plus the standby has applied it, so reads there see it"
+            ]
+          ],
+          "example": "SET synchronous_commit = remote_apply;",
+          "lang": "sql"
+        },
+        {
+          "cmd": "synchronous_standby_names",
+          "what": "Which standbys a commit waits for. `ANY k (...)` is a quorum of k among the list; `FIRST k (...)` takes the first k by priority.",
+          "flags": [
+            [
+              "'ANY 1 (s1, s2)'",
+              "wait for whichever of s1 and s2 answers first"
+            ],
+            [
+              "'FIRST 1 (s1, s2)'",
+              "wait for s1; use s2 only if s1 is gone"
+            ]
+          ],
+          "example": "ALTER SYSTEM SET synchronous_standby_names = 'ANY 1 (standby_a, standby_b)';",
+          "lang": "sql"
+        },
+        {
+          "cmd": "curl -H 'Idempotency-Key: <uuid>'",
+          "what": "Sends a request with an idempotency key, so retrying it cannot do the work twice (next lesson). Send the same key on every retry.",
+          "flags": [
+            [
+              "Idempotency-Key",
+              "the header in the IETF HTTP API draft; a UUID per operation"
+            ]
+          ],
+          "example": "curl -sS -X POST https://api.example.com/payments -H \"Idempotency-Key: $(uuidgen)\" --json '{\"order\":81,\"amount\":40}'",
+          "lang": "bash"
+        }
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make every commit wait until **one of two** standbys has **applied** it, so a read sent to either standby afterwards can see it.",
+      "code": [
+        "ALTER SYSTEM SET synchronous_standby_names = '__1__ 1 (standby_a, standby_b)';",
+        "ALTER SYSTEM SET synchronous_commit = '__2__';"
+      ],
+      "blanks": [
+        "ANY",
+        "remote_apply"
+      ],
+      "bank": [
+        "FIRST",
+        "ALL",
+        "local",
+        "off"
+      ],
+      "explain": "`ANY 1` is a quorum: whichever standby answers first counts. `remote_apply` waits for replay, not just the WAL flush. Careful: a read on the *other* standby may still be behind, so this gives read-your-writes only on the one that confirmed."
+    },
+    {
+      "type": "code",
+      "title": "A quorum checker",
+      "prompt": [
+        "Write four functions for a store with `n` replicas:",
+        "",
+        "- `bool CanWrite(int n, int w, int down)`: enough replicas are up for a write quorum;",
+        "- `bool CanRead(int n, int r, int down)`: the same for reads;",
+        "- `bool ReadSeesLatest(int n, int r, int w)`: every read quorum overlaps every write quorum;",
+        "- `bool WritesOverlap(int n, int w)`: any two write quorums share a replica.",
+        "",
+        "Throw `ArgumentOutOfRangeException` when `r` or `w` is below 1 or above `n`, or `down` is below 0 or above `n`."
+      ],
+      "starter": [
+        "bool CanWrite(int n, int w, int down) => false;",
+        "bool CanRead(int n, int r, int down) => false;",
+        "bool ReadSeesLatest(int n, int r, int w) => false;",
+        "bool WritesOverlap(int n, int w) => false;"
+      ],
+      "solution": [
+        "void Need(bool ok, string what)",
+        "{",
+        "    if (!ok) throw new ArgumentOutOfRangeException(what);",
+        "}",
+        "",
+        "bool CanWrite(int n, int w, int down)",
+        "{",
+        "    Need(w >= 1 && w <= n, nameof(w));",
+        "    Need(down >= 0 && down <= n, nameof(down));",
+        "    return n - down >= w;",
+        "}",
+        "",
+        "bool CanRead(int n, int r, int down)",
+        "{",
+        "    Need(r >= 1 && r <= n, nameof(r));",
+        "    Need(down >= 0 && down <= n, nameof(down));",
+        "    return n - down >= r;",
+        "}",
+        "",
+        "bool ReadSeesLatest(int n, int r, int w)",
+        "{",
+        "    Need(r >= 1 && r <= n, nameof(r));",
+        "    Need(w >= 1 && w <= n, nameof(w));",
+        "    return r + w > n;",
+        "}",
+        "",
+        "bool WritesOverlap(int n, int w)",
+        "{",
+        "    Need(w >= 1 && w <= n, nameof(w));",
+        "    return 2 * w > n;",
+        "}"
+      ],
+      "hints": [
+        "The replicas that are up are `n - down`.",
+        "Overlap rules: `r + w > n` and `2 * w > n` (avoid `w > n / 2` with integers: 5 / 2 is 2)."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"3/2: one down, can write\", true, CanWrite(3, 2, 1));",
+        "Dojo.Eq(\"3/2: two down, cannot write\", false, CanWrite(3, 2, 2));",
+        "Dojo.Eq(\"3/2: one down, can read\", true, CanRead(3, 2, 1));",
+        "Dojo.Eq(\"R=1 survives four of five down\", true, CanRead(5, 1, 4));",
+        "Dojo.Eq(\"all up, W=N\", true, CanWrite(3, 3, 0));",
+        "Dojo.Eq(\"R=2, W=2 of 3 overlap\", true, ReadSeesLatest(3, 2, 2));",
+        "Dojo.Eq(\"R=1, W=1 of 3 do not\", false, ReadSeesLatest(3, 1, 1));",
+        "Dojo.Eq(\"R=3, W=2 of 5 do not (5 is not > 5)\", false, ReadSeesLatest(5, 3, 2));",
+        "Dojo.Eq(\"R=3, W=3 of 5 overlap\", true, ReadSeesLatest(5, 3, 3));",
+        "Dojo.Eq(\"W=2 of 3: writes overlap\", true, WritesOverlap(3, 2));",
+        "Dojo.Eq(\"W=2 of 4: two writes can miss each other\", false, WritesOverlap(4, 2));",
+        "Dojo.Eq(\"W=3 of 5: writes overlap\", true, WritesOverlap(5, 3));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"W above N\", () => CanWrite(3, 4, 0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"R of zero\", () => CanRead(3, 0, 0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"more down than exist\", () => CanWrite(3, 2, 4));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"overlap with W of zero\", () => WritesOverlap(3, 0));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Compare two version vectors",
+      "prompt": [
+        "Write `string Compare(Dictionary<string, int> a, Dictionary<string, int> b)`. A replica missing from a vector",
+        "counts as 0. Return:",
+        "",
+        "- `\"equal\"` when every counter matches;",
+        "- `\"before\"` when `a` happened before `b` (no counter of `a` is bigger, at least one is smaller);",
+        "- `\"after\"` for the opposite;",
+        "- `\"concurrent\"` when each is ahead somewhere."
+      ],
+      "starter": [
+        "string Compare(Dictionary<string, int> a, Dictionary<string, int> b)",
+        "{",
+        "    return \"equal\";",
+        "}"
+      ],
+      "solution": [
+        "string Compare(Dictionary<string, int> a, Dictionary<string, int> b)",
+        "{",
+        "    var behind = false;",
+        "    var ahead = false;",
+        "    foreach (var replica in a.Keys.Union(b.Keys))",
+        "    {",
+        "        var x = a.GetValueOrDefault(replica);",
+        "        var y = b.GetValueOrDefault(replica);",
+        "        if (x < y) behind = true;",
+        "        if (x > y) ahead = true;",
+        "    }",
+        "    if (behind && ahead) return \"concurrent\";",
+        "    if (behind) return \"before\";",
+        "    if (ahead) return \"after\";",
+        "    return \"equal\";",
+        "}"
+      ],
+      "hints": [
+        "Walk the union of both key sets; `GetValueOrDefault` gives 0 for a missing replica.",
+        "Track two flags: was `a` ever behind, was it ever ahead."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dictionary<string, int> dojoV(params (string Replica, int Count)[] xs) => xs.ToDictionary(x => x.Replica, x => x.Count);",
+        "Dojo.Eq(\"same counters\", \"equal\", Compare(dojoV((\"A\", 2), (\"B\", 1)), dojoV((\"A\", 2), (\"B\", 1))));",
+        "Dojo.Eq(\"b saw more\", \"before\", Compare(dojoV((\"A\", 2), (\"B\", 1)), dojoV((\"A\", 2), (\"B\", 2))));",
+        "Dojo.Eq(\"a saw more\", \"after\", Compare(dojoV((\"A\", 3), (\"B\", 1)), dojoV((\"A\", 2), (\"B\", 1))));",
+        "Dojo.Eq(\"each ahead somewhere\", \"concurrent\", Compare(dojoV((\"A\", 3), (\"B\", 0), (\"C\", 1)), dojoV((\"A\", 2), (\"B\", 1), (\"C\", 1))));",
+        "Dojo.Eq(\"a missing replica counts as 0\", \"before\", Compare(dojoV((\"A\", 1)), dojoV((\"A\", 1), (\"C\", 1))));",
+        "Dojo.Eq(\"a zero entry equals a missing one\", \"equal\", Compare(dojoV((\"A\", 1), (\"B\", 0)), dojoV((\"A\", 1))));",
+        "Dojo.Eq(\"two empty vectors\", \"equal\", Compare(new Dictionary<string, int>(), new Dictionary<string, int>()));"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "region-failover",
+      "title": "Build it: survive a region outage",
+      "prompt": [
+        "In the **System design board**, open *Survive a region outage*. Region 1 dies; region 2 holds an",
+        "asynchronous replica. Fail over with DNS health checks and a short TTL, promote the replica, and read the",
+        "data-loss number: with async replication, the writes still in flight at the moment of failure are gone. The",
+        "board shows the exact goals."
+      ],
+      "explain": "Async cross-region replication chooses latency over consistency (PACELC's EL): commits do not wait for the far region, and the price is a recovery point objective equal to the replication lag."
+    }
+  ]
+}

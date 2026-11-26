@@ -1,0 +1,280 @@
+{
+  "title": "Boss: the retry storm postmortem",
+  "summary": "A real-looking postmortem of a metastable outage: measure how long it outlived its trigger, show why the load stayed above capacity, and build the two action items: a retry budget and an adaptive concurrency limit.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The postmortem: INC-4471, orders unavailable for 45 minutes",
+      "body": [
+        "Blameless postmortem draft. Your job is the analysis section and the two action items.",
+        "",
+        "```text",
+        "SUMMARY   A schema migration locked a hot table for 3 minutes. Checkout failed for 45 minutes.",
+        "IMPACT    ~61% of checkout requests failed between 14:00 and 14:40.",
+        "",
+        "TIMELINE (UTC, from the dashboards)",
+        "14:00:00  trigger=off  errors=0.2%    normal: 6,000 rps, the orders DB handles about 8,000 rps",
+        "14:00:10  trigger=on   errors=3.0%    migration takes a lock on orders",
+        "14:00:40  trigger=on   errors=45.0%   api retries 3 attempts per request, no backoff, no budget",
+        "14:03:00  trigger=off  errors=52.0%   migration cancelled, lock released",
+        "14:20:00  trigger=off  errors=61.0%   api scaled 20 -> 40 pods",
+        "14:40:40  trigger=off  errors=0.3%    gateway limit at 60% of traffic; DB drains",
+        "",
+        "ACTION ITEMS  1. retry budget (10% of requests) in the API client",
+        "              2. adaptive concurrency limit in front of the DB calls",
+        "```",
+        "",
+        "The question the review will ask: *why did it not recover at 14:03?*"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "How long did it outlive its trigger?",
+      "prompt": [
+        "Write `int OutlivedSeconds(string[] lines)`. Each line is `HH:MM:SS trigger=on|off errors=N%` (the timeline",
+        "above, lines in time order).",
+        "",
+        "- find the first line with `trigger=off` that comes **after** a `trigger=on` line: the trigger ended there;",
+        "- from that line on, find the first line with errors **below 1.0%**: recovery;",
+        "- return the seconds between them (`0` if it recovered on the same line);",
+        "- return `-1` when the trigger never turned on and off, or the errors never dropped below 1%."
+      ],
+      "starter": [
+        "int OutlivedSeconds(string[] lines)",
+        "{",
+        "    return -1;",
+        "}"
+      ],
+      "solution": [
+        "int OutlivedSeconds(string[] lines)",
+        "{",
+        "    var seenOn = false;",
+        "    TimeSpan? ended = null;",
+        "    foreach (var line in lines)",
+        "    {",
+        "        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        var at = TimeSpan.Parse(parts[0]);",
+        "        var on = parts[1] == \"trigger=on\";",
+        "        var errors = double.Parse(parts[2][\"errors=\".Length..].TrimEnd('%'));",
+        "        if (ended is null)",
+        "        {",
+        "            if (on) { seenOn = true; continue; }",
+        "            if (!seenOn) continue;",
+        "            ended = at;",
+        "        }",
+        "        if (errors < 1.0) return (int)(at - ended.Value).TotalSeconds;",
+        "    }",
+        "    return -1;",
+        "}"
+      ],
+      "hints": [
+        "Split each line on spaces: the time, the trigger, the errors. `TimeSpan.Parse(\"14:03:00\")` reads the time.",
+        "Two phases: first wait for an `on` followed by an `off`; then look for errors below 1, starting with that same `off` line."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoT = new[] {",
+        "    \"14:00:00 trigger=off errors=0.2%\",",
+        "    \"14:00:10 trigger=on errors=3.0%\",",
+        "    \"14:00:40 trigger=on errors=45.0%\",",
+        "    \"14:03:00 trigger=off errors=52.0%\",",
+        "    \"14:20:00 trigger=off errors=61.0%\",",
+        "    \"14:40:40 trigger=off errors=0.3%\" };",
+        "Dojo.Eq(\"INC-4471 outlived its trigger by 37 min 40 s\", 2260, OutlivedSeconds(dojoT));",
+        "Dojo.Eq(\"a healthy recovery takes 0 s\", 0, OutlivedSeconds(new[] { \"10:00:00 trigger=on errors=20.0%\", \"10:00:30 trigger=off errors=0.4%\" }));",
+        "Dojo.Eq(\"a short tail\", 50, OutlivedSeconds(new[] { \"10:00:00 trigger=on errors=20.0%\", \"10:00:30 trigger=off errors=9.0%\", \"10:01:20 trigger=off errors=0.9%\" }));",
+        "Dojo.Eq(\"never recovered in the data\", -1, OutlivedSeconds(new[] { \"10:00:00 trigger=on errors=20.0%\", \"10:00:30 trigger=off errors=30.0%\" }));",
+        "Dojo.Eq(\"no trigger at all\", -1, OutlivedSeconds(new[] { \"10:00:00 trigger=off errors=0.1%\", \"10:00:30 trigger=off errors=0.2%\" }));",
+        "Dojo.Eq(\"exactly 1.0% is not recovered yet\", 60, OutlivedSeconds(new[] { \"10:00:00 trigger=on errors=5.0%\", \"10:00:30 trigger=off errors=1.0%\", \"10:01:30 trigger=off errors=0.5%\" }));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Why it did not recover",
+      "prompt": [
+        "Write `double OverloadFactor(double baseRps, double capacityRps, double errorRate, int attempts)`: the load the",
+        "database sees, divided by its capacity, when each request makes on average",
+        "`1 + p + p² + ... + p^(attempts-1)` calls with failure rate `p`. Round to 2 decimals.",
+        "",
+        "At 14:03 the base traffic was 6,000 rps against 8,000 rps of capacity, errors were 52% and the API made up to",
+        "3 attempts: the factor is **1.34**, still over capacity although the base traffic is only 0.75 of it. So the",
+        "errors stay, so the retries stay. Without retries it would have been 0.75."
+      ],
+      "starter": [
+        "double OverloadFactor(double baseRps, double capacityRps, double errorRate, int attempts)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double OverloadFactor(double baseRps, double capacityRps, double errorRate, int attempts)",
+        "{",
+        "    var calls = 0.0;",
+        "    var chance = 1.0;",
+        "    for (var i = 0; i < attempts; i++)",
+        "    {",
+        "        calls += chance;",
+        "        chance *= errorRate;",
+        "    }",
+        "    return Math.Round(baseRps * calls / capacityRps, 2);",
+        "}"
+      ],
+      "hints": [
+        "This is `ExpectedCalls` from *Timeouts, deadlines and retries that help*, times the base traffic.",
+        "Divide by the capacity and round once at the end."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"14:03: still 34% over capacity\", 1.34, OverloadFactor(6000, 8000, 0.52, 3));",
+        "Dojo.Eq(\"without retries: comfortably under\", 0.75, OverloadFactor(6000, 8000, 0.52, 1));",
+        "Dojo.Eq(\"a healthy system: retries cost nothing\", 0.75, OverloadFactor(6000, 8000, 0, 3));",
+        "Dojo.Eq(\"14:20: more errors, more load\", 1.49, OverloadFactor(6000, 8000, 0.61, 3));",
+        "Dojo.Eq(\"total failure: every attempt is used\", 2.25, OverloadFactor(6000, 8000, 1, 3));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Action item 1: a retry budget",
+      "prompt": [
+        "Write a class `RetryBudget` that allows retries only up to a share of normal requests. Use whole numbers, so",
+        "no floating-point rounding creeps in: count in **hundredths of a retry**.",
+        "",
+        "- `RetryBudget(int percent, int maxRetries)`: every request earns `percent` hundredths of a retry; the",
+        "  budget holds at most `maxRetries` retries and **starts full**, so a short blip can still be retried;",
+        "- `void OnRequest()`: a normal (first-attempt) request was sent;",
+        "- `bool TryRetry()`: if a whole retry is in the budget, spend it and return true, else false.",
+        "",
+        "With 10% and a maximum of 10: ten retries pass at once, the eleventh is refused, and after 20 more requests",
+        "two more retries are allowed."
+      ],
+      "starter": [
+        "class RetryBudget",
+        "{",
+        "    public RetryBudget(int percent, int maxRetries) { }",
+        "    public void OnRequest() { }",
+        "    public bool TryRetry() => true;",
+        "}"
+      ],
+      "solution": [
+        "class RetryBudget",
+        "{",
+        "    readonly int percent;",
+        "    readonly int max;",
+        "    int balance;",
+        "",
+        "    public RetryBudget(int percent, int maxRetries)",
+        "    {",
+        "        this.percent = percent;",
+        "        max = maxRetries * 100;",
+        "        balance = max;",
+        "    }",
+        "",
+        "    public void OnRequest() => balance = Math.Min(max, balance + percent);",
+        "",
+        "    public bool TryRetry()",
+        "    {",
+        "        if (balance < 100) return false;",
+        "        balance -= 100;",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep a balance in hundredths: a retry costs 100, a request adds `percent`, and the cap is `maxRetries × 100`.",
+        "Start the balance at the cap."
+      ],
+      "template": [
+        "var dojoRb = new RetryBudget(10, 10);",
+        "var dojoBurst = 0;",
+        "for (var i = 0; i < 15; i++) if (dojoRb.TryRetry()) dojoBurst++;",
+        "Dojo.Eq(\"the full budget allows 10 retries\", 10, dojoBurst);",
+        "Dojo.Check(\"then retries are refused\", !dojoRb.TryRetry());",
+        "for (var i = 0; i < 20; i++) dojoRb.OnRequest();",
+        "Dojo.Check(\"20 requests at 10% earn retry one\", dojoRb.TryRetry());",
+        "Dojo.Check(\"and retry two\", dojoRb.TryRetry());",
+        "Dojo.Check(\"but not a third\", !dojoRb.TryRetry());",
+        "for (var i = 0; i < 9; i++) dojoRb.OnRequest();",
+        "Dojo.Check(\"nine requests are not enough for a retry\", !dojoRb.TryRetry());",
+        "dojoRb.OnRequest();",
+        "Dojo.Check(\"the tenth is\", dojoRb.TryRetry());",
+        "var dojoCap = new RetryBudget(50, 2);",
+        "for (var i = 0; i < 1000; i++) dojoCap.OnRequest();",
+        "var dojoAfter = 0;",
+        "for (var i = 0; i < 10; i++) if (dojoCap.TryRetry()) dojoAfter++;",
+        "Dojo.Eq(\"the budget never grows past its maximum\", 2, dojoAfter);",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Action item 2: an adaptive concurrency limit",
+      "prompt": [
+        "A fixed limit is wrong on the day the database slows down. An **AIMD** limit (additive increase,",
+        "multiplicative decrease, the same idea as TCP congestion control) adapts:",
+        "",
+        "Write a class `AimdLimit`:",
+        "",
+        "- `AimdLimit(int initial, int min, int max)` and `int Limit`;",
+        "- `void OnResult(double latencyMs, double targetMs, bool dropped)`:",
+        "  - `dropped` (a timeout or an error): halve the limit (`Limit / 2`);",
+        "  - otherwise slower than `targetMs`: shrink to 90% (`Limit * 9 / 10`, whole numbers);",
+        "  - otherwise: grow by 1;",
+        "  - always keep it between `min` and `max`.",
+        "",
+        "From 20 (min 5, max 100): three fast results make it 23, a slow one 20, a drop 10."
+      ],
+      "starter": [
+        "class AimdLimit",
+        "{",
+        "    public AimdLimit(int initial, int min, int max) { }",
+        "    public int Limit { get; }",
+        "    public void OnResult(double latencyMs, double targetMs, bool dropped) { }",
+        "}"
+      ],
+      "solution": [
+        "class AimdLimit",
+        "{",
+        "    readonly int min;",
+        "    readonly int max;",
+        "",
+        "    public AimdLimit(int initial, int min, int max)",
+        "    {",
+        "        this.min = min;",
+        "        this.max = max;",
+        "        Limit = Math.Clamp(initial, min, max);",
+        "    }",
+        "",
+        "    public int Limit { get; private set; }",
+        "",
+        "    public void OnResult(double latencyMs, double targetMs, bool dropped)",
+        "    {",
+        "        var next = dropped ? Limit / 2 : latencyMs > targetMs ? Limit * 9 / 10 : Limit + 1;",
+        "        Limit = Math.Clamp(next, min, max);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Compute the next value with a nested conditional: dropped, then slow, then fast.",
+        "`Math.Clamp(next, min, max)` keeps it in range (and fixes an initial value outside it)."
+      ],
+      "template": [
+        "var dojoL = new AimdLimit(20, 5, 100);",
+        "dojoL.OnResult(12, 50, false); dojoL.OnResult(15, 50, false); dojoL.OnResult(20, 50, false);",
+        "Dojo.Eq(\"three fast results: +1 each\", 23, dojoL.Limit);",
+        "dojoL.OnResult(80, 50, false);",
+        "Dojo.Eq(\"slow: down to 90%\", 20, dojoL.Limit);",
+        "dojoL.OnResult(2000, 50, true);",
+        "Dojo.Eq(\"dropped: halved\", 10, dojoL.Limit);",
+        "dojoL.OnResult(2000, 50, true); dojoL.OnResult(2000, 50, true);",
+        "Dojo.Eq(\"never below the minimum\", 5, dojoL.Limit);",
+        "for (var i = 0; i < 200; i++) dojoL.OnResult(10, 50, false);",
+        "Dojo.Eq(\"never above the maximum\", 100, dojoL.Limit);",
+        "Dojo.Eq(\"exactly on target counts as fast\", 6, new Func<int>(() => { var x = new AimdLimit(5, 1, 10); x.OnResult(50, 50, false); return x.Limit; })());",
+        "Dojo.Eq(\"an initial value outside the range is clamped\", 100, new AimdLimit(500, 5, 100).Limit);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

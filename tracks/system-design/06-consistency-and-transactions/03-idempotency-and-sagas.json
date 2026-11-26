@@ -1,0 +1,370 @@
+{
+  "title": "Idempotency keys and sagas",
+  "summary": "Retries are inevitable, so make them harmless: at-least-once plus idempotence, the Idempotency-Key pattern, why two-phase commit blocks, and sagas with compensations for work that spans services.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A retry that charged twice",
+      "body": [
+        "```text",
+        "10:02:00.000  app      POST /payments  order=81 amount=40",
+        "10:02:00.050  payments  charge card ... ok (provider took 9.8 s)",
+        "10:02:10.000  app      timeout after 10 s -> retry",
+        "10:02:10.040  payments  charge card ... ok          <- second charge",
+        "10:02:10.100  app      200 OK",
+        "```",
+        "",
+        "A timeout does **not** mean \"it failed\". It means \"I do not know\". Networks drop answers, so every client",
+        "retries, every queue redelivers, and the honest guarantee is **at-least-once**. \"Exactly once\" in practice is",
+        "**at-least-once delivery plus idempotent processing**: doing it twice has the same effect as doing it once.",
+        "",
+        "The **idempotency key** pattern makes a non-idempotent call (charge a card) safe to retry:",
+        "",
+        "1. The client makes up a unique key per *operation* (a UUID) and sends it on **every** attempt, in the",
+        "   `Idempotency-Key` header (an IETF HTTP API working group draft, used by many payment APIs).",
+        "2. The server stores key -> (hash of the request, response). A repeat with the same key and the same request",
+        "   gets the stored response; the work is not done again.",
+        "3. The same key with a **different** request is a client bug: `422`. A repeat while the first is still",
+        "   running: `409`, try again later.",
+        "",
+        "- **Idempotency key**: a client-chosen unique id sent with every retry of one operation, so the server does the work at most once."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Finance reports 312 orders charged twice yesterday. All of them show a client timeout",
+        "followed by a retry 10 s later, during a 20-minute period when the card provider was slow. What fixes the",
+        "cause?"
+      ],
+      "options": [
+        "Send an idempotency key per payment and have the payments service return the stored result for a repeated key",
+        "Turn off client retries",
+        "Raise the client timeout to 60 s",
+        "Refund duplicates in a nightly batch job"
+      ],
+      "answer": 0,
+      "explain": "Without retries, slow-but-successful charges look failed and real failures are never retried. A longer timeout only makes the window rarer. An idempotency key makes the retry harmless, which is the real fix; the batch job is cleanup, not prevention."
+    },
+    {
+      "type": "order",
+      "prompt": "Put the server's handling of an idempotent `POST /payments` in order.",
+      "lines": [
+        "Read the `Idempotency-Key` header (no key: 400)",
+        "Look the key up in the store",
+        "Same key and same request hash: return the stored response",
+        "Same key, different request hash: return 422",
+        "New key: record it as in progress, so a parallel copy gets 409",
+        "Do the work and store its response under the key",
+        "Return the response"
+      ],
+      "also": [
+        [
+          "Read the `Idempotency-Key` header (no key: 400)",
+          "Look the key up in the store",
+          "Same key, different request hash: return 422",
+          "Same key and same request hash: return the stored response",
+          "New key: record it as in progress, so a parallel copy gets 409",
+          "Do the work and store its response under the key",
+          "Return the response"
+        ]
+      ],
+      "explain": "Record the key *before* doing the work, ideally in the same database transaction as the work's own rows. Otherwise two parallel retries both see \"new\" and both charge."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A client retries `POST /payments` with the same `Idempotency-Key` but the amount changed from 40 to 99. What should the server do?",
+      "options": [
+        "Refuse with 422: the key belongs to a different request",
+        "Charge 99, because it is the newest request",
+        "Return the stored response for the 40 charge as if nothing changed",
+        "Charge 59 to make up the difference"
+      ],
+      "answer": 0,
+      "explain": "A key names one operation. Reusing it for another request is a client bug, and silently returning the old result would hide it. Comparing a hash of the request body is how the server notices."
+    },
+    {
+      "type": "learn",
+      "title": "Two-phase commit, sagas and the outbox",
+      "body": [
+        "An order touches stock, payments and shipping, each with its own database. How do you keep them consistent?",
+        "",
+        "**Two-phase commit (2PC)**: a coordinator asks every participant to *prepare* (lock and promise), then tells",
+        "all to *commit*. If the coordinator dies after the prepares, participants sit holding locks and cannot",
+        "decide alone: 2PC **blocks**. It also needs every service's database to speak the protocol (XA). Fine inside",
+        "one database cluster; a poor fit across services.",
+        "",
+        "A **saga** is a sequence of local transactions, each with a **compensation** that semantically undoes it:",
+        "",
+        "```text",
+        "reserve stock -> charge card -> book courier   (fails)",
+        "                 refund card <- release stock  (compensate in reverse order)",
+        "```",
+        "",
+        "- **Orchestration**: one saga orchestrator tells each service what to do and records progress durably.",
+        "- **Choreography**: each service reacts to the previous service's event; no central brain.",
+        "- **Semantic lock**: mark rows `PENDING` while the saga runs, so others do not act on half-done work.",
+        "- **Pivot**: the step after which the saga only goes forward (the remaining steps must be retried until",
+        "  they succeed, never compensated).",
+        "",
+        "Each step must publish its outcome reliably: the **transactional outbox** (see the Messaging topic, *Delivery",
+        "guarantees*) writes the event in the same local transaction as the state change.",
+        "",
+        "- **Compensation**: an action that semantically undoes a completed saga step, such as a refund for a charge."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Orchestration or choreography?",
+      "buckets": [
+        "Orchestration",
+        "Choreography"
+      ],
+      "items": [
+        [
+          "One component knows the whole flow and its current step",
+          0
+        ],
+        [
+          "Services react to each other's events; nobody owns the flow",
+          1
+        ],
+        [
+          "Easy to see where a stuck order is: look at the saga's state",
+          0
+        ],
+        [
+          "Adding a step means changing which events a service listens to",
+          1
+        ],
+        [
+          "Risk of cyclic event chains that are hard to follow",
+          1
+        ],
+        [
+          "The coordinator is one more service to run and keep available",
+          0
+        ]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Stock was reserved and the card charged; booking the courier failed. What does this print?",
+      "code": [
+        "var done = new List<string> { \"reserve-stock\", \"charge-card\" };",
+        "var undo = new Dictionary<string, string> { [\"reserve-stock\"] = \"release-stock\", [\"charge-card\"] = \"refund-card\" };",
+        "done.Reverse();",
+        "Console.WriteLine(string.Join(\", \", done.Select(s => undo[s])));"
+      ],
+      "answer": "refund-card, release-stock",
+      "explain": "Compensate newest first, like unwinding a stack: refund the money before releasing the stock, so nothing is shipped or resold against a charge that is about to vanish."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to its meaning.",
+      "pairs": [
+        [
+          "Two-phase commit",
+          "prepare everywhere, then commit everywhere; blocks if the coordinator dies"
+        ],
+        [
+          "Saga",
+          "local transactions in sequence, each with a compensating action"
+        ],
+        [
+          "Semantic lock",
+          "a PENDING marker that warns others the row is mid-saga"
+        ],
+        [
+          "Pivot transaction",
+          "the go/no-go step after which the saga only moves forward"
+        ],
+        [
+          "Transactional outbox",
+          "the event is written in the same local transaction as the change"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** A customer was charged for an order that was never shipped and never refunded. The",
+        "orchestrator's log for the order ends like this. What was missing?"
+      ],
+      "code": [
+        "11:40:02  saga 7f3a  step charge-card    ok",
+        "11:40:03  saga 7f3a  step book-courier   failed: 503",
+        "11:40:03  saga 7f3a  compensating ...",
+        "11:40:03  orchestrator pod restarted (OOMKilled)",
+        "(no more lines for saga 7f3a)"
+      ],
+      "options": [
+        "Durable saga state: the orchestrator must persist each step and resume unfinished sagas after a restart",
+        "A longer timeout on book-courier",
+        "Two-phase commit between payments and shipping",
+        "More memory for the orchestrator"
+      ],
+      "answer": 0,
+      "explain": "The orchestrator kept its progress in memory, so the crash forgot that a refund was owed. Persist the saga's state (and make compensations idempotent) so a restarted orchestrator finishes the job. More memory hides this crash, not the next one."
+    },
+    {
+      "type": "code",
+      "title": "An idempotency store",
+      "prompt": [
+        "Write `class IdempotencyStore` with one method:",
+        "",
+        "`(int Status, string Body) Handle(string? key, string request, Func<string, (int Status, string Body)> work)`",
+        "",
+        "- no key (`null` or empty): return `(400, \"Idempotency-Key header is required\")` and do not run `work`;",
+        "- a key seen before **with the same request**: return the stored response, do not run `work`;",
+        "- a key seen before with a **different request**: return `(422, \"Idempotency-Key reused with a different request\")`;",
+        "- a new key: run `work(request)`, store the response with the key and request, and return it. **Do not store a",
+        "  response with a status of 500 or more**: a failure must be retryable.",
+        "",
+        "(A real store would keep a hash of the request rather than the request, and expire keys after a day or so.)"
+      ],
+      "starter": [
+        "class IdempotencyStore",
+        "{",
+        "    public (int Status, string Body) Handle(string? key, string request, Func<string, (int Status, string Body)> work)",
+        "    {",
+        "        return work(request);",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class IdempotencyStore",
+        "{",
+        "    readonly Dictionary<string, (string Request, int Status, string Body)> seen = new();",
+        "",
+        "    public (int Status, string Body) Handle(string? key, string request, Func<string, (int Status, string Body)> work)",
+        "    {",
+        "        if (string.IsNullOrEmpty(key)) return (400, \"Idempotency-Key header is required\");",
+        "        if (seen.TryGetValue(key, out var stored))",
+        "            return stored.Request == request",
+        "                ? (stored.Status, stored.Body)",
+        "                : (422, \"Idempotency-Key reused with a different request\");",
+        "        var response = work(request);",
+        "        if (response.Status < 500) seen[key] = (request, response.Status, response.Body);",
+        "        return response;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep a `Dictionary<string, (string Request, int Status, string Body)>`.",
+        "Check the key first, then the stored request; only call `work` for a new key, and skip storing 5xx results."
+      ],
+      "template": [
+        "var dojoRuns = 0;",
+        "(int Status, string Body) dojoCharge(string req) { dojoRuns++; return (201, $\"charged {req}\"); }",
+        "var dojoStore = new IdempotencyStore();",
+        "var dojoA = dojoStore.Handle(\"k1\", \"order=81 amount=40\", dojoCharge);",
+        "Dojo.Eq(\"the first call charges\", 201, dojoA.Status);",
+        "Dojo.Eq(\"the first call's body\", \"charged order=81 amount=40\", dojoA.Body);",
+        "var dojoB = dojoStore.Handle(\"k1\", \"order=81 amount=40\", dojoCharge);",
+        "Dojo.Eq(\"the retry gets the stored response\", \"charged order=81 amount=40\", dojoB.Body);",
+        "Dojo.Eq(\"the retry did not charge again\", 1, dojoRuns);",
+        "Dojo.Eq(\"same key, different request: 422\", 422, dojoStore.Handle(\"k1\", \"order=81 amount=99\", dojoCharge).Status);",
+        "Dojo.Eq(\"... and still one charge\", 1, dojoRuns);",
+        "Dojo.Eq(\"a new key charges\", 201, dojoStore.Handle(\"k2\", \"order=82 amount=10\", dojoCharge).Status);",
+        "Dojo.Eq(\"two charges now\", 2, dojoRuns);",
+        "Dojo.Eq(\"no key: 400\", 400, dojoStore.Handle(null, \"x\", dojoCharge).Status);",
+        "Dojo.Eq(\"empty key: 400\", 400, dojoStore.Handle(\"\", \"x\", dojoCharge).Status);",
+        "Dojo.Eq(\"no key never runs the work\", 2, dojoRuns);",
+        "var dojoCalls = 0;",
+        "(int Status, string Body) dojoFlaky(string req) { dojoCalls++; return dojoCalls == 1 ? (503, \"provider down\") : (201, \"charged\"); }",
+        "Dojo.Eq(\"a 503 is passed on\", 503, dojoStore.Handle(\"k3\", \"r\", dojoFlaky).Status);",
+        "Dojo.Eq(\"a 5xx is not stored, so the retry runs the work\", 201, dojoStore.Handle(\"k3\", \"r\", dojoFlaky).Status);",
+        "Dojo.Eq(\"the success is stored\", 201, dojoStore.Handle(\"k3\", \"r\", dojoFlaky).Status);",
+        "Dojo.Eq(\"the provider was called twice, not three times\", 2, dojoCalls);",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A saga orchestrator",
+      "prompt": [
+        "Write `class Saga`:",
+        "",
+        "- `Saga Step(string name, Func<bool> action, Action compensate)`: adds a step and returns the saga (so calls chain).",
+        "- `List<string> Run()`: runs the actions in order. After a successful action log `done <name>`. When an action",
+        "  returns `false`, log `failed <name>`, run the compensations of the **completed** steps newest first (log",
+        "  `undo <name>` for each), log `compensated` and stop. If every step succeeds, log `completed`. Return the log.",
+        "",
+        "The failed step's own compensation does not run (it did nothing), and later steps never start."
+      ],
+      "starter": [
+        "class Saga",
+        "{",
+        "    public Saga Step(string name, Func<bool> action, Action compensate) => this;",
+        "",
+        "    public List<string> Run() => new();",
+        "}"
+      ],
+      "solution": [
+        "class Saga",
+        "{",
+        "    readonly List<(string Name, Func<bool> Do, Action Undo)> steps = new();",
+        "",
+        "    public Saga Step(string name, Func<bool> action, Action compensate)",
+        "    {",
+        "        steps.Add((name, action, compensate));",
+        "        return this;",
+        "    }",
+        "",
+        "    public List<string> Run()",
+        "    {",
+        "        var log = new List<string>();",
+        "        var done = new Stack<(string Name, Action Undo)>();",
+        "        foreach (var step in steps)",
+        "        {",
+        "            if (!step.Do())",
+        "            {",
+        "                log.Add($\"failed {step.Name}\");",
+        "                while (done.Count > 0)",
+        "                {",
+        "                    var d = done.Pop();",
+        "                    d.Undo();",
+        "                    log.Add($\"undo {d.Name}\");",
+        "                }",
+        "                log.Add(\"compensated\");",
+        "                return log;",
+        "            }",
+        "            log.Add($\"done {step.Name}\");",
+        "            done.Push((step.Name, step.Undo));",
+        "        }",
+        "        log.Add(\"completed\");",
+        "        return log;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep the steps in a list of tuples; keep the completed ones on a `Stack` so popping gives newest first.",
+        "On failure: log it, pop and undo every completed step, log `compensated`, return."
+      ],
+      "template": [
+        "var dojoUndone = new List<string>();",
+        "var dojoLog = new Saga()",
+        "    .Step(\"reserve-stock\", () => true, () => dojoUndone.Add(\"release-stock\"))",
+        "    .Step(\"charge-card\", () => true, () => dojoUndone.Add(\"refund-card\"))",
+        "    .Step(\"book-courier\", () => false, () => dojoUndone.Add(\"cancel-courier\"))",
+        "    .Step(\"send-email\", () => true, () => dojoUndone.Add(\"never\"))",
+        "    .Run();",
+        "Dojo.Eq(\"the log of a failed saga\", new List<string> { \"done reserve-stock\", \"done charge-card\", \"failed book-courier\", \"undo charge-card\", \"undo reserve-stock\", \"compensated\" }, dojoLog);",
+        "Dojo.Eq(\"compensations ran newest first\", new List<string> { \"refund-card\", \"release-stock\" }, dojoUndone);",
+        "var dojoOk = new Saga().Step(\"a\", () => true, () => { }).Step(\"b\", () => true, () => { }).Run();",
+        "Dojo.Eq(\"a saga that succeeds\", new List<string> { \"done a\", \"done b\", \"completed\" }, dojoOk);",
+        "var dojoFirst = new List<string>();",
+        "Dojo.Eq(\"a failing first step has nothing to undo\", new List<string> { \"failed a\", \"compensated\" }, new Saga().Step(\"a\", () => false, () => dojoFirst.Add(\"x\")).Run());",
+        "Dojo.Eq(\"the failed step's own compensation does not run\", 0, dojoFirst.Count);",
+        "Dojo.Eq(\"an empty saga completes\", new List<string> { \"completed\" }, new Saga().Run());",
+        "var dojoRan = new List<string>();",
+        "new Saga().Step(\"a\", () => { dojoRan.Add(\"a\"); return false; }, () => { }).Step(\"b\", () => { dojoRan.Add(\"b\"); return true; }, () => { }).Run();",
+        "Dojo.Eq(\"steps after a failure never start\", new List<string> { \"a\" }, dojoRan);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

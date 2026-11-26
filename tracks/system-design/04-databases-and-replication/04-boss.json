@@ -1,0 +1,224 @@
+{
+  "title": "Boss: the failover postmortem",
+  "summary": "A primary database failed during the lunch peak. From the postmortem timeline and the replication view, measure the incident, the replica lag, the connection storm and the data lost, and write the review that goes into the postmortem.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The postmortem draft",
+      "body": [
+        "**INC-3107: checkout errors after a primary database failover.** You are writing the analysis section.",
+        "",
+        "```text",
+        "12:41:05  primary db-orders-1 stops answering (disk controller fault)",
+        "12:41:50  alert: checkout 5xx > 5 % for 30 s, on-call paged",
+        "12:43:20  replica-b promoted (no synchronous standby was configured)",
+        "12:43:25  74 app instances reconnect at once; 53300 too many clients already",
+        "12:47:40  pools reduced, PgBouncer added in front; error rate back under 0.1 %",
+        "",
+        "last pg_stat_replication sample before the fault:",
+        "replica-a|streaming|00:00:00.8",
+        "replica-b|streaming|00:00:02.5",
+        "replica-c|catchup|00:01:10",
+        "",
+        "writes at the time: 900/s      RPO target: 1 s      PITR: not configured",
+        "```",
+        "",
+        "Four tools, each small, that turn this into numbers: how long each phase took, how far behind the",
+        "promoted replica was, whose pools blew the connection limit, and the findings for the review."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "How long did it take?",
+      "prompt": [
+        "Write `int SecondsBetween(string from, string to)` for two clock times `HH:mm:ss` on the timeline. If `to`",
+        "is earlier than `from`, the incident crossed midnight: add a day. Invalid times throw `FormatException`",
+        "(`TimeSpan.Parse` does that for you).",
+        "",
+        "From the fault (12:41:05) to the page (12:41:50) is `45` seconds."
+      ],
+      "starter": [
+        "int SecondsBetween(string from, string to)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int SecondsBetween(string from, string to)",
+        "{",
+        "    var a = TimeSpan.Parse(from);",
+        "    var b = TimeSpan.Parse(to);",
+        "    if (b < a) b += TimeSpan.FromDays(1);",
+        "    return (int)(b - a).TotalSeconds;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"time to detect\", 45, SecondsBetween(\"12:41:05\", \"12:41:50\"));",
+        "Dojo.Eq(\"time to fail over\", 135, SecondsBetween(\"12:41:05\", \"12:43:20\"));",
+        "Dojo.Eq(\"time to mitigate\", 395, SecondsBetween(\"12:41:05\", \"12:47:40\"));",
+        "Dojo.Eq(\"across midnight\", 90, SecondsBetween(\"23:59:30\", \"00:01:00\"));",
+        "Dojo.Throws<FormatException>(\"an invalid time is an error\", () => SecondsBetween(\"noon\", \"12:00:00\"));"
+      ],
+      "explain": "Detection 45 s, failover 135 s, full mitigation 395 s: the connection storm after the promotion took longer than the failover itself."
+    },
+    {
+      "type": "code",
+      "title": "How far behind was the replica?",
+      "prompt": [
+        "Write `double MaxLagSeconds(string[] rows)`. Each row is `name|state|replay_lag`, where `replay_lag` looks like",
+        "`00:00:02.5` (hours:minutes:seconds) or is empty.",
+        "",
+        "- Only rows whose state is `streaming` count. A `catchup` replica is not a failover candidate.",
+        "- An empty `replay_lag` means the replica is caught up and idle: `0` seconds.",
+        "- Return the largest lag in seconds. If no row is streaming, throw `InvalidOperationException`."
+      ],
+      "starter": [
+        "double MaxLagSeconds(string[] rows)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double MaxLagSeconds(string[] rows)",
+        "{",
+        "    var lags = new List<double>();",
+        "    foreach (var row in rows)",
+        "    {",
+        "        var parts = row.Split('|');",
+        "        if (parts[1] != \"streaming\") continue;",
+        "        lags.Add(parts[2] == \"\" ? 0 : TimeSpan.Parse(parts[2]).TotalSeconds);",
+        "    }",
+        "    if (lags.Count == 0) throw new InvalidOperationException(\"no replica is streaming\");",
+        "    return lags.Max();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRows = new[] { \"replica-a|streaming|00:00:00.8\", \"replica-b|streaming|00:00:02.5\", \"replica-c|catchup|00:01:10\" };",
+        "Dojo.Eq(\"the worst streaming replica\", 2.5, MaxLagSeconds(dojoRows));",
+        "Dojo.Eq(\"a catching-up replica is ignored\", 0.8, MaxLagSeconds(new[] { \"replica-a|streaming|00:00:00.8\", \"replica-c|catchup|00:01:10\" }));",
+        "Dojo.Eq(\"an empty lag is caught up\", 0.0, MaxLagSeconds(new[] { \"replica-a|streaming|\" }));",
+        "Dojo.Eq(\"minutes count too\", 75.0, MaxLagSeconds(new[] { \"replica-a|streaming|00:01:15\" }));",
+        "Dojo.Throws<InvalidOperationException>(\"no streaming replica\", () => MaxLagSeconds(new[] { \"replica-c|startup|\" }));"
+      ],
+      "explain": "replica-b, the one promoted, was the most behind of the healthy replicas. Promoting the least-lagged replica (replica-a) would have lost about a third as much."
+    },
+    {
+      "type": "code",
+      "title": "Whose pools blew the limit?",
+      "prompt": [
+        "Write two functions over the services that share the database, given as",
+        "`Dictionary<string, (int Instances, int Pool)>`:",
+        "",
+        "- `int Headroom(Dictionary<string, (int Instances, int Pool)> services, int maxConnections, int reserved)`:",
+        "  `maxConnections − reserved − Σ instances × pool` (negative means they do not fit).",
+        "- `string? LargestConsumer(Dictionary<string, (int Instances, int Pool)> services)`: the service with the",
+        "  most connections (ties to the name in ordinal order), or `null` when there are none."
+      ],
+      "starter": [
+        "int Headroom(Dictionary<string, (int Instances, int Pool)> services, int maxConnections, int reserved) => 0;",
+        "",
+        "string? LargestConsumer(Dictionary<string, (int Instances, int Pool)> services) => null;"
+      ],
+      "solution": [
+        "int Headroom(Dictionary<string, (int Instances, int Pool)> services, int maxConnections, int reserved) =>",
+        "    maxConnections - reserved - services.Values.Sum(s => s.Instances * s.Pool);",
+        "",
+        "string? LargestConsumer(Dictionary<string, (int Instances, int Pool)> services) =>",
+        "    services",
+        "        .OrderByDescending(kv => kv.Value.Instances * kv.Value.Pool)",
+        "        .ThenBy(kv => kv.Key, StringComparer.Ordinal)",
+        "        .Select(kv => kv.Key)",
+        "        .FirstOrDefault();"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoServices = new Dictionary<string, (int Instances, int Pool)>",
+        "{",
+        "    [\"checkout\"] = (40, 15),",
+        "    [\"catalog\"] = (30, 10),",
+        "    [\"reports-cron\"] = (4, 25),",
+        "};",
+        "Dojo.Eq(\"1,000 connections into 790 slots\", -210, Headroom(dojoServices, 800, 10));",
+        "Dojo.Eq(\"checkout holds the most\", \"checkout\", LargestConsumer(dojoServices));",
+        "Dojo.Eq(\"nothing connected leaves every slot\", 790, Headroom(new Dictionary<string, (int Instances, int Pool)>(), 800, 10));",
+        "Dojo.Eq(\"nothing connected has no largest consumer\", (string?)null, LargestConsumer(new Dictionary<string, (int Instances, int Pool)>()));",
+        "var dojoTie = new Dictionary<string, (int Instances, int Pool)> { [\"b-api\"] = (1, 10), [\"a-api\"] = (2, 5) };",
+        "Dojo.Eq(\"a tie goes to the first name\", \"a-api\", LargestConsumer(dojoTie));"
+      ],
+      "explain": "Note the cron job: 4 instances with a pool of 25 for a nightly report. Pools are per service, but the limit is shared, so every pool needs an owner and a budget."
+    },
+    {
+      "type": "code",
+      "title": "The review",
+      "prompt": [
+        "Write `List<string> FailoverReview(FailoverFacts f)`. The record (already defined by the tests) is:",
+        "",
+        "```csharp",
+        "record FailoverFacts(double LagAtFailoverSec, int WritesPerSec, double RpoTargetSec,",
+        "                     int ConnectionsNeeded, int MaxConnections, bool HasPitr, bool StandbyIsSync);",
+        "```",
+        "",
+        "Return these findings in this order (exact text):",
+        "",
+        "1. Not `StandbyIsSync` and the lag is above the RPO target: `\"RPO missed: about N writes lost\"`, where N",
+        "   is lag × writes per second, rounded **up**. (A synchronous standby loses no acknowledged writes.)",
+        "2. `ConnectionsNeeded > MaxConnections`: `\"connection storm: N connections for M slots\"`.",
+        "3. No PITR: `\"no point-in-time recovery\"`.",
+        "",
+        "A clean failover gives an empty list."
+      ],
+      "starter": [
+        "List<string> FailoverReview(FailoverFacts f)",
+        "{",
+        "    return new();",
+        "}"
+      ],
+      "solution": [
+        "List<string> FailoverReview(FailoverFacts f)",
+        "{",
+        "    var findings = new List<string>();",
+        "    if (!f.StandbyIsSync && f.LagAtFailoverSec > f.RpoTargetSec)",
+        "    {",
+        "        var lost = (long)Math.Ceiling(f.LagAtFailoverSec * f.WritesPerSec);",
+        "        findings.Add($\"RPO missed: about {lost} writes lost\");",
+        "    }",
+        "    if (f.ConnectionsNeeded > f.MaxConnections)",
+        "        findings.Add($\"connection storm: {f.ConnectionsNeeded} connections for {f.MaxConnections} slots\");",
+        "    if (!f.HasPitr) findings.Add(\"no point-in-time recovery\");",
+        "    return findings;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"INC-3107\", new List<string> { \"RPO missed: about 2250 writes lost\", \"connection storm: 1000 connections for 800 slots\", \"no point-in-time recovery\" },",
+        "    FailoverReview(new FailoverFacts(2.5, 900, 1, 1000, 800, false, false)));",
+        "Dojo.Eq(\"a clean failover\", new List<string>(), FailoverReview(new FailoverFacts(0.5, 900, 1, 700, 800, true, false)));",
+        "Dojo.Eq(\"a synchronous standby loses nothing\", new List<string>(), FailoverReview(new FailoverFacts(3, 900, 1, 700, 800, true, true)));",
+        "Dojo.Eq(\"lost writes round up\", new List<string> { \"RPO missed: about 1500 writes lost\" }, FailoverReview(new FailoverFacts(1.5, 1000, 1, 10, 800, true, false)));",
+        "Dojo.Eq(\"partial writes round up\", new List<string> { \"RPO missed: about 3 writes lost\" }, FailoverReview(new FailoverFacts(2.5, 1, 2, 10, 800, true, false)));",
+        "Dojo.Eq(\"lag equal to the target is within it\", new List<string>(), FailoverReview(new FailoverFacts(1, 900, 1, 800, 800, true, false)));",
+        "record FailoverFacts(double LagAtFailoverSec, int WritesPerSec, double RpoTargetSec, int ConnectionsNeeded, int MaxConnections, bool HasPitr, bool StandbyIsSync);"
+      ],
+      "explain": [
+        "The action items write themselves: a synchronous standby in another AZ for failover (RPO 0), pools sized",
+        "for the autoscaler's maximum behind a pooler, PITR with a timed restore test, and promotion that picks",
+        "the least-lagged replica."
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "pool-exhaustion",
+      "title": "Build it: the connection storm",
+      "prompt": [
+        "Practise the mitigation from INC-3107 in the **System design board**: open *Too many connections* (solved",
+        "already if you did it in *Connections and pools*) and make the app tier's connections fit the database."
+      ],
+      "explain": "If you solved it earlier this step is already done. Try the other fix this time: if you used a pooler, try smaller pools instead, and compare the p99."
+    }
+  ]
+}

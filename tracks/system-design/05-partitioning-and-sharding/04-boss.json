@@ -1,0 +1,292 @@
+{
+  "title": "Boss: the hot shard incident",
+  "summary": "From a per-shard dashboard snapshot to a fix: find the hot shard and its skew, verify the backfill before cutting over, salt the celebrity counter, and place keys with rendezvous hashing.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**INC-2291 (sev 2): likes API p99 over 3 s, 5xx on writes.** You are on call. This is the per-shard snapshot",
+        "the alert linked to, taken at 20:14 during a live sports final:",
+        "",
+        "```text",
+        "shard  range (post_id)       writes/s   cpu   p99 write",
+        "s0     [0, 25M)                   410   22%      4 ms",
+        "s1     [25M, 50M)                 395   21%      4 ms",
+        "s2     [50M, 75M)                 440   24%      5 ms",
+        "s3     [75M, +inf)              6,120   97%   2,950 ms",
+        "",
+        "top keys on s3 (sampled):  likes:post91822177  71%   likes:post91822180  4%",
+        "```",
+        "",
+        "Two problems stack up: new posts (growing ids) all land on s3, and one viral post takes most of its writes.",
+        "The plan agreed in the incident channel:",
+        "",
+        "1. put numbers on the skew for the postmortem;",
+        "2. move to hash placement across new shards with a dual-write and backfill, verified before cut over;",
+        "3. salt the viral post's like counter;",
+        "4. place keys with rendezvous hashing, so adding shards later moves as few keys as possible.",
+        "",
+        "Each task below is one of those steps."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "1. Hottest shard and skew",
+      "prompt": [
+        "The snapshot arrives as lines like `s3 writes=6120 cpu=97` (the fields after the name may come in any order).",
+        "",
+        "- `string Hottest(string[] lines)`: the name of the shard with the most writes (the first one on a tie); `\"\"`",
+        "  when there are no lines.",
+        "- `double Skew(string[] lines)`: the hottest shard's writes divided by the **average** writes; `0` when there",
+        "  are no lines or the average is 0. For the snapshot it is about `3.32`: s3 does 3.3 times its fair share."
+      ],
+      "starter": [
+        "string Hottest(string[] lines)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "double Skew(string[] lines)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double Writes(string line)",
+        "{",
+        "    var field = line.Split(' ').First(p => p.StartsWith(\"writes=\"));",
+        "    return double.Parse(field.Substring(\"writes=\".Length));",
+        "}",
+        "",
+        "string Hottest(string[] lines)",
+        "{",
+        "    var best = \"\";",
+        "    var max = double.MinValue;",
+        "    foreach (var line in lines)",
+        "    {",
+        "        var w = Writes(line);",
+        "        if (w > max) { max = w; best = line.Split(' ')[0]; }",
+        "    }",
+        "    return best;",
+        "}",
+        "",
+        "double Skew(string[] lines)",
+        "{",
+        "    if (lines.Length == 0) return 0;",
+        "    var writes = lines.Select(Writes).ToList();",
+        "    var average = writes.Average();",
+        "    return average == 0 ? 0 : writes.Max() / average;",
+        "}"
+      ],
+      "hints": [
+        "Write a small helper that finds the part starting with `writes=` and parses the number after it.",
+        "Skew is `max / average`; guard the empty case and an average of zero."
+      ],
+      "template": [
+        "{{CODE}}",
+        "string[] dojoSnap = { \"s0 writes=410 cpu=22\", \"s1 writes=395 cpu=21\", \"s2 writes=440 cpu=24\", \"s3 writes=6120 cpu=97\" };",
+        "Dojo.Eq(\"s3 is the hottest\", \"s3\", Hottest(dojoSnap));",
+        "Dojo.Eq(\"s3 does 3.32 times its share\", 3.32, Math.Round(Skew(dojoSnap), 2));",
+        "string[] dojoEven = { \"a writes=100 cpu=10\", \"b writes=100 cpu=11\" };",
+        "Dojo.Eq(\"a tie goes to the first shard\", \"a\", Hottest(dojoEven));",
+        "Dojo.Eq(\"an even cluster has skew 1\", 1.0, Math.Round(Skew(dojoEven), 2));",
+        "Dojo.Eq(\"fields in another order\", \"s9\", Hottest(new[] { \"s8 cpu=10 writes=20\", \"s9 cpu=50 writes=70\" }));",
+        "Dojo.Eq(\"no lines, no hottest\", \"\", Hottest(new string[0]));",
+        "Dojo.Eq(\"no lines, skew 0\", 0.0, Skew(new string[0]));",
+        "Dojo.Eq(\"an idle cluster has skew 0\", 0.0, Skew(new[] { \"a writes=0 cpu=1\", \"b writes=0 cpu=1\" }));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "2. Verify the backfill before cutting over",
+      "prompt": [
+        "Before reads move to the new shards, compare the old data (`source`) with the copy (`target`), key by key.",
+        "",
+        "Write `List<string> Verify(Dictionary<string, string> source, Dictionary<string, string> target)` that returns",
+        "one line per problem, ordered by key (ordinal):",
+        "",
+        "- `missing <key>`: in source, not in target (the backfill skipped it);",
+        "- `differs <key>`: in both with different values (a write reached only one side);",
+        "- `extra <key>`: in target, not in source (a delete reached only one side).",
+        "",
+        "An empty list means it is safe to cut over."
+      ],
+      "starter": [
+        "List<string> Verify(Dictionary<string, string> source, Dictionary<string, string> target)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Verify(Dictionary<string, string> source, Dictionary<string, string> target)",
+        "{",
+        "    var problems = new List<string>();",
+        "    foreach (var key in source.Keys.Union(target.Keys).OrderBy(k => k, StringComparer.Ordinal))",
+        "    {",
+        "        if (!target.TryGetValue(key, out var copy)) problems.Add($\"missing {key}\");",
+        "        else if (!source.TryGetValue(key, out var original)) problems.Add($\"extra {key}\");",
+        "        else if (original != copy) problems.Add($\"differs {key}\");",
+        "    }",
+        "    return problems;",
+        "}"
+      ],
+      "hints": [
+        "Walk the union of both key sets, sorted with `StringComparer.Ordinal`.",
+        "Check `missing` first, then `extra`, then compare the values."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSrc = new Dictionary<string, string> { [\"a\"] = \"1\", [\"b\"] = \"2\", [\"c\"] = \"3\", [\"d\"] = \"4\" };",
+        "var dojoDst = new Dictionary<string, string> { [\"a\"] = \"1\", [\"b\"] = \"20\", [\"d\"] = \"4\", [\"e\"] = \"5\" };",
+        "Dojo.Eq(\"one of each problem, by key\", new List<string> { \"differs b\", \"missing c\", \"extra e\" }, Verify(dojoSrc, dojoDst));",
+        "Dojo.Eq(\"an exact copy is safe\", new List<string>(), Verify(dojoSrc, new Dictionary<string, string>(dojoSrc)));",
+        "Dojo.Eq(\"nothing to copy\", new List<string>(), Verify(new Dictionary<string, string>(), new Dictionary<string, string>()));",
+        "Dojo.Eq(\"an empty target misses everything\", new List<string> { \"missing a\", \"missing b\", \"missing c\", \"missing d\" }, Verify(dojoSrc, new Dictionary<string, string>()));",
+        "Dojo.Eq(\"ordinal order: upper case first\", new List<string> { \"missing B\", \"missing a\" }, Verify(new Dictionary<string, string> { [\"a\"] = \"1\", [\"B\"] = \"2\" }, new Dictionary<string, string>()));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "3. Salt the viral counter",
+      "prompt": [
+        "One post takes 71% of s3's writes. Spread its like counter over several rows.",
+        "",
+        "Write `class SaltedCounter`:",
+        "",
+        "- `SaltedCounter(int buckets)`: throw `ArgumentOutOfRangeException` when `buckets < 1`.",
+        "- `string KeyFor(string key, long writeSeq)`: the row a write goes to, `$\"{key}#{writeSeq % buckets}\"`",
+        "  (`writeSeq` is never negative).",
+        "- `void Add(string key, long writeSeq, long amount)`: add `amount` to that row.",
+        "- `long Total(string key)`: the sum over all of the key's buckets (`0` for an unknown key).",
+        "- `int RowCount`: how many rows exist so far."
+      ],
+      "starter": [
+        "class SaltedCounter",
+        "{",
+        "    public SaltedCounter(int buckets) { }",
+        "    public string KeyFor(string key, long writeSeq) => \"\";",
+        "    public void Add(string key, long writeSeq, long amount) { }",
+        "    public long Total(string key) => 0;",
+        "    public int RowCount => 0;",
+        "}"
+      ],
+      "solution": [
+        "class SaltedCounter",
+        "{",
+        "    readonly int buckets;",
+        "    readonly Dictionary<string, long> rows = new();",
+        "",
+        "    public SaltedCounter(int buckets)",
+        "    {",
+        "        if (buckets < 1) throw new ArgumentOutOfRangeException(nameof(buckets));",
+        "        this.buckets = buckets;",
+        "    }",
+        "",
+        "    public string KeyFor(string key, long writeSeq) => $\"{key}#{writeSeq % buckets}\";",
+        "",
+        "    public void Add(string key, long writeSeq, long amount)",
+        "    {",
+        "        var row = KeyFor(key, writeSeq);",
+        "        rows[row] = rows.GetValueOrDefault(row) + amount;",
+        "    }",
+        "",
+        "    public long Total(string key)",
+        "    {",
+        "        long total = 0;",
+        "        for (var i = 0; i < buckets; i++) total += rows.GetValueOrDefault($\"{key}#{i}\");",
+        "        return total;",
+        "    }",
+        "",
+        "    public int RowCount => rows.Count;",
+        "}"
+      ],
+      "hints": [
+        "Keep a `Dictionary<string, long>` of rows; `GetValueOrDefault` returns 0 for a row that does not exist yet.",
+        "A reader must visit every bucket `#0` to `#(buckets-1)`."
+      ],
+      "template": [
+        "var dojoC = new SaltedCounter(4);",
+        "for (var dojoI = 0; dojoI < 8; dojoI++) dojoC.Add(\"likes:post9\", dojoI, 1);",
+        "Dojo.Eq(\"eight likes in total\", 8L, dojoC.Total(\"likes:post9\"));",
+        "Dojo.Eq(\"spread over four rows\", 4, dojoC.RowCount);",
+        "Dojo.Eq(\"write 6 goes to bucket 2\", \"likes:post9#2\", dojoC.KeyFor(\"likes:post9\", 6));",
+        "dojoC.Add(\"likes:post9\", 9, 5);",
+        "Dojo.Eq(\"amounts add up\", 13L, dojoC.Total(\"likes:post9\"));",
+        "Dojo.Eq(\"still four rows\", 4, dojoC.RowCount);",
+        "Dojo.Eq(\"an unknown key is zero\", 0L, dojoC.Total(\"likes:other\"));",
+        "dojoC.Add(\"likes:post2\", 0, 3);",
+        "Dojo.Eq(\"keys do not mix\", 13L, dojoC.Total(\"likes:post9\"));",
+        "Dojo.Eq(\"the other key has its own rows\", 3L, dojoC.Total(\"likes:post2\"));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"zero buckets is an error\", () => new SaltedCounter(0));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "4. Place keys with rendezvous hashing",
+      "prompt": [
+        "Write `string Rendezvous(string key, string[] shards)`: score every shard with `H.Hash($\"{shard}|{key}\")` and",
+        "return the shard with the **highest** score (the earlier shard wins a tie). Throw `InvalidOperationException`",
+        "when there are no shards.",
+        "",
+        "`H.Hash(string)` returning `uint` is given. The tests check that load is even, that removing a shard moves only",
+        "its own keys, and that adding a shard moves keys only to the new one."
+      ],
+      "starter": [
+        "string Rendezvous(string key, string[] shards)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Rendezvous(string key, string[] shards)",
+        "{",
+        "    if (shards.Length == 0) throw new InvalidOperationException(\"no shards\");",
+        "    var best = shards[0];",
+        "    var bestScore = H.Hash($\"{best}|{key}\");",
+        "    foreach (var shard in shards.Skip(1))",
+        "    {",
+        "        var score = H.Hash($\"{shard}|{key}\");",
+        "        if (score > bestScore) { best = shard; bestScore = score; }",
+        "    }",
+        "    return best;",
+        "}"
+      ],
+      "hints": [
+        "Start with the first shard as the best, then compare every other shard's score with `>` (so ties keep the earlier one).",
+        "Guard the empty array before reading `shards[0]`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "string[] dojoS = { \"s0\", \"s1\", \"s2\", \"s3\" };",
+        "var dojoKeys = Enumerable.Range(0, 2000).Select(i => $\"post:{i}\").ToList();",
+        "var dojoOwner = dojoKeys.ToDictionary(k => k, k => Rendezvous(k, dojoS));",
+        "Dojo.Check(\"every key lands on a shard\", dojoOwner.Values.All(o => dojoS.Contains(o)), \"a key landed somewhere else\");",
+        "Dojo.Eq(\"the same key always lands on the same shard\", dojoOwner[\"post:7\"], Rendezvous(\"post:7\", dojoS));",
+        "var dojoShares = dojoOwner.Values.GroupBy(o => o).Select(g => g.Count() / 2000.0).ToList();",
+        "Dojo.Check(\"load is even (each shard 15% to 35%)\", dojoShares.Count == 4 && dojoShares.All(s => s > 0.15 && s < 0.35), string.Join(\", \", dojoShares.Select(s => s.ToString(\"P0\"))));",
+        "string[] dojoWithout = { \"s0\", \"s2\", \"s3\" };",
+        "Dojo.Check(\"removing s1 keeps every other key in place\", dojoKeys.Where(k => dojoOwner[k] != \"s1\").All(k => Rendezvous(k, dojoWithout) == dojoOwner[k]), \"a key not on s1 moved\");",
+        "string[] dojoWith = { \"s0\", \"s1\", \"s2\", \"s3\", \"s4\" };",
+        "var dojoMoved = dojoKeys.Where(k => Rendezvous(k, dojoWith) != dojoOwner[k]).ToList();",
+        "Dojo.Check(\"adding s4 moves keys only to s4\", dojoMoved.All(k => Rendezvous(k, dojoWith) == \"s4\"), \"a key moved between old shards\");",
+        "Dojo.Check(\"adding a 5th shard moves about a fifth of the keys (10% to 30%)\", dojoMoved.Count > 200 && dojoMoved.Count < 600, $\"{dojoMoved.Count} of 2000 moved\");",
+        "Dojo.Throws<InvalidOperationException>(\"no shards is an error\", () => Rendezvous(\"x\", new string[0]));",
+        "",
+        "static class H",
+        "{",
+        "    public static uint Hash(string s)",
+        "    {",
+        "        uint h = 2166136261;",
+        "        foreach (var c in s) { h ^= c; h *= 16777619; }",
+        "        h ^= h >> 16; h *= 0x85ebca6b; h ^= h >> 13; h *= 0xc2b2ae35; h ^= h >> 16;",
+        "        return h;",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}

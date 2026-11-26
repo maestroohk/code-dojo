@@ -1,0 +1,220 @@
+{
+  "title": "Boss: the Black Friday cache review",
+  "summary": "A cache dashboard snapshot from a bad morning. Size the cache, read the counters, find the hot key and write the review tool the on-call team will run next time.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**INC-2291: feed and product pages slow, 09:00-09:40.** You are asked to review the cache before the next",
+        "sale. The on-call engineer attached this snapshot:",
+        "",
+        "```text",
+        "cache cluster  shop-cache (6 nodes, maxmemory 12gb each, maxmemory-policy allkeys-lru)",
+        "",
+        "node      cpu    used_memory   ops/s     evicted/s",
+        "cache-1   100%   11.99G        96,400    290",
+        "cache-2    21%   11.98G        19,800    280",
+        "cache-3    19%   11.99G        18,900    285",
+        "cache-4    22%   11.99G        20,300    270",
+        "cache-5    20%   11.98G        19,100    290",
+        "cache-6    18%   11.99G        18,700    285",
+        "",
+        "app config:   TTL 300 s (no jitter), no request coalescing",
+        "db:           CPU 97%, p99 1.8 s",
+        "```",
+        "",
+        "Four tasks, each a small tool. Together they are the review you would attach to the postmortem: is the",
+        "cache big enough, what is its real hit ratio, which key is hot, and what must change before the sale."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "How much memory for the hot set?",
+      "prompt": [
+        "Write `long CacheBytes(long keys, int keyBytes, int valueBytes, int overheadBytes, double headroom)`:",
+        "",
+        "- the bytes `keys` entries take: `keys × (keyBytes + valueBytes + overheadBytes)`;",
+        "- then leave `headroom` free (`0.25` means the data may fill only 75 % of memory): divide by",
+        "  `1 − headroom` and round **up** to a whole byte.",
+        "- `headroom` must be at least `0` and below `1`, otherwise throw `ArgumentOutOfRangeException`.",
+        "",
+        "2 million hot products with 20-byte keys, 2,000-byte values and 64 bytes of overhead, with 25 % headroom,",
+        "need `5,557,333,334` bytes (about 5.2 GiB)."
+      ],
+      "starter": [
+        "long CacheBytes(long keys, int keyBytes, int valueBytes, int overheadBytes, double headroom)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "long CacheBytes(long keys, int keyBytes, int valueBytes, int overheadBytes, double headroom)",
+        "{",
+        "    if (headroom < 0 || headroom >= 1) throw new ArgumentOutOfRangeException(nameof(headroom));",
+        "    long data = keys * (keyBytes + valueBytes + overheadBytes);",
+        "    return (long)Math.Ceiling(data / (1 - headroom));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"2 million products with 25 % headroom\", 5557333334L, CacheBytes(2_000_000, 20, 2000, 64, 0.25));",
+        "Dojo.Eq(\"no headroom is just the data\", 4168000000L, CacheBytes(2_000_000, 20, 2000, 64, 0));",
+        "Dojo.Eq(\"large key counts do not overflow\", 1_000_000_000_000L, CacheBytes(10_000_000_000L, 20, 60, 20, 0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"headroom of 1 is rejected\", () => CacheBytes(1, 1, 1, 1, 1));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"negative headroom is rejected\", () => CacheBytes(1, 1, 1, 1, -0.1));"
+      ],
+      "explain": "Six 12 GB nodes is 72 GB: the hot set fits easily, so memory is not why cache-1 is on fire. Sizing first stops you buying the wrong fix."
+    },
+    {
+      "type": "code",
+      "title": "The real hit ratio",
+      "prompt": [
+        "Write `double HitRatioBetween(string before, string after)`. Each argument is the text of `INFO stats`:",
+        "lines of `name:value` (lines may end in `\\r\\n`, and other lines such as `# Stats` appear too).",
+        "",
+        "Return the hit ratio **between** the two snapshots: the change in `keyspace_hits` divided by the change in",
+        "`keyspace_hits` plus `keyspace_misses`. Return `0` when there were no lookups in between. If a field is",
+        "missing, throw `FormatException`.",
+        "",
+        "You may write helper functions."
+      ],
+      "starter": [
+        "double HitRatioBetween(string before, string after)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "long InfoField(string info, string name)",
+        "{",
+        "    foreach (var raw in info.Split('\\n'))",
+        "    {",
+        "        var line = raw.Trim();",
+        "        if (line.StartsWith(name + \":\")) return long.Parse(line[(name.Length + 1)..]);",
+        "    }",
+        "    throw new FormatException($\"{name} not found\");",
+        "}",
+        "",
+        "double HitRatioBetween(string before, string after)",
+        "{",
+        "    var hits = InfoField(after, \"keyspace_hits\") - InfoField(before, \"keyspace_hits\");",
+        "    var misses = InfoField(after, \"keyspace_misses\") - InfoField(before, \"keyspace_misses\");",
+        "    return hits + misses == 0 ? 0 : (double)hits / (hits + misses);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoBefore = \"# Stats\\r\\ntotal_connections_received:9001\\r\\nkeyspace_hits:812004110\\r\\nkeyspace_misses:90012000\\r\\nevicted_keys:4100220\\r\\n\";",
+        "var dojoAfter = \"# Stats\\r\\ntotal_connections_received:9050\\r\\nkeyspace_hits:812151110\\r\\nkeyspace_misses:90117000\\r\\nevicted_keys:4201220\\r\\n\";",
+        "Dojo.Eq(\"the minute's hit ratio, not the lifetime one\", 0.583, Math.Round(HitRatioBetween(dojoBefore, dojoAfter), 3));",
+        "Dojo.Eq(\"works with plain \\\\n line ends\", 0.75, HitRatioBetween(\"keyspace_hits:10\\nkeyspace_misses:10\", \"keyspace_hits:40\\nkeyspace_misses:20\"));",
+        "Dojo.Eq(\"no lookups in between gives 0\", 0.0, HitRatioBetween(dojoBefore, dojoBefore));",
+        "Dojo.Throws<FormatException>(\"a missing field is an error\", () => HitRatioBetween(\"keyspace_hits:1\", \"keyspace_hits:2\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Which key is hot?",
+      "prompt": [
+        "The on-call engineer sampled 100 commands on `cache-1` (the keys only). Write",
+        "`List<(string Key, double Share)> TopKeys(string[] sample, int n)`:",
+        "",
+        "- count each key in the sample;",
+        "- return the `n` most frequent, most frequent first, ties broken by key in **ordinal** order;",
+        "- `Share` is the key's count divided by the sample size;",
+        "- an empty sample gives an empty list; fewer than `n` distinct keys gives them all."
+      ],
+      "starter": [
+        "List<(string Key, double Share)> TopKeys(string[] sample, int n)",
+        "{",
+        "    return new();",
+        "}"
+      ],
+      "solution": [
+        "List<(string Key, double Share)> TopKeys(string[] sample, int n)",
+        "{",
+        "    if (sample.Length == 0) return new();",
+        "    return sample.GroupBy(k => k)",
+        "        .OrderByDescending(g => g.Count())",
+        "        .ThenBy(g => g.Key, StringComparer.Ordinal)",
+        "        .Take(n)",
+        "        .Select(g => (g.Key, (double)g.Count() / sample.Length))",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSample = Enumerable.Repeat(\"feed:user:9001\", 50)",
+        "    .Concat(Enumerable.Repeat(\"feed:user:2210\", 8))",
+        "    .Concat(Enumerable.Repeat(\"feed:user:17\", 8))",
+        "    .Concat(Enumerable.Range(100, 34).Select(i => $\"feed:user:{i}\"))",
+        "    .ToArray();",
+        "var dojoTop = TopKeys(dojoSample, 3);",
+        "Dojo.Eq(\"the top three keys, ties in ordinal order\", new List<string> { \"feed:user:9001\", \"feed:user:17\", \"feed:user:2210\" }, dojoTop.Select(x => x.Key).ToList());",
+        "Dojo.Eq(\"their shares of the sample\", new List<double> { 0.5, 0.08, 0.08 }, dojoTop.Select(x => Math.Round(x.Share, 3)).ToList());",
+        "Dojo.Eq(\"asking for more than exist returns them all\", 37, TopKeys(dojoSample, 100).Count);",
+        "Dojo.Eq(\"an empty sample gives nothing\", 0, TopKeys(new string[0], 3).Count);"
+      ],
+      "explain": "Half of one node's traffic is one key. That is why cache-1 runs at 96,400 ops/s and the others at 20,000: a near cache for keys like this, not more nodes."
+    },
+    {
+      "type": "code",
+      "title": "The review tool",
+      "prompt": [
+        "Write `List<string> Review(CacheSnapshot s)`. The record (already defined by the tests) is:",
+        "",
+        "```csharp",
+        "record CacheSnapshot(string Policy, double HitRatio, long EvictionsPerSec,",
+        "                     double MaxNodeCpu, double MedianNodeCpu, bool TtlJitter, bool Coalescing);",
+        "```",
+        "",
+        "Return these findings, in this order, for each rule that applies (exact text):",
+        "",
+        "1. `Policy` is `\"noeviction\"`: `\"noeviction on a pure cache: use allkeys-lfu\"`",
+        "2. `EvictionsPerSec > 0` and `HitRatio < 0.9`: `\"too small: evicting while the hit ratio is under 90%\"`",
+        "3. `MaxNodeCpu >= 80` and `MaxNodeCpu >= 3 × MedianNodeCpu`: `\"hot key: one node is much busier than the rest\"`",
+        "4. no TTL jitter: `\"no TTL jitter\"`",
+        "5. no coalescing: `\"no request coalescing\"`",
+        "",
+        "A healthy cache gives an empty list."
+      ],
+      "starter": [
+        "List<string> Review(CacheSnapshot s)",
+        "{",
+        "    return new();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Review(CacheSnapshot s)",
+        "{",
+        "    var findings = new List<string>();",
+        "    if (s.Policy == \"noeviction\") findings.Add(\"noeviction on a pure cache: use allkeys-lfu\");",
+        "    if (s.EvictionsPerSec > 0 && s.HitRatio < 0.9) findings.Add(\"too small: evicting while the hit ratio is under 90%\");",
+        "    if (s.MaxNodeCpu >= 80 && s.MaxNodeCpu >= 3 * s.MedianNodeCpu) findings.Add(\"hot key: one node is much busier than the rest\");",
+        "    if (!s.TtlJitter) findings.Add(\"no TTL jitter\");",
+        "    if (!s.Coalescing) findings.Add(\"no request coalescing\");",
+        "    return findings;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoIncident = Review(new CacheSnapshot(\"allkeys-lru\", 0.58, 1700, 100, 20, false, false));",
+        "Dojo.Eq(\"the 09:00 snapshot\", new List<string> { \"too small: evicting while the hit ratio is under 90%\", \"hot key: one node is much busier than the rest\", \"no TTL jitter\", \"no request coalescing\" }, dojoIncident);",
+        "Dojo.Eq(\"a healthy cache has no findings\", new List<string>(), Review(new CacheSnapshot(\"allkeys-lfu\", 0.97, 0, 35, 30, true, true)));",
+        "Dojo.Eq(\"noeviction is flagged\", new List<string> { \"noeviction on a pure cache: use allkeys-lfu\" }, Review(new CacheSnapshot(\"noeviction\", 0.95, 0, 50, 45, true, true)));",
+        "Dojo.Eq(\"evicting at a 95 % hit ratio is fine\", new List<string>(), Review(new CacheSnapshot(\"allkeys-lfu\", 0.95, 300, 40, 35, true, true)));",
+        "Dojo.Eq(\"80 % against a 30 % median is not 3x\", new List<string>(), Review(new CacheSnapshot(\"allkeys-lfu\", 0.95, 0, 80, 30, true, true)));",
+        "Dojo.Eq(\"90 % against a 30 % median is a hot key\", new List<string> { \"hot key: one node is much busier than the rest\" }, Review(new CacheSnapshot(\"allkeys-lfu\", 0.95, 0, 90, 30, true, true)));",
+        "record CacheSnapshot(string Policy, double HitRatio, long EvictionsPerSec, double MaxNodeCpu, double MedianNodeCpu, bool TtlJitter, bool Coalescing);"
+      ],
+      "explain": [
+        "The review for INC-2291: the hit ratio dropped because the cache was evicting (worth checking after the hot",
+        "key is fixed, since retries and duplicate fills inflate misses too), one celebrity key pinned cache-1, and",
+        "synchronised TTLs plus no coalescing turned each expiry into a stampede on a database already at 97 %."
+      ]
+    }
+  ]
+}

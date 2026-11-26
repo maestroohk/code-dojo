@@ -1,0 +1,281 @@
+{
+  "title": "Design search autocomplete",
+  "summary": "Suggestions on every keystroke within a few tens of milliseconds: a trie with the top-k stored at each node, an offline aggregation pipeline, CDN caching of popular prefixes and client debounce.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** as the user types into the search box, show the 5 most popular completions of what they have",
+        "typed so far.",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | top 5 suggestions for a prefix; per language or region; trending queries show up within an hour or so |",
+        "| Non-functional | it must feel instant: under ~100 ms end to end, so a server budget of ~10-20 ms; very high availability (a broken box breaks search) |",
+        "| Out of scope | personalised suggestions, spelling correction (mention them as extensions) |",
+        "",
+        "```text",
+        "users       50 M daily active, 6 searches each",
+        "requests    ~4 per search after debounce (not 1 per keystroke)",
+        "            50 M x 6 x 4 = 1.2 B / day  ≈ 14,000 / s average, ~40,000 / s peak",
+        "data        top 10 M distinct queries x ~30 bytes ≈ 300 MB of strings; with the trie and top-k lists a few GB",
+        "```",
+        "",
+        "It fits in **memory on every server**. So the design is about keeping lookups O(prefix length) and keeping the",
+        "data fresh, not about storage."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "How many suggestion requests per second on average? (Integer division.)",
+      "code": [
+        "var dau = 50_000_000L;",
+        "var searchesPerUser = 6;",
+        "var requestsPerSearch = 4;",
+        "Console.WriteLine(dau * searchesPerUser * requestsPerSearch / 86_400);"
+      ],
+      "answer": "13888",
+      "explain": "1.2 B a day over 86,400 seconds. Without debouncing, a 12-character query would be 12 requests and the load three times higher."
+    },
+    {
+      "type": "learn",
+      "title": "A trie with the answers already in it",
+      "body": [
+        "```text",
+        "              (root)  top: weather, web mail, wedding",
+        "                |",
+        "                w     top: weather, web mail, wedding",
+        "                |",
+        "                e     top: weather, web mail, wedding",
+        "             /  |  \\",
+        "           a    b    d ...",
+        "  top: weather  top: web mail    top: wedding",
+        "```",
+        "",
+        "Walking a trie to the prefix node is O(length of the prefix). If you then had to search the whole subtree for",
+        "the most popular completions, \"w\" would scan millions of queries. So each node **stores its top k** (say 5)",
+        "completions. A lookup is: walk the prefix, return the list. No search at request time.",
+        "",
+        "The cost moves to **build time**: every node's list must be computed. That is why the trie is built **offline**:",
+        "",
+        "```text",
+        "search logs --> hourly / daily aggregation (query, count, decayed by age) --> build trie snapshot",
+        "            --> ship to every serving node --> load beside the old one --> switch atomically",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why store the top-k completions at every node instead of computing them at request time?",
+      "options": [
+        "A lookup then costs only the prefix length; computing at request time would walk huge subtrees for short prefixes like \"w\"",
+        "It uses less memory than storing the queries once",
+        "It makes the trie easier to update in real time",
+        "Tries cannot be searched without it"
+      ],
+      "answer": 0,
+      "explain": "It is a classic trade: more memory (k strings or pointers per node) and a slower build, for predictable, tiny lookups on the hot path. Short prefixes are both the most common requests and the biggest subtrees."
+    },
+    {
+      "type": "learn",
+      "title": "Caching, freshness and the client",
+      "body": [
+        "- **CDN caching.** Suggestions for a prefix are the same for everyone in a region and language, so",
+        "  `GET /suggest?q=wea&lang=en` is cacheable at the edge for a few minutes. The short prefixes, which are most of",
+        "  the traffic, then never reach your servers.",
+        "- **Client debounce.** Send a request only after the user pauses typing for ~100-200 ms, cancel stale requests,",
+        "  and cache answers in the page (backspace is free).",
+        "- **Freshness.** A daily batch misses breaking news. Add a small **real-time layer**: count the last hour's",
+        "  queries in a stream processor and merge a few trending ones into the batch results.",
+        "- **Filtering.** Remove offensive or unsafe suggestions at build time, with a block list that can also be applied",
+        "  instantly at serving time for emergencies.",
+        "- **Sharding**, if one server is not enough, by hash of the prefix's first characters, or simply replicate the",
+        "  whole trie everywhere (it is a few GB)."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Does this happen offline (in the build pipeline) or online (on each request)?",
+      "buckets": [
+        "Offline",
+        "Online"
+      ],
+      "items": [
+        [
+          "Count queries from yesterday's search logs",
+          0
+        ],
+        [
+          "Build a trie snapshot with the top-k at every node",
+          0
+        ],
+        [
+          "Ship the snapshot to every serving node",
+          0
+        ],
+        [
+          "Walk to the prefix node and return its stored list",
+          1
+        ],
+        [
+          "Serve the cached answer for \"wea\" from the CDN",
+          1
+        ],
+        [
+          "Debounce keystrokes in the browser",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** A major storm hits at 09:00. By 15:00 users still see no suggestion for \"storm\" when they type",
+        "\"sto\", although it is the top query of the day. The pipeline's job log:",
+        "",
+        "```text",
+        "trie-build   schedule: daily 02:00 UTC   last run: 02:00 UTC   ok   10.2 M queries",
+        "```",
+        "",
+        "What is the right fix?"
+      ],
+      "options": [
+        "Add a real-time layer that counts recent queries (last hour, from a stream) and merges trending ones into the batch results",
+        "Run the full trie build every minute",
+        "Disable the CDN cache for suggestions",
+        "Increase k from 5 to 50"
+      ],
+      "answer": 0,
+      "explain": "The daily build is fine for stable popularity; it simply cannot see today. A full rebuild every minute is expensive and slow to ship. A small streaming counter for recent queries is the usual answer, with the batch as the stable base."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each technique to what it buys you.",
+      "pairs": [
+        [
+          "Top-k stored at each node",
+          "Lookup cost depends only on the prefix length"
+        ],
+        [
+          "Client debounce",
+          "A request only after the user pauses typing"
+        ],
+        [
+          "Prefix caching at the CDN",
+          "Popular short prefixes answered at the edge"
+        ],
+        [
+          "Snapshot swap",
+          "Serving nodes switch to a new trie atomically"
+        ],
+        [
+          "Real-time layer",
+          "Today's trending queries appear within the hour"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A trie with top-k suggestions",
+      "prompt": [
+        "Write a class `Autocomplete`:",
+        "",
+        "- `Autocomplete(int k)`: `k` of `0` or less throws `ArgumentOutOfRangeException`.",
+        "- `void Add(string query, long count)`: adds `count` to the query's total (it may be added more than once).",
+        "- `List<string> Suggest(string prefix)`: up to `k` queries that start with `prefix`, highest total first; equal",
+        "  totals in ordinal string order. An unknown prefix gives an empty list; `\"\"` matches every query.",
+        "",
+        "Store the top-k list at each trie node and update it in `Add`, so `Suggest` only walks the prefix. Counts only",
+        "grow, so when a query's total rises it is enough to (re)insert **that** query into each node's list on its",
+        "path, re-sort and trim to `k`. Anything trimmed can only come back by being added again."
+      ],
+      "starter": [
+        "class Autocomplete",
+        "{",
+        "    public Autocomplete(int k) { }",
+        "",
+        "    public void Add(string query, long count) { }",
+        "",
+        "    public List<string> Suggest(string prefix) => new();",
+        "}"
+      ],
+      "solution": [
+        "class Autocomplete",
+        "{",
+        "    class Node",
+        "    {",
+        "        public readonly Dictionary<char, Node> Next = new();",
+        "        public readonly List<string> Top = new();",
+        "    }",
+        "",
+        "    readonly int k;",
+        "    readonly Node root = new();",
+        "    readonly Dictionary<string, long> totals = new();",
+        "",
+        "    public Autocomplete(int k)",
+        "    {",
+        "        if (k <= 0) throw new ArgumentOutOfRangeException(nameof(k));",
+        "        this.k = k;",
+        "    }",
+        "",
+        "    public void Add(string query, long count)",
+        "    {",
+        "        totals[query] = totals.GetValueOrDefault(query) + count;",
+        "        var node = root;",
+        "        Update(node, query);",
+        "        foreach (var c in query)",
+        "        {",
+        "            if (!node.Next.TryGetValue(c, out var child)) node.Next[c] = child = new Node();",
+        "            node = child;",
+        "            Update(node, query);",
+        "        }",
+        "    }",
+        "",
+        "    void Update(Node node, string query)",
+        "    {",
+        "        if (!node.Top.Contains(query)) node.Top.Add(query);",
+        "        node.Top.Sort((a, b) => totals[a] != totals[b] ? totals[b].CompareTo(totals[a]) : string.CompareOrdinal(a, b));",
+        "        if (node.Top.Count > k) node.Top.RemoveAt(node.Top.Count - 1);",
+        "    }",
+        "",
+        "    public List<string> Suggest(string prefix)",
+        "    {",
+        "        var node = root;",
+        "        foreach (var c in prefix)",
+        "        {",
+        "            if (!node.Next.TryGetValue(c, out var child)) return new List<string>();",
+        "            node = child;",
+        "        }",
+        "        return new List<string>(node.Top);",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A node is a `Dictionary<char, Node>` of children plus a `List<string>` top list; keep the totals in one `Dictionary<string, long>`.",
+        "In `Add`, call an `Update(node, query)` on the root and on every node along the query: add it if missing, sort by total descending then `string.CompareOrdinal`, trim to `k`."
+      ],
+      "template": [
+        "var dojoA = new Autocomplete(3);",
+        "dojoA.Add(\"weather\", 500);",
+        "dojoA.Add(\"web mail\", 300);",
+        "dojoA.Add(\"weekend\", 200);",
+        "dojoA.Add(\"wedding\", 250);",
+        "dojoA.Add(\"we\", 50);",
+        "Dojo.Eq(\"top 3 for we\", new List<string> { \"weather\", \"web mail\", \"wedding\" }, dojoA.Suggest(\"we\"));",
+        "Dojo.Eq(\"a longer prefix narrows it\", new List<string> { \"weekend\" }, dojoA.Suggest(\"wee\"));",
+        "dojoA.Add(\"weekend\", 400);",
+        "Dojo.Eq(\"counts add up and can climb into the top\", new List<string> { \"weekend\", \"weather\", \"web mail\" }, dojoA.Suggest(\"we\"));",
+        "dojoA.Add(\"wex\", 300);",
+        "Dojo.Eq(\"ties are broken in ordinal order\", new List<string> { \"weekend\", \"weather\", \"web mail\" }, dojoA.Suggest(\"we\"));",
+        "Dojo.Eq(\"the exact query is its own prefix\", new List<string> { \"wex\" }, dojoA.Suggest(\"wex\"));",
+        "Dojo.Eq(\"the empty prefix matches everything\", new List<string> { \"weekend\", \"weather\", \"web mail\" }, dojoA.Suggest(\"\"));",
+        "Dojo.Eq(\"an unknown prefix\", new List<string>(), dojoA.Suggest(\"x\"));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"k must be positive\", () => new Autocomplete(0));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,336 @@
+{
+  "title": "Design chat and presence",
+  "summary": "Millions of open WebSockets: connection gateways, per-conversation sequence numbers, receipts, offline delivery, many devices per user, and presence from heartbeats with a TTL.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** one-to-one and small group chat (up to a few hundred members), on phones and laptops at once, with",
+        "\"online\" dots and sent / delivered / read ticks.",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | send and receive; history; receipts; presence; offline users get a push and catch up on open |",
+        "| Non-functional | delivery under ~500 ms when online; **never lose** a message once acked; per-conversation order; history kept for years |",
+        "| Out of scope | end-to-end encryption key exchange (mention it changes what the server can see), voice and video, huge broadcast channels |",
+        "",
+        "```text",
+        "users         50 M daily active, 10 M connected at peak",
+        "messages      40 / user / day = 2 B / day   ≈ 23,000 / s average, ~70,000 / s peak",
+        "storage       2 B x ~200 bytes = 400 GB / day  ≈ 146 TB / year before replication",
+        "connections   10 M long-lived WebSockets, mostly idle",
+        "```",
+        "",
+        "The unusual number is the last one: the hard part is **holding 10 M connections** and knowing which machine",
+        "holds whose, not the message rate."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Each gateway node holds 100,000 idle WebSockets comfortably. You run in 3 availability zones and must survive losing one zone at peak (10 M connections). How many gateway nodes?",
+      "options": [
+        "150",
+        "100",
+        "34",
+        "300"
+      ],
+      "answer": 0,
+      "explain": "10 M / 100k = 100 nodes. If one of 3 zones dies, the other two must hold everything, so each zone needs 50 nodes: 150 in total. When a zone dies, 3.3 M clients reconnect at once: reconnect with jittered backoff or the survivors are hit by a stampede."
+    },
+    {
+      "type": "learn",
+      "title": "The high-level design",
+      "body": [
+        "```text",
+        "  phone  laptop                                         +------------------+",
+        "    \\      /   WebSocket (TLS)                           | session registry |",
+        "  +----------------+    +---------------------+         | user -> gateways |",
+        "  | gateway nodes  |<-->| chat service        |-------->| (Redis, TTL)     |",
+        "  | hold sockets   |    | owns conversations, |         +------------------+",
+        "  +----------------+    | assigns seq numbers |",
+        "                         +----------+----------+-------> push service (APNs, FCM)",
+        "                                    |",
+        "                         +----------v----------+",
+        "                         | message store       |  partitioned by conversation_id",
+        "                         | (conv_id, seq) PK   |",
+        "                         +---------------------+",
+        "```",
+        "",
+        "- **Gateways** only hold sockets and forward frames. They are stateless apart from the sockets, so a deploy",
+        "  drains them gradually.",
+        "- The **session registry** maps each user to the gateways where their devices are connected, with a TTL so dead",
+        "  entries vanish.",
+        "- The **message store** is keyed by `(conversation_id, seq)`: reading history and \"everything after seq 41\" are",
+        "  range scans on one partition. A wide-column or key-value store with range keys fits well."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the path of one message in order.",
+      "lines": [
+        "The phone sends the message with a client message id over its WebSocket",
+        "The gateway forwards it to the chat service instance that owns the conversation",
+        "The chat service assigns the next sequence number and stores the message durably",
+        "It acks the sender with the sequence number, then pushes the message to each member's gateways from the registry",
+        "Members with no live connection get a push notification that wakes the app to sync"
+      ],
+      "explain": "Store before you ack: an ack promises the message survives. The client message id makes a resend after a lost ack harmless: the service sees the same id and returns the same seq."
+    },
+    {
+      "type": "learn",
+      "title": "Ordering: one writer per conversation",
+      "body": [
+        "Clocks on phones are wrong and messages race over different paths, so timestamps cannot order a conversation.",
+        "Give each conversation **one writer** (route by `conversation_id` to one partition or one service instance) and",
+        "let it hand out **sequence numbers** 1, 2, 3, ...",
+        "",
+        "Clients use them two ways:",
+        "",
+        "- **Dedupe and order:** show messages sorted by seq; ignore a seq already shown.",
+        "- **Gap detection:** a client that last saw 41 and receives 42, 43, 46 knows 44 and 45 are missing and fetches",
+        "  `after=43` from the store. The push channel can lose frames; the store cannot.",
+        "",
+        "Order is only promised **inside** a conversation. Across conversations nobody can tell, so do not pay for it."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A client last saw seq 41. What does this print?",
+      "code": [
+        "long lastSeen = 41;",
+        "long[] received = { 42, 43, 46, 44 };",
+        "var max = received.Max();",
+        "var missing = new List<long>();",
+        "for (var s = lastSeen + 1; s <= max; s++)",
+        "    if (!received.Contains(s)) missing.Add(s);",
+        "Console.WriteLine(string.Join(\",\", missing));"
+      ],
+      "answer": "45",
+      "explain": "44 arrived out of order, so it is not missing. Only 45 is, and the client asks the store for it."
+    },
+    {
+      "type": "learn",
+      "title": "Receipts, offline delivery and many devices",
+      "body": [
+        "- **Receipts are numbers, not flags.** Store per member the highest seq *delivered* and the highest seq *read*.",
+        "  \"Read up to 57\" covers every message before it, so one small write replaces dozens.",
+        "- **Offline delivery is a sync, not a queue.** The push notification says \"something new\"; the app then",
+        "  connects and asks for everything after its last seq. Push payloads can be dropped or delayed, so never put",
+        "  the only copy of a message in one.",
+        "- **Each device has its own cursor.** The phone may be at seq 57 and the laptop at 40. Fan out to every",
+        "  connected device of each member; each catches up from its own position.",
+        "- **Groups** multiply fan-out by members: a 500-member group turns one message into 500 deliveries. Very large",
+        "  channels switch to pull (clients fetch), like celebrity feeds."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each mechanism to the problem it solves.",
+      "pairs": [
+        [
+          "Client message id",
+          "A resend after a lost ack does not create a duplicate"
+        ],
+        [
+          "Per-conversation sequence numbers",
+          "Everyone sees the same order, and gaps are detectable"
+        ],
+        [
+          "Highest-read seq per member",
+          "One write marks many messages as read"
+        ],
+        [
+          "Session registry with a TTL",
+          "Finding which gateways hold a user's devices"
+        ],
+        [
+          "Sync after a push wake-up",
+          "Offline devices catch up even if a push was dropped"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Presence: heartbeats and a TTL",
+      "body": [
+        "A socket can die without a goodbye (a phone enters a tunnel). So presence is a **lease**:",
+        "",
+        "```text",
+        "device sends heartbeat every 30 s   ->   presence key   last_seen = now,  TTL 90 s",
+        "no heartbeat for 90 s               ->   key expires     ->   offline",
+        "```",
+        "",
+        "- Make the TTL **2-3 x the heartbeat interval**, so one late or lost heartbeat does not flip the dot.",
+        "- A user is online if **any** device is.",
+        "- Do not broadcast every change to every contact: 10 M users with 200 contacts each is billions of events.",
+        "  Push changes only to people who are looking (an open chat or contact list), and let others fetch on demand.",
+        "- Debounce flaps: show \"offline\" only after it has lasted a few seconds."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Users complain their friends' dots flicker between online and offline every minute or so.",
+        "Config:",
+        "",
+        "```yaml",
+        "presence:",
+        "  heartbeatIntervalSeconds: 30",
+        "  ttlSeconds: 30",
+        "```",
+        "",
+        "What is the cause?"
+      ],
+      "options": [
+        "The TTL equals the heartbeat interval, so any heartbeat that is a little late lets the key expire. Make the TTL 2-3 x the interval",
+        "The heartbeat is too slow: send one every second",
+        "The session registry is out of memory and evicting keys",
+        "WebSockets cannot carry heartbeats; use HTTP polling"
+      ],
+      "answer": 0,
+      "explain": "Network jitter, a GC pause or a busy phone delays heartbeats by a second or two all the time. With TTL = interval there is no margin. Heartbeating every second would multiply the load 30 times for no gain."
+    },
+    {
+      "type": "code",
+      "title": "A presence tracker",
+      "prompt": [
+        "Write a class `PresenceTracker` with time passed in:",
+        "",
+        "- `PresenceTracker(long ttlMs)`.",
+        "- `void Heartbeat(string user, string device, long nowMs)`: that device was seen now.",
+        "- `void Disconnect(string user, string device)`: a clean goodbye; the device stops counting at once.",
+        "- `bool IsOnline(string user, long nowMs)`: true when **any** of the user's devices was seen less than `ttlMs`",
+        "  ago (`nowMs - lastSeen < ttlMs`).",
+        "- `List<string> Online(long nowMs)`: every online user, sorted with ordinal string order."
+      ],
+      "starter": [
+        "class PresenceTracker",
+        "{",
+        "    public PresenceTracker(long ttlMs) { }",
+        "",
+        "    public void Heartbeat(string user, string device, long nowMs) { }",
+        "",
+        "    public void Disconnect(string user, string device) { }",
+        "",
+        "    public bool IsOnline(string user, long nowMs) => false;",
+        "",
+        "    public List<string> Online(long nowMs) => new();",
+        "}"
+      ],
+      "solution": [
+        "class PresenceTracker",
+        "{",
+        "    readonly long ttlMs;",
+        "    readonly Dictionary<string, Dictionary<string, long>> seen = new();",
+        "",
+        "    public PresenceTracker(long ttlMs) => this.ttlMs = ttlMs;",
+        "",
+        "    public void Heartbeat(string user, string device, long nowMs)",
+        "    {",
+        "        if (!seen.TryGetValue(user, out var devices)) seen[user] = devices = new();",
+        "        devices[device] = nowMs;",
+        "    }",
+        "",
+        "    public void Disconnect(string user, string device)",
+        "    {",
+        "        if (seen.TryGetValue(user, out var devices)) devices.Remove(device);",
+        "    }",
+        "",
+        "    public bool IsOnline(string user, long nowMs) =>",
+        "        seen.TryGetValue(user, out var devices) && devices.Values.Any(t => nowMs - t < ttlMs);",
+        "",
+        "    public List<string> Online(long nowMs) =>",
+        "        seen.Keys.Where(u => IsOnline(u, nowMs)).OrderBy(u => u, StringComparer.Ordinal).ToList();",
+        "}"
+      ],
+      "hints": [
+        "Keep `Dictionary<string, Dictionary<string, long>>`: user -> device -> last seen.",
+        "Online means `devices.Values.Any(t => nowMs - t < ttlMs)`."
+      ],
+      "template": [
+        "var dojoP = new PresenceTracker(90_000);",
+        "dojoP.Heartbeat(\"ana\", \"phone\", 0);",
+        "Dojo.Eq(\"online just inside the TTL\", true, dojoP.IsOnline(\"ana\", 89_999));",
+        "Dojo.Eq(\"offline once the TTL has passed\", false, dojoP.IsOnline(\"ana\", 90_000));",
+        "dojoP.Heartbeat(\"ana\", \"laptop\", 60_000);",
+        "Dojo.Eq(\"online while any device is\", true, dojoP.IsOnline(\"ana\", 100_000));",
+        "dojoP.Disconnect(\"ana\", \"laptop\");",
+        "Dojo.Eq(\"a clean disconnect counts at once\", false, dojoP.IsOnline(\"ana\", 100_000));",
+        "Dojo.Eq(\"unknown users are offline\", false, dojoP.IsOnline(\"zed\", 0));",
+        "dojoP.Heartbeat(\"cy\", \"phone\", 95_000);",
+        "dojoP.Heartbeat(\"bo\", \"phone\", 50_000);",
+        "Dojo.Eq(\"who is online at 120 s\", new List<string> { \"bo\", \"cy\" }, dojoP.Online(120_000));",
+        "Dojo.Eq(\"nobody at 500 s\", new List<string>(), dojoP.Online(500_000));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Sequence numbers and gaps",
+      "prompt": [
+        "Write a class `ConversationLog`, the single writer of each conversation:",
+        "",
+        "- `long Append(string conversation, string clientMessageId)`: gives the message the next sequence number of its",
+        "  conversation (the first is `1`) and returns it. If the same conversation already has this client message id,",
+        "  return its existing number and do **not** use up a new one (a retried send).",
+        "- `static List<long> Missing(long lastSeen, IEnumerable<long> received)`: the numbers after `lastSeen` and up to",
+        "  the largest received one that did not arrive, ascending. Numbers at or below `lastSeen` are ignored."
+      ],
+      "starter": [
+        "class ConversationLog",
+        "{",
+        "    public long Append(string conversation, string clientMessageId) => 0;",
+        "",
+        "    public static List<long> Missing(long lastSeen, IEnumerable<long> received) => new();",
+        "}"
+      ],
+      "solution": [
+        "class ConversationLog",
+        "{",
+        "    readonly Dictionary<string, long> last = new();",
+        "    readonly Dictionary<(string Conversation, string ClientId), long> byClientId = new();",
+        "",
+        "    public long Append(string conversation, string clientMessageId)",
+        "    {",
+        "        if (byClientId.TryGetValue((conversation, clientMessageId), out var existing)) return existing;",
+        "        var seq = last.GetValueOrDefault(conversation) + 1;",
+        "        last[conversation] = seq;",
+        "        byClientId[(conversation, clientMessageId)] = seq;",
+        "        return seq;",
+        "    }",
+        "",
+        "    public static List<long> Missing(long lastSeen, IEnumerable<long> received)",
+        "    {",
+        "        var got = new HashSet<long>(received);",
+        "        var max = got.Count == 0 ? lastSeen : Math.Max(lastSeen, got.Max());",
+        "        var missing = new List<long>();",
+        "        for (var s = lastSeen + 1; s <= max; s++)",
+        "            if (!got.Contains(s)) missing.Add(s);",
+        "        return missing;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Two dictionaries: conversation -> last seq, and (conversation, client id) -> seq.",
+        "For `Missing`, put the received numbers in a `HashSet<long>` and walk from `lastSeen + 1` to the largest one."
+      ],
+      "template": [
+        "var dojoC = new ConversationLog();",
+        "Dojo.Eq(\"first message is 1\", 1L, dojoC.Append(\"c1\", \"m1\"));",
+        "Dojo.Eq(\"second message is 2\", 2L, dojoC.Append(\"c1\", \"m2\"));",
+        "Dojo.Eq(\"each conversation counts on its own\", 1L, dojoC.Append(\"c2\", \"x1\"));",
+        "Dojo.Eq(\"a retried send keeps its number\", 1L, dojoC.Append(\"c1\", \"m1\"));",
+        "Dojo.Eq(\"and does not use one up\", 3L, dojoC.Append(\"c1\", \"m3\"));",
+        "Dojo.Eq(\"the same client id in another conversation is a new message\", 2L, dojoC.Append(\"c2\", \"m1\"));",
+        "Dojo.Eq(\"one gap\", new List<long> { 45 }, ConversationLog.Missing(41, new long[] { 42, 43, 46, 44 }));",
+        "Dojo.Eq(\"several gaps\", new List<long> { 2, 3, 4 }, ConversationLog.Missing(0, new long[] { 5, 1, 5 }));",
+        "Dojo.Eq(\"old numbers are ignored\", new List<long>(), ConversationLog.Missing(3, new long[] { 3, 2 }));",
+        "Dojo.Eq(\"nothing received, nothing known to be missing\", new List<long>(), ConversationLog.Missing(5, new long[0]));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

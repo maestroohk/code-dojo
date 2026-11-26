@@ -1,0 +1,260 @@
+{
+  "title": "Utilisation and the knee",
+  "summary": "Why latency explodes as utilisation nears 100%: the M/M/1 curve, why a pool of many cores tolerates more (M/M/c, Erlang C), and how much headroom to plan.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The curve every capacity plan lives on",
+      "body": [
+        "**Utilisation** is the share of time a server is busy: `rho = arrivals per second x service time / servers`.",
+        "When requests arrive at random, some arrive while the server is busy and wait. The simplest queueing model,",
+        "**M/M/1** (random arrivals, random service times, one server), gives the average time in the system:",
+        "",
+        "```text",
+        "W = S / (1 - rho)            S = service time",
+        "",
+        "rho   50%   70%   80%   90%   95%   99%",
+        "W     2S    3.3S  5S    10S   20S   100S",
+        "```",
+        "",
+        "Latency is flat for a long time and then rises like a wall. That bend is the **knee**. Going from 90% to 95%",
+        "busy doubles the response time; the last few percent of capacity cost the most. Step through it:"
+      ],
+      "trace": {
+        "code": [
+          "double s = 10;",
+          "foreach (var rho in new[] { 0.5, 0.7, 0.8, 0.9, 0.95 })",
+          "{",
+          "    var w = s / (1 - rho);",
+          "    Console.WriteLine($\"utilisation {rho:0%}  response {w:0} ms\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "One server, 10 ms service time, 90% busy. What average response time (ms) does M/M/1 give?",
+      "code": [
+        "double s = 10, rho = 0.9;",
+        "Console.WriteLine(Math.Round(s / (1 - rho)));"
+      ],
+      "answer": "100",
+      "explain": "10 / (1 - 0.9) = 100 ms: ten times the service time, all of it spent waiting in the queue except the first 10 ms."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A single-core server at 80% busy and a 64-core pool at 80% busy, same service time per request. Which one has the shorter queueing delay, and why?",
+      "options": [
+        "The 64-core pool: with many servers a request rarely finds them all busy, so it rarely waits",
+        "The single core: one queue is simpler, so it is faster",
+        "They are the same: utilisation alone decides the wait",
+        "The 64-core pool, but only because it has more memory"
+      ],
+      "answer": 0,
+      "explain": "Pooling wins. At 80% a single server makes 80% of requests wait. With 64 servers fed from one queue (or a good balancer), only a few percent wait, and briefly. That is why big pools can run hotter than small ones."
+    },
+    {
+      "type": "learn",
+      "title": "M/M/c and Erlang C",
+      "body": [
+        "With `c` servers fed from one queue (M/M/c), the **Erlang C** formula gives the probability that a request has to",
+        "wait. It is easiest to compute through the Erlang B recursion with offered load `a = c x rho`:",
+        "",
+        "```text",
+        "B(0) = 1",
+        "B(k) = a x B(k-1) / (k + a x B(k-1))         for k = 1..c",
+        "C    = B(c) / (1 - rho x (1 - B(c)))          probability of waiting",
+        "Wq   = C x S / (c x (1 - rho))                average wait",
+        "W    = S + Wq                                 average response time",
+        "```",
+        "",
+        "| Servers at 80% busy | P(wait) | Average wait |",
+        "|---|---|---|",
+        "| 1 | 80% | 4 S |",
+        "| 8 | about 46% | about 0.29 S |",
+        "| 64 | about 7% | about 0.005 S |",
+        "",
+        "Two lessons. Big pools can run hotter: 80% is fine for 64 cores and painful for 1. And the cliff is still",
+        "there: every pool's wait goes to infinity as `rho` reaches 1, only later and steeper. These are averages;",
+        "p99 sits further up the same curve, so it hits the knee first."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "For one server (M/M/1), match each utilisation to the average response time as a multiple of the service time.",
+      "pairs": [
+        [ "50% busy", "2 x" ],
+        [ "75% busy", "4 x" ],
+        [ "90% busy", "10 x" ],
+        [ "95% busy", "20 x" ],
+        [ "99% busy", "100 x" ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Headroom",
+      "body": [
+        "Plan the peak at a utilisation well below the knee. Three things eat the gap:",
+        "",
+        "- **Losing capacity**: a server or a whole zone fails, or a deploy takes 25% of the pool out at a time. With 3 zones,",
+        "  losing one moves 50% more load onto the other two: a pool at 70% jumps to 105%.",
+        "- **Spikes**: real peaks are spikier than your average peak (a push notification, a retry wave).",
+        "- **Autoscaling lag**: new instances take minutes to boot and warm up; the spike is already here.",
+        "",
+        "Rules of thumb seniors use: plan CPU around **50 to 70%** at peak for latency-sensitive services, check that the",
+        "pool survives losing its largest failure domain, and find the real knee with a constant-rate load test",
+        "(`wrk2 -R`, k6 `constant-arrival-rate`) instead of trusting the model."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Load-test report** for one server (8 cores), constant-rate steps of 60 s:",
+        "",
+        "```text",
+        "rps     p50    p99     cpu",
+        "4000    8 ms   35 ms   71%",
+        "4500    9 ms   52 ms   80%",
+        "5000   12 ms  140 ms   89%",
+        "5500   35 ms  1.9 s    97%",
+        "```",
+        "",
+        "The SLO is p99 under 100 ms. What should the capacity plan assume per server?"
+      ],
+      "options": [
+        "About 3,000 to 3,500 rps: below the 4,500 rps knee with room for a lost server and spikes",
+        "5,500 rps: the server still answers at that rate",
+        "5,000 rps: p50 is only 12 ms there",
+        "4,500 rps exactly: that is the last step under the SLO"
+      ],
+      "answer": 0,
+      "explain": [
+        "4,500 rps is the last step that meets the SLO, so it is the knee, not the plan. Planning at the knee means one",
+        "failed server or a 10% spike breaks the SLO. 70 to 75% of the knee leaves that room. p50 hides the problem:",
+        "always read p99 against the SLO."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Utilisation and M/M/1",
+      "prompt": [
+        "Write two methods:",
+        "",
+        "- `double Utilisation(double arrivalsPerSec, double serviceMs, int servers)`: `arrivals x serviceMs / 1,000 / servers`.",
+        "- `double MM1ResponseMs(double serviceMs, double arrivalsPerSec)`: the M/M/1 average response time",
+        "  `S / (1 - rho)` in ms, or `double.PositiveInfinity` when `rho >= 1` (the queue grows without bound).",
+        "",
+        "`MM1ResponseMs(10, 50)` is `20`: 50 requests/s of 10 ms keep one server 50% busy."
+      ],
+      "starter": [
+        "double Utilisation(double arrivalsPerSec, double serviceMs, int servers)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double MM1ResponseMs(double serviceMs, double arrivalsPerSec)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double Utilisation(double arrivalsPerSec, double serviceMs, int servers)",
+        "{",
+        "    return arrivalsPerSec * serviceMs / 1000 / servers;",
+        "}",
+        "",
+        "double MM1ResponseMs(double serviceMs, double arrivalsPerSec)",
+        "{",
+        "    var rho = Utilisation(arrivalsPerSec, serviceMs, 1);",
+        "    if (rho >= 1) return double.PositiveInfinity;",
+        "    return serviceMs / (1 - rho);",
+        "}"
+      ],
+      "hints": [
+        "Service time is in ms: divide by 1,000 to get seconds of work per second.",
+        "Check `rho >= 1` before dividing; otherwise `S / (1 - rho)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"12k QPS of 10 ms on 120 cores\", 1.0, Utilisation(12_000, 10, 120));",
+        "Dojo.Eq(\"5k QPS of 8 ms on 64 cores\", 0.625, Utilisation(5_000, 8, 64));",
+        "Dojo.Eq(\"half busy doubles the time\", 20.0, Math.Round(MM1ResponseMs(10, 50), 1));",
+        "Dojo.Eq(\"90% busy is ten times\", 100.0, Math.Round(MM1ResponseMs(10, 90), 1));",
+        "Dojo.Eq(\"idle is just the service time\", 10.0, MM1ResponseMs(10, 0));",
+        "Dojo.Check(\"100% busy never settles\", double.IsPositiveInfinity(MM1ResponseMs(10, 100)), \"expected double.PositiveInfinity\");",
+        "Dojo.Check(\"overloaded never settles\", double.IsPositiveInfinity(MM1ResponseMs(10, 150)), \"expected double.PositiveInfinity\");"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Erlang C for a pool",
+      "prompt": [
+        "Write two methods using the formulas from the M/M/c card:",
+        "",
+        "- `double WaitProbability(int servers, double utilisation)`: Erlang C, through the Erlang B recursion with",
+        "  `a = servers x utilisation`.",
+        "- `double MMcResponseMs(int servers, double serviceMs, double arrivalsPerSec)`: `S + C x S / (c x (1 - rho))`,",
+        "  where `rho = arrivals x S / 1,000 / c`; `double.PositiveInfinity` when `rho >= 1`.",
+        "",
+        "`WaitProbability(2, 0.5)` is `1/3`. `MMcResponseMs(1, 10, 50)` matches M/M/1: `20`."
+      ],
+      "starter": [
+        "double WaitProbability(int servers, double utilisation)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double MMcResponseMs(int servers, double serviceMs, double arrivalsPerSec)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double WaitProbability(int servers, double utilisation)",
+        "{",
+        "    var a = servers * utilisation;",
+        "    var b = 1.0;",
+        "    for (var k = 1; k <= servers; k++) b = a * b / (k + a * b);",
+        "    return b / (1 - utilisation * (1 - b));",
+        "}",
+        "",
+        "double MMcResponseMs(int servers, double serviceMs, double arrivalsPerSec)",
+        "{",
+        "    var rho = arrivalsPerSec * serviceMs / 1000 / servers;",
+        "    if (rho >= 1) return double.PositiveInfinity;",
+        "    var c = WaitProbability(servers, rho);",
+        "    return serviceMs + c * serviceMs / (servers * (1 - rho));",
+        "}"
+      ],
+      "hints": [
+        "Start with `b = 1.0` and loop `k` from 1 to `servers`: `b = a * b / (k + a * b)`.",
+        "Then `C = b / (1 - rho * (1 - b))`. In `MMcResponseMs`, compute `rho` first and pass it to `WaitProbability`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"one server waits with probability rho\", 0.8, Math.Round(WaitProbability(1, 0.8), 3));",
+        "Dojo.Eq(\"two servers at 50%\", 0.333, Math.Round(WaitProbability(2, 0.5), 3));",
+        "Dojo.Eq(\"eight servers at 80%\", 0.46, Math.Round(WaitProbability(8, 0.8), 2));",
+        "Dojo.Check(\"more servers wait less at the same utilisation\", WaitProbability(64, 0.8) < WaitProbability(8, 0.8), \"64 servers should wait less often than 8\");",
+        "Dojo.Eq(\"M/M/c with one server is M/M/1\", 20.0, Math.Round(MMcResponseMs(1, 10, 50), 1));",
+        "Dojo.Eq(\"two servers at 50%\", 13.3, Math.Round(MMcResponseMs(2, 10, 100), 1));",
+        "Dojo.Eq(\"eight servers at 80%\", 13.0, Math.Round(MMcResponseMs(8, 10, 640)));",
+        "Dojo.Check(\"a full pool never settles\", double.IsPositiveInfinity(MMcResponseMs(4, 10, 400)), \"expected double.PositiveInfinity\");"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "right-size",
+      "title": "Build it: right-size the pool",
+      "prompt": [
+        "In the **System design board**, two small app servers take a peak of about 12,000 requests per second at",
+        "roughly 10 ms of CPU each, and melt. Work out the cores you need (QPS x CPU time / target utilisation), size",
+        "the pool, and run the load test. Watch p99 fall off the knee. Meet the p99, CPU and budget goals the board shows."
+      ],
+      "explain": "Too few cores and you are on the wall of the curve; too many and you pay for idle machines. The budget forces you to the sensible middle, around 60 to 70% at peak."
+    }
+  ]
+}

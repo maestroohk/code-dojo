@@ -18,7 +18,7 @@ import { loadPaths, pathProgress, labSolved, LAB_INFO, hours } from './paths.js'
 const TOPIC_LABS = {
   pki: { labs: ['pki'] }, networking: { labs: ['subnet', 'netbuild'], netlabs: /^(0[1-9]|10)-/ },
   docker: { labs: ['composebuild'] }, kubernetes: { labs: ['kubebuild'] }, cicd: { labs: ['pipebuild'] },
-  messaging: { labs: ['msgbuild-rabbit', 'msgbuild-kafka'], netlabs: /^(24|25)-/ }, integration: { labs: ['archbuild'], netlabs: /^23-/ },
+  messaging: { labs: ['msgbuild-rabbit', 'msgbuild-kafka'], netlabs: /^(24|25)-/ }, integration: { labs: ['archbuild'], netlabs: /^23-/ }, 'system-design': { labs: ['sysdesign'] },
   linux: { labs: ['vim'], netlabs: /^(1[1-9]|2[0-2])-/ }, editors: { labs: ['vim'] }, regex: { labs: ['regex'] },
 };
 

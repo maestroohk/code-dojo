@@ -26,6 +26,10 @@ Alongside the courses:
   Messaging topic.
 - **Messaging builder** (`#/labs/msgbuild`, `ui/lab-msgbuild.js`): RabbitMQ and Kafka modes on the shared board,
   driven by pure simulators (`ui/rabbitsim.js`, `ui/kafkasim.js`, tested in Node by `MsgSimTests`).
+- **System design board** (`#/labs/sysdesign`, `ui/lab-sysdesign.js`): rack users, DNS, a CDN, load balancers, app
+  servers, caches, a sharded database with a standby and replicas, streams with workers and object storage, then run a
+  10-minute load test with failure injection and a Grafana-style dashboard. The model (`ui/sdsim.js`: M/M/c queues,
+  Zipf key popularity, an overload/collapse model, seeded sampling) is tested in Node by `SdSimTests`.
 - **Workbench**: run your own ASP.NET Core apps live inside the dojo. Send them requests (JSON, forms,
   multipart file uploads, custom headers), see the response, the curl command and the C# test for it, and
   watch each request travel through *your* code: the map is drawn from your `Program.cs` (middleware, then

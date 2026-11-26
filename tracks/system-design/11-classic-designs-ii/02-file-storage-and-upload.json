@@ -1,0 +1,275 @@
+{
+  "title": "Design file storage and upload",
+  "summary": "A file sync and sharing service: metadata in a database, bytes in object storage, presigned and resumable multipart uploads, content-hash dedupe and sync conflicts.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** users upload files from phones and laptops, see them on every device, share them by link.",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | upload (large files too, over bad networks), download, list folders, share a link, sync changes to other devices |",
+        "| Non-functional | never lose or corrupt a file (durability first); uploads resume after a dropped connection; metadata changes visible on other devices within seconds |",
+        "| Out of scope | real-time co-editing of documents, virus scanning (mention it as a pipeline step) |",
+        "",
+        "```text",
+        "users      10 M daily active",
+        "uploads    2 / user / day x 3 MB average = 60 TB / day of new bytes",
+        "bandwidth  60 TB / 86,400 s ≈ 690 MB/s ≈ 5.6 Gbit/s average, peaks 2-3x that",
+        "metadata   20 M new file rows / day x ~1 KB = 20 GB / day: small, but read constantly",
+        "```",
+        "",
+        "Two very different data sets: **huge, write-once bytes** and **small, busy metadata**. They belong in different",
+        "stores."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "double bytesPerDay = 60e12;",
+        "var gbps = bytesPerDay * 8 / 86400 / 1e9;",
+        "Console.WriteLine(Math.Round(gbps, 1));"
+      ],
+      "answer": "5.6",
+      "explain": "Bytes to bits is x 8; a day is 86,400 seconds; Gbit is 10^9 bits. 60 TB a day is only 5.6 Gbit/s on average, but pushing it through your API servers would still need a fleet of them just for network cards."
+    },
+    {
+      "type": "learn",
+      "title": "Bytes go straight to object storage",
+      "body": [
+        "```text",
+        "  client --(1) POST /uploads {name, size, sha256}--> API --> metadata DB (file, version, status=pending)",
+        "         <--(2) upload id + presigned part URLs -----",
+        "  client --(3) PUT part 1..n directly ------------------------> object storage (bucket)",
+        "  client --(4) POST /uploads/{id}/complete {part ETags} --> API --> complete multipart, status=ready",
+        "                                                                  --> event --> sync service --> other devices",
+        "```",
+        "",
+        "- A **presigned URL** is a link the API signs with its own credentials, valid for one object and a few minutes.",
+        "  The client uploads directly; the API servers never carry the bytes.",
+        "- **Multipart upload** splits a big file into parts uploaded independently (in parallel, and retried one by",
+        "  one). On Amazon S3, for example, parts are at least 5 MiB (except the last) and an upload has at most 10,000",
+        "  parts; other object stores have similar rules.",
+        "- **Resumable:** after a dropped connection the client asks which parts the store already has and sends only",
+        "  the rest.",
+        "- The **metadata DB** holds names, folders, versions, owners, sharing and the object key. It is what every",
+        "  listing and every sync reads."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Where does each piece of data live?",
+      "buckets": [
+        "Metadata database",
+        "Object storage"
+      ],
+      "items": [
+        [
+          "The folder tree and file names",
+          0
+        ],
+        [
+          "The 4 GB video itself",
+          1
+        ],
+        [
+          "Who a file is shared with",
+          0
+        ],
+        [
+          "Each version's content hash and object key",
+          0
+        ],
+        [
+          "Thumbnails generated from photos",
+          1
+        ],
+        [
+          "Old versions' bytes kept for 30 days",
+          1
+        ]
+      ],
+      "explain": "Rule of thumb: anything you query, filter, join or update in place goes in the database; large immutable blobs go in object storage, addressed by a key the database stores."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Upload latency is terrible at peak. The API fleet dashboard:",
+        "",
+        "```text",
+        "api servers         24 instances",
+        "CPU                 18% average",
+        "network out / in    9.4 Gbit/s in per instance (the NIC limit is 10)",
+        "upload handler      reads the request body and streams it to the bucket",
+        "```",
+        "",
+        "What is the best fix?"
+      ],
+      "options": [
+        "Hand out presigned (multipart) URLs so clients upload straight to object storage; the API only handles metadata",
+        "Double the instance count: the CPU is fine, so they are cheap",
+        "Compress files on the API servers before storing them",
+        "Move the API servers into the same zone as the bucket"
+      ],
+      "answer": 0,
+      "explain": "The servers are network-bound, not CPU-bound, because they proxy every byte. Doubling them doubles the bill for a job object storage does natively. Presigned uploads remove the bytes from the API path entirely."
+    },
+    {
+      "type": "learn",
+      "title": "Dedupe and sync conflicts",
+      "body": [
+        "- **Content-hash dedupe.** Split files into chunks (fixed size, or content-defined chunking so an insert near",
+        "  the start does not shift every chunk) and name each chunk by its SHA-256. Upload only chunks the store does",
+        "  not have. Keep a **reference count** per chunk; delete the bytes only when it reaches zero.",
+        "- **Privacy note:** global dedupe across users leaks information (\"does anyone have this exact file?\"). Many",
+        "  services dedupe only within one account.",
+        "- **Sync conflicts.** Each file has a version number. A device uploads with \"I edited version 7\". If the server is",
+        "  already at 8, the edit is a conflict: keep both (\"report (conflicted copy).docx\") rather than silently",
+        "  overwrite someone's work. Last-writer-wins loses data."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put a resumable upload after a dropped connection in order.",
+      "lines": [
+        "The client asks the API for the upload's state",
+        "The API lists the parts the object store already has",
+        "The client uploads only the missing parts to their presigned URLs",
+        "The client asks the API to complete the upload with every part's ETag",
+        "The API marks the version ready and the sync service notifies other devices"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Plan the parts",
+      "prompt": [
+        "Write `long[] PartSizes(long fileSize, long partSize)`: the size of each part of a multipart upload, in order.",
+        "Every part is `partSize` except the last, which holds the remainder.",
+        "",
+        "Throw `ArgumentOutOfRangeException` when:",
+        "",
+        "- `fileSize` is `0` or less;",
+        "- `partSize` is under 5 MiB (`5 * 1024 * 1024` bytes);",
+        "- the file would need more than 10,000 parts."
+      ],
+      "starter": [
+        "long[] PartSizes(long fileSize, long partSize)",
+        "{",
+        "    return new long[0];",
+        "}"
+      ],
+      "solution": [
+        "long[] PartSizes(long fileSize, long partSize)",
+        "{",
+        "    const long MiB = 1024 * 1024;",
+        "    if (fileSize <= 0) throw new ArgumentOutOfRangeException(nameof(fileSize));",
+        "    if (partSize < 5 * MiB) throw new ArgumentOutOfRangeException(nameof(partSize), \"parts are at least 5 MiB\");",
+        "    var count = (fileSize + partSize - 1) / partSize;",
+        "    if (count > 10_000) throw new ArgumentOutOfRangeException(nameof(partSize), \"more than 10,000 parts\");",
+        "    var parts = new long[count];",
+        "    for (var i = 0; i < count; i++) parts[i] = Math.Min(partSize, fileSize - i * partSize);",
+        "    return parts;",
+        "}"
+      ],
+      "hints": [
+        "The part count is `(fileSize + partSize - 1) / partSize` (rounding up).",
+        "Part `i` is `Math.Min(partSize, fileSize - i * partSize)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "const long dojoMiB = 1024 * 1024;",
+        "Dojo.Eq(\"12 MiB in 5 MiB parts\", new long[] { 5 * dojoMiB, 5 * dojoMiB, 2 * dojoMiB }, PartSizes(12 * dojoMiB, 5 * dojoMiB));",
+        "Dojo.Eq(\"an exact fit has no tiny last part\", new long[] { 5 * dojoMiB, 5 * dojoMiB }, PartSizes(10 * dojoMiB, 5 * dojoMiB));",
+        "Dojo.Eq(\"a tiny file is one part\", new long[] { 1 }, PartSizes(1, 5 * dojoMiB));",
+        "Dojo.Eq(\"50 GiB in 8 MiB parts\", 6400, PartSizes(50 * 1024 * dojoMiB, 8 * dojoMiB).Length);",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"too many parts\", () => PartSizes(10_001 * 5 * dojoMiB, 5 * dojoMiB));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"parts too small\", () => PartSizes(100, dojoMiB));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"an empty file\", () => PartSizes(0, 5 * dojoMiB));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A deduplicating chunk store",
+      "prompt": [
+        "Write a class `ChunkStore` that stores chunks by content hash with reference counts:",
+        "",
+        "- `int Upload(IEnumerable<string> chunkHashes)`: one file's chunks. Each hash adds one reference. Return how many",
+        "  chunks had to be **uploaded** (hashes the store did not have yet; a hash repeated inside the same file is",
+        "  uploaded once).",
+        "- `int Stored`: how many distinct chunks are stored.",
+        "- `int RefCount(string hash)`: references to that chunk (`0` if unknown).",
+        "- `int Delete(IEnumerable<string> chunkHashes)`: one file is deleted: remove one reference per hash. A chunk whose",
+        "  count reaches `0` is freed. Return how many chunks were freed. Deleting a hash that is not stored throws",
+        "  `InvalidOperationException`."
+      ],
+      "starter": [
+        "class ChunkStore",
+        "{",
+        "    public int Upload(IEnumerable<string> chunkHashes) => 0;",
+        "",
+        "    public int Stored => 0;",
+        "",
+        "    public int RefCount(string hash) => 0;",
+        "",
+        "    public int Delete(IEnumerable<string> chunkHashes) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class ChunkStore",
+        "{",
+        "    readonly Dictionary<string, int> refs = new();",
+        "",
+        "    public int Upload(IEnumerable<string> chunkHashes)",
+        "    {",
+        "        var uploaded = 0;",
+        "        foreach (var h in chunkHashes)",
+        "        {",
+        "            if (!refs.ContainsKey(h)) { refs[h] = 0; uploaded++; }",
+        "            refs[h]++;",
+        "        }",
+        "        return uploaded;",
+        "    }",
+        "",
+        "    public int Stored => refs.Count;",
+        "",
+        "    public int RefCount(string hash) => refs.TryGetValue(hash, out var n) ? n : 0;",
+        "",
+        "    public int Delete(IEnumerable<string> chunkHashes)",
+        "    {",
+        "        var freed = 0;",
+        "        foreach (var h in chunkHashes)",
+        "        {",
+        "            if (!refs.TryGetValue(h, out var n)) throw new InvalidOperationException($\"chunk {h} is not stored\");",
+        "            if (n == 1) { refs.Remove(h); freed++; }",
+        "            else refs[h] = n - 1;",
+        "        }",
+        "        return freed;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `Dictionary<string, int>` of hash -> reference count is the whole store.",
+        "On delete, a count of 1 means this was the last reference: remove the entry and count it as freed."
+      ],
+      "template": [
+        "var dojoS = new ChunkStore();",
+        "Dojo.Eq(\"a file with a repeated chunk uploads it once\", 2, dojoS.Upload(new[] { \"a\", \"b\", \"a\" }));",
+        "Dojo.Eq(\"a second file shares chunk b\", 1, dojoS.Upload(new[] { \"b\", \"c\" }));",
+        "Dojo.Eq(\"three distinct chunks\", 3, dojoS.Stored);",
+        "Dojo.Eq(\"b is referenced twice\", 2, dojoS.RefCount(\"b\"));",
+        "Dojo.Eq(\"a is referenced twice by one file\", 2, dojoS.RefCount(\"a\"));",
+        "Dojo.Eq(\"deleting the first file frees only a\", 1, dojoS.Delete(new[] { \"a\", \"b\", \"a\" }));",
+        "Dojo.Eq(\"b and c remain\", 2, dojoS.Stored);",
+        "Dojo.Eq(\"b has one reference left\", 1, dojoS.RefCount(\"b\"));",
+        "Dojo.Eq(\"unknown chunks have no references\", 0, dojoS.RefCount(\"zzz\"));",
+        "Dojo.Throws<InvalidOperationException>(\"deleting a chunk that is not stored\", () => dojoS.Delete(new[] { \"zzz\" }));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

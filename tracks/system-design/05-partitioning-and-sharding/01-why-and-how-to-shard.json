@@ -1,0 +1,428 @@
+{
+  "title": "Why and how to shard",
+  "summary": "Shard for write throughput, storage and blast radius, not for reads. Pick the partition key from the access patterns, choose hash, range or a directory, and spot the hot shard before it pages you.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One database is not enough (eventually)",
+      "body": [
+        "**Sharding** splits one logical table across several databases. Each **shard** holds a slice of the rows and",
+        "has its own primary, replicas, disk and CPU. It is the last scaling step, not the first. Try these first:",
+        "",
+        "| Pain | Cheaper fix first |",
+        "|---|---|",
+        "| Too many **reads** | a cache, read replicas, better indexes |",
+        "| Slow queries | an index, a smaller result, fewer round trips |",
+        "| CPU at 80% on a small box | a bigger box (vertical scaling goes a long way in 2026) |",
+        "",
+        "Shard when one primary cannot keep up and nothing else helps:",
+        "",
+        "- **Write throughput**: every write goes to the one primary. Replicas do not share that work.",
+        "- **Storage**: the data set outgrows one machine's disks, or backups and restores take too long.",
+        "- **Blast radius**: a bad migration or a runaway query hurts one shard's users, not everyone.",
+        "",
+        "The bill: queries that span shards, transactions that span shards, uneven load, resharding later, and more",
+        "machines to run. A senior says *why not yet* as often as *how*."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which situation is the **weakest** reason to shard right now?",
+      "options": [
+        "The product page is read 40,000 times a second; writes are 200 a second and the primary's CPU is at 35%",
+        "The primary takes 9,000 writes a second, is at 85% CPU on the largest instance size, and writes grow 10% a month",
+        "The table is 60 TB and a full restore takes two days, longer than the recovery time objective",
+        "One tenant's batch job slows every other tenant down, and contracts promise isolation"
+      ],
+      "answer": 0,
+      "explain": "Read-heavy load with an idle primary is a job for a cache and read replicas. Sharding helps writes, storage and isolation; it does nothing a replica could not do for reads, at a much higher cost."
+    },
+    {
+      "type": "learn",
+      "title": "The partition key, and three ways to split",
+      "body": [
+        "The **partition key** decides which shard owns a row. Choose it from the **access patterns**: the most common",
+        "queries should touch one shard. For a shop, \"show my orders\" runs far more than \"all orders on Tuesday\", so",
+        "`customer_id` beats `order_date`.",
+        "",
+        "| Scheme | How | Good at | Bad at |",
+        "|---|---|---|---|",
+        "| **Hash** | `shard = hash(key) mod N` (or a ring, next lesson) | spreading load evenly | range scans (`WHERE created BETWEEN ...` hits every shard) |",
+        "| **Range** | shard 0 holds keys `[0, 25M)`, shard 1 `[25M, 50M)`... | range scans, time-ordered data | hot spots when new keys all land at one end |",
+        "| **Directory** | a lookup table maps key (or tenant) to shard | moving one big tenant, uneven tenants | one more lookup, and the directory must be highly available |",
+        "",
+        "```text",
+        "hash(customer_id) mod 4         range on created_at              directory",
+        "  c17 -> s1   c18 -> s3          Jan -> s0   Feb -> s1            acme    -> s2",
+        "  c19 -> s0   c20 -> s1          Mar -> s2   Apr -> s3  <- hot    globex  -> s0",
+        "```",
+        "",
+        "- **Partition key**: the column that decides which shard owns a row; pick it so common queries hit one shard."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Pick the partitioning scheme that fits each workload best.",
+      "buckets": [
+        "Hash",
+        "Range",
+        "Directory"
+      ],
+      "items": [
+        [
+          "User profiles, always read and written by `user_id`",
+          0
+        ],
+        [
+          "Sensor readings queried as \"last 24 hours for this sensor\", keyed by `(sensor_id, time)`",
+          1
+        ],
+        [
+          "B2B SaaS where three tenants are 100x bigger than the rest and must be movable on their own",
+          2
+        ],
+        [
+          "Shopping carts keyed by `cart_id`, no range queries",
+          0
+        ],
+        [
+          "An archive where old months move to cheaper shards",
+          1
+        ],
+        [
+          "Regulated tenants that must live in a named region",
+          2
+        ]
+      ],
+      "explain": "Hash for even load on point lookups; range when queries scan ordered keys; a directory when you need to place specific keys (tenants) by hand."
+    },
+    {
+      "type": "learn",
+      "title": "Hot spots, and salting the celebrity",
+      "body": [
+        "Sharding only helps if load is **spread**. Two classic ways it is not:",
+        "",
+        "1. **Time-ordered keys on range partitions.** Auto-increment ids, timestamps and UUIDv7 all grow. Every new",
+        "   row lands on the last range, so one shard takes 100% of the inserts while the others sit idle.",
+        "2. **Celebrity keys.** Hashing spreads *keys*, not *traffic*. If one key (a famous account, a viral post) takes",
+        "   30% of the writes, the shard that owns it takes 30% plus its fair share.",
+        "",
+        "**Salting** spreads one hot key over several rows: write `likes:post9#0` ... `likes:post9#7` (pick the suffix",
+        "from a sequence or at random), and read all eight and add them up. Writes spread eight ways; reads cost eight",
+        "lookups. Only salt the keys you know are hot.",
+        "",
+        "```text",
+        "before                         after salting into 4",
+        "likes:post9  -> s2  (6,000/s)   likes:post9#0 -> s0  1,500/s",
+        "                                likes:post9#1 -> s3  1,500/s",
+        "                                likes:post9#2 -> s1  1,500/s",
+        "                                likes:post9#3 -> s2  1,500/s",
+        "```",
+        "",
+        "- **Hot spot**: a shard (or key) that takes far more than its share of the load, so adding shards does not help."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** It is 09:05 on a Monday. The orders cluster pages: `shard-07 CPU > 95%`. The per-shard",
+        "dashboard shows the rest are quiet. Orders use a `bigint` identity column as the partition key, range",
+        "partitioned, 8 shards. What is the most likely cause?"
+      ],
+      "code": [
+        "shard     range (order_id)        inserts/s   cpu",
+        "shard-00  [0, 40M)                       3     9%",
+        "shard-01  [40M, 80M)                     2     8%",
+        "...",
+        "shard-06  [240M, 280M)                   4    11%",
+        "shard-07  [280M, +inf)               5,870    97%"
+      ],
+      "options": [
+        "Every new order gets the next id, so all inserts land in the last range: a time-ordered key on range partitioning",
+        "shard-07 has a missing index",
+        "A celebrity customer is placing thousands of orders",
+        "The load balancer sends all traffic to shard-07"
+      ],
+      "answer": 0,
+      "explain": "Growing ids plus range partitioning means the newest range takes all the writes. Hash the key (or partition by a high-cardinality key like `customer_id`) so new rows spread. Splitting shard-07 only moves the problem to the new last range."
+    },
+    {
+      "type": "code",
+      "title": "Which range owns the key?",
+      "prompt": [
+        "Range partitioning keeps a sorted list of **exclusive upper bounds**. With bounds `{ 100, 200, 300 }` there",
+        "are four shards: shard 0 holds keys below 100, shard 1 holds `[100, 200)`, shard 2 `[200, 300)`, and shard 3",
+        "holds 300 and above.",
+        "",
+        "Write `int RangeShard(long key, long[] upperBounds)`. Keys may be negative (they go to shard 0)."
+      ],
+      "starter": [
+        "int RangeShard(long key, long[] upperBounds)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int RangeShard(long key, long[] upperBounds)",
+        "{",
+        "    for (var i = 0; i < upperBounds.Length; i++)",
+        "        if (key < upperBounds[i]) return i;",
+        "    return upperBounds.Length;",
+        "}"
+      ],
+      "hints": [
+        "Walk the bounds in order and return the first index whose bound is greater than the key.",
+        "If no bound is greater, the key belongs to the last, open-ended shard: index `upperBounds.Length`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "long[] dojoB = { 100, 200, 300 };",
+        "Dojo.Eq(\"5 is in shard 0\", 0, RangeShard(5, dojoB));",
+        "Dojo.Eq(\"100 is the first key of shard 1 (bounds are exclusive)\", 1, RangeShard(100, dojoB));",
+        "Dojo.Eq(\"299 is in shard 2\", 2, RangeShard(299, dojoB));",
+        "Dojo.Eq(\"300 goes to the open-ended last shard\", 3, RangeShard(300, dojoB));",
+        "Dojo.Eq(\"a huge key goes to the last shard too\", 3, RangeShard(9_000_000_000, dojoB));",
+        "Dojo.Eq(\"negative keys go to shard 0\", 0, RangeShard(-7, dojoB));",
+        "Dojo.Eq(\"no bounds means one shard\", 0, RangeShard(42, new long[0]));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: seeing partitions and shards",
+      "body": "When load is uneven, first find out where a key lives and how much each partition holds. These are the commands for the stores you will meet most.",
+      "toolkit": [
+        {
+          "cmd": "CREATE TABLE ... PARTITION BY HASH (col)",
+          "what": "PostgreSQL declarative partitioning: one logical table, several physical partitions on the same server. It is partitioning, not sharding across machines (extensions such as Citus spread partitions over nodes).",
+          "flags": [
+            [
+              "PARTITION BY HASH (customer_id)",
+              "rows go to a partition by the hash of the key"
+            ],
+            [
+              "PARTITION OF orders FOR VALUES WITH (MODULUS 4, REMAINDER 0)",
+              "this partition takes hash mod 4 = 0"
+            ],
+            [
+              "PARTITION BY RANGE (created_at)",
+              "ranges: FOR VALUES FROM (...) TO (...)"
+            ]
+          ],
+          "example": "CREATE TABLE orders (id bigint, customer_id bigint, total numeric) PARTITION BY HASH (customer_id);",
+          "when": "a big table needs smaller indexes, faster vacuum, or cheap deletes of old ranges",
+          "lang": "sql"
+        },
+        {
+          "cmd": "SELECT tableoid::regclass, count(*) FROM orders GROUP BY 1",
+          "what": "Counts rows per partition in PostgreSQL: `tableoid` is the partition each row really lives in.",
+          "flags": [
+            [
+              "tableoid::regclass",
+              "the partition's name"
+            ]
+          ],
+          "example": "SELECT tableoid::regclass AS part, count(*) FROM orders GROUP BY 1 ORDER BY 2 DESC;",
+          "when": "checking that a hash partition key really spreads the rows",
+          "lang": "sql"
+        },
+        {
+          "cmd": "SELECT token(key) ... (cqlsh)",
+          "what": "In Cassandra the partitioner turns the partition key into a token on the ring; `token()` shows it, so you can see where rows sit.",
+          "flags": [
+            [
+              "token(user_id)",
+              "the Murmur3 token of the partition key"
+            ]
+          ],
+          "example": "SELECT token(user_id), user_id FROM shop.carts LIMIT 5;",
+          "lang": "sql"
+        },
+        {
+          "cmd": "nodetool getendpoints <keyspace> <table> <key>",
+          "what": "Prints the replicas (node addresses) that own one partition key. The fastest way to find the node behind a hot key.",
+          "flags": [
+            [
+              "<key>",
+              "the partition key value, as text"
+            ]
+          ],
+          "example": "nodetool getendpoints shop carts user42",
+          "when": "one node is hot and you suspect one key",
+          "lang": "bash"
+        },
+        {
+          "cmd": "nodetool status",
+          "what": "Every node in the Cassandra cluster with its state (UN = up, normal), load on disk and the share of the ring it owns.",
+          "flags": [
+            [
+              "Owns (effective)",
+              "the percentage of data this node replicates"
+            ],
+            [
+              "<keyspace>",
+              "give a keyspace to get effective ownership for its replication"
+            ]
+          ],
+          "example": "nodetool status shop",
+          "lang": "bash"
+        },
+        {
+          "cmd": "redis-cli CLUSTER KEYSLOT <key>",
+          "what": "Redis Cluster has 16,384 hash slots: slot = CRC16(key) mod 16384. A **hash tag** `{...}` makes only the part in braces count, so related keys share a slot (and can be used in one multi-key command).",
+          "flags": [
+            [
+              "{user42}",
+              "user:{user42}:cart and user:{user42}:orders land in the same slot"
+            ]
+          ],
+          "example": "redis-cli CLUSTER KEYSLOT 'user:{user42}:cart'",
+          "lang": "bash"
+        },
+        {
+          "cmd": "redis-cli --cluster reshard <host:port>",
+          "what": "Moves hash slots (and their keys) between Redis Cluster nodes while the cluster keeps serving.",
+          "flags": [
+            [
+              "--cluster-from <node-id>",
+              "the source node(s)"
+            ],
+            [
+              "--cluster-to <node-id>",
+              "the target node"
+            ],
+            [
+              "--cluster-slots <n>",
+              "how many slots to move"
+            ],
+            [
+              "--cluster-yes",
+              "do not ask for confirmation"
+            ]
+          ],
+          "example": "redis-cli --cluster reshard 10.0.0.5:6379 --cluster-from 3e1f... --cluster-to 9ab2... --cluster-slots 500 --cluster-yes",
+          "when": "a new node joined, or one node holds too many hot slots",
+          "lang": "bash"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to what it tells you.",
+      "pairs": [
+        [
+          "`nodetool getendpoints shop carts user42`",
+          "which nodes hold this one partition key"
+        ],
+        [
+          "`nodetool status`",
+          "each node's state, load and share of the ring"
+        ],
+        [
+          "`CLUSTER KEYSLOT 'user:{user42}:cart'`",
+          "the Redis Cluster slot a key maps to"
+        ],
+        [
+          "`SELECT tableoid::regclass, count(*) ... GROUP BY 1`",
+          "how many rows each PostgreSQL partition holds"
+        ],
+        [
+          "`redis-cli --cluster reshard ... --cluster-slots 500`",
+          "moves 500 slots between nodes online"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Hash-partition `orders` by customer into 4 partitions in PostgreSQL. Complete the first partition.",
+      "code": [
+        "CREATE TABLE orders (id bigint, customer_id bigint, total numeric)",
+        "    PARTITION BY __1__ (customer_id);",
+        "",
+        "CREATE TABLE orders_p0 PARTITION OF orders",
+        "    FOR VALUES WITH (__2__ 4, REMAINDER 0);"
+      ],
+      "blanks": [
+        "HASH",
+        "MODULUS"
+      ],
+      "bank": [
+        "RANGE",
+        "LIST",
+        "MOD",
+        "BUCKETS"
+      ],
+      "explain": "Each hash partition takes the rows whose hash of `customer_id`, mod `MODULUS`, equals `REMAINDER`. You need partitions for remainders 0 to 3, or inserts for the missing remainders fail."
+    },
+    {
+      "type": "code",
+      "title": "Find the hot shard, salt the hot key",
+      "prompt": [
+        "Two helpers for the on-call runbook.",
+        "",
+        "1. `List<int> HotShards(double[] writesPerSec, double factor)`: the indexes (in order) of shards whose writes are",
+        "   **more than** `factor` times the average over all shards. With `{ 100, 100, 100, 700 }` the average is 250, so",
+        "   with factor 2 only shard 3 (700 > 500) is hot.",
+        "2. `List<string> SaltedKeys(string key, int buckets)`: every salted row a reader must fetch, `key#0` up to",
+        "   `key#(buckets-1)`. Throw `ArgumentOutOfRangeException` when `buckets < 1`."
+      ],
+      "starter": [
+        "List<int> HotShards(double[] writesPerSec, double factor)",
+        "{",
+        "    return new List<int>();",
+        "}",
+        "",
+        "List<string> SaltedKeys(string key, int buckets)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<int> HotShards(double[] writesPerSec, double factor)",
+        "{",
+        "    var hot = new List<int>();",
+        "    if (writesPerSec.Length == 0) return hot;",
+        "    var average = writesPerSec.Average();",
+        "    for (var i = 0; i < writesPerSec.Length; i++)",
+        "        if (writesPerSec[i] > factor * average) hot.Add(i);",
+        "    return hot;",
+        "}",
+        "",
+        "List<string> SaltedKeys(string key, int buckets)",
+        "{",
+        "    if (buckets < 1) throw new ArgumentOutOfRangeException(nameof(buckets));",
+        "    return Enumerable.Range(0, buckets).Select(i => $\"{key}#{i}\").ToList();",
+        "}"
+      ],
+      "hints": [
+        "`writesPerSec.Average()` gives the mean; compare each shard with `factor * average`.",
+        "`Enumerable.Range(0, buckets).Select(i => $\"{key}#{i}\")` builds the salted keys."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"one hot shard\", new List<int> { 3 }, HotShards(new double[] { 100, 100, 100, 700 }, 2));",
+        "Dojo.Eq(\"an even cluster has none\", new List<int>(), HotShards(new double[] { 100, 110, 90, 100 }, 1.5));",
+        "Dojo.Eq(\"two hot shards, in order\", new List<int> { 0, 1 }, HotShards(new double[] { 500, 500, 0, 0 }, 1.5));",
+        "Dojo.Eq(\"exactly factor x average is not hot\", new List<int>(), HotShards(new double[] { 200, 100, 0 }, 2));",
+        "Dojo.Eq(\"an idle cluster has none\", new List<int>(), HotShards(new double[] { 0, 0, 0 }, 2));",
+        "Dojo.Eq(\"no shards, no hot shards\", new List<int>(), HotShards(new double[0], 2));",
+        "Dojo.Eq(\"salting into 4\", new List<string> { \"likes:post9#0\", \"likes:post9#1\", \"likes:post9#2\", \"likes:post9#3\" }, SaltedKeys(\"likes:post9\", 4));",
+        "Dojo.Eq(\"one bucket is just one row\", new List<string> { \"k#0\" }, SaltedKeys(\"k\", 1));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"zero buckets is an error\", () => SaltedKeys(\"k\", 0));"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "hot-shard",
+      "title": "Build it: the hot shard",
+      "prompt": [
+        "In the **System design board**, open *The hot shard*. Eight shards, range partitioned on time-ordered ids:",
+        "every write lands on the last one. Change the partitioning so the writes spread, then run the load test and",
+        "watch the per-shard utilisation even out. The board shows the exact goals."
+      ],
+      "explain": "Hash partitioning turns a growing key into an evenly spread one. You lose cheap range scans on that key, which is the trade-off to say out loud."
+    }
+  ]
+}

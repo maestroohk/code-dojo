@@ -1,0 +1,263 @@
+{
+  "title": "Replication, read replicas and failover",
+  "summary": "Leader/follower replication, synchronous versus asynchronous, read replicas and their lag, read-your-writes, failing over without split brain, and why replicas are not backups: PITR, RPO and RTO.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One leader, many followers",
+      "body": [
+        "In **leader/follower** replication (primary/replica), every write goes to one primary. It records each",
+        "change in its write-ahead log (WAL) and streams the WAL to replicas, which replay it.",
+        "",
+        "```text",
+        "            writes                    WAL stream",
+        " app ───────────────> primary ═══════════════════> replica A  (same region, another AZ)",
+        "  │                     ║",
+        "  │ reads               ╚═══════════════════════> replica B  (reads only)",
+        "  └────────────────────────────────────────────> replica A or B",
+        "```",
+        "",
+        "- **Asynchronous** (the default): the primary confirms the commit before any replica has it. Fast, but a",
+        "  primary that dies loses whatever the replicas had not received.",
+        "- **Synchronous**: the commit waits until a standby confirms. In PostgreSQL: `synchronous_standby_names =",
+        "  'ANY 1 (a, b)'` plus `synchronous_commit` (`on` waits for the standby's disk flush, `remote_apply` until",
+        "  it is visible to reads there). No acknowledged write is lost, but every commit pays a round trip, and if",
+        "  the standby is down the primary **stops committing** unless another standby can answer.",
+        "",
+        "Managed \"multi-AZ\" databases usually keep a synchronous standby in a second AZ for failover, plus",
+        "asynchronous read replicas for scale."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to its meaning.",
+      "pairs": [
+        ["Synchronous standby", "A commit is confirmed only after this replica has it"],
+        ["Asynchronous replica", "Receives changes after the commit is confirmed, so it can be behind"],
+        ["Replica lag", "How far a replica's replayed state is behind the primary"],
+        ["Promotion", "Turning a replica into the new primary"],
+        ["Split brain", "Two nodes both accept writes as primary"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Read replicas and read-your-writes",
+      "body": [
+        "Read replicas scale reads, not writes: every replica replays every write. They also serve **slightly old",
+        "data**. Lag is usually milliseconds, and grows to seconds or minutes when a replica is busy, a large",
+        "transaction replays, or the network is slow.",
+        "",
+        "The classic bug: a user saves their profile (write to the primary), the page reloads (read from a",
+        "replica), and their change is gone. **Read-your-writes** consistency fixes it for that user without",
+        "sending everyone to the primary:",
+        "",
+        "1. **Time window**: after a user writes, route their reads to the primary for a few seconds. Simple;",
+        "   wrong when lag exceeds the window.",
+        "2. **Wait for the position**: after the write, remember `pg_current_wal_lsn()`. Read from a replica",
+        "   only once its `pg_last_wal_replay_lsn()` has reached that position; otherwise use the primary. Exact.",
+        "",
+        "Also watch **monotonic reads**: two reads by one user that hit two replicas with different lag can go",
+        "backwards in time. Pin a user (or a session) to one replica."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Support tickets: \"I changed my delivery address, it saved, then the checkout page showed",
+        "the old one. A refresh later it was right.\" Writes go to the primary; all page reads go to two replicas.",
+        "On the primary:"
+      ],
+      "code": [
+        "SELECT application_name, state, replay_lag FROM pg_stat_replication;",
+        " application_name |   state   |    replay_lag",
+        "------------------+-----------+-----------------",
+        " replica-a        | streaming | 00:00:01.840211",
+        " replica-b        | streaming | 00:00:02.410577"
+      ],
+      "options": [
+        "Replica lag of about 2 s breaks read-your-writes; after a user writes, read their data from the primary until a replica has replayed their write",
+        "The write was lost; switch to synchronous replication everywhere",
+        "The replicas are broken; rebuild them",
+        "Add a third replica so the lag drops"
+      ],
+      "answer": 0,
+      "explain": "The data was not lost, only not replayed yet. Two seconds is normal for a busy replica. Making every replica synchronous would slow every commit to fix a problem that only the writing user notices. Another replica does not reduce lag; it shares reads."
+    },
+    {
+      "type": "predict",
+      "prompt": "The primary has written up to byte 5,000,000 of WAL, the replica has replayed up to 4,200,000, and it replays about 400,000 bytes per second. What does this print?",
+      "code": [
+        "long primaryLsn = 5_000_000, replayLsn = 4_200_000;",
+        "int bytesPerSec = 400_000;",
+        "Console.WriteLine($\"{(primaryLsn - replayLsn) / bytesPerSec} s behind\");"
+      ],
+      "answer": "2 s behind",
+      "explain": "LSNs are byte positions in the WAL, so subtracting them gives the lag in bytes: `pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)` on the primary. Dividing by the replay rate turns bytes into time."
+    },
+    {
+      "type": "learn",
+      "title": "Failover without split brain",
+      "body": [
+        "When the primary dies, a standby is **promoted** and writers are pointed at it. The hard part is being sure",
+        "the old primary is really gone. If it was only cut off by the network and comes back still accepting",
+        "writes, you have **split brain**: two primaries, two diverging histories, and a painful manual merge.",
+        "",
+        "- **Detect by quorum**: an HA manager (Patroni with etcd, or the cloud provider's control plane) decides",
+        "  with a majority of independent observers, never from one health check.",
+        "- **Fence the old primary** before promoting: stop it, cut its network, or make storage refuse it",
+        "  (STONITH: \"shoot the other node in the head\"). Writers include a **fencing token** (an epoch number)",
+        "  so a stale primary's writes are rejected.",
+        "- Promote the most up-to-date standby, then move the write endpoint (DNS name or proxy) to it.",
+        "",
+        "Even managed failover takes tens of seconds to a couple of minutes, during which writes fail. Apps must",
+        "retry idempotent writes with backoff and reconnect, and must not cache the old primary's address forever."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put a safe failover in order.",
+      "lines": [
+        "A majority of observers agree the primary is unreachable",
+        "Fence the old primary so it cannot accept writes",
+        "Promote the standby that has replayed the most WAL",
+        "Point the write endpoint at the new primary",
+        "Rebuild the old primary as a replica of the new one"
+      ],
+      "explain": "Fencing before promotion is what prevents split brain. The old primary may have commits the new one never received, so it must be rewound or rebuilt (`pg_rewind`) rather than rejoined as it is."
+    },
+    {
+      "type": "learn",
+      "title": "Replicas are not backups",
+      "body": [
+        "A replica copies **everything**, including mistakes: `DROP TABLE orders` reaches every replica within",
+        "milliseconds. Backups protect against that.",
+        "",
+        "- **PITR** (point-in-time recovery): a base backup plus the archived WAL since then lets you restore to any",
+        "  moment, for example 14:31:59, one second before the bad migration. Tools: pgBackRest, WAL-G, Barman, or",
+        "  the managed database's PITR setting.",
+        "- **RPO** (recovery point objective): how much data you may lose, measured in time. Async replication",
+        "  failover loses about the replica lag; PITR loses whatever was not yet archived.",
+        "- **RTO** (recovery time objective): how long until service is back. A failover is minutes; restoring a",
+        "  4 TB database from backup can be hours.",
+        "",
+        "A backup you have never restored is a hope, not a backup. Schedule restore tests and time them: that",
+        "measured time is your real RTO."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The primary takes 900 writes per second. Its asynchronous replica runs 2.5 s behind when the primary's disk fails and the replica is promoted. Roughly how many acknowledged writes are lost?",
+      "options": [
+        "About 2,250",
+        "None: replicas keep everything",
+        "About 360",
+        "About 900"
+      ],
+      "answer": 0,
+      "explain": "900 writes/s × 2.5 s of lag = 2,250 writes that the primary confirmed and the replica never received. If that RPO is not acceptable, use a synchronous standby for failover, and keep async replicas for reads."
+    },
+    {
+      "type": "code",
+      "title": "A read-your-writes router",
+      "prompt": [
+        "Write a class `ReplicaRouter` that decides whether a user's read may go to a replica.",
+        "",
+        "- `ReplicaRouter(long stickyMs)`: throws `ArgumentOutOfRangeException` when `stickyMs < 0`.",
+        "- `void RecordWrite(string user, long lsn, long nowMs)`: the user's latest write ended at WAL position",
+        "  `lsn` at time `nowMs` (a later write replaces the earlier one).",
+        "- `string RouteByLsn(string user, long replicaReplayLsn)`: `\"primary\"` if the user has a write the replica",
+        "  has not replayed yet (its `lsn` is greater than `replicaReplayLsn`), else `\"replica\"`.",
+        "- `string RouteByTime(string user, long nowMs)`: `\"primary\"` if the user wrote less than `stickyMs` ago,",
+        "  else `\"replica\"`.",
+        "- `int PrimaryReads` and `int ReplicaReads`: how many reads each method has routed where.",
+        "",
+        "Users who never wrote always read from the replica."
+      ],
+      "starter": [
+        "class ReplicaRouter",
+        "{",
+        "    public ReplicaRouter(long stickyMs) { }",
+        "",
+        "    public int PrimaryReads { get; }",
+        "    public int ReplicaReads { get; }",
+        "",
+        "    public void RecordWrite(string user, long lsn, long nowMs) { }",
+        "",
+        "    public string RouteByLsn(string user, long replicaReplayLsn) => \"replica\";",
+        "",
+        "    public string RouteByTime(string user, long nowMs) => \"replica\";",
+        "}"
+      ],
+      "solution": [
+        "class ReplicaRouter",
+        "{",
+        "    readonly long stickyMs;",
+        "    readonly Dictionary<string, (long Lsn, long AtMs)> lastWrite = new();",
+        "",
+        "    public ReplicaRouter(long stickyMs)",
+        "    {",
+        "        if (stickyMs < 0) throw new ArgumentOutOfRangeException(nameof(stickyMs));",
+        "        this.stickyMs = stickyMs;",
+        "    }",
+        "",
+        "    public int PrimaryReads { get; private set; }",
+        "    public int ReplicaReads { get; private set; }",
+        "",
+        "    public void RecordWrite(string user, long lsn, long nowMs) => lastWrite[user] = (lsn, nowMs);",
+        "",
+        "    public string RouteByLsn(string user, long replicaReplayLsn) =>",
+        "        Route(lastWrite.TryGetValue(user, out var w) && w.Lsn > replicaReplayLsn);",
+        "",
+        "    public string RouteByTime(string user, long nowMs) =>",
+        "        Route(lastWrite.TryGetValue(user, out var w) && nowMs - w.AtMs < stickyMs);",
+        "",
+        "    string Route(bool toPrimary)",
+        "    {",
+        "        if (toPrimary) { PrimaryReads++; return \"primary\"; }",
+        "        ReplicaReads++;",
+        "        return \"replica\";",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep one dictionary from user to `(Lsn, AtMs)` of their latest write.",
+        "Both routing methods compute a bool and pass it to one private helper that counts and returns the name."
+      ],
+      "template": [
+        "var dojoR = new ReplicaRouter(2000);",
+        "Dojo.Eq(\"a user who never wrote reads from the replica\", \"replica\", dojoR.RouteByLsn(\"ann\", 100));",
+        "dojoR.RecordWrite(\"ann\", 500, 10_000);",
+        "Dojo.Eq(\"the replica has not replayed ann's write\", \"primary\", dojoR.RouteByLsn(\"ann\", 450));",
+        "Dojo.Eq(\"once the replica reaches her LSN, it is safe\", \"replica\", dojoR.RouteByLsn(\"ann\", 500));",
+        "Dojo.Eq(\"other users are not affected\", \"replica\", dojoR.RouteByLsn(\"bob\", 450));",
+        "Dojo.Eq(\"inside the 2 s window: primary\", \"primary\", dojoR.RouteByTime(\"ann\", 11_000));",
+        "Dojo.Eq(\"exactly 2 s later: replica\", \"replica\", dojoR.RouteByTime(\"ann\", 12_000));",
+        "dojoR.RecordWrite(\"ann\", 700, 13_000);",
+        "Dojo.Eq(\"the latest write counts\", \"primary\", dojoR.RouteByLsn(\"ann\", 600));",
+        "Dojo.Eq(\"reads routed to the primary\", 3, dojoR.PrimaryReads);",
+        "Dojo.Eq(\"reads routed to the replica\", 4, dojoR.ReplicaReads);",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"a negative window is rejected\", () => new ReplicaRouter(-1));",
+        "{{CODE}}"
+      ],
+      "explain": [
+        "The LSN version is exact and costs one extra value per user (often kept in the session or a cookie). The",
+        "time version is a guess about lag: when a replica falls 5 s behind, a 2 s window serves stale reads",
+        "again. Seniors alert on `replay_lag` so that guess stays true."
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "read-replicas",
+      "title": "Build it: read replicas and lag",
+      "prompt": [
+        "In the **System design board**, open *Read replicas and lag*. Personalised reads cannot be cached and the",
+        "primary is overloaded. Add read replicas from the app servers, size them so the primary has headroom,",
+        "and keep the replica lag under the goal, within the budget."
+      ],
+      "explain": "Watch the replica lag panel: replicas that are themselves near 100 % fall behind, because replaying writes competes with serving reads."
+    }
+  ]
+}

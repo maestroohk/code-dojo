@@ -1,0 +1,234 @@
+{
+  "title": "Boss: the zone outage postmortem",
+  "summary": "Turn a real postmortem timeline into numbers: time to detect, mitigate and resolve, the error budget it burned, and the review findings that become action items.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The postmortem draft on your desk",
+      "body": [
+        "Checkout had a bad afternoon. The incident commander wrote this draft and asked you, as the reviewer, to",
+        "fill in the numbers and the findings before Friday's review. Tags in capitals mark the key moments.",
+        "",
+        "```text",
+        "Postmortem: checkout errors during a zone outage (2026-10-14)",
+        "SLO: 99.9% of checkout requests succeed, 30-day window",
+        "Architecture: 3 zones, 30 app instances at 72% CPU at peak; PostgreSQL primary in zone b,",
+        "              asynchronous replica in zone c, no automatic failover",
+        "",
+        "Timeline (UTC)",
+        "13:52 START     Packet loss begins in zone b",
+        "13:58 DETECT    Burn-rate page fires (14.4x over 1 h and 5 min)",
+        "14:06           On-call joins; errors come from zone b app servers",
+        "14:19 MITIGATE  Zone b drained from the load balancer by hand; errors back under the SLO",
+        "14:31           Writes still slow: the primary is in zone b",
+        "15:05 RESOLVE   Zone b recovers; traffic rebalanced",
+        "",
+        "Error rate per minute: 13:52-13:57 5%, 13:58-14:18 31%, 14:19-14:29 2%",
+        "```",
+        "",
+        "Each step below is one piece of the review. They build on each other: the starter of each step contains",
+        "the pieces you already wrote."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Minutes between two times",
+      "prompt": [
+        "Write `int MinutesBetween(string from, string to)` for times written `HH:mm`. If `to` is earlier than `from`, the",
+        "incident crossed midnight: add a day (1,440 minutes).",
+        "",
+        "`MinutesBetween(\"13:52\", \"13:58\")` is `6`; `MinutesBetween(\"23:50\", \"00:10\")` is `20`."
+      ],
+      "starter": [
+        "int MinutesBetween(string from, string to)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int MinutesBetween(string from, string to)",
+        "{",
+        "    int Minutes(string t) => int.Parse(t[..2]) * 60 + int.Parse(t[3..5]);",
+        "    var d = Minutes(to) - Minutes(from);",
+        "    return d < 0 ? d + 1440 : d;",
+        "}"
+      ],
+      "hints": [
+        "Hours are `t[..2]` and minutes `t[3..5]`; turn both times into minutes since midnight.",
+        "A negative difference means the next day: add 1,440."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"start to detect\", 6, MinutesBetween(\"13:52\", \"13:58\"));",
+        "Dojo.Eq(\"across the hour\", 27, MinutesBetween(\"13:52\", \"14:19\"));",
+        "Dojo.Eq(\"start to resolve\", 73, MinutesBetween(\"13:52\", \"15:05\"));",
+        "Dojo.Eq(\"across midnight\", 20, MinutesBetween(\"23:50\", \"00:10\"));",
+        "Dojo.Eq(\"the same minute\", 0, MinutesBetween(\"09:30\", \"09:30\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Detect, mitigate, resolve",
+      "prompt": [
+        "Write `(int Detect, int Mitigate, int Resolve) Metrics(string[] timeline)`. Each line starts with `HH:mm`;",
+        "after it, the first word may be a tag: `START`, `DETECT`, `MITIGATE` or `RESOLVE`. Lines without a tag are",
+        "notes. Return the minutes from `START` to each of the other three. If any of the four tags is missing, throw",
+        "`InvalidOperationException` (a postmortem without them is not finished).",
+        "",
+        "For the draft's timeline the answer is `(6, 27, 73)`. Your `MinutesBetween` is in the starter."
+      ],
+      "starter": [
+        "int MinutesBetween(string from, string to)",
+        "{",
+        "    int Minutes(string t) => int.Parse(t[..2]) * 60 + int.Parse(t[3..5]);",
+        "    var d = Minutes(to) - Minutes(from);",
+        "    return d < 0 ? d + 1440 : d;",
+        "}",
+        "",
+        "(int Detect, int Mitigate, int Resolve) Metrics(string[] timeline)",
+        "{",
+        "    return (0, 0, 0);",
+        "}"
+      ],
+      "solution": [
+        "int MinutesBetween(string from, string to)",
+        "{",
+        "    int Minutes(string t) => int.Parse(t[..2]) * 60 + int.Parse(t[3..5]);",
+        "    var d = Minutes(to) - Minutes(from);",
+        "    return d < 0 ? d + 1440 : d;",
+        "}",
+        "",
+        "(int Detect, int Mitigate, int Resolve) Metrics(string[] timeline)",
+        "{",
+        "    var at = new Dictionary<string, string>();",
+        "    foreach (var line in timeline)",
+        "    {",
+        "        if (line.Length < 5) continue;",
+        "        var tag = line[5..].Trim().Split(' ')[0];",
+        "        if (tag is \"START\" or \"DETECT\" or \"MITIGATE\" or \"RESOLVE\") at[tag] = line[..5];",
+        "    }",
+        "    foreach (var need in new[] { \"START\", \"DETECT\", \"MITIGATE\", \"RESOLVE\" })",
+        "        if (!at.ContainsKey(need)) throw new InvalidOperationException($\"the timeline has no {need} line\");",
+        "    return (MinutesBetween(at[\"START\"], at[\"DETECT\"]),",
+        "            MinutesBetween(at[\"START\"], at[\"MITIGATE\"]),",
+        "            MinutesBetween(at[\"START\"], at[\"RESOLVE\"]));",
+        "}"
+      ],
+      "hints": [
+        "The time is `line[..5]`; the tag is the first word of `line[5..].Trim()`.",
+        "Collect tag -> time in a dictionary, check all four are there, then call `MinutesBetween` three times."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoLines = new[] {",
+        "    \"13:52 START     Packet loss begins in zone b\",",
+        "    \"13:58 DETECT    Burn-rate page fires (14.4x over 1 h and 5 min)\",",
+        "    \"14:06           On-call joins; errors come from zone b app servers\",",
+        "    \"14:19 MITIGATE  Zone b drained from the load balancer by hand\",",
+        "    \"14:31           Writes still slow: the primary is in zone b\",",
+        "    \"15:05 RESOLVE   Zone b recovers; traffic rebalanced\" };",
+        "var dojoM = Metrics(dojoLines);",
+        "Dojo.Eq(\"time to detect\", 6, dojoM.Detect);",
+        "Dojo.Eq(\"time to mitigate\", 27, dojoM.Mitigate);",
+        "Dojo.Eq(\"time to resolve\", 73, dojoM.Resolve);",
+        "var dojoNight = Metrics(new[] { \"23:55 START a\", \"23:59 DETECT b\", \"00:20 MITIGATE c\", \"01:00 RESOLVE d\" });",
+        "Dojo.Eq(\"across midnight: mitigate\", 25, dojoNight.Mitigate);",
+        "Dojo.Eq(\"across midnight: resolve\", 65, dojoNight.Resolve);",
+        "Dojo.Eq(\"notes that mention a tag word later do not count\", 6, Metrics(new[] { \"10:00 START x\", \"10:02 On-call asks when DETECT fired\", \"10:06 DETECT page\", \"10:10 MITIGATE y\", \"10:20 RESOLVE z\" }).Detect);",
+        "Dojo.Throws<InvalidOperationException>(\"no RESOLVE line\", () => Metrics(new[] { \"10:00 START x\", \"10:05 DETECT y\", \"10:09 MITIGATE z\" }));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "How much error budget did it burn?",
+      "prompt": [
+        "Write `double BudgetSpentPercent(double[] errorRatePerMinute, double slo, int windowDays)`: the share of the",
+        "window's error budget the incident used, in percent. Each array entry is the fraction of requests that failed",
+        "in one minute (assume steady traffic, so a minute at 31% errors costs 0.31 \"bad minutes\"). The budget is",
+        "`windowDays x 1,440 x (1 - slo)` minutes. A rate below 0 or above 1 throws `ArgumentException`.",
+        "",
+        "The draft's 38 minutes (6 at 5%, 21 at 31%, 11 at 2%) against 99.9% over 30 days is about `16.3`%."
+      ],
+      "starter": [
+        "double BudgetSpentPercent(double[] errorRatePerMinute, double slo, int windowDays)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double BudgetSpentPercent(double[] errorRatePerMinute, double slo, int windowDays)",
+        "{",
+        "    if (errorRatePerMinute.Any(r => r < 0 || r > 1)) throw new ArgumentException(\"error rates are fractions from 0 to 1\");",
+        "    var budgetMinutes = windowDays * 1440 * (1 - slo);",
+        "    return errorRatePerMinute.Sum() / budgetMinutes * 100;",
+        "}"
+      ],
+      "hints": [
+        "Bad minutes are the sum of the per-minute error rates.",
+        "Budget minutes: `windowDays * 1440 * (1 - slo)`; the answer is bad / budget x 100."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRates = Enumerable.Repeat(0.05, 6).Concat(Enumerable.Repeat(0.31, 21)).Concat(Enumerable.Repeat(0.02, 11)).ToArray();",
+        "Dojo.Eq(\"the draft's incident against 99.9% / 30 days\", 16.3, Math.Round(BudgetSpentPercent(dojoRates, 0.999, 30), 1));",
+        "Dojo.Eq(\"the same incident against 99.95%\", 32.5, Math.Round(BudgetSpentPercent(dojoRates, 0.9995, 30), 1));",
+        "Dojo.Eq(\"10 minutes fully down blows a 99.99% budget\", 231.5, Math.Round(BudgetSpentPercent(Enumerable.Repeat(1.0, 10).ToArray(), 0.9999, 30), 1));",
+        "Dojo.Eq(\"a clean hour costs nothing\", 0.0, BudgetSpentPercent(new double[60], 0.999, 30));",
+        "Dojo.Throws<ArgumentException>(\"an error rate of 120% is an error\", () => BudgetSpentPercent(new[] { 0.1, 1.2 }, 0.999, 30));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The review findings",
+      "prompt": [
+        "Write `List<string> Findings(int detectMinutes, int mitigateMinutes, bool mitigatedByHand, double utilAfterZoneLoss, bool primaryStuckInFailedZone)`",
+        "that turns the numbers into findings for the review, in this order:",
+        "",
+        "1. `detectMinutes > 5`: `\"detect: the page took {detectMinutes} min; target 5\"`",
+        "2. `mitigateMinutes > 15` **and** `mitigatedByHand`: `\"mitigate: {mitigateMinutes} min by hand; automate the zone drain\"`",
+        "3. `utilAfterZoneLoss > 0.8`: `\"capacity: {percent}% after losing a zone; target 80%\"` where `percent` is",
+        "   `Math.Round(utilAfterZoneLoss * 100)`",
+        "4. `primaryStuckInFailedZone`: `\"database: the primary stayed in the failed zone; enable automatic failover\"`",
+        "",
+        "The draft: 72% CPU over 3 zones is 108% after losing one. `Findings(6, 27, true, 1.08, true)` returns all four."
+      ],
+      "starter": [
+        "List<string> Findings(int detectMinutes, int mitigateMinutes, bool mitigatedByHand, double utilAfterZoneLoss, bool primaryStuckInFailedZone)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Findings(int detectMinutes, int mitigateMinutes, bool mitigatedByHand, double utilAfterZoneLoss, bool primaryStuckInFailedZone)",
+        "{",
+        "    var found = new List<string>();",
+        "    if (detectMinutes > 5) found.Add($\"detect: the page took {detectMinutes} min; target 5\");",
+        "    if (mitigateMinutes > 15 && mitigatedByHand) found.Add($\"mitigate: {mitigateMinutes} min by hand; automate the zone drain\");",
+        "    if (utilAfterZoneLoss > 0.8) found.Add($\"capacity: {Math.Round(utilAfterZoneLoss * 100)}% after losing a zone; target 80%\");",
+        "    if (primaryStuckInFailedZone) found.Add(\"database: the primary stayed in the failed zone; enable automatic failover\");",
+        "    return found;",
+        "}"
+      ],
+      "hints": [
+        "Four independent `if`s in the order given, each adding one interpolated string.",
+        "`Math.Round(1.08 * 100)` is `108`; interpolating a whole double prints no decimals."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the draft: every finding\", new List<string> {",
+        "    \"detect: the page took 6 min; target 5\",",
+        "    \"mitigate: 27 min by hand; automate the zone drain\",",
+        "    \"capacity: 108% after losing a zone; target 80%\",",
+        "    \"database: the primary stayed in the failed zone; enable automatic failover\" },",
+        "    Findings(6, 27, true, 1.08, true));",
+        "Dojo.Eq(\"a well-run incident: nothing to say\", new List<string>(), Findings(4, 9, false, 0.7, false));",
+        "Dojo.Eq(\"exactly on target is fine\", new List<string>(), Findings(5, 15, true, 0.8, false));",
+        "Dojo.Eq(\"automated but slow mitigation is not this finding\", new List<string> { \"detect: the page took 12 min; target 5\" },",
+        "    Findings(12, 30, false, 0.5, false));",
+        "Dojo.Eq(\"capacity only\", new List<string> { \"capacity: 93% after losing a zone; target 80%\" }, Findings(3, 10, true, 0.93, false));"
+      ]
+    }
+  ]
+}

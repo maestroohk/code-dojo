@@ -95,6 +95,30 @@ const ART = {
     <path d="M110 59 H118 M114 55 L118 59 L114 63" ${L} stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
   log: `${[0, 1, 2].map(i => `<rect x="4" y="${8 + i * 21}" width="100" height="16" rx="3" ${B}/>${Array.from({ length: 6 - i }, (_, j) => `<rect x="${8 + j * 13}" y="${11 + i * 21}" width="10" height="10" rx="1.5" ${j === 5 - i ? A : D}/>`).join('')}`).join('')}
     <path d="M108 16 H116 M108 37 H116 M108 58 H116" ${L} stroke-width="2" stroke-dasharray="2 3"/>`,
+  // system design board (lab-sysdesign.js): the users' phones and laptops, a DNS appliance (name -> address table and
+  // a globe), a CDN edge PoP (a short rack under the points of presence), a 1U load balancer with ears, one input
+  // and three outputs, a rack of 1U app servers, a storage array of drive bays, and a primary with its replica
+  users: `<rect x="40" y="10" width="62" height="40" rx="3" ${B}/><rect x="44" y="14" width="54" height="32" rx="1.5" ${S}/><path d="M48 19 H66 M48 24 H60" ${L}/>
+    <path d="M30 54 H112 L106 63 H36 Z" ${B}/><rect x="10" y="20" width="26" height="48" rx="4.5" ${B}/><rect x="13.5" y="25" width="19" height="35" rx="1.5" ${S}/><circle cx="23" cy="64" r="1.5" ${F}/>`,
+  dnsserver: `<rect x="4" y="22" width="6" height="32" rx="1" ${B}/><rect x="110" y="22" width="6" height="32" rx="1" ${B}/>
+    <rect x="8" y="18" width="104" height="40" rx="4" ${B}/><rect x="13" y="23" width="60" height="30" rx="2" ${S}/>
+    <path d="M17 30 H40 M47 30 H68 M17 37 H36 M47 37 H66 M17 44 H42 M47 44 H64" ${L}/><path d="M42 30 H45 M42 37 H45 M42 44 H45" ${L} stroke-width="0.8"/>
+    <circle cx="92" cy="38" r="12" ${F}/><path d="M80 38 H104 M92 26 C86 31 86 45 92 50 C98 45 98 31 92 26 M83 31 H101 M83 45 H101" ${L}/><circle cx="104" cy="24" r="1.8" ${A}/>`,
+  edgepop: `<path d="M10 34 C26 4 94 4 110 34" ${L} fill="none" stroke-dasharray="3 3"/><circle cx="10" cy="34" r="3.2" ${A}/><circle cx="35" cy="14" r="3.2" ${A}/><circle cx="85" cy="14" r="3.2" ${A}/><circle cx="110" cy="34" r="3.2" ${A}/>
+    <rect x="34" y="28" width="52" height="46" rx="3" ${B}/>
+    ${[0, 1, 2].map(i => `<rect x="38" y="${32 + i * 13.5}" width="44" height="10" rx="1.5" ${F}/><path d="M42 ${37 + i * 13.5} H62" ${L}/><circle cx="76" cy="${37 + i * 13.5}" r="1.8" ${i === 2 ? D : A}/>`).join('')}`,
+  loadbalancer: `<rect x="2" y="27" width="7" height="24" rx="1" ${B}/><rect x="111" y="27" width="7" height="24" rx="1" ${B}/><circle cx="5.5" cy="32" r="1.2" ${D}/><circle cx="114.5" cy="46" r="1.2" ${D}/>
+    <rect x="7" y="23" width="106" height="32" rx="3" ${B}/><rect x="11" y="27" width="98" height="24" rx="2" ${F}/>
+    <rect x="15" y="34" width="11" height="10" rx="1.5" ${D}/><path d="M30 39 H44 M44 39 L56 31 H68 M44 39 H68 M44 39 L56 47 H68" ${L} stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="70" y="28" width="10" height="6" rx="1" ${A}/><rect x="70" y="36" width="10" height="6" rx="1" ${A}/><rect x="70" y="44" width="10" height="6" rx="1" ${A}/>
+    <rect x="86" y="31" width="18" height="16" rx="1.5" ${S}/><path d="M89 36 H101 M89 41 H97" ${L}/>`,
+  rack: `<rect x="24" y="1" width="72" height="74" rx="3" ${B}/><path d="M30 1 V75 M90 1 V75" ${L}/>
+    ${[0, 1, 2, 3, 4].map(i => `<rect x="33" y="${5 + i * 13.8}" width="54" height="10.5" rx="1.5" ${F}/><path d="M37 ${10.2 + i * 13.8} H58 M62 ${10.2 + i * 13.8} H66" ${L}/><circle cx="76" cy="${10.2 + i * 13.8}" r="1.8" ${A}/><circle cx="82" cy="${10.2 + i * 13.8}" r="1.8" ${D}/>`).join('')}`,
+  storagearray: `<rect x="8" y="12" width="104" height="52" rx="4" ${B}/><rect x="12" y="16" width="96" height="44" rx="2" ${F}/>
+    ${[0, 1].map(r => Array.from({ length: 8 }, (_, i) => `<rect x="${16 + i * 11.4}" y="${20 + r * 19}" width="8.6" height="15" rx="1" ${B}/><circle cx="${20.3 + i * 11.4}" cy="${31 + r * 19}" r="1.2" ${(i + r) % 3 ? A : D}/>`).join('')).join('')}`,
+  dbreplica: `<path d="M54 8 V44 C54 52 98 52 98 44 V8" ${B}/><ellipse cx="76" cy="8" rx="22" ry="5.5" ${F}/><path d="M54 20 C54 26 98 26 98 20 M54 32 C54 38 98 38 98 32" ${L}/>
+    <path d="M18 26 V62 C18 70 62 70 62 62 V26" ${B}/><ellipse cx="40" cy="26" rx="22" ry="5.5" ${F}/><path d="M18 38 C18 44 62 44 62 38 M18 50 C18 56 62 56 62 50" ${L}/><circle cx="54" cy="60" r="2.2" ${A}/>
+    <path d="M102 22 C114 34 112 56 70 68" ${L} fill="none" stroke-width="2" stroke-dasharray="3 2.5"/><path d="M76 63.5 L69.5 68.3 L76.8 71.5" ${L} fill="none" stroke-width="2"/>`,
 };
 
 export const ARTS = Object.keys(ART);

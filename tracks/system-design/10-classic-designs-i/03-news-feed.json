@@ -1,0 +1,298 @@
+{
+  "title": "Design a news feed",
+  "summary": "Home timelines for 100 M daily users: fan-out on write versus on read, the hybrid for accounts with millions of followers, cursor pagination and a k-way merge.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** users follow other users. The home feed shows recent posts from the people you follow, newest",
+        "first, and loads fast.",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | post; follow and unfollow; read the home feed page by page |",
+        "| Non-functional | feed p99 under 200 ms; a new post visible to followers within seconds (not instantly); feed reads matter more than post writes |",
+        "| Out of scope | ML ranking (keep it reverse-chronological with light boosts), ads, search |",
+        "",
+        "```text",
+        "users        100 M daily active",
+        "reads        10 feed loads / user / day = 1 B / day   ≈ 11,600 / s average, ~35,000 / s peak",
+        "posts        0.5 / user / day = 50 M / day            ≈ 580 / s average",
+        "followers    300 on average, a long tail up to tens of millions",
+        "```",
+        "",
+        "Reads outnumber posts 20 to 1, and the follower counts are wildly uneven. Both facts decide the design."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "If every post is copied into each follower's precomputed timeline, how many timeline inserts per second is that on average?",
+      "code": [
+        "var postsPerSecond = 580;",
+        "var avgFollowers = 300;",
+        "Console.WriteLine(postsPerSecond * avgFollowers);"
+      ],
+      "answer": "174000",
+      "explain": "580 posts a second become 174,000 small writes a second. That is a lot, but they are cheap list pushes into a cache like Redis, spread over many shards, and they happen in the background."
+    },
+    {
+      "type": "learn",
+      "title": "Fan-out on write versus fan-out on read",
+      "body": [
+        "```text",
+        "FAN-OUT ON WRITE (push)                         FAN-OUT ON READ (pull)",
+        "",
+        " post --> posts DB                              post --> posts DB (author's list)",
+        "      --> fan-out workers --> timeline of       read --> list who I follow (300)",
+        "          follower 1, 2, ... 300                     --> fetch recent posts of each",
+        " read --> one list read: my timeline                --> merge newest first",
+        "",
+        " cheap reads, expensive writes                  cheap writes, expensive reads",
+        "```",
+        "",
+        "- **Push** precomputes each user's timeline (a capped list of post ids, say the latest 800) in a cache. A read is",
+        "  one key lookup plus hydration. A post by someone with 20 M followers means 20 M inserts.",
+        "- **Pull** stores only each author's own posts. A read fans out to everyone you follow and merges, every time.",
+        "  Following 2,000 accounts means 2,000 lookups per page.",
+        "",
+        "Timelines store **ids**, not posts: an edit or delete then shows up everywhere, and the lists stay small."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which approach has each property?",
+      "buckets": [
+        "Fan-out on write (push)",
+        "Fan-out on read (pull)"
+      ],
+      "items": [
+        [
+          "A feed read is a single list lookup",
+          0
+        ],
+        [
+          "A post by a huge account creates millions of writes",
+          0
+        ],
+        [
+          "Inactive users' timelines are built and never read",
+          0
+        ],
+        [
+          "Every page load merges posts from all followed accounts",
+          1
+        ],
+        [
+          "Posting is one write, whatever the follower count",
+          1
+        ],
+        [
+          "Read latency grows with the number of accounts you follow",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The hybrid: push for most, pull for celebrities",
+      "body": [
+        "Real systems mix both. Pick a **threshold** (say 1 M followers):",
+        "",
+        "- Authors **under** it: push. Their posts go into followers' timelines in the background.",
+        "- Authors **over** it: do not push. At read time, fetch their recent posts and merge them into the page.",
+        "",
+        "A user follows maybe a handful of huge accounts, so the read-time merge stays small, and no single post",
+        "triggers millions of writes. Two more tricks: only push to followers who were **active recently** (rebuild a",
+        "dormant user's timeline on their next visit), and cap each timeline's length.",
+        "",
+        "Order the merge by `(created_at, post_id)`, both descending. The id breaks ties, so the order is total and the",
+        "next page can start exactly where this one ended."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** An account with 30 M followers posts at 19:00. Your fan-out dashboard:",
+        "",
+        "```text",
+        "fan-out queue lag     2 s  ->  41 min",
+        "timeline cache CPU    35%  ->  92%",
+        "feed reads p99        90 ms -> 640 ms",
+        "posts by others       visible after 40+ minutes",
+        "```",
+        "",
+        "What is the best fix?"
+      ],
+      "options": [
+        "Stop pushing posts of accounts above a follower threshold; merge them in at read time",
+        "Add fan-out workers until 30 M inserts finish in a minute",
+        "Switch everyone to fan-out on read",
+        "Raise the timeline cache TTL"
+      ],
+      "answer": 0,
+      "explain": "One post queued 30 M inserts ahead of everyone else's, and saturated the timeline cache that reads depend on. More workers would only hit the cache harder. Pull-only for everyone makes every read expensive. The hybrid is why it exists."
+    },
+    {
+      "type": "learn",
+      "title": "Cursor pagination, not offsets",
+      "body": [
+        "`?offset=40&limit=20` breaks on a live feed: new posts arrive at the top, everything shifts down, and the next",
+        "page repeats posts the user just saw. It also makes the server skip 40 items every time.",
+        "",
+        "Use a **cursor**: the sort key of the last item returned.",
+        "",
+        "```text",
+        "GET /feed?limit=20                          -> 20 posts, nextCursor = \"1764235200:98123\"",
+        "GET /feed?limit=20&cursor=1764235200:98123  -> posts strictly older than (ts 1764235200, id 98123)",
+        "```",
+        "",
+        "Encode it opaquely (base64) so clients do not build their own. New posts that arrived meanwhile appear when",
+        "the user pulls to refresh, not in the middle of their scroll."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the hybrid read path in order.",
+      "lines": [
+        "Read the user's precomputed timeline and the list of huge accounts they follow",
+        "Fetch the recent posts of those huge accounts from their own post lists",
+        "Merge both lists newest first, after the cursor, dropping duplicates",
+        "Hydrate the page's post ids into full posts from the post cache",
+        "Return the page and a cursor made from its last item"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "What does the hybrid save?",
+      "prompt": [
+        "For one batch of posts, given each author's follower count, write:",
+        "",
+        "- `long TimelineWrites(int[] followerCounts, int threshold)`: inserts caused by pushing. Authors with **fewer**",
+        "  followers than `threshold` push one insert per follower; the others push nothing.",
+        "- `int PulledAuthors(int[] followerCounts, int threshold)`: how many authors are at or above the threshold",
+        "  (merged at read time instead).",
+        "",
+        "Careful: the sum can be bigger than an `int`."
+      ],
+      "starter": [
+        "long TimelineWrites(int[] followerCounts, int threshold)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "int PulledAuthors(int[] followerCounts, int threshold)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "long TimelineWrites(int[] followerCounts, int threshold)",
+        "{",
+        "    long writes = 0;",
+        "    foreach (var f in followerCounts)",
+        "        if (f < threshold) writes += f;",
+        "    return writes;",
+        "}",
+        "",
+        "int PulledAuthors(int[] followerCounts, int threshold) => followerCounts.Count(f => f >= threshold);"
+      ],
+      "hints": [
+        "Accumulate into a `long`, not an `int`.",
+        "Pushed: `f < threshold`. Pulled: `f >= threshold`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoBatch = new[] { 120, 300, 15_000_000, 80, 2_000_000 };",
+        "Dojo.Eq(\"with a 1 M threshold only small authors push\", 500L, TimelineWrites(dojoBatch, 1_000_000));",
+        "Dojo.Eq(\"two authors are pulled\", 2, PulledAuthors(dojoBatch, 1_000_000));",
+        "Dojo.Eq(\"push for everyone\", 17_000_500L, TimelineWrites(dojoBatch, int.MaxValue));",
+        "Dojo.Eq(\"nobody pulled\", 0, PulledAuthors(dojoBatch, int.MaxValue));",
+        "Dojo.Eq(\"the threshold itself is pulled\", 1, PulledAuthors(new[] { 1_000_000 }, 1_000_000));",
+        "Dojo.Eq(\"no int overflow\", 4_000_000_000L, TimelineWrites(new[] { 2_000_000_000, 2_000_000_000 }, int.MaxValue));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Merge timelines with a cursor",
+      "prompt": [
+        "Write `List<Post> Page(List<List<Post>> timelines, Cursor? after, int limit)`. The template declares",
+        "`record Post(long Id, long Ts)` and `record Cursor(long Ts, long Id)`.",
+        "",
+        "- Each list is already sorted newest first: by `Ts` descending, then `Id` descending.",
+        "- Return up to `limit` posts in that same order, merged from all lists.",
+        "- Only posts strictly **after** the cursor in that order: `Ts < after.Ts`, or the same `Ts` with `Id < after.Id`.",
+        "  A `null` cursor means start from the top.",
+        "- A post can appear in several lists (pushed and pulled): return it once.",
+        "",
+        "A heap-based k-way merge (`PriorityQueue`) only touches what it returns, which matters when the lists are long.",
+        "Concatenating and sorting also passes the tests."
+      ],
+      "starter": [
+        "List<Post> Page(List<List<Post>> timelines, Cursor? after, int limit)",
+        "{",
+        "    return new List<Post>();",
+        "}"
+      ],
+      "solution": [
+        "List<Post> Page(List<List<Post>> timelines, Cursor? after, int limit)",
+        "{",
+        "    bool Older(Post p) => after is null || p.Ts < after.Ts || (p.Ts == after.Ts && p.Id < after.Id);",
+        "    var heap = new PriorityQueue<(int L, int I), (long Ts, long Id)>(",
+        "        Comparer<(long Ts, long Id)>.Create((a, b) => a.Ts != b.Ts ? b.Ts.CompareTo(a.Ts) : b.Id.CompareTo(a.Id)));",
+        "    for (var l = 0; l < timelines.Count; l++)",
+        "    {",
+        "        var i = 0;",
+        "        while (i < timelines[l].Count && !Older(timelines[l][i])) i++;",
+        "        if (i < timelines[l].Count) heap.Enqueue((l, i), (timelines[l][i].Ts, timelines[l][i].Id));",
+        "    }",
+        "    var page = new List<Post>();",
+        "    var seen = new HashSet<long>();",
+        "    while (page.Count < limit && heap.TryDequeue(out var at, out _))",
+        "    {",
+        "        var p = timelines[at.L][at.I];",
+        "        if (seen.Add(p.Id)) page.Add(p);",
+        "        if (at.I + 1 < timelines[at.L].Count)",
+        "        {",
+        "            var n = timelines[at.L][at.I + 1];",
+        "            heap.Enqueue((at.L, at.I + 1), (n.Ts, n.Id));",
+        "        }",
+        "    }",
+        "    return page;",
+        "}"
+      ],
+      "hints": [
+        "Simple version: `timelines.SelectMany(t => t)`, keep the ones after the cursor, `DistinctBy(p => p.Id)`, order by `Ts` then `Id` descending, `Take(limit)`.",
+        "Heap version: enqueue the first post after the cursor from each list with priority `(Ts, Id)` and a comparer that puts larger first; pop, add, push that list's next post."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoA = new List<Post> { new(9, 900), new(6, 600), new(2, 200) };",
+        "var dojoB = new List<Post> { new(8, 800), new(6, 600), new(3, 300) };",
+        "var dojoC = new List<Post> { new(7, 700), new(5, 600) };",
+        "var dojoAll = new List<List<Post>> { dojoA, dojoB, dojoC };",
+        "Dojo.Eq(\"first page, newest first\", new List<Post> { new(9, 900), new(8, 800), new(7, 700), new(6, 600) }, Page(dojoAll, null, 4));",
+        "Dojo.Eq(\"next page after (600, 6): the tie at 600 is broken by id\", new List<Post> { new(5, 600), new(3, 300), new(2, 200) }, Page(dojoAll, new Cursor(600, 6), 4));",
+        "Dojo.Eq(\"a post pushed and pulled shows once\", 7, Page(dojoAll, null, 100).Count);",
+        "Dojo.Eq(\"nothing after the oldest post\", new List<Post>(), Page(dojoAll, new Cursor(200, 2), 4));",
+        "Dojo.Eq(\"no timelines, no posts\", new List<Post>(), Page(new List<List<Post>>(), null, 4));",
+        "record Post(long Id, long Ts);",
+        "record Cursor(long Ts, long Id);"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "hot-key",
+      "title": "Build it: the celebrity key",
+      "prompt": [
+        "Celebrities hurt reads too: everyone fetches the same post. In the **System design board**, one key takes half of",
+        "all reads from minute three. Find out why adding cache nodes does not help, then fix it so the hottest cache node",
+        "stays under its utilisation goal."
+      ],
+      "explain": "A key lives on one node, so a hot key is limited by one node's capacity however big the cluster is. Copies closer to the caller (an in-process near cache) are the fix."
+    }
+  ]
+}

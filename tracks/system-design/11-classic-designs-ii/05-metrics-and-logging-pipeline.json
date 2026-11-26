@@ -1,0 +1,368 @@
+{
+  "title": "Design a metrics and logging pipeline",
+  "summary": "Telemetry from 20,000 hosts: agents, a stream in the middle, processing, a time-series store and cheap log storage; cardinality explosions, downsampling, retention, and why percentiles cannot be averaged.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** every service in the company sends metrics and logs. Engineers build dashboards and alerts on the",
+        "metrics and search the logs during incidents.",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | ingest metrics (counters, gauges, histograms) and logs; query by labels and time; alert rules |",
+        "| Non-functional | alerts evaluate on data under a minute old; the pipeline must **not** fall over during an incident (when everyone queries and every service logs errors); cost per GB matters |",
+        "| Out of scope | distributed tracing storage (same pattern, mention it), the dashboard UI |",
+        "",
+        "```text",
+        "hosts      20,000, each exposing ~1,000 active series",
+        "series     20 M active series",
+        "samples    20 M / 15 s scrape interval ≈ 1.3 M samples / s",
+        "storage    ~1.5-2 bytes / sample after compression ≈ 2-2.7 MB/s ≈ 170-230 GB / day",
+        "logs       20,000 hosts x 50 lines/s x 300 bytes = 300 MB/s raw ≈ 26 TB / day",
+        "```",
+        "",
+        "Metrics are cheap **per sample** but expensive **per series**. Logs are cheap to write but huge. Both shape",
+        "the design."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "How many samples per second does the metrics store ingest? (Integer division.)",
+      "code": [
+        "long hosts = 20_000, seriesPerHost = 1_000;",
+        "var samplesPerSecond = hosts * seriesPerHost / 15;",
+        "Console.WriteLine(samplesPerSecond);"
+      ],
+      "answer": "1333333",
+      "explain": "Every series produces one sample per scrape. Halving the scrape interval to 7.5 s doubles this, and so does doubling the series count: series count is the number to watch."
+    },
+    {
+      "type": "learn",
+      "title": "The pipeline",
+      "body": [
+        "```text",
+        " hosts: app --> agent (e.g. OpenTelemetry Collector, Fluent Bit)",
+        "                  | batches, retries, buffers to disk",
+        "                  v",
+        "          [ log / stream: Kafka topics, partitioned by source ]      <-- absorbs spikes, replayable",
+        "                  |                         |",
+        "          stream processing              log indexer",
+        "          (aggregate, drop labels,         |",
+        "           compute rollups)                v",
+        "                  |                 hot index (days) --> object storage (months, cheap)",
+        "                  v",
+        "          time-series store (raw 15 s for 15 days, 5 min rollups for 1 year)",
+        "                  |",
+        "          alerting rules + dashboards",
+        "```",
+        "",
+        "- The **stream in the middle** decouples producers from storage: if the store is slow, data waits in Kafka",
+        "  instead of being dropped by 20,000 agents at once.",
+        "- **Pull vs push:** Prometheus-style scraping pulls from targets (the server controls the rate and knows when a",
+        "  target is down); push (OTLP) suits short-lived jobs and many network setups. Large systems use both.",
+        "- **Downsampling and retention tiers** keep a year of history at a fraction of the cost: nobody needs 15-second",
+        "  points from last March."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** After Tuesday's deploy, the metrics store's memory went from 40 GB to 310 GB and queries time",
+        "out. `promtool tsdb analyze` on a block shows:",
+        "",
+        "```text",
+        "Highest cardinality labels:",
+        "4100213 session_id",
+        "   1840 route",
+        "     12 status_code",
+        "Highest cardinality metric names:",
+        "4129551 http_requests_total",
+        "```",
+        "",
+        "What happened and what is the fix?"
+      ],
+      "options": [
+        "A label with unbounded values (session_id) turned one metric into millions of series. Drop the label (relabel it away) and put per-session detail in logs or traces",
+        "Traffic grew 8 times overnight: scale the metrics store",
+        "The scrape interval is too short: change 15 s to 60 s",
+        "Compression is broken in this block: delete it"
+      ],
+      "answer": 0,
+      "explain": "Every distinct combination of label values is a new series with its own memory and index entries. Ids (users, sessions, requests, full URLs) never belong in metric labels. Slower scraping would cut samples, not series."
+    },
+    {
+      "type": "learn",
+      "title": "Cardinality, downsampling and retention",
+      "body": [
+        "**Series for one metric = the product of its label value counts.**",
+        "",
+        "```text",
+        "http_request_duration_seconds_bucket",
+        "  route (200) x method (4) x status_code (8) x le buckets (12) x pods (300)",
+        "  = 23 M series      <- already too many: drop pod, or aggregate before storing",
+        "```",
+        "",
+        "- Keep labels **bounded**: route templates (`/orders/{id}`) not raw paths, status classes, regions.",
+        "- **Aggregate early** in the stream processor (sum over pods) when nobody queries per pod.",
+        "- **Downsample** old data: keep min, max, sum and count per 5 minutes, which still gives averages and peaks.",
+        "- **Logs** go to a hot index for a few days, then compressed files in object storage that can still be",
+        "  queried (slowly). Sampling debug logs is fine; dropping error logs is not."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Is this a safe metric label, or a cardinality bomb?",
+      "buckets": [
+        "Safe label",
+        "Cardinality bomb"
+      ],
+      "items": [
+        [
+          "`status_code`",
+          0
+        ],
+        [
+          "`http_method`",
+          0
+        ],
+        [
+          "`region`",
+          0
+        ],
+        [
+          "`route` as a template (`/orders/{id}`)",
+          0
+        ],
+        [
+          "`user_id`",
+          1
+        ],
+        [
+          "`request_id`",
+          1
+        ],
+        [
+          "the raw path (`/orders/81723`)",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "You cannot average percentiles",
+      "body": [
+        "Host A serves 1,000 requests a second with p99 = 0.5 s. Host B serves 10 a second with p99 = 2.5 s. The fleet",
+        "p99 is **not** (0.5 + 2.5) / 2 = 1.5 s. Percentiles are positions in a sorted list; averaging them ignores how",
+        "many requests each host served and how they were spread.",
+        "",
+        "**Histograms can be merged.** Each host counts requests per latency bucket. Bucket counts simply add up across",
+        "hosts, and the percentile is then read from the merged counts:",
+        "",
+        "```text",
+        "bucket (s)     <=0.05  <=0.1  <=0.25  <=0.5  <=1  <=2.5",
+        "host A           700    250     38      10    2     0",
+        "host B             0      0      1       2    4     3",
+        "merged           700    250     39      12    6     3     total 1,010",
+        "p99 = the bucket where the running total reaches 0.99 x 1,010 = 999.9  ->  <= 0.5 s",
+        "```",
+        "",
+        "In PromQL: `histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))`. Prometheus",
+        "buckets are cumulative (`le` = less than or equal) and it interpolates inside the bucket; the idea is the same."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Two services report their own p99 latency to your dashboard: 120 ms (9,000 requests/s) and 800 ms (100 requests/s). What is the p99 across both?",
+      "options": [
+        "It cannot be worked out from the two p99s; you need their histograms (bucket counts) to merge",
+        "460 ms, the average",
+        "800 ms, the worst one",
+        "127 ms, the request-weighted average"
+      ],
+      "answer": 0,
+      "explain": "Even a weighted average of percentiles is wrong: the combined p99 depends on the whole shape of both distributions. Export histograms (or a mergeable sketch) and compute the quantile after summing."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: metrics and pipeline",
+      "body": "What you reach for when dashboards lie, the store runs out of memory or telemetry arrives late.",
+      "toolkit": [
+        {
+          "cmd": "histogram_quantile()",
+          "what": "Computes a percentile from summed histogram buckets: the correct way to get a fleet-wide p99.",
+          "flags": [
+            [
+              "sum by (le) (...)",
+              "add buckets across instances, keep the bucket label"
+            ],
+            [
+              "rate(...[5m])",
+              "per-second rates over a window, robust to counter resets"
+            ]
+          ],
+          "example": "histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket[5m])))",
+          "when": "every latency SLO panel and alert",
+          "lang": "bash"
+        },
+        {
+          "cmd": "count by (__name__)",
+          "what": "Counts active series per metric name, to find which metric exploded.",
+          "flags": [
+            [
+              "topk(10, ...)",
+              "only the ten largest"
+            ],
+            [
+              "{__name__=~\".+\"}",
+              "every series"
+            ]
+          ],
+          "example": "topk(10, count by (__name__) ({__name__=~\".+\"}))",
+          "when": "the metrics store's memory jumps",
+          "lang": "bash"
+        },
+        {
+          "cmd": "promtool tsdb analyze",
+          "what": "Reads a Prometheus data block and lists the labels and metrics with the most series and label values.",
+          "flags": [
+            [
+              "<data dir>",
+              "the TSDB folder"
+            ],
+            [
+              "<block id>",
+              "optional: one block instead of the newest"
+            ]
+          ],
+          "example": "promtool tsdb analyze /var/lib/prometheus/data",
+          "lang": "bash"
+        },
+        {
+          "cmd": "promtool check rules",
+          "what": "Validates alerting and recording rule files before you deploy them.",
+          "flags": [
+            [
+              "check rules <file>",
+              "syntax and PromQL errors"
+            ],
+            [
+              "test rules <file>",
+              "unit tests for rules with fixed input series"
+            ]
+          ],
+          "example": "promtool check rules alerts/slo.yml && promtool test rules tests/slo_test.yml",
+          "when": "in CI for every rule change",
+          "lang": "bash"
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --describe",
+          "what": "Shows how far the pipeline's consumers are behind the stream, per partition: late telemetry starts here.",
+          "flags": [
+            [
+              "--bootstrap-server host:9092",
+              "any broker"
+            ],
+            [
+              "--group <name>",
+              "the consumer group, e.g. the indexer"
+            ],
+            [
+              "LAG column",
+              "messages not yet processed"
+            ]
+          ],
+          "example": "kafka-consumer-groups.sh --bootstrap-server kafka.example.com:9092 --describe --group log-indexer",
+          "when": "logs or metrics show up minutes late",
+          "lang": "bash"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each tool to the question it answers.",
+      "pairs": [
+        [
+          "`histogram_quantile(0.99, sum by (le) (...))`",
+          "What is the p99 across the whole fleet?"
+        ],
+        [
+          "`topk(10, count by (__name__) (...))`",
+          "Which metrics have the most series?"
+        ],
+        [
+          "`promtool tsdb analyze`",
+          "Which label has the most distinct values?"
+        ],
+        [
+          "`promtool test rules`",
+          "Does this alert fire on the data I expect?"
+        ],
+        [
+          "`kafka-consumer-groups.sh --describe`",
+          "How far behind is the indexer?"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Merge histograms, then take the percentile",
+      "prompt": [
+        "Write `double Percentile(double[] upperBounds, long[][] hostCounts, double q)`:",
+        "",
+        "- `upperBounds` are the buckets' upper bounds, ascending. Each `hostCounts[h]` has one count **per bucket** (not",
+        "  cumulative), same length as `upperBounds`.",
+        "- Sum the hosts' counts bucket by bucket, then return the upper bound of the first bucket where the running total",
+        "  reaches `q x total` (no interpolation).",
+        "- `q` outside `(0, 1]` throws `ArgumentOutOfRangeException`; no requests at all throws",
+        "  `InvalidOperationException`."
+      ],
+      "starter": [
+        "double Percentile(double[] upperBounds, long[][] hostCounts, double q)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double Percentile(double[] upperBounds, long[][] hostCounts, double q)",
+        "{",
+        "    if (q <= 0 || q > 1) throw new ArgumentOutOfRangeException(nameof(q));",
+        "    var merged = new long[upperBounds.Length];",
+        "    foreach (var host in hostCounts)",
+        "        for (var i = 0; i < merged.Length; i++) merged[i] += host[i];",
+        "    var total = merged.Sum();",
+        "    if (total == 0) throw new InvalidOperationException(\"no requests\");",
+        "    var target = q * total;",
+        "    long running = 0;",
+        "    for (var i = 0; i < merged.Length; i++)",
+        "    {",
+        "        running += merged[i];",
+        "        if (running >= target) return upperBounds[i];",
+        "    }",
+        "    return upperBounds[^1];",
+        "}"
+      ],
+      "hints": [
+        "First add the hosts' arrays element by element into one `long[]`.",
+        "Then walk the buckets with a running total and stop when it is at least `q * total`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoB = new[] { 0.05, 0.1, 0.25, 0.5, 1, 2.5 };",
+        "var dojoA = new long[] { 700, 250, 38, 10, 2, 0 };",
+        "var dojoSlow = new long[] { 0, 0, 1, 2, 4, 3 };",
+        "Dojo.Eq(\"fleet p99 from merged buckets\", 0.5, Percentile(dojoB, new[] { dojoA, dojoSlow }, 0.99));",
+        "Dojo.Eq(\"the slow host alone has a p99 of 2.5 s\", 2.5, Percentile(dojoB, new[] { dojoSlow }, 0.99));",
+        "Dojo.Eq(\"so averaging the p99s (1.5 s) would be wrong: fleet p99 is not 1.5\", true, Percentile(dojoB, new[] { dojoA, dojoSlow }, 0.99) != 1.5);",
+        "Dojo.Eq(\"fleet p50\", 0.05, Percentile(dojoB, new[] { dojoA, dojoSlow }, 0.5));",
+        "Dojo.Eq(\"fleet p99.9 reaches the slow tail\", 2.5, Percentile(dojoB, new[] { dojoA, dojoSlow }, 0.999));",
+        "Dojo.Eq(\"q = 1 is the last non-empty bucket\", 1.0, Percentile(dojoB, new[] { dojoA }, 1.0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"q must be above 0\", () => Percentile(dojoB, new[] { dojoA }, 0));",
+        "Dojo.Throws<InvalidOperationException>(\"no requests at all\", () => Percentile(dojoB, new[] { new long[6] }, 0.5));"
+      ]
+    }
+  ]
+}

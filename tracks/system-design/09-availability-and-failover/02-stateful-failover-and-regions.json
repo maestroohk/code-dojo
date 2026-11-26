@@ -1,0 +1,330 @@
+{
+  "title": "Stateful failover, regions, RPO and RTO",
+  "summary": "Stateless tiers fail over by routing; data does not. Synchronous standbys, promotion, split brain and fencing tokens; active-passive and active-active regions; DNS failover in practice; RPO and RTO in numbers.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Stateless fails over by routing, state does not",
+      "body": [
+        "A **stateless** app server holds nothing you cannot lose. When it dies the load balancer stops sending it",
+        "traffic and you are done. A **database** holds the only copy of recent writes, so failing it over is a",
+        "procedure:",
+        "",
+        "```text",
+        "zone a                          zone b",
+        "[primary] ==sync replication==> [standby]",
+        "    x  dies",
+        "        1. detect   (several failed checks, 10-30 s)",
+        "        2. fence    the old primary: it must never accept another write",
+        "        3. promote  the standby to primary",
+        "        4. repoint  clients (a floating endpoint or DNS name)",
+        "        5. rebuild  a new standby from the new primary",
+        "```",
+        "",
+        "Managed databases with a standby in another zone typically fail over in tens of seconds to a couple of",
+        "minutes. During that window writes fail, so clients need timeouts and retries.",
+        "",
+        "- **Synchronous standby**: the primary waits for the standby to confirm each commit. No committed write is lost on failover, but every commit pays a cross-zone round trip (about 1 ms).",
+        "- **Asynchronous replica**: the primary does not wait. Commits are faster, but writes still in flight when the primary dies are lost.",
+        "- **Split brain**: two nodes both believe they are the primary and both accept writes. The data diverges and someone has to merge it by hand.",
+        "- **Fencing**: making sure the old primary cannot write after a new one is promoted: cut its network, power it off, or reject writes that carry an old **fencing token** (an epoch number that grows with every promotion).",
+        "",
+        "Tools like Patroni avoid split brain by keeping the leader lock in a consensus store (etcd, Consul, ZooKeeper):",
+        "a primary that cannot renew its lease demotes itself."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the steps of a safe database failover in order.",
+      "lines": [
+        "Detect that the primary is unhealthy (several failed checks in a row)",
+        "Fence the old primary so it cannot accept writes",
+        "Promote the standby to primary",
+        "Point clients at the new primary",
+        "Build a new standby from the new primary"
+      ],
+      "explain": "Fencing comes before promotion: if the old primary is only slow, not dead, promoting first creates two primaries. Rebuilding the standby comes last, and until it is done you have no protection against a second failure."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** After a 40-second network partition between zones, the orders table has 212 pairs of rows",
+        "with the same `order_id` but different contents, created in both zones during those 40 seconds. A home-made",
+        "failover script promotes the standby when it cannot reach the primary for 10 seconds. What went wrong?"
+      ],
+      "options": [
+        "Split brain: the old primary was never fenced, so both nodes accepted writes during the partition",
+        "Replication lag on the standby",
+        "The order ids were not random enough",
+        "The partition was too short to cause a failover"
+      ],
+      "answer": 0,
+      "explain": [
+        "\"Cannot reach the primary\" does not mean \"the primary is down\": it was alive on the other side of the",
+        "partition and kept taking writes. Without fencing (a lease in a consensus store, a fencing token checked on",
+        "every write, or cutting the old primary off) you get two primaries. This is why seniors do not write their own",
+        "failover scripts."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Multi-region: active-passive and active-active",
+      "body": [
+        "Zones protect against a data centre failure. **Regions** protect against a whole regional outage or a",
+        "disaster, and bring the service closer to distant users. They cost much more, mostly in complexity.",
+        "",
+        "| | Active-passive | Active-active |",
+        "|---|---|---|",
+        "| Traffic | all in region 1; region 2 waits | both regions serve users |",
+        "| Writes | one primary region; async replica in region 2 | writes in both regions |",
+        "| Failover | promote region 2, move traffic (minutes) | stop sending traffic to the bad region (seconds to minutes) |",
+        "| Data loss on failover | writes in the replication lag | depends on conflict handling |",
+        "| Hard part | keeping region 2 tested and big enough | conflicting writes to the same record (module 6) |",
+        "| Cost | pay for idle capacity, or scale up during failover | each region needs headroom for the other's traffic |",
+        "",
+        "Cross-region replication is almost always **asynchronous**: a synchronous commit across 70-150 ms of",
+        "round trip would make every write slow. So a regional failover usually loses the last moments of writes.",
+        "Many teams keep data writes in one home region per user or per tenant (\"partitioned active-active\") so",
+        "each record has exactly one writer."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which multi-region design does each statement describe?",
+      "buckets": [ "Active-passive", "Active-active" ],
+      "items": [
+        [ "The second region is idle until a failover", 0 ],
+        [ "Users are served by the nearest region all the time", 1 ],
+        [ "Two users can update the same record in two regions at once", 1 ],
+        [ "Failover means promoting a replica and moving all traffic", 0 ],
+        [ "The standby region is easy to forget about until it is needed, so it must be tested", 0 ],
+        [ "Each region must keep headroom for the other region's users", 1 ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "RPO, RTO and DNS in practice",
+      "body": [
+        "- **RPO** (recovery point objective): how much recent data you may lose, measured in time. With async replication, RPO is at least the replication lag.",
+        "- **RTO** (recovery time objective): how long until the service works again after a failure.",
+        "",
+        "```text",
+        "writes lost  ~= write rate x replication lag at the moment of failure",
+        "              = 1,200 writes/s x 2.5 s = 3,000 writes",
+        "",
+        "RTO         ~= time to detect + time to promote + time for clients to move",
+        "```",
+        "",
+        "**DNS failover is slower than its TTL suggests.** A health-checked DNS record switches to region 2, but:",
+        "",
+        "- clients cache the old answer for up to the TTL (keep it at 30-60 s for failover records);",
+        "- some resolvers and runtimes cache longer than the TTL;",
+        "- long-lived connections never look up the name again. In .NET, `HttpClient` with the default",
+        "  `SocketsHttpHandler` keeps pooled connections open to the old address while they are busy. Set",
+        "  `PooledConnectionLifetime` (for example 2 minutes) so connections are recycled and DNS is looked up again.",
+        "",
+        "Write RPO and RTO into the design. \"Zero data loss and instant failover\" across regions is not a goal,",
+        "it is a cost nobody has agreed to pay."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "The primary region fails while its replica is 2.5 seconds behind, at 1,200 writes per second. Roughly how many acknowledged writes are lost? What does this print?",
+      "code": [
+        "var writesPerSecond = 1200;",
+        "var lagSeconds = 2.5;",
+        "Console.WriteLine(Math.Ceiling(writesPerSecond * lagSeconds));"
+      ],
+      "answer": "3000",
+      "explain": "Every write the primary acknowledged in the last 2.5 seconds had not reached the replica. Customers were told \"saved\" for about 3,000 writes that the new primary has never seen."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to its meaning.",
+      "pairs": [
+        [ "RPO", "How much recent data you may lose, in time" ],
+        [ "RTO", "How long until the service works again" ],
+        [ "Fencing token", "An epoch number that lets storage reject writes from an old leader" ],
+        [ "Synchronous standby", "Every commit waits for a second copy, so failover loses nothing committed" ],
+        [ "DNS TTL", "How long resolvers may keep using an old answer" ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make this `HttpClient` notice a DNS failover: busy pooled connections must be closed and re-resolved every 2 minutes.",
+      "code": [
+        "var handler = new SocketsHttpHandler",
+        "{",
+        "    __1__ = TimeSpan.FromMinutes(2),",
+        "};",
+        "var http = new HttpClient(handler);"
+      ],
+      "blanks": [ "PooledConnectionLifetime" ],
+      "bank": [ "PooledConnectionIdleTimeout", "ConnectTimeout", "Expect100ContinueTimeout" ],
+      "explain": "`PooledConnectionIdleTimeout` only closes connections that sit idle, and a busy service's connections are never idle. `PooledConnectionLifetime` caps every connection's age, so after a failover traffic moves within that time."
+    },
+    {
+      "type": "code",
+      "title": "RPO and RTO in numbers",
+      "prompt": [
+        "Write two methods:",
+        "",
+        "- `long WritesLost(double writesPerSecond, double lagSeconds)`: acknowledged writes lost when the primary",
+        "  dies with the replica `lagSeconds` behind, **rounded up**. A negative input throws `ArgumentException`.",
+        "- `double RtoSeconds(double detectSeconds, double promoteSeconds, double dnsTtlSeconds, double connectionLifetimeSeconds)`:",
+        "  detection, then promotion, then the slower of the two ways clients keep talking to the old address (the",
+        "  DNS TTL and the pooled connection lifetime).",
+        "",
+        "`RtoSeconds(30, 45, 60, 120)` is `195`: 30 + 45 + the larger of 60 and 120."
+      ],
+      "starter": [
+        "long WritesLost(double writesPerSecond, double lagSeconds)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double RtoSeconds(double detectSeconds, double promoteSeconds, double dnsTtlSeconds, double connectionLifetimeSeconds)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "long WritesLost(double writesPerSecond, double lagSeconds)",
+        "{",
+        "    if (writesPerSecond < 0 || lagSeconds < 0) throw new ArgumentException(\"rates and lag cannot be negative\");",
+        "    return (long)Math.Ceiling(writesPerSecond * lagSeconds);",
+        "}",
+        "",
+        "double RtoSeconds(double detectSeconds, double promoteSeconds, double dnsTtlSeconds, double connectionLifetimeSeconds)",
+        "{",
+        "    return detectSeconds + promoteSeconds + Math.Max(dnsTtlSeconds, connectionLifetimeSeconds);",
+        "}"
+      ],
+      "hints": [
+        "`(long)Math.Ceiling(writesPerSecond * lagSeconds)` after checking the inputs.",
+        "Clients move when both their DNS cache and their connections have expired: `Math.Max` of the two."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"1,200 writes/s at 2.5 s lag\", 3000L, WritesLost(1200, 2.5));",
+        "Dojo.Eq(\"rounded up\", 4L, WritesLost(3, 1.1));",
+        "Dojo.Eq(\"a synchronous standby has no lag\", 0L, WritesLost(5000, 0));",
+        "Dojo.Throws<ArgumentException>(\"negative lag is an error\", () => WritesLost(10, -1));",
+        "Dojo.Eq(\"connections are the slow part\", 195.0, RtoSeconds(30, 45, 60, 120));",
+        "Dojo.Eq(\"a long DNS TTL is the slow part\", 375.0, RtoSeconds(30, 45, 300, 120));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A failover controller with fencing",
+      "prompt": [
+        "Write a class `Failover` that decides when to promote the standby, and fences the old primary with an epoch.",
+        "",
+        "- `Failover(string primary, string standby, int failThreshold)`: `failThreshold` below 1 throws `ArgumentException`.",
+        "  It starts with `Primary` = `primary`, `Epoch` = `1` and `State` = `\"healthy\"`.",
+        "- `void Probe(bool primaryOk)`: one health check of the current primary.",
+        "  - OK: reset the failure count; `State` becomes `\"healthy\"`.",
+        "  - Failed: count it. Below `failThreshold` failures in a row, `State` is `\"suspect\"`. On reaching it, promote:",
+        "    swap primary and standby, add 1 to `Epoch`, reset the count, `State` = `\"promoted\"`.",
+        "- `bool AcceptWrite(string node, long epoch)`: true only when `node` is the current primary **and** `epoch` is",
+        "  the current epoch. That is fencing: the old primary, or anyone holding an old epoch, is refused.",
+        "- `string Primary`, `long Epoch`, `string State` (get-only)."
+      ],
+      "starter": [
+        "class Failover",
+        "{",
+        "    public Failover(string primary, string standby, int failThreshold) { }",
+        "",
+        "    public string Primary { get; } = \"\";",
+        "    public long Epoch { get; }",
+        "    public string State { get; } = \"\";",
+        "",
+        "    public void Probe(bool primaryOk) { }",
+        "",
+        "    public bool AcceptWrite(string node, long epoch) => false;",
+        "}"
+      ],
+      "solution": [
+        "class Failover",
+        "{",
+        "    readonly int failThreshold;",
+        "    string standby;",
+        "    int failures;",
+        "",
+        "    public Failover(string primary, string standby, int failThreshold)",
+        "    {",
+        "        if (failThreshold < 1) throw new ArgumentException(\"need at least one failed check\", nameof(failThreshold));",
+        "        Primary = primary;",
+        "        this.standby = standby;",
+        "        this.failThreshold = failThreshold;",
+        "    }",
+        "",
+        "    public string Primary { get; private set; }",
+        "    public long Epoch { get; private set; } = 1;",
+        "    public string State { get; private set; } = \"healthy\";",
+        "",
+        "    public void Probe(bool primaryOk)",
+        "    {",
+        "        if (primaryOk)",
+        "        {",
+        "            failures = 0;",
+        "            State = \"healthy\";",
+        "            return;",
+        "        }",
+        "        failures++;",
+        "        if (failures < failThreshold) { State = \"suspect\"; return; }",
+        "        (Primary, standby) = (standby, Primary);",
+        "        Epoch++;",
+        "        failures = 0;",
+        "        State = \"promoted\";",
+        "    }",
+        "",
+        "    public bool AcceptWrite(string node, long epoch) => node == Primary && epoch == Epoch;",
+        "}"
+      ],
+      "hints": [
+        "Keep a failure counter and the standby's name in fields; give the properties a `private set`.",
+        "Promotion is a tuple swap: `(Primary, standby) = (standby, Primary);` then `Epoch++`."
+      ],
+      "template": [
+        "var dojoF = new Failover(\"db-a\", \"db-b\", 3);",
+        "Dojo.Eq(\"starts on db-a\", \"db-a\", dojoF.Primary);",
+        "Dojo.Eq(\"starts at epoch 1\", 1L, dojoF.Epoch);",
+        "Dojo.Eq(\"starts healthy\", \"healthy\", dojoF.State);",
+        "dojoF.Probe(false);",
+        "Dojo.Eq(\"one failed check: suspect\", \"suspect\", dojoF.State);",
+        "Dojo.Eq(\"one failed check does not fail over\", \"db-a\", dojoF.Primary);",
+        "dojoF.Probe(true);",
+        "Dojo.Eq(\"a passing check clears it\", \"healthy\", dojoF.State);",
+        "dojoF.Probe(false); dojoF.Probe(false);",
+        "Dojo.Eq(\"two in a row: still db-a\", \"db-a\", dojoF.Primary);",
+        "dojoF.Probe(false);",
+        "Dojo.Eq(\"three in a row: db-b is promoted\", \"db-b\", dojoF.Primary);",
+        "Dojo.Eq(\"promotion bumps the epoch\", 2L, dojoF.Epoch);",
+        "Dojo.Eq(\"state says promoted\", \"promoted\", dojoF.State);",
+        "Dojo.Eq(\"the old primary is fenced\", false, dojoF.AcceptWrite(\"db-a\", 1));",
+        "Dojo.Eq(\"a stale epoch is fenced\", false, dojoF.AcceptWrite(\"db-b\", 1));",
+        "Dojo.Eq(\"the new primary with the new epoch writes\", true, dojoF.AcceptWrite(\"db-b\", 2));",
+        "dojoF.Probe(true);",
+        "Dojo.Eq(\"healthy again\", \"healthy\", dojoF.State);",
+        "Dojo.Throws<ArgumentException>(\"a threshold of 0 is an error\", () => new Failover(\"a\", \"b\", 0));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "region-failover",
+      "title": "Build it: survive a region outage",
+      "prompt": [
+        "In the **System design board**, the service runs in region 1 with a warm copy in region 2. When region 1",
+        "dies, DNS keeps sending users to it for a long time and the region-2 replica cannot take writes. Give DNS",
+        "health-checked failover with a short TTL, let the region-2 replica be promoted, and meet the availability and",
+        "data-loss (RPO) goals the board shows."
+      ],
+      "explain": "The error spike lasts about detection plus TTL plus promotion: that is your RTO. The writes lost are the replica's lag at the moment of failure: that is your RPO. Both are numbers you choose and pay for."
+    }
+  ]
+}

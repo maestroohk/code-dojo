@@ -1,0 +1,326 @@
+{
+  "title": "Consistent hashing",
+  "summary": "Why hash mod N reshuffles almost every key when a node joins, how a ring with virtual nodes moves only about 1/(N+1) of them, and rendezvous hashing as the simpler alternative.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The trouble with mod N",
+      "body": [
+        "`shard = hash(key) mod N` spreads keys evenly. Now add one node. Almost every key's `mod` changes, so almost",
+        "every key moves. For a cache tier that means almost every lookup misses at once and the database takes the",
+        "whole load. For a database it means copying nearly all the data.",
+        "",
+        "Step through 12 keys going from 3 nodes to 4. Only keys 0, 1 and 2 stay put.",
+        "",
+        "> **Rule of thumb:** going from N to N+1 nodes with mod N, only about **1 in N+1** keys stays where it was."
+      ],
+      "trace": {
+        "code": [
+          "var moved = 0;",
+          "for (var k = 0; k < 12; k++)",
+          "{",
+          "    var before = k % 3;",
+          "    var after = k % 4;",
+          "    if (before != after) moved++;",
+          "}",
+          "Console.WriteLine($\"{moved} of 12 keys moved\");"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Twenty keys, going from 4 nodes to 5 with mod N. What does this print?",
+      "code": [
+        "var moved = 0;",
+        "for (var k = 0; k < 20; k++)",
+        "    if (k % 4 != k % 5) moved++;",
+        "Console.WriteLine(moved);"
+      ],
+      "answer": "16",
+      "explain": "`k % 4 == k % 5` only for k = 0 to 3 in every block of 20 (the lcm of 4 and 5). So 4 stay and 16 of 20 move: 80%."
+    },
+    {
+      "type": "learn",
+      "title": "The ring",
+      "body": [
+        "**Consistent hashing** puts nodes and keys on the same circle of hash values (say 0 to 2^32 - 1). A key belongs",
+        "to the first node **clockwise** from it. Add node D and it only takes the keys between its predecessor and",
+        "itself; every other key stays where it was.",
+        "",
+        "```text",
+        "                 0",
+        "            A(10)  .  k5",
+        "      k95 .            . k25",
+        "                          B(40)",
+        "     k80 .               . k45",
+        "                        D(55)  <- new: takes k45, k50 from C",
+        "        C(70)  .  k60   . k50",
+        "```",
+        "",
+        "The trace below uses a tiny ring of 0 to 99. Watch which keys change owner when D joins at 55. With N nodes,",
+        "a new one takes about **1/(N+1)** of the keys, all of them from one neighbour (with virtual nodes, from many)."
+      ],
+      "trace": {
+        "code": [
+          "int[] ring = { 10, 40, 70 };",
+          "string[] names = { \"A\", \"B\", \"C\" };",
+          "int[] keys = { 5, 25, 45, 50, 60, 80, 95 };",
+          "var before = keys.Select(k => Owner(ring, names, k)).ToArray();",
+          "int[] ring2 = { 10, 40, 55, 70 };",
+          "string[] names2 = { \"A\", \"B\", \"D\", \"C\" };",
+          "var moved = 0;",
+          "for (var i = 0; i < keys.Length; i++)",
+          "{",
+          "    var after = Owner(ring2, names2, keys[i]);",
+          "    if (after != before[i]) moved++;",
+          "    Console.WriteLine($\"key {keys[i]}: {before[i]} -> {after}\");",
+          "}",
+          "Console.WriteLine($\"{moved} of {keys.Length} keys moved\");",
+          "",
+          "static string Owner(int[] points, string[] owners, int key)",
+          "{",
+          "    for (var i = 0; i < points.Length; i++)",
+          "        if (key <= points[i]) return owners[i];",
+          "    return owners[0];",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Same ring (A at 10, B at 40, C at 70 on 0 to 99). Who owns key 72?",
+      "code": [
+        "int[] nodes = { 10, 40, 70 };",
+        "string[] names = { \"A\", \"B\", \"C\" };",
+        "Console.WriteLine(Owner(72));",
+        "",
+        "string Owner(int key)",
+        "{",
+        "    for (var i = 0; i < nodes.Length; i++)",
+        "        if (key <= nodes[i]) return names[i];",
+        "    return names[0];",
+        "}"
+      ],
+      "answer": "A",
+      "explain": "No node sits clockwise between 72 and the top of the ring, so the key wraps around to the first node, A at 10."
+    },
+    {
+      "type": "learn",
+      "title": "Virtual nodes, and rendezvous hashing",
+      "body": [
+        "Three points on a ring make very uneven arcs: one node might own half the circle. And when a node dies, its",
+        "whole arc lands on **one** neighbour, which may then fall over too.",
+        "",
+        "**Virtual nodes** fix both: each physical node is placed at many points (`A#0`, `A#1`, ... `A#99`). Arcs average",
+        "out, so load is even, and a dead node's keys spread over all the survivors. Stronger machines get more points.",
+        "",
+        "| Technique | Lookup | Moves when a node joins | Notes |",
+        "|---|---|---|---|",
+        "| `hash mod N` | O(1) | about N/(N+1) of keys | fine when N never changes |",
+        "| Ring + virtual nodes | O(log V) binary search | about 1/(N+1) | Cassandra-style tokens, many client libraries |",
+        "| **Rendezvous** (highest random weight) | O(N): score every node, pick the max | about 1/(N+1) | no ring to store; simple and even |",
+        "| Jump consistent hash | O(log N), no memory | about 1/(N+1) | nodes must be numbered 0..N-1; only add or remove the last |",
+        "",
+        "Rendezvous: for each node compute `hash(node + key)` and pick the node with the highest score. Remove a node",
+        "and only the keys it won move, each to its runner-up.",
+        "",
+        "- **Virtual node**: one of many points a physical node takes on the hash ring, so arcs and failover load are even."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A cache tier has 4 nodes. You add a 5th. Roughly what share of keys move with `hash mod N`, and with a ring with virtual nodes?",
+      "options": [
+        "About 80% with mod N, about 20% with the ring",
+        "About 20% with both",
+        "About 80% with both",
+        "About 25% with mod N, about 5% with the ring"
+      ],
+      "answer": 0,
+      "explain": "With mod N only 1 in N+1 = 1 in 5 keys stays (20%), so 80% move. A ring moves only the share the new node should own: about 1/5."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** At 14:10 an engineer removed one unhealthy node from a 10-node memcached tier. Clients",
+        "pick a node with `hash(key) % servers.Count`. Within a minute the cache hit rate fell from 96% to 11% and the",
+        "database's read QPS went up eight times. What happened?"
+      ],
+      "options": [
+        "Changing the node count from 10 to 9 remapped about 90% of the keys, so almost every read missed and went to the database",
+        "The removed node held all the hot keys",
+        "memcached flushes every node when one leaves",
+        "The database got slower, which lowered the hit rate"
+      ],
+      "answer": 0,
+      "explain": "With mod N almost every key changes node, so the warm cache is useless until it refills. A consistent-hashing client (a ring such as ketama, or rendezvous) would have moved only the removed node's tenth of the keys."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to its meaning.",
+      "pairs": [
+        [
+          "Consistent hashing",
+          "keys and nodes on one ring; a key goes to the next node clockwise"
+        ],
+        [
+          "Virtual nodes",
+          "many ring points per machine, for even load and spread-out failover"
+        ],
+        [
+          "Rendezvous hashing",
+          "score every node with hash(node, key) and take the highest"
+        ],
+        [
+          "Resharding with mod N",
+          "almost every key moves when N changes"
+        ],
+        [
+          "Jump consistent hash",
+          "no stored ring, but nodes are numbered and only the last can be removed"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "How many keys move with mod N?",
+      "prompt": [
+        "Write `double MovedFraction(int keys, int from, int to)`: of the integer keys `0` to `keys - 1`, the share whose",
+        "`key % from` differs from `key % to`. Return `0` when `keys` is `0`.",
+        "",
+        "`MovedFraction(1000, 4, 5)` is `0.8`. Compare that with a ring, which moves about `1.0 / 5`."
+      ],
+      "starter": [
+        "double MovedFraction(int keys, int from, int to)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double MovedFraction(int keys, int from, int to)",
+        "{",
+        "    if (keys == 0) return 0;",
+        "    var moved = 0;",
+        "    for (var k = 0; k < keys; k++)",
+        "        if (k % from != k % to) moved++;",
+        "    return (double)moved / keys;",
+        "}"
+      ],
+      "hints": [
+        "Count the keys where `k % from != k % to`.",
+        "Divide as a double: `(double)moved / keys`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"4 -> 5 nodes moves 80%\", 0.8, MovedFraction(1000, 4, 5));",
+        "Dojo.Eq(\"3 -> 4 nodes moves 75%\", 0.75, MovedFraction(1200, 3, 4));",
+        "Dojo.Eq(\"10 -> 11 nodes, 60 keys\", 0.833, Math.Round(MovedFraction(60, 10, 11), 3));",
+        "Dojo.Eq(\"same N moves nothing\", 0.0, MovedFraction(100, 4, 4));",
+        "Dojo.Eq(\"no keys\", 0.0, MovedFraction(0, 3, 4));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A hash ring with virtual nodes",
+      "prompt": [
+        "Write `class HashRing`:",
+        "",
+        "- `HashRing(int vnodes)`: how many points each node gets.",
+        "- `void Add(string node)`: put the node on the ring at `H.Hash($\"{node}#{i}\")` for `i` from `0` to `vnodes - 1`.",
+        "- `void Remove(string node)`: take all its points off.",
+        "- `string NodeFor(string key)`: the owner of the first point whose position is **greater than or equal to**",
+        "  `H.Hash(key)`, wrapping round to the first point. Throw `InvalidOperationException` when the ring is empty.",
+        "",
+        "`H.Hash(string)` is given (a stable 32-bit hash returning `uint`); do not write it. Keep the points in a sorted",
+        "`List<uint>` and use `BinarySearch`: a negative result `i` means \"insert at `~i`\".",
+        "",
+        "The tests put 3,000 keys on A, B and C, check the load is even, add D and check that keys only move **to** D,",
+        "then remove D and check every key is back."
+      ],
+      "starter": [
+        "class HashRing",
+        "{",
+        "    public HashRing(int vnodes) { }",
+        "",
+        "    public void Add(string node) { }",
+        "",
+        "    public void Remove(string node) { }",
+        "",
+        "    public string NodeFor(string key) => \"\";",
+        "}"
+      ],
+      "solution": [
+        "class HashRing",
+        "{",
+        "    readonly int vnodes;",
+        "    readonly List<uint> points = new();",
+        "    readonly Dictionary<uint, string> owner = new();",
+        "",
+        "    public HashRing(int vnodes) => this.vnodes = vnodes;",
+        "",
+        "    public void Add(string node)",
+        "    {",
+        "        for (var i = 0; i < vnodes; i++)",
+        "        {",
+        "            var p = H.Hash($\"{node}#{i}\");",
+        "            if (owner.TryAdd(p, node)) points.Add(p);",
+        "        }",
+        "        points.Sort();",
+        "    }",
+        "",
+        "    public void Remove(string node)",
+        "    {",
+        "        points.RemoveAll(p => owner[p] == node);",
+        "        foreach (var p in owner.Where(kv => kv.Value == node).Select(kv => kv.Key).ToList())",
+        "            owner.Remove(p);",
+        "    }",
+        "",
+        "    public string NodeFor(string key)",
+        "    {",
+        "        if (points.Count == 0) throw new InvalidOperationException(\"the ring is empty\");",
+        "        var i = points.BinarySearch(H.Hash(key));",
+        "        if (i < 0) i = ~i;",
+        "        if (i == points.Count) i = 0;",
+        "        return owner[points[i]];",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep two things: a sorted `List<uint>` of positions and a `Dictionary<uint, string>` from position to node.",
+        "`points.BinarySearch(h)` returns the index if found, else the complement of where it would go: `if (i < 0) i = ~i;`.",
+        "If `i == points.Count` the key is past the last point: wrap to index 0."
+      ],
+      "template": [
+        "var dojoRing = new HashRing(100);",
+        "dojoRing.Add(\"A\"); dojoRing.Add(\"B\"); dojoRing.Add(\"C\");",
+        "var dojoKeys = Enumerable.Range(0, 3000).Select(i => $\"user:{i}\").ToList();",
+        "var dojoBefore = dojoKeys.ToDictionary(k => k, k => dojoRing.NodeFor(k));",
+        "Dojo.Check(\"every key lands on A, B or C\", dojoBefore.Values.All(n => n is \"A\" or \"B\" or \"C\"), \"NodeFor returned something else\");",
+        "Dojo.Eq(\"the same key always lands on the same node\", dojoBefore[\"user:42\"], dojoRing.NodeFor(\"user:42\"));",
+        "var dojoShares = dojoBefore.Values.GroupBy(n => n).ToDictionary(g => g.Key, g => g.Count() / 3000.0);",
+        "Dojo.Check(\"100 virtual nodes keep the load even (each node 20% to 46%)\", dojoShares.Count == 3 && dojoShares.Values.All(s => s > 0.20 && s < 0.46), string.Join(\", \", dojoShares.Select(kv => $\"{kv.Key} {kv.Value:P0}\")));",
+        "dojoRing.Add(\"D\");",
+        "var dojoMoved = dojoKeys.Where(k => dojoRing.NodeFor(k) != dojoBefore[k]).ToList();",
+        "Dojo.Check(\"adding D moves keys only to D\", dojoMoved.All(k => dojoRing.NodeFor(k) == \"D\"), \"a key moved between two old nodes\");",
+        "Dojo.Check(\"adding a 4th node moves about a quarter of the keys (15% to 35%)\", dojoMoved.Count > 450 && dojoMoved.Count < 1050, $\"{dojoMoved.Count} of 3000 moved\");",
+        "dojoRing.Remove(\"D\");",
+        "Dojo.Check(\"removing D puts every key back where it was\", dojoKeys.All(k => dojoRing.NodeFor(k) == dojoBefore[k]), \"some key did not go back\");",
+        "Dojo.Throws<InvalidOperationException>(\"an empty ring throws\", () => new HashRing(10).NodeFor(\"x\"));",
+        "{{CODE}}",
+        "",
+        "static class H",
+        "{",
+        "    public static uint Hash(string s)",
+        "    {",
+        "        uint h = 2166136261;",
+        "        foreach (var c in s) { h ^= c; h *= 16777619; }",
+        "        h ^= h >> 16; h *= 0x85ebca6b; h ^= h >> 13; h *= 0xc2b2ae35; h ^= h >> 16;",
+        "        return h;",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}

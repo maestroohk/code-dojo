@@ -1,0 +1,199 @@
+{
+  "title": "Boss: the on-sale postmortem",
+  "summary": "A ticket on-sale oversold 312 seats. Work through the postmortem like the reviewer: time to mitigate, which orders to refund, and the admission rate that would have kept the database calm. Then build the capstone.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The artefact: a postmortem timeline",
+      "body": [
+        "**Postmortem: winter tour on-sale (blameless).** Impact: 312 seats sold twice; about 9 minutes of degraded",
+        "booking. The timeline, from the incident channel and the dashboards:",
+        "",
+        "```text",
+        "18:59:30 waiting room opened, 410000 fans queued",
+        "19:00:00 sale started, admit rate 2000/s",
+        "19:00:04 seat service p99 2.8s, db cpu 97%",
+        "19:00:09 web clients retrying failed holds 3x",
+        "19:00:41 oversell detected: 312 seats with 2 orders",
+        "19:03:10 admit rate cut to 500/s",
+        "19:07:55 fix deployed: conditional update on hold",
+        "19:08:00 oversell stopped",
+        "```",
+        "",
+        "Root cause (from the code review): the hold was a check-then-act race, and load made the window between the",
+        "read and the write long enough to matter. Contributing factor: the admission rate was set without measuring",
+        "how many bookings per second the database could confirm.",
+        "",
+        "Each step below is one number the review needs. The last step builds the capstone design on the board."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Time between two events",
+      "prompt": [
+        "Write `int SecondsBetween(string[] timeline, string fromPrefix, string toPrefix)`.",
+        "",
+        "- Each line is `HH:MM:SS text` (the time, one space, the text).",
+        "- Find the **first** line whose text starts with `fromPrefix`, and the first line **after** it whose text starts",
+        "  with `toPrefix`. Return the seconds between their times.",
+        "- If either is missing, return `-1`.",
+        "",
+        "The review's headline number is the time from detection to mitigation."
+      ],
+      "starter": [
+        "int SecondsBetween(string[] timeline, string fromPrefix, string toPrefix)",
+        "{",
+        "    return -1;",
+        "}"
+      ],
+      "solution": [
+        "int SecondsBetween(string[] timeline, string fromPrefix, string toPrefix)",
+        "{",
+        "    TimeSpan? from = null;",
+        "    foreach (var line in timeline)",
+        "    {",
+        "        var at = TimeSpan.Parse(line[..8]);",
+        "        var text = line[9..];",
+        "        if (from is null)",
+        "        {",
+        "            if (text.StartsWith(fromPrefix, StringComparison.Ordinal)) from = at;",
+        "        }",
+        "        else if (text.StartsWith(toPrefix, StringComparison.Ordinal))",
+        "            return (int)(at - from.Value).TotalSeconds;",
+        "    }",
+        "    return -1;",
+        "}"
+      ],
+      "hints": [
+        "`TimeSpan.Parse(line[..8])` reads `19:00:41`; the text starts at index 9.",
+        "Remember the `from` time once found, then keep scanning for the `to` line."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoT = new[] {",
+        "    \"18:59:30 waiting room opened, 410000 fans queued\",",
+        "    \"19:00:00 sale started, admit rate 2000/s\",",
+        "    \"19:00:04 seat service p99 2.8s, db cpu 97%\",",
+        "    \"19:00:09 web clients retrying failed holds 3x\",",
+        "    \"19:00:41 oversell detected: 312 seats with 2 orders\",",
+        "    \"19:03:10 admit rate cut to 500/s\",",
+        "    \"19:07:55 fix deployed: conditional update on hold\",",
+        "    \"19:08:00 oversell stopped\" };",
+        "Dojo.Eq(\"detection to mitigation\", 439, SecondsBetween(dojoT, \"oversell detected\", \"oversell stopped\"));",
+        "Dojo.Eq(\"sale start to detection\", 41, SecondsBetween(dojoT, \"sale started\", \"oversell detected\"));",
+        "Dojo.Eq(\"queue open to the first sign of overload\", 34, SecondsBetween(dojoT, \"waiting room\", \"seat service\"));",
+        "Dojo.Eq(\"the to-line must come after the from-line\", -1, SecondsBetween(dojoT, \"oversell stopped\", \"sale started\"));",
+        "Dojo.Eq(\"a missing event\", -1, SecondsBetween(dojoT, \"sale started\", \"rollback\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Which orders to refund",
+      "prompt": [
+        "Write `List<string> OrdersToRefund(List<(string Order, string Seat, int Ts)> orders)`.",
+        "",
+        "The policy agreed in the review: for each seat, the **earliest** order keeps it (smallest `Ts`; if two are equal,",
+        "the smaller order id in ordinal order). Every other order for that seat is refunded.",
+        "",
+        "Return the refunded order ids sorted in ordinal order."
+      ],
+      "starter": [
+        "List<string> OrdersToRefund(List<(string Order, string Seat, int Ts)> orders)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> OrdersToRefund(List<(string Order, string Seat, int Ts)> orders) =>",
+        "    orders.GroupBy(o => o.Seat)",
+        "          .SelectMany(g => g.OrderBy(o => o.Ts).ThenBy(o => o.Order, StringComparer.Ordinal).Skip(1))",
+        "          .Select(o => o.Order)",
+        "          .OrderBy(id => id, StringComparer.Ordinal)",
+        "          .ToList();"
+      ],
+      "hints": [
+        "Group by seat. In each group, sort by `Ts` then by order id, and skip the first.",
+        "Collect the rest and sort them with `StringComparer.Ordinal`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoO = new List<(string, string, int)> {",
+        "    (\"o-104\", \"A1\", 41), (\"o-101\", \"A1\", 40), (\"o-102\", \"A2\", 40),",
+        "    (\"o-109\", \"A3\", 44), (\"o-103\", \"A3\", 44), (\"o-110\", \"A3\", 45) };",
+        "Dojo.Eq(\"refund everyone but the first buyer of each seat\", new List<string> { \"o-104\", \"o-109\", \"o-110\" }, OrdersToRefund(dojoO));",
+        "Dojo.Eq(\"seats sold once need no refund\", new List<string>(), OrdersToRefund(new List<(string, string, int)> { (\"o-1\", \"B1\", 5), (\"o-2\", \"B2\", 5) }));",
+        "Dojo.Eq(\"no orders\", new List<string>(), OrdersToRefund(new List<(string, string, int)>()));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The admission rate the database can take",
+      "prompt": [
+        "The action items ask for the waiting room to admit fans at a rate derived from the database, not a guess.",
+        "",
+        "- `int AdmitPerSecond(int confirmsPerSecond, double buyRate)`: fans admitted per second so that the bookings they",
+        "  make (`admitted x buyRate`) do not exceed what the database can confirm. Round **down**. A `buyRate` of `0` or",
+        "  less, or above `1`, throws `ArgumentOutOfRangeException`.",
+        "- `int SecondsToSellOut(int seats, int seatsPerBooking, int confirmsPerSecond)`: bookings needed (seats divided by",
+        "  seats per booking, rounded **up**), divided by the confirm rate, rounded **up**.",
+        "",
+        "If the database confirms 600 bookings a second and 30% of admitted fans buy, admit 2,000 a second and the",
+        "50,000 seats (2 per booking) sell out in 42 seconds."
+      ],
+      "starter": [
+        "int AdmitPerSecond(int confirmsPerSecond, double buyRate)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "int SecondsToSellOut(int seats, int seatsPerBooking, int confirmsPerSecond)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int AdmitPerSecond(int confirmsPerSecond, double buyRate)",
+        "{",
+        "    if (buyRate <= 0 || buyRate > 1) throw new ArgumentOutOfRangeException(nameof(buyRate));",
+        "    return (int)Math.Floor(confirmsPerSecond / buyRate);",
+        "}",
+        "",
+        "int SecondsToSellOut(int seats, int seatsPerBooking, int confirmsPerSecond)",
+        "{",
+        "    var bookings = (seats + seatsPerBooking - 1) / seatsPerBooking;",
+        "    return (bookings + confirmsPerSecond - 1) / confirmsPerSecond;",
+        "}"
+      ],
+      "hints": [
+        "Admitted x buyRate <= confirms, so admitted <= confirms / buyRate.",
+        "Round up with integers: `(a + b - 1) / b`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"600 confirms/s at a 30% buy rate\", 2000, AdmitPerSecond(600, 0.3));",
+        "Dojo.Eq(\"500 confirms/s at 25%\", 2000, AdmitPerSecond(500, 0.25));",
+        "Dojo.Eq(\"round down\", 428, AdmitPerSecond(300, 0.7));",
+        "Dojo.Eq(\"everyone buys\", 300, AdmitPerSecond(300, 1.0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"a buy rate of 0 makes no sense\", () => AdmitPerSecond(300, 0));",
+        "Dojo.Eq(\"sell-out at 600 confirms/s\", 42, SecondsToSellOut(50_000, 2, 600));",
+        "Dojo.Eq(\"sell-out at 500 confirms/s\", 50, SecondsToSellOut(50_000, 2, 500));",
+        "Dojo.Eq(\"an odd seat still needs a booking\", 4, SecondsToSellOut(7, 2, 1));"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "photo-share",
+      "title": "Capstone: design photo sharing",
+      "prompt": [
+        "Put the whole topic together. In the **System design board**, start from nothing but the users and design a",
+        "photo-sharing service: uploads go straight to object storage with presigned URLs, views come from a CDN and a",
+        "cache, everything survives losing an availability zone, and it all fits the budget. The board's load test checks",
+        "every goal."
+      ],
+      "explain": "This is the interview answer made real: estimates told you bytes dominate, so the bytes never touch your servers; reads are skewed, so caches and the CDN carry them; and N+1 headroom across zones keeps the SLO through a failure."
+    }
+  ]
+}
