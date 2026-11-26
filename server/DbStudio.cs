@@ -26,10 +26,17 @@ public sealed partial class DbStudio
     readonly object _lock = new();
     static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-    public DbStudio(string dir, string stateDir)
+    readonly string _prefix;
+    readonly int _portShift;
+
+    /// <param name="containerPrefix">Docker names start with this (tests use their own, so they never touch the learner's containers).</param>
+    /// <param name="portShift">Added to every engine's host port (tests use their own ports for the same reason).</param>
+    public DbStudio(string dir, string stateDir, string containerPrefix = "code-dojo-db-", int portShift = 0)
     {
         Dir = dir;
         _stateFile = Path.Combine(stateDir, "db-engines.json");
+        _prefix = containerPrefix;
+        _portShift = portShift;
     }
 
     public static string DefaultDir() =>
@@ -305,8 +312,10 @@ public sealed partial class DbStudio
     static EngineSpec? Engine(string? id) => id is null or "" or "sqlite" ? null
         : Specs.FirstOrDefault(s => s.Id == id) ?? throw new StudioException($"Unknown engine {id}.");
 
-    static string Container(EngineSpec e) => "code-dojo-db-" + e.Id;
-    static string Volume(EngineSpec e) => "code-dojo-db-" + e.Id + "-data";
+    public string Container(EngineSpec e) => _prefix + e.Id;
+    public string Volume(EngineSpec e) => _prefix + e.Id + "-data";
+    public int Port(EngineSpec e) => e.Port + _portShift;
+    string Label => _prefix == "code-dojo-db-" ? "code-dojo=db" : "code-dojo=db-test";
 
     sealed class Job { public string Status = "starting"; public readonly List<string> Log = []; public string? Error; }
     readonly Dictionary<string, Job> _jobs = [];
@@ -330,11 +339,36 @@ public sealed partial class DbStudio
             // Letters and digits only (safe in every connection string), with each class present for SQL Server's policy.
             const string chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
             var fresh = "Dj" + new string(RandomNumberGenerator.GetItems<char>(chars, 22)) + "7q";
-            state[e.Id] = new JsonObject { ["password"] = fresh };
-            Directory.CreateDirectory(Path.GetDirectoryName(_stateFile)!);
-            File.WriteAllText(_stateFile, state.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            SavePassword(e, fresh);
             return fresh;
         }
+    }
+
+    void SavePassword(EngineSpec e, string pw)
+    {
+        lock (_lock)
+        {
+            var state = File.Exists(_stateFile) ? JsonNode.Parse(File.ReadAllText(_stateFile)) as JsonObject ?? [] : [];
+            state[e.Id] = new JsonObject { ["password"] = pw };
+            Directory.CreateDirectory(Path.GetDirectoryName(_stateFile)!);
+            File.WriteAllText(_stateFile, state.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+    }
+
+    static string PasswordVar(EngineSpec e) => e.Id switch { "postgres" => "POSTGRES_PASSWORD", "sqlserver" => "MSSQL_SA_PASSWORD", _ => "MYSQL_ROOT_PASSWORD" };
+
+    /// <summary>
+    /// The container keeps the password it was created with. If the saved one is missing or different
+    /// (state folder reset, a second copy of the app), take it from the container so connecting still works.
+    /// </summary>
+    async Task AdoptContainerPassword(EngineSpec e)
+    {
+        var env = await NetLabs.Docker(["container", "inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", Container(e)], TimeSpan.FromSeconds(20));
+        if (!env.Ok) return;
+        var line = env.Out.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.StartsWith(PasswordVar(e) + "=", StringComparison.Ordinal));
+        if (line is null) return;
+        var pw = line[(PasswordVar(e).Length + 1)..];
+        if (pw.Length > 0 && pw != Password(e)) SavePassword(e, pw);
     }
 
     public async Task<object> Engines()
@@ -351,7 +385,7 @@ public sealed partial class DbStudio
             };
         var images = await NetLabs.Docker(["images", "--format", "{{.Repository}}:{{.Tag}}"], TimeSpan.FromSeconds(15));
         _images = images.Out.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-        var ps = await NetLabs.Docker(["ps", "-a", "--filter", "label=code-dojo=db", "--format", "{{.Names}}\t{{.State}}\t{{.Image}}"], TimeSpan.FromSeconds(15));
+        var ps = await NetLabs.Docker(["ps", "-a", "--filter", "label=" + Label, "--format", "{{.Names}}\t{{.State}}\t{{.Image}}"], TimeSpan.FromSeconds(15));
         var states = ps.Out.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim().Split('\t')).Where(p => p.Length >= 3).ToDictionary(p => p[0], p => (State: p[1], Image: p[2]));
         return new
         {
@@ -368,7 +402,7 @@ public sealed partial class DbStudio
                 return new
                 {
                     id = e.Id, name = e.Name, image, imagePresent = _images.Contains(image), size = e.Size, note = e.Note,
-                    port = e.Port, status, container = Container(e), volume = Volume(e), log, error = job?.Error,
+                    port = Port(e), status, container = Container(e), volume = Volume(e), log, error = job?.Error,
                     user = e.Id switch { "postgres" => "postgres", "sqlserver" => "sa", _ => "root" },
                 };
             }),
@@ -385,7 +419,15 @@ public sealed partial class DbStudio
             if (_jobs.TryGetValue(id, out var running) && running.Status == "starting") return new { started = true };
             _jobs[id] = job = new Job();
         }
-        void Log(string line) { lock (_lock) { job.Log.Add(line.Length > 200 ? line[..200] : line); if (job.Log.Count > 200) job.Log.RemoveAt(0); } }
+        void Log(string line, bool replaceProgress = false)
+        {
+            lock (_lock)
+            {
+                if (replaceProgress && job.Log.Count > 0 && job.Log[^1].StartsWith("Downloaded ", StringComparison.Ordinal)) job.Log.RemoveAt(job.Log.Count - 1);
+                job.Log.Add(line.Length > 200 ? line[..200] : line);
+                if (job.Log.Count > 200) job.Log.RemoveAt(0);
+            }
+        }
         _ = Task.Run(async () =>
         {
             try
@@ -393,22 +435,41 @@ public sealed partial class DbStudio
                 var exists = await NetLabs.Docker(["container", "inspect", Container(e)], TimeSpan.FromSeconds(20));
                 if (exists.Ok)
                 {
+                    await AdoptContainerPassword(e);
                     Log($"Starting the existing {e.Name} container…");
                     var s = await NetLabs.Docker(["start", Container(e)], TimeSpan.FromMinutes(2));
                     if (!s.Ok) throw new StudioException(s.Err.Trim());
                 }
                 else
                 {
+                    // Know which images are here first, so a present older tag is used instead of downloading.
+                    var images = await NetLabs.Docker(["images", "--format", "{{.Repository}}:{{.Tag}}"], TimeSpan.FromSeconds(15));
+                    if (images.Ok) _images = images.Out.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
                     var image = ImageFor(e);
                     var have = await NetLabs.Docker(["image", "inspect", image], TimeSpan.FromSeconds(20));
                     if (!have.Ok)
                     {
                         Log($"Downloading {image} ({e.Size}). This happens once.");
-                        var pull = await NetLabs.Docker(["pull", image], TimeSpan.FromMinutes(40), onLine: l => { if (!l.Contains("Waiting") && !l.Contains("Downloading") && !l.Contains("Extracting")) Log(l); });
+                        // docker pull prints a line per layer; show one progress line instead.
+                        var layers = new HashSet<string>();
+                        var done = new HashSet<string>();
+                        var pull = await NetLabs.Docker(["pull", image], TimeSpan.FromMinutes(40), onLine: l =>
+                        {
+                            if (LayerLine().Match(l) is { Success: true } m)
+                            {
+                                lock (layers)
+                                {
+                                    layers.Add(m.Groups[1].Value);
+                                    if (m.Groups[2].Value.StartsWith("Pull complete", StringComparison.Ordinal) || m.Groups[2].Value.StartsWith("Already exists", StringComparison.Ordinal)) done.Add(m.Groups[1].Value);
+                                    Log($"Downloaded {done.Count} of {layers.Count} parts…", replaceProgress: true);
+                                }
+                            }
+                            else if (l.Trim().Length > 0 && !l.StartsWith("Digest:", StringComparison.Ordinal)) Log(l.Trim());
+                        });
                         if (!pull.Ok) throw new StudioException("Download failed: " + pull.Err.Trim());
                     }
                     var pw = Password(e);
-                    var args = new List<string> { "run", "-d", "--name", Container(e), "--label", "code-dojo=db", "-p", $"127.0.0.1:{e.Port}:{e.Inner}" };
+                    var args = new List<string> { "run", "-d", "--name", Container(e), "--label", Label, "--stop-timeout", "60", "-p", $"127.0.0.1:{Port(e)}:{e.Inner}" };
                     switch (e.Id)
                     {
                         case "postgres":
@@ -425,19 +486,33 @@ public sealed partial class DbStudio
                             break;
                     }
                     args.Add(image);
-                    Log($"Creating the {e.Name} container (data volume {Volume(e)}, port 127.0.0.1:{e.Port})…");
+                    Log($"Creating the {e.Name} container (data volume {Volume(e)}, port 127.0.0.1:{Port(e)})…");
                     var run = await NetLabs.Docker(args, TimeSpan.FromMinutes(3));
                     if (!run.Ok) throw new StudioException(run.Err.Trim());
                 }
                 Log($"Waiting for {e.Name} to accept connections (the first start can take a minute)…");
-                var until = DateTime.UtcNow.AddMinutes(3);
+                var until = DateTime.UtcNow.AddMinutes(4);
                 string? last = null;
                 while (DateTime.UtcNow < until)
                 {
+                    // A container that exits (bad password, not enough memory) will never answer: say why now.
+                    var state = await NetLabs.Docker(["container", "inspect", "--format", "{{.State.Running}}", Container(e)], TimeSpan.FromSeconds(20));
+                    if (state.Ok && state.Out.Trim() == "false")
+                    {
+                        var logs = await NetLabs.Docker(["logs", "--tail", "8", Container(e)], TimeSpan.FromSeconds(20));
+                        var tail = (logs.Out + logs.Err).Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).TakeLast(4);
+                        throw new StudioException($"The {e.Name} container stopped while starting. Its last log lines: " + string.Join(" | ", tail));
+                    }
                     try
                     {
                         await using var c = await OpenServer(e, null);
-                        if (e.Id == "sqlserver") await Exec(c, $"IF DB_ID('{e.DefaultDb}') IS NULL CREATE DATABASE [{e.DefaultDb}]");
+                        if (e.Id == "sqlserver")
+                        {
+                            // Connecting works before every database has finished recovery after a restart.
+                            if (Convert.ToInt32((await Rows(c, "SELECT COUNT(*) FROM sys.databases WHERE state_desc <> 'ONLINE'"))[0][0]) > 0)
+                                throw new TimeoutException("Databases are still recovering.");
+                            await Exec(c, $"IF DB_ID('{e.DefaultDb}') IS NULL CREATE DATABASE [{e.DefaultDb}]");
+                        }
                         Log($"{e.Name} is ready.");
                         lock (_lock) job.Status = "running";
                         return;
@@ -459,7 +534,19 @@ public sealed partial class DbStudio
     public async Task<object> Stop(string id)
     {
         var e = Engine(id)!;
-        var r = await NetLabs.Docker(["stop", Container(e)], TimeSpan.FromMinutes(2));
+        if (e.Id == "sqlserver")
+        {
+            // The SQL Server image does not pass Docker's stop signal on to the server, so Docker would wait
+            // and then kill it. SHUTDOWN stops it cleanly (every database is saved first) and right away.
+            try
+            {
+                await using var c = await OpenServer(e, null);
+                await Exec(c, "SHUTDOWN");
+            }
+            catch (Exception ex) when (ex is DbException or InvalidOperationException or IOException or TimeoutException) { }   // not running, or the connection closed as it stopped
+        }
+        // Give the database time to shut down cleanly (Docker's default is 10 seconds, then it kills it).
+        var r = await NetLabs.Docker(["stop", "-t", "60", Container(e)], TimeSpan.FromMinutes(2));
         lock (_lock) _jobs.Remove(id);
         return new { stopped = r.Ok, message = r.Ok ? "" : r.Err.Trim() };
     }
@@ -470,9 +557,9 @@ public sealed partial class DbStudio
         if (db is not null) CheckName(db);
         return e.Id switch
         {
-            "postgres" => $"Host=127.0.0.1;Port={e.Port};Username=postgres;Password={pw};Database={db ?? e.DefaultDb};Timeout=5;Command Timeout={ServerTimeoutSeconds};Pooling=false",
-            "sqlserver" => $"Server=127.0.0.1,{e.Port};User ID=sa;Password={pw};Database={db ?? "master"};TrustServerCertificate=True;Encrypt=False;Connect Timeout=5;Pooling=false",
-            _ => $"Server=127.0.0.1;Port={e.Port};User ID=root;Password={pw};Database={db ?? e.DefaultDb};Pooling=false;Connection Timeout=5;Default Command Timeout={ServerTimeoutSeconds};AllowUserVariables=true",
+            "postgres" => $"Host=127.0.0.1;Port={Port(e)};Username=postgres;Password={pw};Database={db ?? e.DefaultDb};Timeout=5;Command Timeout={ServerTimeoutSeconds};Pooling=false",
+            "sqlserver" => $"Server=127.0.0.1,{Port(e)};User ID=sa;Password={pw};Database={db ?? "master"};TrustServerCertificate=True;Encrypt=False;Connect Timeout=5;Pooling=false",
+            _ => $"Server=127.0.0.1;Port={Port(e)};User ID=root;Password={pw};Database={db ?? e.DefaultDb};Pooling=false;Connection Timeout=5;Default Command Timeout={ServerTimeoutSeconds};AllowUserVariables=true",
         };
     }
 
@@ -543,7 +630,7 @@ public sealed partial class DbStudio
     /// <summary>The 1-based line, within a batch, of the error Postgres reports.</summary>
     static int PgLine(string batch, Npgsql.PostgresException pe)
     {
-        var stmt = pe.BatchCommand?.CommandText;
+        var stmt = pe.BatchCommand?.CommandText ?? batch;
         if (stmt is { Length: > 0 } && batch.IndexOf(stmt.Trim(), StringComparison.Ordinal) is var start and >= 0 && pe.Position > 0)
             return batch.AsSpan(0, Math.Min(batch.Length, start + pe.Position - 1)).Count('\n') + 1;
         // A plain multi-statement command does not say which statement failed: find the name the message quotes.
@@ -556,88 +643,253 @@ public sealed partial class DbStudio
         return 1;
     }
 
-    static string Show(object? v) => v switch
+    /// <summary>A value as text for the grid. The column type decides between a date and a date with a time.</summary>
+    static string Show(object? v, string type = "") => v switch
     {
         null => "NULL",
         DateOnly d => d.ToString("yyyy-MM-dd", Inv),
-        TimeOnly t => t.ToString("HH:mm:ss.FFF", Inv),
+        TimeOnly t => t.ToString("HH:mm:ss.FFFFFFF", Inv).TrimEnd('.'),
         TimeSpan t => t.ToString("c", Inv),
-        DateTime d => d.TimeOfDay == TimeSpan.Zero ? d.ToString("yyyy-MM-dd", Inv) : d.ToString("yyyy-MM-dd HH:mm:ss.FFF", Inv),
-        DateTimeOffset d => d.ToString("yyyy-MM-dd HH:mm:ss.FFF zzz", Inv),
+        DateTime d when type.Equals("date", StringComparison.OrdinalIgnoreCase) => d.ToString("yyyy-MM-dd", Inv),
+        DateTime d => d.ToString("yyyy-MM-dd HH:mm:ss.FFFFFFF", Inv).TrimEnd('.'),
+        DateTimeOffset d => d.ToString("yyyy-MM-dd HH:mm:ss.FFFFFFF", Inv).TrimEnd('.') + d.ToString(" zzz", Inv),
         bool b => b ? "true" : "false",
         byte[] b => "0x" + Convert.ToHexString(b.Length > 64 ? b[..64] : b) + (b.Length > 64 ? "…" : ""),
+        // MySQL BIT(n) comes back as a number: show the bits, the way it was written.
+        ulong u when type.Equals("BIT", StringComparison.OrdinalIgnoreCase) => "b'" + Convert.ToString((long)u, 2) + "'",
         double d => d.ToString("R", Inv),
         float f => f.ToString("R", Inv),
+        string s => s,
+        Array a => "{" + string.Join(",", a.Cast<object?>().Select(x => x is null ? "NULL" : Show(x))) + "}",   // PostgreSQL arrays
         _ => Convert.ToString(v, Inv) ?? "",
     };
+
+    static string? Cell(DbDataReader r, int i, string type, EngineSpec e)
+    {
+        try { return r.IsDBNull(i) ? null : Show(r.GetValue(i), type); }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // SQL Server's geography, geometry and hierarchyid need a library this app does not ship.
+            return e.Id == "sqlserver" ? $"({type} value: select it with .ToString() to see it)" : $"({type} value: CAST it to text to see it)";
+        }
+    }
+
+    [GeneratedRegex(@"^\s*GO(?:\s+(\d+))?\s*;?\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex GoLine();
+
+    [GeneratedRegex(@"^([0-9a-f]{12}): (.*)$")]
+    private static partial Regex LayerLine();
+
+    /// <summary>
+    /// SQL Server tools split a script into batches on lines that say GO (GO 3 runs the batch three times).
+    /// Each batch keeps its own first line, so error lines point into the whole script.
+    /// </summary>
+    public static List<(string Sql, int Line, int Repeat)> SqlServerBatches(string script)
+    {
+        var lines = script.Replace("\r\n", "\n").Split('\n');
+        var list = new List<(string, int, int)>();
+        var start = 0;
+        void Add(int end, int repeat)
+        {
+            var text = string.Join("\n", lines[start..end]);
+            if (SqlChecker.StripComments(text).Trim().Length > 0) list.Add((text, start + 1, repeat));
+        }
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (GoLine().Match(lines[i]) is not { Success: true } m) continue;
+            Add(i, m.Groups[1].Success ? Math.Clamp(int.Parse(m.Groups[1].Value, Inv), 1, 1000) : 1);
+            start = i + 1;
+        }
+        Add(lines.Length, 1);
+        return list;
+    }
+
+    /// <summary>
+    /// Splits a script into statements the way the engine's own command-line client does (mysql, psql):
+    /// on ; outside strings, quoted names and comments. MySQL: backslash escapes, # comments and DELIMITER lines
+    /// (needed for procedures and triggers). PostgreSQL: $$ dollar quotes and E'...' strings.
+    /// Each statement starts at its first real character and comes with its line in the script.
+    /// The delimiter itself is left out.
+    /// </summary>
+    public static List<(string Sql, int Line)> SplitStatements(string script, bool mysql)
+    {
+        script = script.Replace("\r\n", "\n");
+        var list = new List<(string, int)>();
+        var delim = ";";
+        var n = script.Length;
+        int start = 0, i = 0;
+
+        bool IsDashComment(int p) => p + 1 < n && script[p] == '-' && script[p + 1] == '-' && (!mysql || p + 2 >= n || char.IsWhiteSpace(script[p + 2]));
+        bool IsLineComment(int p) => (mysql && script[p] == '#') || IsDashComment(p);
+        // Past whitespace and comments (but not MySQL's /*! ... */, which the server runs).
+        int SkipNoise(int from, int to)
+        {
+            var p = from;
+            while (p < to)
+            {
+                if (char.IsWhiteSpace(script[p])) p++;
+                else if (IsLineComment(p)) { var nl = script.IndexOf('\n', p); p = nl < 0 ? to : Math.Min(to, nl + 1); }
+                else if (p + 1 < n && script[p] == '/' && script[p + 1] == '*' && !(mysql && p + 2 < n && script[p + 2] == '!'))
+                { var end = script.IndexOf("*/", p + 2, StringComparison.Ordinal); p = end < 0 ? to : Math.Min(to, end + 2); }
+                else break;
+            }
+            return p;
+        }
+        void Add(int end)
+        {
+            var lead = SkipNoise(start, end);
+            var body = script[lead..end].TrimEnd();
+            if (body.Length > 0) list.Add((body, 1 + script.AsSpan(0, lead).Count('\n')));
+        }
+        bool IdentChar(int p) => p >= 0 && (char.IsLetterOrDigit(script[p]) || script[p] == '_' || script[p] == '$');
+
+        while (i < n)
+        {
+            if (mysql && (i == 0 || script[i - 1] == '\n') && SkipNoise(start, i) == i
+                && Regex.Match(script[i..], @"^[ \t]*DELIMITER[ \t]+(\S+)[ \t]*(?:\n|$)", RegexOptions.IgnoreCase) is { Success: true } d)
+            {
+                delim = d.Groups[1].Value;
+                i += d.Length;
+                start = i;
+                continue;
+            }
+            var c = script[i];
+            if (c is '\'' or '"' or '`' && (c != '`' || mysql))
+            {
+                // MySQL strings take backslash escapes; in PostgreSQL only E'...' strings do.
+                var backslash = c != '`' && (mysql || (c == '\'' && i > 0 && script[i - 1] is 'E' or 'e' && !IdentChar(i - 2)));
+                for (i++; i < n && script[i] != c; i++)
+                    if (backslash && script[i] == '\\') i++;
+                i++;
+            }
+            else if (!mysql && c == '$' && !IdentChar(i - 1) && Regex.Match(script[i..Math.Min(n, i + 64)], @"^\$(?:[A-Za-z_]\w*)?\$") is { Success: true } tag)
+            {
+                var end = script.IndexOf(tag.Value, i + tag.Length, StringComparison.Ordinal);
+                i = end < 0 ? n : end + tag.Length;
+            }
+            else if (IsLineComment(i)) { var nl = script.IndexOf('\n', i); i = nl < 0 ? n : nl; }
+            else if (c == '/' && i + 1 < n && script[i + 1] == '*') { var end = script.IndexOf("*/", i + 2, StringComparison.Ordinal); i = end < 0 ? n : end + 2; }
+            else if (string.CompareOrdinal(script, i, delim, 0, delim.Length) == 0) { Add(i); i += delim.Length; start = i; }
+            else i++;
+        }
+        if (start < n) Add(n);
+        return list;
+    }
+
+    [GeneratedRegex(@"at line (\d+)\s*$")]
+    private static partial Regex MySqlAtLine();
+
+    /// <summary>A hint for the classic mix-ups between dialects, added to the engine's own error.</summary>
+    static string DialectHint(EngineSpec e, string sql, string message)
+    {
+        var code = SqlChecker.StripComments(sql);
+        if (e.Id == "sqlserver" && Regex.IsMatch(code, @"\bLIMIT\s+\d", RegexOptions.IgnoreCase) && message.Contains("syntax", StringComparison.OrdinalIgnoreCase))
+            return " SQL Server has no LIMIT. Write SELECT TOP 10 ... instead, or ORDER BY ... OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY.";
+        if (e.Id != "sqlserver" && Regex.IsMatch(code, @"\bSELECT\s+(DISTINCT\s+)?TOP\s*\(?\d", RegexOptions.IgnoreCase) && message.Contains("syntax", StringComparison.OrdinalIgnoreCase))
+            return $" {e.Name} has no TOP. Put LIMIT 10 at the end of the query instead.";
+        if (e.Id == "mysql" && Regex.IsMatch(code, @"\[[A-Za-z_]\w*\]") && message.Contains("syntax", StringComparison.OrdinalIgnoreCase))
+            return " MySQL quotes names with backticks, like `order`, not [order].";
+        return "";
+    }
 
     async Task<object> ServerQuery(EngineSpec e, string? db, string sql, bool explain)
     {
         await using var c = await Connect(e, db);
         var started = System.Diagnostics.Stopwatch.StartNew();
-        // SQL Server tools split scripts into batches on GO lines; do the same.
-        var batches = e.Id == "sqlserver" ? Regex.Split(sql, @"^\s*GO\s*;?\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase).Where(b => b.Trim().Length > 0).ToList() : [sql];
-        var lineOffsets = new List<int>();
-        { var at = 0; foreach (var b in batches) { var i = sql.IndexOf(b, at, StringComparison.Ordinal); lineOffsets.Add(i < 0 ? 0 : sql.AsSpan(0, i).Count('\n')); at = Math.Max(at, i); } }
-        if (explain)
-        {
-            var last = batches[^1];
-            batches = e.Id switch
-            {
-                "postgres" => ["EXPLAIN " + last],
-                "mysql" => ["EXPLAIN FORMAT=TREE " + last],
-                _ => ["SET SHOWPLAN_TEXT ON", last],
-            };
-            lineOffsets = [.. batches.Select(_ => 0)];
-        }
         var grids = new List<Grid>();
         var messages = new List<string>();
-        for (var bi = 0; bi < batches.Count; bi++)
+
+        // What goes to the server, one piece at a time, with the script line each piece starts on.
+        //   SQL Server: one batch per GO, like sqlcmd and SSMS.
+        //   PostgreSQL and MySQL: one statement at a time, like psql and mysql. Sent together, PostgreSQL
+        //   would run them as one transaction, so an error on line 9 would quietly undo lines 1 to 8.
+        var oneByOne = e.Id != "sqlserver";
+        var units = oneByOne ? SplitStatements(sql, mysql: e.Id == "mysql").Select(s => (s.Sql, s.Line, Repeat: 1)).ToList() : SqlServerBatches(sql);
+        if (units.Count == 0) throw new StudioException("Write a query first.");
+        if (explain)
         {
-            try
+            // Explain the last statement only (the others are not run).
+            units = e.Id switch
             {
-                await using var cmd = c.CreateCommand();
-                cmd.CommandText = batches[bi];
-                cmd.CommandTimeout = ServerTimeoutSeconds;
-                var t = System.Diagnostics.Stopwatch.StartNew();
-                await using var r = await cmd.ExecuteReaderAsync();
-                do
+                "postgres" => [("EXPLAIN " + units[^1].Sql, units[^1].Line, 1)],
+                "mysql" => [("EXPLAIN FORMAT=TREE " + units[^1].Sql, units[^1].Line, 1)],
+                _ => [("SET SHOWPLAN_TEXT ON", 0, 1), (units[^1].Sql, units[^1].Line, 1)],
+            };
+        }
+
+        if (c is Microsoft.Data.SqlClient.SqlConnection sc)
+            sc.InfoMessage += (_, a) => { lock (messages) foreach (Microsoft.Data.SqlClient.SqlError err in a.Errors) if (err.Class <= 10) messages.Add(err.Message); };   // PRINT
+
+        try
+        {
+            foreach (var (text, line, repeat) in units)
+            {
+                for (var rep = 0; rep < repeat; rep++)
                 {
-                    if (r.FieldCount == 0) continue;
-                    var cols = Enumerable.Range(0, r.FieldCount).Select(r.GetName).ToList();
-                    var types = Enumerable.Range(0, r.FieldCount).Select(i => { try { return r.GetDataTypeName(i); } catch { return ""; } }).ToList();
-                    var rows = new List<string?[]>();
-                    var truncated = false;
-                    while (await r.ReadAsync())
+                    try
                     {
-                        if (rows.Count >= MaxRows) { truncated = true; break; }
-                        var row = new string?[r.FieldCount];
-                        for (var i = 0; i < row.Length; i++) row[i] = r.IsDBNull(i) ? null : Show(r.GetValue(i));
-                        rows.Add(row);
+                        await using var cmd = c.CreateCommand();
+                        cmd.CommandText = text;
+                        cmd.CommandTimeout = ServerTimeoutSeconds;
+                        if (cmd is Microsoft.Data.SqlClient.SqlCommand ssc)
+                            ssc.StatementCompleted += (_, a) => { lock (messages) messages.Add($"({a.RecordCount} row{(a.RecordCount == 1 ? "" : "s")} affected)"); };
+                        var t = System.Diagnostics.Stopwatch.StartNew();
+                        var hadResult = false;
+                        await using var r = await cmd.ExecuteReaderAsync();
+                        do
+                        {
+                            if (r.FieldCount == 0) continue;
+                            hadResult = true;
+                            var cols = Enumerable.Range(0, r.FieldCount).Select(r.GetName).ToList();
+                            // SQL Server names CLR types in full (shop.sys.geography): the last part is enough.
+                            var types = Enumerable.Range(0, r.FieldCount).Select(i => { try { return r.GetDataTypeName(i).Split('.')[^1]; } catch { return ""; } }).ToList();
+                            var rows = new List<string?[]>();
+                            var truncated = false;
+                            while (await r.ReadAsync())
+                            {
+                                if (rows.Count >= MaxRows) { truncated = true; break; }
+                                var row = new string?[r.FieldCount];
+                                for (var i = 0; i < row.Length; i++) row[i] = Cell(r, i, types[i], e);
+                                rows.Add(row);
+                            }
+                            // One statement per command: each grid knows its line. A SQL Server batch runs as a whole.
+                            grids.Add(new(cols, types, rows, truncated, oneByOne ? line : 0, t.ElapsedMilliseconds));
+                            if (truncated) break;
+                        } while (await r.NextResultAsync());
+                        await r.DisposeAsync();
+                        var n = r.RecordsAffected;
+                        if (oneByOne && !hadResult)
+                        {
+                            var verb = SqlChecker.FirstWord(text);
+                            messages.Add(verb is "INSERT" or "UPDATE" or "DELETE" or "REPLACE" || n > 0
+                                ? $"Line {line}: {verb} changed {n} row{(n == 1 ? "" : "s")}."
+                                : $"Line {line}: {verb} done.");
+                        }
+
                     }
-                    grids.Add(new(cols, types, rows, truncated, 0, t.ElapsedMilliseconds));   // line unknown: the server runs the batch as a whole
-                    if (truncated) break;
-                } while (await r.NextResultAsync());
-                await r.DisposeAsync();
-                if (r.RecordsAffected > 0) messages.Add($"{r.RecordsAffected} row{(r.RecordsAffected == 1 ? "" : "s")} changed.");
-            }
-            catch (Exception ex) when (ex is DbException or InvalidOperationException)
-            {
-                var line = lineOffsets[bi] + (ex switch
-                {
-                    // Npgsql splits a batch into statements; Position counts from the start of the failing one.
-                    Npgsql.PostgresException pe => PgLine(batches[bi], pe),
-                    Microsoft.Data.SqlClient.SqlException se => Math.Max(1, se.LineNumber),
-                    _ => 1,
-                });
-                var message = ex is Npgsql.PostgresException p ? p.MessageText + (p.Hint is { Length: > 0 } hint ? " Hint: " + hint : "") : ex.Message;
-                var timedOut = ex.Message.Contains("timeout", StringComparison.OrdinalIgnoreCase);
-                if (explain && e.Id == "sqlserver") { try { await Exec(c, "SET SHOWPLAN_TEXT OFF"); } catch { } }
-                return new { results = grids, messages, error = $"Line {line}: {message}", errorLine = line, timedOut, ms = started.ElapsedMilliseconds };
+                    catch (Exception ex) when (ex is not OutOfMemoryException)
+                    {
+                        var errLine = Math.Max(1, line) - 1 + ex switch
+                        {
+                            // Position counts characters from the start of the statement.
+                            Npgsql.PostgresException pe => PgLine(text, pe),
+                            Microsoft.Data.SqlClient.SqlException se => Math.Max(1, se.LineNumber),
+                            MySqlConnector.MySqlException me when MySqlAtLine().Match(me.Message) is { Success: true } at => int.Parse(at.Groups[1].Value, Inv),
+                            _ => 1,
+                        };
+                        var message = ex is Npgsql.PostgresException p ? p.MessageText + (p.Hint is { Length: > 0 } hint ? " Hint: " + hint : "") : ex.Message;
+                        message += DialectHint(e, text, message);
+                        var timedOut = ex.Message.Contains("timeout", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase);
+                        return new { results = grids, messages, error = $"Line {errLine}: {message}", errorLine = errLine, timedOut, ms = started.ElapsedMilliseconds };
+                    }
+                }
             }
         }
-        if (explain && e.Id == "sqlserver") { try { await Exec(c, "SET SHOWPLAN_TEXT OFF"); } catch { } }
-        return new { results = grids, messages, error = (string?)null, errorLine = 0, timedOut = false, ms = started.ElapsedMilliseconds, explained = explain };
+        finally
+        {
+            if (explain && e.Id == "sqlserver") { try { await Exec(c, "SET SHOWPLAN_TEXT OFF"); } catch { } }
+        }
+        return new { results = grids, messages, error = (string?)null, errorLine = 0, timedOut = false, ms = started.ElapsedMilliseconds, explained = explain, statements = oneByOne ? units.Count : (int?)null };
     }
 
     async Task<List<Table>> ServerSchema(EngineSpec e, string? db)
@@ -651,8 +903,20 @@ public sealed partial class DbStudio
         };
         string Key(object? schema, object? name) => e.Id == "mysql" || schema?.ToString() == deflt ? name?.ToString() ?? "" : $"{schema}.{name}";
         var tables = (await Rows(c, $"SELECT t.table_schema, t.table_name, t.table_type FROM information_schema.tables t WHERE {scope} ORDER BY t.table_type, t.table_schema, t.table_name"))
-            .Select(r => (Key: Key(r[0], r[1]), Kind: r[2]?.ToString()?.Contains("VIEW") == true ? "view" : "table")).ToList();
-        var cols = await Rows(c, $"SELECT t.table_schema, t.table_name, t.column_name, t.data_type, t.is_nullable, t.column_default FROM information_schema.columns t WHERE {scope} ORDER BY t.table_schema, t.table_name, t.ordinal_position");
+            .Select(r => (Schema: r[0]?.ToString() ?? "", Name: r[1]?.ToString() ?? "", Key: Key(r[0], r[1]), Kind: r[2]?.ToString()?.Contains("VIEW") == true ? "view" : "table")).ToList();
+        // MySQL's column_type already says varchar(100), enum('S','M'), decimal(10,2); the others are put together here.
+        var typeCols = e.Id switch { "mysql" => "t.column_type", "postgres" => "t.data_type, t.character_maximum_length, t.numeric_precision, t.numeric_scale, t.udt_name", _ => "t.data_type, t.character_maximum_length, t.numeric_precision, t.numeric_scale" };
+        var cols = await Rows(c, $"SELECT t.table_schema, t.table_name, t.column_name, t.is_nullable, t.column_default, {typeCols} FROM information_schema.columns t WHERE {scope} ORDER BY t.table_schema, t.table_name, t.ordinal_position");
+        string TypeOf(object?[] r)
+        {
+            var type = r[5]?.ToString() ?? "";
+            if (e.Id == "mysql") return type;
+            if (type == "ARRAY" && r.Length > 9 && r[9] is string udt) return udt.TrimStart('_') + "[]";   // PostgreSQL: _int4 is int4[]
+            if (r[6] is not null && Convert.ToInt64(r[6], Inv) is var len && !type.Contains("text", StringComparison.OrdinalIgnoreCase) && type is not ("xml" or "image" or "ntext"))
+                return $"{type}({(len < 0 ? "max" : len.ToString(Inv))})";
+            if (type is "decimal" or "numeric" && r[7] is not null && r[8] is not null) return $"{type}({r[7]},{r[8]})";
+            return type;
+        }
         var pks = (await Rows(c, $"SELECT t.table_schema, t.table_name, k.column_name FROM information_schema.table_constraints t JOIN information_schema.key_column_usage k ON k.constraint_name = t.constraint_name AND k.table_schema = t.table_schema AND k.table_name = t.table_name WHERE t.constraint_type = 'PRIMARY KEY' AND {scope}"))
             .Select(r => Key(r[0], r[1]) + "\u001f" + r[2]).ToHashSet();
         var fkSql = e.Id switch
@@ -669,11 +933,25 @@ public sealed partial class DbStudio
             _ => "SELECT table_schema, table_name, index_name, MIN(non_unique) = 0, GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ', ') FROM information_schema.statistics WHERE table_schema = DATABASE() GROUP BY table_schema, table_name, index_name",
         };
         var idx = await Rows(c, idxSql);
+        // Row counts for the tables (not views), as the SQLite side shows. Small learning databases: COUNT(*) is quick.
+        var counts = new Dictionary<string, long>();
+        string Quote(string s) => e.Id switch { "sqlserver" => "[" + s.Replace("]", "]]") + "]", "mysql" => "`" + s.Replace("`", "``") + "`", _ => "\"" + s.Replace("\"", "\"\"") + "\"" };
+        foreach (var t in tables.Where(t => t.Kind == "table").Take(100))
+        {
+            try
+            {
+                await using var cmd = c.CreateCommand();
+                cmd.CommandText = $"SELECT COUNT(*) FROM {(e.Id == "mysql" ? "" : Quote(t.Schema) + ".")}{Quote(t.Name)}";
+                cmd.CommandTimeout = 5;
+                counts[t.Key] = Convert.ToInt64(await cmd.ExecuteScalarAsync(), Inv);
+            }
+            catch (DbException) { }
+        }
         return tables.Select(t => new Table(t.Key, t.Kind,
-            cols.Where(r => Key(r[0], r[1]) == t.Key).Select(r => new Column(r[2]?.ToString() ?? "", r[3]?.ToString() ?? "", r[4]?.ToString() == "NO", pks.Contains(t.Key + "\u001f" + r[2]), r[5]?.ToString())).ToList(),
+            cols.Where(r => Key(r[0], r[1]) == t.Key).Select(r => new Column(r[2]?.ToString() ?? "", TypeOf(r), r[3]?.ToString() == "NO", pks.Contains(t.Key + "\u001f" + r[2]), r[4]?.ToString())).ToList(),
             fks.Where(r => Key(r[0], r[1]) == t.Key).Select(r => new ForeignKey(r[2]?.ToString() ?? "", Key(r[3], r[4]), r[5]?.ToString() ?? "")).ToList(),
             idx.Where(r => Key(r[0], r[1]) == t.Key).Select(r => new Index(r[2]?.ToString() ?? "", Convert.ToBoolean(r[3]), r[4]?.ToString() ?? "")).ToList(),
-            null, null)).ToList();
+            counts.TryGetValue(t.Key, out var n) ? n : null, null)).ToList();
     }
 
     // ---------------------------------------------------------------- sample databases

@@ -14,6 +14,13 @@ const STARTERS = {
   movies: '-- Movies: movies, people, genres, movie_genres, cast_members, users, ratings.\n-- Highest rated films with at least 5 ratings:\nSELECT m.title, m.year, ROUND(AVG(r.score), 2) AS average, COUNT(*) AS ratings\nFROM movies m\nJOIN ratings r ON r.movie_id = m.id\nGROUP BY m.id\nHAVING COUNT(*) >= 5\nORDER BY average DESC;',
 };
 
+// First text in the editor for a database on a server engine: what makes that dialect different.
+const ENGINE_STARTERS = {
+  postgres: '-- PostgreSQL. Quote names with "double quotes". Use LIMIT to take the first rows.\nSELECT version();',
+  sqlserver: '-- SQL Server (T-SQL). Quote names with [brackets]. Use SELECT TOP 10 to take the first rows.\n-- A line with just GO ends a batch: CREATE VIEW and CREATE PROCEDURE must start their own batch.\nSELECT @@VERSION AS version;',
+  mysql: '-- MySQL. Quote names with `backticks`. Use LIMIT to take the first rows.\n-- To write a procedure or trigger, change the delimiter first: DELIMITER $$\nSELECT VERSION() AS version;',
+};
+
 /** fetch that returns the server's own error message. */
 async function call(path, body) {
   const res = await fetch('/api/db/' + path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -111,7 +118,7 @@ export function dbStudio(page) {
   function select(target) {
     st.drafts[keyOf(st.target)] = editor.value;
     st.target = target; save();
-    editor.value = st.drafts[keyOf(target)] ?? STARTERS[target.db] ?? (target.engine === 'sqlite' ? 'SELECT name, type FROM sqlite_schema;' : 'SELECT 1;');
+    editor.value = st.drafts[keyOf(target)] ?? (target.engine === 'sqlite' ? STARTERS[target.db] ?? 'SELECT name, type FROM sqlite_schema;' : ENGINE_STARTERS[target.engine] ?? 'SELECT 1;');
     results = null; paintResults(); paintSide(); paintTarget(); loadSchema();
   }
 
@@ -169,9 +176,9 @@ export function dbStudio(page) {
       const on = e.status === 'running';
       const t = st.target;
       return h('div.db-engine',
-        h('div.db-engine-head', h('b', e.name), h(`span.db-pill.${e.status}`, { failed: 'failed', running: 'running', starting: 'starting…', stopped: 'stopped', absent: 'not created' }[e.status] || e.status), h('span.spacer'),
-          on ? h('button.mini', { type: 'button', onclick: async () => { await call(`engines/${e.id}/stop`, {}); delete serverDbs[e.id]; if (t.engine === e.id) select({ engine: 'sqlite', db: dbs[0]?.name || 'bookshop' }); loadEngines(); } }, 'Stop')
-            : e.status === 'starting' ? null
+        h('div.db-engine-head', h('b', e.name), h(`span.db-pill.${e.status}`, { failed: 'failed', running: 'running', starting: 'starting…', stopping: 'stopping…', stopped: 'stopped', absent: 'not created' }[e.status] || e.status), h('span.spacer'),
+          on ? h('button.mini', { type: 'button', onclick: () => stopEngine(e) }, 'Stop')
+            : e.status === 'starting' || e.status === 'stopping' ? null
             : h('button.mini', { type: 'button', onclick: () => startEngine(e) }, e.imagePresent ? 'Start' : 'Download & start')),
         h('div.muted.small', `${e.image} · 127.0.0.1:${e.port} · user ${e.user}`),
         !e.imagePresent && e.status !== 'starting' && h('div.muted.small', `First start downloads the image (${e.size}).`),
@@ -188,6 +195,18 @@ export function dbStudio(page) {
       : `Start ${e.name}? This first downloads the ${e.image} image (${e.size}) from the internet, which can take several minutes. It then runs as ${e.container} on 127.0.0.1:${e.port} only, with its data in the volume ${e.volume}.`;
     if (!await ask(e.id === 'sqlserver' ? `${msg} ${e.note}` : msg, { ok: e.imagePresent ? 'Start it' : 'Download and start' })) return;
     try { await call(`engines/${e.id}/start`, {}); } catch (err) { toastErr(err); }
+    loadEngines();
+  }
+
+  // A database can take a while to shut down cleanly, so show that it is on its way.
+  async function stopEngine(e) {
+    e.status = 'stopping'; paintSide();
+    try {
+      const r = await call(`engines/${e.id}/stop`, {});
+      if (!r.stopped && r.message) toastErr(new Error(r.message));
+    } catch (err) { toastErr(err); }
+    delete serverDbs[e.id];
+    if (st.target.engine === e.id) select({ engine: 'sqlite', db: dbs[0]?.name || 'bookshop' });
     loadEngines();
   }
 
@@ -222,7 +241,7 @@ export function dbStudio(page) {
     if (!schema.length) return put(schemaEl, h('p.muted.small', 'No tables yet. CREATE TABLE one, or import a CSV.'));
     put(schemaEl, schema.map(t => h('details.db-table', { open: schema.length <= 4 },
       h('summary', h('span.db-table-name', t.name), t.kind === 'view' && h('span.db-badge', 'view'), t.rows != null && h('span.muted.small', ` ${t.rows} rows`),
-        h('button.mini.db-peek', { type: 'button', title: 'Show its rows', onclick: ev => { ev.preventDefault(); editor.value = `SELECT * FROM ${quoteName(t.name)} LIMIT 100;`; run(false); } }, '▶')),
+        h('button.mini.db-peek', { type: 'button', title: 'Show its rows', onclick: ev => { ev.preventDefault(); editor.value = peekSql(st.target.engine, t.name); run(false); } }, '▶')),
       h('ul.db-cols', t.columns.map(c => {
         const fk = t.foreignKeys.find(f => f.from === c.name);
         return h('li', h('span.db-key', c.pk ? 'PK' : fk ? 'FK' : ''), h('span.db-col', c.name), h('span.db-ctype', (c.type || '').toLowerCase()),
@@ -230,7 +249,14 @@ export function dbStudio(page) {
       })),
       t.indexes.length > 0 && h('div.db-indexes', t.indexes.map(i => h('div.small.muted', `${i.unique ? 'unique ' : ''}index ${i.name} (${i.columns})`))))));
   }
-  const quoteName = n => /^[A-Za-z_][\w]*(\.[A-Za-z_]\w*)?$/.test(n) ? n : `"${n.replace(/"/g, '""')}"`;
+  // Each engine quotes names its own way, and SQL Server has TOP instead of LIMIT.
+  const quotePart = (engine, n) => /^[A-Za-z_]\w*$/.test(n) ? n
+    : engine === 'sqlserver' ? `[${n.replace(/]/g, ']]')}]`
+    : engine === 'mysql' ? `\`${n.replace(/`/g, '``')}\``
+    : `"${n.replace(/"/g, '""')}"`;
+  // Server engines name tables outside the default schema as schema.table; SQLite names never have a schema.
+  const quoteName = (engine, n) => (engine === 'sqlite' || engine === 'mysql' ? [n] : n.split('.')).map(p => quotePart(engine, p)).join('.');
+  const peekSql = (engine, n) => engine === 'sqlserver' ? `SELECT TOP 100 * FROM ${quoteName(engine, n)};` : `SELECT * FROM ${quoteName(engine, n)} LIMIT 100;`;
 
   // ------------------------------------------------------------ painting: results
 
