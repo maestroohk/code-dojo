@@ -25,7 +25,7 @@ const FEATURES = [
     { name: 'Spaced re-proof', status: 'done', link: '#/practice', note: 'A proven module sends a cold rebuild back to Practice after 3 and 10 days ("Can you still do it?"). Not passing marks the module rusty (amber on the map) until you rebuild it.' },
     { name: 'Rush detector', status: 'done', note: 'Finishing far faster than the minutes a lesson suggests while leaning on hints and answers gets a kind nudge to try the cold rebuild, and no quest progress for that lesson. It never blocks you.' },
     { name: 'Profile file and path order', status: 'done', link: '#/', note: 'Your welcome answers are kept in .state/profile.json too. Reorder Your path on the home page (drag or arrows); the order is saved to your profile.' },
-    { name: 'Gates and cold rebuilds in every topic', status: 'building', note: 'The engine is done. C# (builds Sidekick, a real CLI tool) and Fundamentals (builds Delve) are converted; PKI, Networking, Linux and Git are next (see docs/CURRICULUM.md and docs/HANDOFF.md).' },
+    { name: 'Gates and cold rebuilds in every topic', status: 'done', note: 'All 20 topics: every lesson module ends with a cold rebuild of one of its pieces (empty editor, same tests) and a gate (boss with 2 stars + the cold rebuild). 136 cold rebuilds, all validated. C# builds Sidekick and Fundamentals builds Delve; dreams for the other topics are planned in docs/CURRICULUM.md.' },
   ] },
   { area: 'Labs', items: [
     { name: 'Certificate chain lab', status: 'done', link: '#/labs/pki', note: 'Lego-style board, real X509Chain validation, fix-it challenges.' },
@@ -46,7 +46,7 @@ const FEATURES = [
     { name: 'Pop-out editor', status: 'done', note: 'The corner button or Ctrl+Shift+F opens any editor large, with the task and results beside it and its own text size (A−/A+). Ctrl+B folds the side panel; new results bring it back. Esc returns.' },
     { name: 'Room for the code in Code spaces', status: 'done', link: '#/spaces', note: 'Full screen button; the Problems/Output panel stays folded until a run, build, test or error needs it (Ctrl+J toggles it).' },
     { name: 'C# go to definition, references, hover', status: 'done', note: 'From the real compiler, across files and NuGet packages.' },
-    { name: 'Python and TypeScript intelligence', status: 'building', note: 'Definition, references, hover and smarter completion for Python and JS/TS.' },
+    { name: 'Python and TypeScript intelligence', status: 'done', note: 'The real engines: TypeScript''s own language service (with your space''s node_modules: React, Next.js, Express types) and Jedi for Python (with your space''s .venv). Definition, references, hover and completion; installed once in the background, and the built-in analysers answer until then or when an engine is slow.' },
     { name: 'Workbench', status: 'done', link: '#/workbench', note: 'Run your web apps live, call them, see each request travel through your code; several apps at once.' },
     { name: 'Code spaces (.NET)', status: 'done', link: '#/spaces', note: 'Real projects with NuGet, build, run, test.' },
     { name: 'Code spaces for Python and Node', status: 'done', link: '#/spaces', note: 'pip packages and pytest; npm packages, Express and Next.js. Registry lookups try IPv6 and IPv4 in parallel, so a network with a dead IPv6 route no longer looks offline.' },
