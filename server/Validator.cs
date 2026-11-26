@@ -55,6 +55,7 @@ public static class Validator
             catch (Exception e) { Error(key, "cannot parse: " + e.Message); continue; }
             if (lesson is null) { Error(key, "bad file name (use lowercase letters, digits and dashes)"); continue; }
             if ((string?)lesson["title"] is null) Error(key, "missing title");
+            foreach (var msg in Flashcards.Check(lesson)) Error(key, msg);   // hand-written flashcards
 
             var list = lesson["steps"] as JsonArray ?? [];
             if (list.Count == 0) Error(key, "no steps");
@@ -241,7 +242,22 @@ public static class Validator
             }
         }
 
+        // Katas (content/katas) and the error knowledge base (content/errors): `dojo validate katas`, `dojo validate errors`.
+        var contentRoot = Path.GetDirectoryName(content.TracksDir)!;
+        var (katasChecked, kataRuns) = await new Katas(contentRoot).Validate(checker, langs, filter, Error, Warn);
+        code += kataRuns;
+        var kbEntries = 0;
+        if (filter is null || filter.StartsWith("errors", StringComparison.OrdinalIgnoreCase))
+        {
+            var (entries, kbProblems) = new ErrorKb(Path.Combine(contentRoot, "content", "errors")).Load();
+            kbEntries = entries.Count;
+            foreach (var p in kbProblems) Error("errors", p);
+            Console.WriteLine($"errors: {entries.Count} knowledge base entries ({string.Join(", ", entries.GroupBy(e => e.Language).Select(g => $"{g.Key} {g.Count()}"))})");
+        }
+
         Console.WriteLine();
+        if (katasChecked > 0) Console.WriteLine($"Katas: {katasChecked} checked.");
+        if (kbEntries > 0) Console.WriteLine($"Error knowledge base: {kbEntries} entries.");
         Console.WriteLine($"{lessons} lessons, {steps} steps, {code} code exercises run. {errors} errors, {warnings} warnings.");
         if (puzzles)
             Console.WriteLine($"Puzzles: {puzzlesChecked} order/blanks steps checked for a second right answer, {unverifiable} could not be run on their own.");
