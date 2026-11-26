@@ -1,0 +1,241 @@
+{
+  "title": "Boss: the flaky test report",
+  "summary": "The quarterly flaky-test report names three offenders. Make each one deterministic and strong: culture, the end of the month, and ties in an ordering.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Quarterly report: the top three flaky tests",
+      "body": [
+        "The platform team's report from 30 days of CI runs on `main`:",
+        "",
+        "The fixes you choose must make the tests deterministic **and** keep them catching bugs: each step below plants bugs your new tests must catch. Pick each row for the diagnosis."
+      ],
+      "testviz": {
+        "kind": "flaky",
+        "title": "30 days of main, one column per day",
+        "subtitle": "red: at least one failure that day",
+        "tests": [
+          { "name": "InvoiceFormatTests.Total_text", "runs": "PPPPPPPPPPPPPPPFFFFFFFFFFFFFFF", "cause": "Started failing on day 16, when half the agents moved to a pool with culture **de-DE**. The code formats with the current culture: `€12,50` instead of `€12.50`. The test never ran under another culture, so it never noticed." },
+          { "name": "RenewalTests.Renews_next_month", "runs": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPF", "cause": "Fails only on the 31st. The test computes its expectation from `DateTime.Today.AddDays(30)` while the code adds a calendar month." },
+          { "name": "LeaderboardTests.Top_three", "runs": "PPFPPPFPPPPFPPPPFPPPFPPPPPFPPP", "cause": "Players are loaded from a dictionary in whatever order it gives, and two players have the same score. The test expects one of them first; the order of ties was never specified." }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "title": "Culture: the German build agents",
+      "prompt": [
+        "The formatter was fixed to use the invariant culture. It is compiled beside your tests:",
+        "",
+        "```csharp",
+        "using System.Globalization;",
+        "",
+        "public static class InvoiceFormat",
+        "{",
+        "    // Always \"€1,234.50\": the format the PDF template and the accounting export expect, whatever the server's culture.",
+        "    public static string Total(decimal amount) => \"€\" + amount.ToString(\"#,##0.00\", CultureInfo.InvariantCulture);",
+        "}",
+        "```",
+        "",
+        "Write `public class InvoiceFormatTests` with at least **3** tests, and run at least one of them **under the German culture on purpose** (set `CultureInfo.CurrentCulture` inside the test and restore it in a `finally`). Three planted bugs, one of which goes back to the current culture."
+      ],
+      "starter": [
+        "using System.Globalization;",
+        "",
+        "public class InvoiceFormatTests",
+        "{",
+        "    [Fact] public void Formats_a_total() => Assert.Equal(\"€12.50\", InvoiceFormat.Total(12.5m));",
+        "}"
+      ],
+      "solution": [
+        "using System.Globalization;",
+        "",
+        "public class InvoiceFormatTests",
+        "{",
+        "    [Theory]",
+        "    [InlineData(\"12.5\", \"€12.50\")]",
+        "    [InlineData(\"1234.5\", \"€1,234.50\")]",
+        "    [InlineData(\"0\", \"€0.00\")]",
+        "    public void Formats_with_two_decimals_and_a_thousands_separator(string amount, string expected)",
+        "        => Assert.Equal(expected, InvoiceFormat.Total(decimal.Parse(amount, CultureInfo.InvariantCulture)));",
+        "",
+        "    [Fact]",
+        "    public void Ignores_the_servers_culture()",
+        "    {",
+        "        var before = CultureInfo.CurrentCulture;",
+        "        try",
+        "        {",
+        "            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(\"de-DE\");",
+        "            Assert.Equal(\"€1,234.50\", InvoiceFormat.Total(1234.5m));",
+        "        }",
+        "        finally { CultureInfo.CurrentCulture = before; }",
+        "    }",
+        "}"
+      ],
+      "xunit": {
+        "minTests": 3,
+        "target": [
+          "using System.Globalization;",
+          "",
+          "public static class InvoiceFormat",
+          "{",
+          "    public static string Total(decimal amount) => \"€\" + amount.ToString(\"#,##0.00\", CultureInfo.InvariantCulture);",
+          "}"
+        ],
+        "mutants": [
+          { "name": "it formats with the current culture again", "replace": [["amount.ToString(\"#,##0.00\", CultureInfo.InvariantCulture)", "amount.ToString(\"#,##0.00\")"]], "hint": "The tests run in en-US: switch one test to de-DE." },
+          { "name": "no thousands separator", "replace": [["\"#,##0.00\"", "\"0.00\""]] },
+          { "name": "one decimal", "replace": [["\"#,##0.00\"", "\"#,##0.0#\""]] }
+        ]
+      },
+      "require": [
+        { "pattern": "CurrentCulture\\s*=", "message": "One test runs under another culture" },
+        { "pattern": "finally", "message": "Restores the culture in a finally" }
+      ],
+      "hints": [
+        "The test process runs in en-US, so a current-culture bug is invisible until a test changes the culture itself.",
+        "`CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(\"de-DE\");` inside `try`, and put the old culture back in `finally`, or the next test on that thread inherits it (a new flake).",
+        "Use an amount with thousands and a half: 1234.5 must be `€1,234.50`."
+      ],
+      "explain": "Culture is the hidden input that changes when infrastructure changes. Testing under a hostile culture on purpose turns a future production incident into a red test today."
+    },
+    {
+      "type": "code",
+      "title": "The end of the month",
+      "prompt": [
+        "Subscriptions renew one calendar month after the last payment, on the last day of the month when that day does not exist:",
+        "",
+        "```csharp",
+        "public static class Renewal",
+        "{",
+        "    public static DateOnly NextDate(DateOnly lastPaid) => lastPaid.AddMonths(1);",
+        "}",
+        "```",
+        "",
+        "The old test computed its expectation from `DateTime.Today`, so it tested a different case every day and failed on the 31st. Write `public class RenewalTests` with at least **4** tests on **fixed dates** chosen for their edges: an ordinary day, the 31st, February in a leap year and in an ordinary year, December. Three planted bugs."
+      ],
+      "starter": [
+        "public class RenewalTests",
+        "{",
+        "    [Fact]",
+        "    public void Renews_next_month()",
+        "    {",
+        "        var today = DateOnly.FromDateTime(DateTime.Today);",
+        "        Assert.Equal(today.AddDays(30), Renewal.NextDate(today));",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "public class RenewalTests",
+        "{",
+        "    public static TheoryData<DateOnly, DateOnly> Cases => new()",
+        "    {",
+        "        { new(2026, 11, 15), new(2026, 12, 15) },",
+        "        { new(2026, 1, 31), new(2026, 2, 28) },",
+        "        { new(2028, 1, 31), new(2028, 2, 29) },",
+        "        { new(2026, 3, 31), new(2026, 4, 30) },",
+        "        { new(2026, 12, 20), new(2027, 1, 20) },",
+        "    };",
+        "",
+        "    [Theory]",
+        "    [MemberData(nameof(Cases))]",
+        "    public void Renews_one_calendar_month_later(DateOnly lastPaid, DateOnly expected) => Assert.Equal(expected, Renewal.NextDate(lastPaid));",
+        "}"
+      ],
+      "xunit": {
+        "minTests": 4,
+        "target": [
+          "public static class Renewal",
+          "{",
+          "    public static DateOnly NextDate(DateOnly lastPaid) => lastPaid.AddMonths(1);",
+          "}"
+        ],
+        "mutants": [
+          { "name": "it adds 30 days", "replace": [["lastPaid.AddMonths(1)", "lastPaid.AddDays(30)"]] },
+          { "name": "it adds 31 days", "replace": [["lastPaid.AddMonths(1)", "lastPaid.AddDays(31)"]] },
+          { "name": "it renews the day before", "replace": [["lastPaid.AddMonths(1)", "lastPaid.AddMonths(1).AddDays(-1)"]] }
+        ]
+      },
+      "forbid": [
+        { "pattern": "DateTime(Offset)?\\.(Now|UtcNow|Today)", "message": "Fixed dates only, no real clock" }
+      ],
+      "hints": [
+        "`DateOnly` cannot go in `[InlineData]`: use `TheoryData<DateOnly, DateOnly>` with `[MemberData]`.",
+        "30 and 31 days are right for some months: pick dates where they are wrong (a day in November or December, the 31st of January).",
+        "Jan 31 renews on Feb 28 (2026) or Feb 29 (2028); Mar 31 on Apr 30; Dec 20 on Jan 20 of the next year."
+      ],
+      "explain": "Each fixed date is a named edge of the calendar, so the suite tests all of them every run instead of one random day per run."
+    },
+    {
+      "type": "code",
+      "title": "Ties in the leaderboard",
+      "prompt": [
+        "After the report, product decided the rule for ties: **highest score first; equal scores in alphabetical order of name (ordinal)**. The fixed code, compiled beside your tests:",
+        "",
+        "```csharp",
+        "public record Player(string Name, int Score);",
+        "",
+        "public static class Leaderboard",
+        "{",
+        "    public static IReadOnlyList<Player> Top(IEnumerable<Player> players, int count) =>",
+        "        players.OrderByDescending(p => p.Score).ThenBy(p => p.Name, StringComparer.Ordinal).Take(count).ToList();",
+        "}",
+        "```",
+        "",
+        "Write `public class LeaderboardTests` with at least **3** tests that pin the order, ties included. Feed ties in the **wrong** order on purpose: a test whose input is already sorted cannot see a missing tie-breaker. Four planted bugs."
+      ],
+      "starter": [
+        "public class LeaderboardTests",
+        "{",
+        "    [Fact]",
+        "    public void Highest_first() =>",
+        "        Assert.Equal(\"ada\", Leaderboard.Top([new(\"bob\", 10), new(\"ada\", 30)], 1)[0].Name);",
+        "}"
+      ],
+      "solution": [
+        "public class LeaderboardTests",
+        "{",
+        "    static IEnumerable<string> Names(IEnumerable<Player> players) => players.Select(p => p.Name);",
+        "",
+        "    [Fact]",
+        "    public void Highest_score_first() =>",
+        "        Assert.Equal(new[] { \"ada\", \"cy\", \"bob\" }, Names(Leaderboard.Top([new(\"bob\", 10), new(\"ada\", 30), new(\"cy\", 20)], 3)));",
+        "",
+        "    [Fact]",
+        "    public void Ties_are_alphabetical_whatever_the_input_order() =>",
+        "        Assert.Equal(new[] { \"ada\", \"bob\", \"cy\" }, Names(Leaderboard.Top([new(\"cy\", 50), new(\"bob\", 50), new(\"ada\", 50)], 3)));",
+        "",
+        "    [Fact]",
+        "    public void Returns_at_most_count_players() =>",
+        "        Assert.Equal(2, Leaderboard.Top([new(\"a\", 1), new(\"b\", 2), new(\"c\", 3)], 2).Count);",
+        "}"
+      ],
+      "xunit": {
+        "minTests": 3,
+        "target": [
+          "public record Player(string Name, int Score);",
+          "",
+          "public static class Leaderboard",
+          "{",
+          "    public static IReadOnlyList<Player> Top(IEnumerable<Player> players, int count) =>",
+          "        players.OrderByDescending(p => p.Score).ThenBy(p => p.Name, StringComparer.Ordinal).Take(count).ToList();",
+          "}"
+        ],
+        "mutants": [
+          { "name": "no tie-breaker", "replace": [[".ThenBy(p => p.Name, StringComparer.Ordinal)", ""]], "hint": "Give three players the same score, listed in reverse alphabetical order." },
+          { "name": "ties in reverse order", "replace": [[".ThenBy(p => p.Name, StringComparer.Ordinal)", ".ThenByDescending(p => p.Name, StringComparer.Ordinal)"]] },
+          { "name": "lowest score first", "replace": [["OrderByDescending(p => p.Score)", "OrderBy(p => p.Score)"]] },
+          { "name": "one player too many", "replace": [[".Take(count)", ".Take(count + 1)"]] }
+        ]
+      },
+      "hints": [
+        "Compare whole name lists: `Assert.Equal(new[] { \"ada\", \"bob\", \"cy\" }, top.Select(p => p.Name))`.",
+        "For ties, give the input as cy, bob, ada with equal scores: only a real tie-breaker turns that into ada, bob, cy.",
+        "Ask for fewer players than you pass in, and check the count."
+      ],
+      "explain": "The flake was a missing specification: nobody had decided the order of ties. Once decided, it is one `ThenBy`, and a test with adversarial input order keeps it decided."
+    }
+  ]
+}
