@@ -1,0 +1,100 @@
+{
+  "title": "Stage 2: Tidy the scanner inbox",
+  "summary": "Rename-ScanByDate: a bulk rename with a dry run, that can be run twice without doing damage.",
+  "minutes": 14,
+  "prereqs": ["powershell/03-files-text-and-data/03-text-and-encodings", "powershell/04-scripts-and-functions/02-pipeline-and-whatif"],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The scanner inbox",
+      "body": [
+        "The office scanner drops `scan0001.pdf`, `scan0002.pdf`, ... into a share (`~/scans`). Nobody can find anything.",
+        "The ask: rename each to **`yyyy-MM-dd_HHmm_<original name>`** by when it was scanned (its `LastWriteTime`), so",
+        "the folder sorts by date and the original name is kept for reference.",
+        "",
+        "A bulk rename that runs every hour must be:",
+        "",
+        "- **rehearsable**: `-WhatIf` shows the plan and changes nothing;",
+        "- **idempotent**: running it twice is the same as once (already renamed files are left alone);",
+        "- **careful**: it never overwrites an existing file; it skips and warns instead.",
+        "",
+        "`-f` formats dates with .NET format strings: `'{0:yyyy-MM-dd_HHmm}' -f $file.LastWriteTime` gives",
+        "`2026-11-14_1402`. (Lowercase `mm` is minutes, uppercase `MM` months: the classic mix-up.)"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "lang": "powershell",
+      "code": ["$t = [datetime]'2026-11-03 09:05:00'", "'{0:yyyy-MM-dd_HHmm}' -f $t", "'{0:yyyy-mm-dd}' -f $t"],
+      "answer": ["2026-11-03_0905", "2026-05-03"],
+      "verify": false,
+      "explain": "`mm` is minutes (05), not the month. File names with dates should always be `yyyy-MM-dd`: they sort correctly as text."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Rename-ScanByDate",
+      "prompt": [
+        "Write **`Rename-ScanByDate`** in `~/src/OpsKit/Public/Rename-ScanByDate.ps1`:",
+        "",
+        "- `-Path` (mandatory, an existing folder); only the `.pdf` files directly in it;",
+        "- renames each to `yyyy-MM-dd_HHmm_<name>` from its `LastWriteTime`, and **outputs the renamed files**;",
+        "- **skips** files that already start with such a date (so a second run changes nothing);",
+        "- never overwrites: if the target name exists, warn and skip;",
+        "- supports **`-WhatIf`**.",
+        "",
+        "Try it with `-WhatIf` on `~/scans` first. The checks run it on fresh copies of the inbox."
+      ],
+      "setup": ["KIT_STAGE=2 bash \"$DOJO_FILES/kit.sh\""],
+      "checks": [
+        { "name": "dry run, rename, and a second run that changes nothing",
+          "cmd": "python3 \"$DOJO_FILES/kitcheck.py\" scans",
+          "fail": "Not quite (see what the check found)." }
+      ],
+      "hints": [
+        "`Get-ChildItem -LiteralPath $Path -File -Filter *.pdf | Where-Object Name -notmatch '^\\d{4}-\\d{2}-\\d{2}_\\d{4}_'` skips the ones already done.",
+        "`$newName = '{0:yyyy-MM-dd_HHmm}_{1}' -f $_.LastWriteTime, $_.Name`, and `Test-Path -LiteralPath (Join-Path $_.DirectoryName $newName)` before renaming.",
+        "`[CmdletBinding(SupportsShouldProcess)]`, then `if ($PSCmdlet.ShouldProcess($_.FullName, \"Rename to $newName\")) { Rename-Item -LiteralPath $_.FullName -NewName $newName -PassThru }`."
+      ],
+      "solution": [
+        "@'",
+        "function Rename-ScanByDate {",
+        "    <#",
+        "    .SYNOPSIS",
+        "        Renames scanner PDFs to yyyy-MM-dd_HHmm_<name>.pdf by when they were scanned.",
+        "    #>",
+        "    [CmdletBinding(SupportsShouldProcess)]",
+        "    param(",
+        "        [Parameter(Mandatory)]",
+        "        [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })]",
+        "        [string] $Path",
+        "    )",
+        "    Get-ChildItem -LiteralPath $Path -File -Filter *.pdf |",
+        "        Where-Object Name -notmatch '^\\d{4}-\\d{2}-\\d{2}_\\d{4}_' |",
+        "        ForEach-Object {",
+        "            $newName = '{0:yyyy-MM-dd_HHmm}_{1}' -f $_.LastWriteTime, $_.Name",
+        "            if (Test-Path -LiteralPath (Join-Path $_.DirectoryName $newName)) {",
+        "                Write-Warning \"$newName already exists: skipping $($_.Name)\"",
+        "                return",
+        "            }",
+        "            if ($PSCmdlet.ShouldProcess($_.FullName, \"Rename to $newName\")) {",
+        "                Rename-Item -LiteralPath $_.FullName -NewName $newName -PassThru",
+        "            }",
+        "        }",
+        "}",
+        "'@ | Set-Content ~/src/OpsKit/Public/Rename-ScanByDate.ps1",
+        "Import-Module ~/src/OpsKit/OpsKit.psm1 -Force",
+        "Rename-ScanByDate -Path ~/scans -WhatIf",
+        "Rename-ScanByDate -Path ~/scans",
+        "Rename-ScanByDate -Path ~/scans",
+        "Get-ChildItem ~/scans"
+      ],
+      "explain": [
+        "`return` inside `ForEach-Object` ends the script block for **that** item only (like `continue` in a loop). Note",
+        "what the function trusts: `LastWriteTime`. Copying files with some tools resets it; for photos, the date in the",
+        "EXIF data is more reliable, which is why real photo tools read it instead."
+      ]
+    }
+  ]
+}
