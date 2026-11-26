@@ -1,0 +1,419 @@
+{
+  "title": "Options, timeouts and [GeneratedRegex]",
+  "summary": "RegexOptions that matter in production (CultureInvariant, NonBacktracking, IgnorePatternWhitespace), match timeouts and RegexMatchTimeoutException, and source-generated regexes as the default for fixed patterns.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The options that matter",
+      "body": [
+        "`RegexOptions` are flags you combine with `|`. These are the ones you will meet in real code:",
+        "",
+        "| Option | Effect | Inline |",
+        "|---|---|---|",
+        "| `IgnoreCase` | case-insensitive | `(?i)` |",
+        "| `CultureInvariant` | with IgnoreCase: case rules that do not depend on the machine's culture | |",
+        "| `Multiline` | `^` and `$` match at every line | `(?m)` |",
+        "| `Singleline` | `.` also matches `\\n` | `(?s)` |",
+        "| `ExplicitCapture` | only named groups capture; `(...)` just groups | `(?n)` |",
+        "| `IgnorePatternWhitespace` | spaces in the pattern are ignored and `#` starts a comment | `(?x)` |",
+        "| `Compiled` | generate IL at run time: slower start, faster matching | |",
+        "| `NonBacktracking` (.NET 7+) | linear time, whatever the input; no lookarounds, backreferences or atomic groups | |",
+        "| `ECMAScript` | JavaScript-like behaviour, e.g. `\\d` is only `0-9` | |",
+        "",
+        "Two worth arguing for in review:",
+        "",
+        "- **`IgnoreCase | CultureInvariant`** for identifiers, keywords and protocol text, so the result is the same on",
+        "  every server.",
+        "- **`NonBacktracking`** when the pattern or the input is untrusted: no input can make it run for minutes."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each option to what it changes.",
+      "pairs": [
+        [
+          "`Multiline`",
+          "`^` and `$` match at the start and end of every line"
+        ],
+        [
+          "`Singleline`",
+          "`.` matches newlines too"
+        ],
+        [
+          "`ExplicitCapture`",
+          "plain `( )` groups stop capturing"
+        ],
+        [
+          "`IgnorePatternWhitespace`",
+          "spaces are ignored and `#` starts a comment"
+        ],
+        [
+          "`NonBacktracking`",
+          "matching time grows linearly with the input"
+        ],
+        [
+          "`CultureInvariant`",
+          "case-insensitive matching ignores the current culture"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A gateway checks `Regex.IsMatch(role, \"^admin$\", RegexOptions.IgnoreCase)`. It works everywhere except on one server, whose culture is `tr-TR`, where the role `ADMIN` is rejected. Why, and what is the fix?",
+      "options": [
+        "In Turkish, `I` lower-cases to dotless `ı` and `i` upper-cases to dotted `İ`, so `I` and `i` are not a case pair. Add `RegexOptions.CultureInvariant`.",
+        "`IgnoreCase` only works for ASCII letters, so use `[Aa][Dd][Mm][Ii][Nn]`.",
+        "`^` and `$` behave differently in some cultures; use `\\A` and `\\z`.",
+        "`IgnoreCase` needs `RegexOptions.Compiled` to work on servers."
+      ],
+      "answer": 0,
+      "explain": "This is the \"Turkish i\" problem. With `IgnoreCase` .NET uses the current culture's case rules, and Turkish and Azerbaijani pair the letters differently. `CultureInvariant` makes the check identical on every machine. The same bug hits `ToUpper()`, which is why code uses `ToUpperInvariant()` and `StringComparison.OrdinalIgnoreCase`."
+    },
+    {
+      "type": "regex",
+      "title": "A pattern with comments",
+      "prompt": [
+        "Config files hold durations like `1h30m`, `45s` or `2h`: hours, minutes and seconds, each optional, in that",
+        "order, at least one present. Write a pattern with named groups `h`, `m` and `s` (ASCII digits).",
+        "",
+        "The **x** flag (IgnorePatternWhitespace) is on, so you can space the parts out, and end the line with a",
+        "`# comment` saying what it does. The next person to read it will thank you."
+      ],
+      "flags": "x",
+      "lockFlags": true,
+      "solution": "(?=[0-9]) (?:(?<h>[0-9]+)h)? (?:(?<m>[0-9]+)m)? (?:(?<s>[0-9]+)s)?   # hours, minutes, seconds; at least one",
+      "tests": {
+        "match": [
+          "45s",
+          "2h",
+          "1h30m",
+          "1h30m15s"
+        ],
+        "reject": [
+          "",
+          "90",
+          "h",
+          "1h1h",
+          "30m1h",
+          "1.5h"
+        ],
+        "captures": [
+          {
+            "input": "1h30m",
+            "groups": {
+              "h": "1",
+              "m": "30",
+              "s": null
+            }
+          }
+        ]
+      },
+      "require": [
+        {
+          "pattern": "#",
+          "message": "Has a # comment"
+        }
+      ],
+      "hints": [
+        "Each part is an optional group like `(?:(?<h>[0-9]+)h)?`. With all three optional, the empty string would match: start with a lookahead `(?=[0-9])`.",
+        "`(?=[0-9]) (?:(?<h>[0-9]+)h)? (?:(?<m>[0-9]+)m)? (?:(?<s>[0-9]+)s)?   # h, m, s`"
+      ],
+      "explain": "In C# you would write the pattern over several lines in a verbatim string, one part per line with its own comment, and pass `RegexOptions.IgnorePatternWhitespace`. A real space then has to be written as `\\ ` or `[ ]`."
+    },
+    {
+      "type": "learn",
+      "title": "Timeouts: a safety net",
+      "body": [
+        "Some patterns backtrack exponentially on unlucky input (module 2). If the pattern or the input comes from",
+        "outside, one request can then keep a thread busy for minutes: that is a denial of service (ReDoS). By default",
+        ".NET regexes have **no timeout** (`Regex.InfiniteMatchTimeout`).",
+        "",
+        "```csharp",
+        "var regex = new Regex(pattern, RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(250));",
+        "try",
+        "{",
+        "    accepted = regex.IsMatch(input);",
+        "}",
+        "catch (RegexMatchTimeoutException e)",
+        "{",
+        "    logger.LogWarning(\"Regex timed out after {Timeout} on {Length} chars\", e.MatchTimeout, e.Input.Length);",
+        "    accepted = false;   // treat as invalid: do not crash the request",
+        "}",
+        "```",
+        "",
+        "To protect every regex in the process, including those inside libraries, set a default **at startup, before",
+        "any regex is created**:",
+        "",
+        "```csharp",
+        "AppContext.SetData(\"REGEX_DEFAULT_MATCH_TIMEOUT\", TimeSpan.FromSeconds(1));",
+        "```",
+        "",
+        "A timeout limits the damage; it does not fix the pattern. For untrusted patterns, `NonBacktracking` removes",
+        "the problem. Log the input's length, not the input: it may hold personal data."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A regex is built with `TimeSpan.FromMilliseconds(250)`, and an input arrives that would take the engine minutes. What does `regex.IsMatch(input)` do?",
+      "options": [
+        "Throws `RegexMatchTimeoutException` after roughly 250 ms",
+        "Returns `false` after roughly 250 ms",
+        "Returns `false` at once, because the engine detects the bad pattern",
+        "Keeps running: the timeout applies only to `Matches`"
+      ],
+      "answer": 0,
+      "explain": "A timeout never turns into a silent `false`: the call throws, every method of the instance honours it, and the exception carries `Input`, `Pattern` and `MatchTimeout`. Your code decides what a timeout means, usually \"reject\", and logs it so you find the pattern."
+    },
+    {
+      "type": "learn",
+      "title": "[GeneratedRegex]: the default for fixed patterns",
+      "body": [
+        "Since .NET 7, a **source generator** can turn a constant pattern into plain C# while your project builds:",
+        "",
+        "```csharp",
+        "using System.Text.RegularExpressions;",
+        "",
+        "static partial class Patterns",
+        "{",
+        "    // .NET 7+: a partial method",
+        "    [GeneratedRegex(@\"\\b[A-Z]{2,5}-[0-9]+\\b\", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)]",
+        "    public static partial Regex TicketKey();",
+        "",
+        "    // .NET 9+ (C# 13): a partial property",
+        "    [GeneratedRegex(@\"[0-9]+\")]",
+        "    public static partial Regex Digits { get; }",
+        "}",
+        "",
+        "// Patterns.TicketKey().IsMatch(s)    Patterns.Digits.Count(s)",
+        "```",
+        "",
+        "Why it is the default for any pattern you know at compile time:",
+        "",
+        "- **No startup cost**: nothing is parsed or compiled at run time, unlike `RegexOptions.Compiled`.",
+        "- **Native AOT and trimming friendly**: no IL is emitted at run time.",
+        "- **Readable**: the generated matcher is C# you can open and step through, with comments explaining it.",
+        "- **One cached instance**, created on first use and shared by all threads.",
+        "",
+        "The class must be `partial`. Analyzer **SYSLIB1045** flags `new Regex(\"constant\")` and offers to convert it.",
+        "Keep `new Regex(...)` for patterns that only exist at run time."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the lines into a source-generated regex.",
+      "lines": [
+        "static partial class LogPatterns",
+        "{",
+        "    [GeneratedRegex(@\"^(?<level>[A-Z]+) (?<msg>.*)$\", RegexOptions.CultureInvariant)]",
+        "    public static partial Regex Line();",
+        "}"
+      ],
+      "explain": "The attribute sits on a `static partial` method returning `Regex`, inside a `partial` class. The generator writes the method's body."
+    },
+    {
+      "type": "sort",
+      "prompt": "`[GeneratedRegex]` or `new Regex(...)` at run time?",
+      "buckets": [
+        "`[GeneratedRegex]`",
+        "`new Regex(...)` at run time"
+      ],
+      "items": [
+        [
+          "The ticket key format, the same in every build",
+          0
+        ],
+        [
+          "A pattern a user types into a log search box",
+          1
+        ],
+        [
+          "Per-tenant validation rules loaded from the database",
+          1
+        ],
+        [
+          "SKU validation in a Native AOT microservice",
+          0
+        ],
+        [
+          "The log-line parser called on every request",
+          0
+        ],
+        [
+          "A pattern built at startup from a list of banned words in config",
+          1
+        ]
+      ],
+      "explain": "If the pattern is a constant in your source, generate it. If it only exists at run time, build it with `new Regex` (with a timeout or `NonBacktracking`, since it came from outside), and cache it if it is reused."
+    },
+    {
+      "type": "regex",
+      "title": "Symptom: the saved search stopped working",
+      "prompt": [
+        "**Symptom.** The log viewer now runs every saved search with `RegexOptions.NonBacktracking`, so a hostile",
+        "pattern cannot hang it. One saved search fails with:",
+        "",
+        "```text",
+        "System.NotSupportedException: Regular expression construct (?<=...) is not supported with RegexOptions.NonBacktracking",
+        "```",
+        "",
+        "Rewrite it without lookarounds: match `user=` followed by the user name, and capture the name in group 1.",
+        "`superuser=` must not count."
+      ],
+      "nonBacktracking": true,
+      "starter": "(?<=user=)\\w+",
+      "solution": "\\buser=(\\w+)",
+      "tests": {
+        "captures": [
+          {
+            "input": "GET /cart user=ann id=4",
+            "groups": {
+              "1": "ann"
+            }
+          }
+        ],
+        "noFind": [
+          "GET /cart id=4",
+          "sudo superuser=root"
+        ],
+        "fast": [
+          {
+            "repeat": "user=",
+            "times": 20000
+          }
+        ]
+      },
+      "hints": [
+        "Match the prefix instead of looking behind for it, and capture what follows: `user=(\\w+)`.",
+        "Add `\\b` in front so `superuser=` does not match: `\\buser=(\\w+)`."
+      ],
+      "explain": "NonBacktracking supports groups and captures, but not lookarounds, backreferences, atomic groups or conditionals. The fix is common: consume the context and capture the part you want, then read group 1 instead of the whole match."
+    },
+    {
+      "type": "code",
+      "title": "Generate the ticket key regex",
+      "prompt": [
+        "Write `static partial class Patterns` with a source-generated `public static partial Regex TicketKey()` for",
+        "keys like `OPS-311`: a word boundary, 2 to 5 capital letters, a dash, ASCII digits, a word boundary.",
+        "Give it `RegexOptions.CultureInvariant` and a 250 ms timeout (`matchTimeoutMilliseconds: 250`).",
+        "",
+        "The tests call `Patterns.TicketKey()`. `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "static partial class Patterns",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "static partial class Patterns",
+        "{",
+        "    [GeneratedRegex(@\"\\b[A-Z]{2,5}-[0-9]+\\b\", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)]",
+        "    public static partial Regex TicketKey();",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "Dojo.Eq(\"OPS-311 is a key\", true, Patterns.TicketKey().IsMatch(\"OPS-311\"));",
+        "Dojo.Eq(\"finds the key inside a sentence\", \"PAY-7\", Patterns.TicketKey().Match(\"fixes PAY-7 today\").Value);",
+        "Dojo.Eq(\"lower case is not a key\", false, Patterns.TicketKey().IsMatch(\"ops-311\"));",
+        "Dojo.Eq(\"six letters is not a key\", false, Patterns.TicketKey().IsMatch(\"TOOLONG-1\"));",
+        "Dojo.Eq(\"one cached instance\", true, ReferenceEquals(Patterns.TicketKey(), Patterns.TicketKey()));",
+        "Dojo.Eq(\"a 250 ms timeout\", TimeSpan.FromMilliseconds(250), Patterns.TicketKey().MatchTimeout);",
+        "{{CODE}}"
+      ],
+      "require": [
+        {
+          "pattern": "\\[GeneratedRegex\\(",
+          "message": "Uses [GeneratedRegex]"
+        },
+        {
+          "pattern": "static\\s+partial\\s+Regex\\s+TicketKey",
+          "message": "Declares a static partial TicketKey method"
+        }
+      ],
+      "hints": [
+        "Put `[GeneratedRegex(@\"...\", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)]` above a method with no body.",
+        "`public static partial Regex TicketKey();`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "ParseDuration, the production version",
+      "prompt": [
+        "Write `static partial class Durations` with `public static TimeSpan? Parse(string text)` for durations like",
+        "`1h30m`, `45s`, `90m` or `1h30m15s`. Return `null` for anything else.",
+        "",
+        "- Use a source-generated regex with named groups `h`, `m`, `s` and ASCII digits `[0-9]`, anchored with `^`",
+        "  and `\\z` (`$` would also accept a trailing newline).",
+        "- The text comes from user config, so give the regex `matchTimeoutMilliseconds: 250`, and catch",
+        "  `RegexMatchTimeoutException`: a timeout means \"not a valid duration\", not a crash.",
+        "- `new TimeSpan(hours, minutes, seconds)` builds the result; `90m` is 1:30:00.",
+        "",
+        "`System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "static partial class Durations",
+        "{",
+        "    public static TimeSpan? Parse(string text)",
+        "    {",
+        "        return null;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "static partial class Durations",
+        "{",
+        "    [GeneratedRegex(@\"^(?=[0-9])(?:(?<h>[0-9]+)h)?(?:(?<m>[0-9]+)m)?(?:(?<s>[0-9]+)s)?\\z\", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)]",
+        "    private static partial Regex Pattern();",
+        "",
+        "    public static TimeSpan? Parse(string text)",
+        "    {",
+        "        try",
+        "        {",
+        "            var m = Pattern().Match(text);",
+        "            if (!m.Success) return null;",
+        "            int Part(string name) => m.Groups[name].Success ? int.Parse(m.Groups[name].Value) : 0;",
+        "            return new TimeSpan(Part(\"h\"), Part(\"m\"), Part(\"s\"));",
+        "        }",
+        "        catch (RegexMatchTimeoutException)",
+        "        {",
+        "            return null;",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "Dojo.Eq(\"1h30m\", (TimeSpan?)new TimeSpan(1, 30, 0), Durations.Parse(\"1h30m\"));",
+        "Dojo.Eq(\"45s\", (TimeSpan?)new TimeSpan(0, 0, 45), Durations.Parse(\"45s\"));",
+        "Dojo.Eq(\"2h\", (TimeSpan?)new TimeSpan(2, 0, 0), Durations.Parse(\"2h\"));",
+        "Dojo.Eq(\"90m is an hour and a half\", (TimeSpan?)new TimeSpan(1, 30, 0), Durations.Parse(\"90m\"));",
+        "Dojo.Eq(\"1h30m15s\", (TimeSpan?)new TimeSpan(1, 30, 15), Durations.Parse(\"1h30m15s\"));",
+        "Dojo.Check(\"an empty string is not a duration\", Durations.Parse(\"\") is null, \"expected null\");",
+        "Dojo.Check(\"30m1h is in the wrong order\", Durations.Parse(\"30m1h\") is null, \"expected null\");",
+        "Dojo.Check(\"1.5h is not supported\", Durations.Parse(\"1.5h\") is null, \"expected null\");",
+        "Dojo.Check(\"a trailing newline is rejected\", Durations.Parse(\"2h\\n\") is null, \"expected null: use \\\\z, not $\");",
+        "Dojo.Try(\"Arabic-Indic digits are rejected, not a crash\", () => Dojo.Check(\"\\u0662h is not a duration\", Durations.Parse(\"\\u0662h\") is null, \"expected null: use [0-9], not \\\\d\"));",
+        "{{CODE}}"
+      ],
+      "require": [
+        {
+          "pattern": "\\[GeneratedRegex\\(",
+          "message": "Uses [GeneratedRegex]"
+        },
+        {
+          "pattern": "matchTimeoutMilliseconds",
+          "message": "Sets a match timeout"
+        },
+        {
+          "pattern": "catch\\s*\\(\\s*RegexMatchTimeoutException",
+          "message": "Handles RegexMatchTimeoutException"
+        }
+      ],
+      "hints": [
+        "Declare `[GeneratedRegex(@\"^(?=[0-9])(?:(?<h>[0-9]+)h)?...\\z\", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)] private static partial Regex Pattern();`",
+        "In `Parse`: match inside `try`, read each group with `m.Groups[\"h\"].Success ? int.Parse(m.Groups[\"h\"].Value) : 0`, and `catch (RegexMatchTimeoutException) { return null; }`."
+      ]
+    }
+  ]
+}

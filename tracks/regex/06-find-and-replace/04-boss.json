@@ -1,0 +1,202 @@
+{
+  "title": "Boss: drop Newtonsoft.Json",
+  "summary": "A real migration ticket: rewrite attributes, calls and usings from Newtonsoft.Json to System.Text.Json with find-and-replace, then script it and count what is left for a human.",
+  "minutes": 22,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "PLAT-482",
+      "body": [
+        "> **PLAT-482: Orders.Api: replace Newtonsoft.Json with System.Text.Json.** Mechanical changes only in this PR;",
+        "> anything that needs thought is listed for review.",
+        "",
+        "The service has 140 files. Most of the change is mechanical, which makes it a find-and-replace job:",
+        "",
+        "1. `[JsonProperty(\"name\")]` becomes `[JsonPropertyName(\"name\")]`.",
+        "2. `JsonConvert.SerializeObject` / `DeserializeObject<T>` become `JsonSerializer.Serialize` / `Deserialize<T>`.",
+        "3. `using Newtonsoft.Json;` and `.Serialization` become their `System.Text.Json` namespaces.",
+        "4. Script all of it, make it safe to run twice, and count the lines a human must still look at.",
+        "",
+        "Anything without a one-to-one replacement (`JObject`, `Required = ...`) must be left untouched, not guessed at."
+      ]
+    },
+    {
+      "type": "regex",
+      "title": "Rewrite the attributes",
+      "prompt": [
+        "Turn `[JsonProperty(\"order_id\")]` into `[JsonPropertyName(\"order_id\")]`, keeping the name. Attributes with",
+        "other arguments, such as `[JsonProperty(Required = Required.Always)]` or `[JsonProperty(\"a\", Order = 2)]`,",
+        "have no direct equivalent: leave them for review."
+      ],
+      "solution": "\\[JsonProperty\\(\"([^\"]*)\"\\)\\]",
+      "solutionReplacement": "[JsonPropertyName(\"$1\")]",
+      "tests": {
+        "replace": [
+          {
+            "input": "    [JsonProperty(\"order_id\")]",
+            "output": "    [JsonPropertyName(\"order_id\")]"
+          },
+          {
+            "input": "[JsonProperty(\"id\")] public int Id { get; set; }",
+            "output": "[JsonPropertyName(\"id\")] public int Id { get; set; }"
+          }
+        ],
+        "noFind": [
+          "[JsonPropertyName(\"order_id\")]",
+          "[JsonProperty(Required = Required.Always)]",
+          "[JsonProperty(\"a\", Order = 2)]"
+        ]
+      }
+    },
+    {
+      "type": "regex",
+      "title": "Rewrite the calls",
+      "prompt": [
+        "Rewrite both calls with **one** pattern and **one** replacement:",
+        "",
+        "- `JsonConvert.SerializeObject(order)` becomes `JsonSerializer.Serialize(order)`",
+        "- `JsonConvert.DeserializeObject<Order>(json)` becomes `JsonSerializer.Deserialize<Order>(json)`",
+        "",
+        "`JsonConvert.PopulateObject` has no equivalent: leave it."
+      ],
+      "solution": "\\bJsonConvert\\.(Serialize|Deserialize)Object\\b",
+      "solutionReplacement": "JsonSerializer.$1",
+      "tests": {
+        "replace": [
+          {
+            "input": "var json = JsonConvert.SerializeObject(order);",
+            "output": "var json = JsonSerializer.Serialize(order);"
+          },
+          {
+            "input": "var back = JsonConvert.DeserializeObject<Order>(json);",
+            "output": "var back = JsonSerializer.Deserialize<Order>(json);"
+          }
+        ],
+        "noFind": [
+          "JsonConvert.PopulateObject(json, order);",
+          "JsonSerializer.Serialize(order);",
+          "MyJsonConvert.SerializeObjectFast(x);"
+        ]
+      }
+    },
+    {
+      "type": "regex",
+      "title": "Rewrite the usings",
+      "prompt": [
+        "In a whole file, change `using Newtonsoft.Json;` to `using System.Text.Json;` and",
+        "`using Newtonsoft.Json.Serialization;` to `using System.Text.Json.Serialization;`, with one pattern and one",
+        "replacement. `using Newtonsoft.Json.Linq;` stays: `JObject` code needs a human."
+      ],
+      "flags": "m",
+      "solution": "^using Newtonsoft\\.Json(\\.Serialization)?;",
+      "solutionReplacement": "using System.Text.Json$1;",
+      "tests": {
+        "replace": [
+          {
+            "input": [
+              "using System;",
+              "using Newtonsoft.Json;",
+              "using Newtonsoft.Json.Serialization;",
+              "using Newtonsoft.Json.Linq;"
+            ],
+            "output": [
+              "using System;",
+              "using System.Text.Json;",
+              "using System.Text.Json.Serialization;",
+              "using Newtonsoft.Json.Linq;"
+            ]
+          }
+        ],
+        "noFind": [
+          "using Newtonsoft.Json.Linq;",
+          "using System.Text.Json;",
+          "// using Newtonsoft.Json;"
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "title": "Script the migration",
+      "prompt": [
+        "Put it together so it can run over all 140 files.",
+        "",
+        "- `string Migrate(string source)` applies the three rewrites (usings, attributes, calls) to a whole file.",
+        "  Lines end with `\\n`. Running it on its own output must change nothing.",
+        "- `int LeftForReview(string code)` counts the **lines** that still contain `Newtonsoft`, `JsonProperty(`",
+        "  or the word `JObject`: the list for the human reviewer. (`JsonPropertyName(` does not count.)",
+        "",
+        "For the sample file in the tests, `LeftForReview(Migrate(file))` is 3: the `Linq` using, the `Required`",
+        "attribute and the `JObject.Parse` line. `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "string Migrate(string source)",
+        "{",
+        "    return source;",
+        "}",
+        "",
+        "int LeftForReview(string code)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "string Migrate(string source)",
+        "{",
+        "    source = Regex.Replace(source, @\"^using Newtonsoft\\.Json(\\.Serialization)?;\", \"using System.Text.Json$1;\", RegexOptions.Multiline);",
+        "    source = Regex.Replace(source, @\"\\[JsonProperty\\(\"\"([^\"\"]*)\"\"\\)\\]\", @\"[JsonPropertyName(\"\"$1\"\")]\");",
+        "    source = Regex.Replace(source, @\"\\bJsonConvert\\.(Serialize|Deserialize)Object\\b\", \"JsonSerializer.$1\");",
+        "    return source;",
+        "}",
+        "",
+        "int LeftForReview(string code)",
+        "{",
+        "    return Regex.Count(code, @\"^.*(?:Newtonsoft|JsonProperty\\(|\\bJObject\\b).*$\", RegexOptions.Multiline);",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "var dojoSrc = string.Join(\"\\n\", new[] {",
+        "    \"using System;\",",
+        "    \"using Newtonsoft.Json;\",",
+        "    \"using Newtonsoft.Json.Linq;\",",
+        "    \"\",",
+        "    \"public class Order\",",
+        "    \"{\",",
+        "    \"    [JsonProperty(\\\"order_id\\\")]\",",
+        "    \"    public int Id { get; set; }\",",
+        "    \"    [JsonProperty(Required = Required.Always)]\",",
+        "    \"    public string Name { get; set; } = \\\"\\\";\",",
+        "    \"}\",",
+        "    \"var json = JsonConvert.SerializeObject(order);\",",
+        "    \"var back = JsonConvert.DeserializeObject<Order>(json);\",",
+        "    \"var tree = JObject.Parse(json);\",",
+        "});",
+        "var dojoWant = string.Join(\"\\n\", new[] {",
+        "    \"using System;\",",
+        "    \"using System.Text.Json;\",",
+        "    \"using Newtonsoft.Json.Linq;\",",
+        "    \"\",",
+        "    \"public class Order\",",
+        "    \"{\",",
+        "    \"    [JsonPropertyName(\\\"order_id\\\")]\",",
+        "    \"    public int Id { get; set; }\",",
+        "    \"    [JsonProperty(Required = Required.Always)]\",",
+        "    \"    public string Name { get; set; } = \\\"\\\";\",",
+        "    \"}\",",
+        "    \"var json = JsonSerializer.Serialize(order);\",",
+        "    \"var back = JsonSerializer.Deserialize<Order>(json);\",",
+        "    \"var tree = JObject.Parse(json);\",",
+        "});",
+        "var dojoOut = Migrate(dojoSrc);",
+        "Dojo.Eq(\"the sample file is migrated\", dojoWant, dojoOut);",
+        "Dojo.Eq(\"running it twice changes nothing\", dojoOut, Migrate(dojoOut));",
+        "Dojo.Eq(\"Serialization using is migrated too\", \"using System.Text.Json.Serialization;\\nusing System;\", Migrate(\"using Newtonsoft.Json.Serialization;\\nusing System;\"));",
+        "Dojo.Eq(\"3 lines left for review\", 3, LeftForReview(dojoOut));",
+        "Dojo.Eq(\"a clean file needs no review\", 0, LeftForReview(\"using System.Text.Json;\\n[JsonPropertyName(\\\"id\\\")]\"));",
+        "Dojo.Eq(\"two mentions on one line count once\", 1, LeftForReview(\"var t = JObject.Parse(Newtonsoft.Json.JsonConvert.SerializeObject(x));\"));"
+      ]
+    }
+  ]
+}

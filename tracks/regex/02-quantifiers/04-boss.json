@@ -1,0 +1,163 @@
+{
+  "title": "Boss: the log shipper ticket",
+  "summary": "A ticket from the observability team: validate request ids, clean an email export, find slow requests and stop secrets leaking into the logs.",
+  "minutes": 22,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket OBS-207",
+      "body": [
+        "> **OBS-207: log shipper fixes before the audit.** Assigned to you.",
+        "",
+        "1. Request ids are `req-` plus 8 to 12 lowercase hex characters. Reject anything else at the edge.",
+        "2. The support team exports emails as HTML. They want plain text: drop every tag, keep the words.",
+        "3. Report requests that took at least a given number of milliseconds.",
+        "4. **Security finding:** API tokens appear in the logs as `token=\"...\"`. Mask them, and do not lose the fields",
+        "   after them.",
+        "",
+        "Every part is about saying exactly how many, and stopping in the right place."
+      ]
+    },
+    {
+      "type": "regex",
+      "title": "Request ids",
+      "prompt": [
+        "Match the whole string when it is a valid request id: `req-` followed by 8 to 12 lowercase hex characters",
+        "(`0-9`, `a-f`)."
+      ],
+      "solution": "req-[0-9a-f]{8,12}",
+      "tests": {
+        "match": [
+          "req-3fa85f64",
+          "req-3fa85f645717",
+          "req-00000000"
+        ],
+        "reject": [
+          "req-3fa85f6",
+          "req-3fa85f6457170",
+          "req-3FA85F64",
+          "req-3fa85g64",
+          "REQ-3fa85f64",
+          "req-"
+        ]
+      },
+      "explain": "`{8,12}` sets both limits. Rejecting bad ids at the edge keeps junk (and injection attempts) out of every system downstream."
+    },
+    {
+      "type": "regex",
+      "title": "Strip the tags",
+      "prompt": [
+        "Each match is replaced with nothing. Write a pattern that matches one HTML tag at a time, so that",
+        "`<p>Order <b>ORD-004211</b> shipped</p>` becomes `Order ORD-004211 shipped`.",
+        "",
+        "These exports come from one known template. Arbitrary HTML from the web needs an HTML parser, not a regex."
+      ],
+      "replacement": "",
+      "solution": "<[^>]+>",
+      "tests": {
+        "replace": [
+          {
+            "input": "<p>Order <b>ORD-004211</b> shipped</p>",
+            "output": "Order ORD-004211 shipped"
+          },
+          {
+            "input": "<p>Hi <a href=\"https://contoso.com/track\">track it</a> now</p>",
+            "output": "Hi track it now"
+          },
+          {
+            "input": "No tags here",
+            "output": "No tags here"
+          }
+        ]
+      },
+      "explain": "`<[^>]+>` cannot cross a `>`, so each tag is its own match. The greedy `<.+>` removes everything from the first `<` to the last `>`: the whole line."
+    },
+    {
+      "type": "code",
+      "title": "Slow requests",
+      "prompt": [
+        "Write `List<int> SlowDurations(string log, int minMs)`. Durations appear as `dur=` followed by digits and `ms`,",
+        "for example `dur=1500ms`. Return every duration of at least `minMs` milliseconds, as numbers, in log order.",
+        "",
+        "The number is the match without its first four and last two characters: `m.Value[4..^2]`.",
+        "`System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "List<int> SlowDurations(string log, int minMs)",
+        "{",
+        "    return new List<int>();",
+        "}"
+      ],
+      "solution": [
+        "List<int> SlowDurations(string log, int minMs)",
+        "{",
+        "    var result = new List<int>();",
+        "    foreach (Match m in Regex.Matches(log, @\"dur=[0-9]+ms\"))",
+        "    {",
+        "        var ms = int.Parse(m.Value[4..^2]);",
+        "        if (ms >= minMs) result.Add(ms);",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "var dojoLog = \"GET /a status=200 dur=12ms\\nGET /b status=503 dur=30012ms\\nGET /c status=200 dur=1500ms\\nGET /d status=200 dur=999ms\\nGET /e status=200 dur=ms\";",
+        "Dojo.Eq(\"at least 1000 ms\", new List<int> { 30012, 1500 }, SlowDurations(dojoLog, 1000));",
+        "Dojo.Eq(\"the limit is inclusive\", new List<int> { 30012, 1500, 999 }, SlowDurations(dojoLog, 999));",
+        "Dojo.Eq(\"minMs 0 gives every duration\", new List<int> { 12, 30012, 1500, 999 }, SlowDurations(dojoLog, 0));",
+        "Dojo.Eq(\"an empty log gives an empty list\", new List<int>(), SlowDurations(\"\", 0));"
+      ],
+      "require": [
+        {
+          "pattern": "Regex\\.Matches",
+          "message": "Uses Regex.Matches"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Mask the tokens",
+      "prompt": [
+        "Write `string MaskTokens(string line)` that replaces the value of every `token=\"...\"` with `***`, and keeps",
+        "everything else exactly as it was:",
+        "",
+        "```text",
+        "user=\"alice\" token=\"sk_9f8e7d\" ip=\"10.0.0.7\"",
+        "user=\"alice\" token=\"***\" ip=\"10.0.0.7\"",
+        "```",
+        "",
+        "A line may hold several tokens, or an empty one. Use `Regex.Replace`. Think about what a greedy quantifier would",
+        "do to the `ip` field. `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "string MaskTokens(string line)",
+        "{",
+        "    return line;",
+        "}"
+      ],
+      "solution": [
+        "string MaskTokens(string line)",
+        "{",
+        "    return Regex.Replace(line, \"token=\\\"[^\\\"]*\\\"\", \"token=\\\"***\\\"\");",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"the token is masked, the ip is kept\", \"user=\\\"alice\\\" token=\\\"***\\\" ip=\\\"10.0.0.7\\\"\", MaskTokens(\"user=\\\"alice\\\" token=\\\"sk_9f8e7d\\\" ip=\\\"10.0.0.7\\\"\"));",
+        "Dojo.Eq(\"two tokens on one line\", \"token=\\\"***\\\" refresh token=\\\"***\\\" ok\", MaskTokens(\"token=\\\"a1\\\" refresh token=\\\"b2\\\" ok\"));",
+        "Dojo.Eq(\"an empty token is masked too\", \"token=\\\"***\\\" user=\\\"bob\\\"\", MaskTokens(\"token=\\\"\\\" user=\\\"bob\\\"\"));",
+        "Dojo.Eq(\"a line without a token is unchanged\", \"user=\\\"carol\\\" level=info\", MaskTokens(\"user=\\\"carol\\\" level=info\"));"
+      ],
+      "require": [
+        {
+          "pattern": "Regex\\.Replace",
+          "message": "Uses Regex.Replace"
+        }
+      ]
+    }
+  ]
+}

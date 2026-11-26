@@ -1,0 +1,271 @@
+{
+  "title": "Validate the whole input",
+  "summary": "Why IsMatch without anchors is a validation bug, \\A...\\z for full-string checks, and word boundaries \\b and \\B (Unicode-aware in .NET).",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "IsMatch finds a part, validation needs the whole",
+      "body": [
+        "`Regex.IsMatch` answers \"is there a match **somewhere**?\". That is right for search and wrong for validation:",
+        "",
+        "```csharp",
+        "Regex.IsMatch(\"bob; DROP TABLE users\", @\"[a-z0-9_]{3,16}\")     // true: \"bob\" is in there",
+        "Regex.IsMatch(\"bob\\n\", @\"^[a-z0-9_]{3,16}$\")                  // true: $ allows a final \\n",
+        "Regex.IsMatch(\"bob\\n\", @\"\\A[a-z0-9_]{3,16}\\z\")               // false: correct",
+        "```",
+        "",
+        "For validation, pin the pattern to both ends with `\\A ... \\z`. .NET has no `FullMatch` method (Python has",
+        "`re.fullmatch`), so the anchors are your job.",
+        "",
+        "Validation is defence in depth, not your SQL injection fix: queries still use parameters. But a validator that",
+        "checks only part of the input lets through exactly the strings an attacker would send. Below, the unanchored",
+        "pattern happily finds `bob`."
+      ],
+      "regex": {
+        "pattern": "[a-z0-9_]{3,16}",
+        "text": "bob; DROP TABLE users"
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "A user name is 3 to 16 lowercase letters, digits or underscores. Which check is correct?",
+      "options": [
+        "`Regex.IsMatch(s, @\"\\A[a-z0-9_]{3,16}\\z\")`",
+        "`Regex.IsMatch(s, @\"^[a-z0-9_]{3,16}$\")`",
+        "`Regex.IsMatch(s, @\"[a-z0-9_]{3,16}\")`",
+        "`Regex.IsMatch(s, @\"\\A[a-z0-9_]{3,16}\")`"
+      ],
+      "answer": 0,
+      "explain": "Without anchors any 3-letter run passes. With only `\\A`, `bob; DROP` passes. With `$`, `bob\\n` passes. Only `\\A ... \\z` checks the whole string and nothing more."
+    },
+    {
+      "type": "regex",
+      "title": "Symptom: the sign-up validator lets anything in",
+      "mode": "fix",
+      "prompt": [
+        "**Symptom.** The security team found accounts named `bob; DROP TABLE users` and `eve` followed by a newline.",
+        "The sign-up service checks names with `Regex.IsMatch(name, pattern)`, and these checks run the same way: a name",
+        "is accepted when the pattern finds a match anywhere in it.",
+        "",
+        "The rule: 3 to 16 lowercase letters, digits or underscores, and nothing else. Fix the pattern."
+      ],
+      "starter": "[a-z0-9_]{3,16}",
+      "solution": "\\A[a-z0-9_]{3,16}\\z",
+      "tests": {
+        "find": [
+          "bob",
+          "alice_99",
+          "a_very_long_name"
+        ],
+        "noFind": [
+          "bob; DROP TABLE users",
+          [
+            "eve",
+            ""
+          ],
+          "ab",
+          "a_very_long_name_",
+          "Bob",
+          " bob"
+        ]
+      },
+      "hints": [
+        "The pattern must start at the start of the input and end at its very end.",
+        "`$` still accepts the trailing newline. Use `\\A` at the start and `\\z` at the end."
+      ],
+      "explain": "`\\A[a-z0-9_]{3,16}\\z` leaves no room before or after. `^...$` fixes the first account but not the second: `$` matches before the final newline, which then lands in your database and your logs."
+    },
+    {
+      "type": "learn",
+      "title": "Word boundaries: \\b and \\B",
+      "body": [
+        "`\\b` is a position between a **word character** (`\\w`) and a non-word character, or the start or end of the text.",
+        "`\\B` is any position that is not a boundary.",
+        "",
+        "- `\\bcat\\b` finds `cat` alone, not in `concat` or `cats`. This is what `rg -w` and `grep -w` do.",
+        "- `\\Bcat` finds `cat` only inside a longer word, like `concat`.",
+        "",
+        "Two details matter in practice:",
+        "",
+        "1. `_` is a word character, so `\\bid\\b` does **not** find the `id` in `user_id`. A dash is not, so it finds it in",
+        "   `user-id`.",
+        "2. In .NET, `\\w` is Unicode, so `\\b` is too: `\\bcafé\\b` works. In JavaScript `\\b` is ASCII only, even with the `u`",
+        "   flag, so the same pattern fails after the `é`."
+      ],
+      "regex": {
+        "pattern": "\\bcat\\b",
+        "text": "cat concat cats cat. (cat) user_cat"
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "Console.WriteLine(Regex.Matches(\"cat concat cats cat.\", @\"\\bcat\\b\").Count);",
+        "Console.WriteLine(Regex.Matches(\"cat concat cats cat.\", @\"\\Bcat\").Count);",
+        "Console.WriteLine(Regex.IsMatch(\"café au lait\", @\"\\bcafé\\b\"));"
+      ],
+      "answer": [
+        "2",
+        "1",
+        "True"
+      ],
+      "explain": "`\\bcat\\b` finds the first `cat` and the one before the dot. `\\Bcat` finds only the `cat` inside `concat`. In .NET `é` is a word character, so there is a boundary between it and the space."
+    },
+    {
+      "type": "regex",
+      "title": "The IP, and not its neighbours",
+      "prompt": [
+        "Back to the firewall logs from module 1: `10\\.0\\.0\\.1` also finds `10.0.0.12` and `110.0.0.1`. Find the address",
+        "`10.0.0.1` only when it stands alone."
+      ],
+      "solution": "\\b10\\.0\\.0\\.1\\b",
+      "tests": {
+        "find": [
+          "deny tcp 10.0.0.1:22",
+          "10.0.0.1",
+          "src=10.0.0.1, dst=10.0.0.9"
+        ],
+        "noFind": [
+          "deny tcp 10.0.0.12:22",
+          "allow 110.0.0.1",
+          "10a0b0c1"
+        ]
+      },
+      "hints": [
+        "Digits are word characters, so a boundary sits between `1` and `:` but not between `1` and `2`.",
+        "`\\b10\\.0\\.0\\.1\\b`"
+      ],
+      "explain": "The boundaries refuse a digit on either side. One edge remains: `10.0.0.1.5` still matches, because a dot is not a word character. For strict IP handling, parse with `System.Net.IPAddress`."
+    },
+    {
+      "type": "sort",
+      "prompt": "Does `\\bid\\b` find a match in each text?",
+      "buckets": [
+        "Finds a match",
+        "Finds nothing"
+      ],
+      "items": [
+        [
+          "`user id 7`",
+          0
+        ],
+        [
+          "`id=7`",
+          0
+        ],
+        [
+          "`(id)`",
+          0
+        ],
+        [
+          "`user-id`",
+          0
+        ],
+        [
+          "`userid`",
+          1
+        ],
+        [
+          "`ids`",
+          1
+        ],
+        [
+          "`user_id`",
+          1
+        ]
+      ],
+      "explain": "Spaces, `=`, brackets and dashes are not word characters, so they make boundaries. Letters and `_` are, so `userid`, `ids` and `user_id` have no boundary next to the `id`."
+    },
+    {
+      "type": "regex",
+      "title": "The word error",
+      "prompt": [
+        "An alert should fire on lines that contain the word `error`, in lower case, as a word of its own. Metric names like",
+        "`errors=0` and `error_code=5`, and words like `terror`, must not fire it."
+      ],
+      "solution": "\\berror\\b",
+      "tests": {
+        "find": [
+          "an error occurred",
+          "error: disk full",
+          "(error) retrying",
+          "status=error"
+        ],
+        "noFind": [
+          "errors=0",
+          "error_code=5",
+          "terror alert",
+          "ERRORS logged"
+        ]
+      },
+      "hints": [
+        "Put a boundary on both sides of the word.",
+        "`\\berror\\b`. Remember that `_` counts as a word character."
+      ],
+      "explain": "`error_code` has no boundary after `error`, because `_` is a word character. That is usually what you want for identifiers, and a surprise when you expected `_` to separate words."
+    },
+    {
+      "type": "code",
+      "title": "A user name validator that holds",
+      "prompt": [
+        "Write `bool IsValidUsername(string name)`. A valid name:",
+        "",
+        "- is 3 to 16 characters long,",
+        "- uses only lowercase ASCII letters, ASCII digits and `_`,",
+        "- starts with a letter.",
+        "",
+        "Return true only when the **whole** name follows the rules: no trailing newline, nothing after it. Use",
+        "`Regex.IsMatch`. `System.Text.RegularExpressions` is already imported.",
+        "",
+        "| name | valid |",
+        "|---|---|",
+        "| `bob` | yes |",
+        "| `alice_99` | yes |",
+        "| `9lives` | no: starts with a digit |",
+        "| `bob` + newline | no |"
+      ],
+      "starter": [
+        "bool IsValidUsername(string name)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool IsValidUsername(string name)",
+        "{",
+        "    return Regex.IsMatch(name, @\"\\A[a-z][a-z0-9_]{2,15}\\z\");",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"bob is valid\", true, IsValidUsername(\"bob\"));",
+        "Dojo.Eq(\"alice_99 is valid\", true, IsValidUsername(\"alice_99\"));",
+        "Dojo.Eq(\"16 characters is valid\", true, IsValidUsername(\"a_very_long_name\"));",
+        "Dojo.Eq(\"17 characters is too long\", false, IsValidUsername(\"a_very_long_name_\"));",
+        "Dojo.Eq(\"2 characters is too short\", false, IsValidUsername(\"ab\"));",
+        "Dojo.Eq(\"a trailing newline is rejected\", false, IsValidUsername(\"bob\\n\"));",
+        "Dojo.Eq(\"bob; DROP TABLE users is rejected\", false, IsValidUsername(\"bob; DROP TABLE users\"));",
+        "Dojo.Eq(\"starting with a digit is rejected\", false, IsValidUsername(\"9lives\"));",
+        "Dojo.Eq(\"starting with _ is rejected\", false, IsValidUsername(\"_bob\"));",
+        "Dojo.Eq(\"capitals are rejected\", false, IsValidUsername(\"Bob\"));",
+        "Dojo.Eq(\"non-ASCII letters are rejected\", false, IsValidUsername(\"b\u00f8b\"));",
+        "Dojo.Eq(\"the empty string is rejected\", false, IsValidUsername(\"\"));"
+      ],
+      "require": [
+        {
+          "pattern": "Regex\\.IsMatch",
+          "message": "Uses Regex.IsMatch"
+        }
+      ],
+      "hints": [
+        "One letter first, then 2 to 15 more allowed characters: 3 to 16 in total.",
+        "`Regex.IsMatch(name, @\"\\A[a-z][a-z0-9_]{2,15}\\z\")`"
+      ]
+    }
+  ]
+}

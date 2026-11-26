@@ -15,6 +15,7 @@ import { composeBuildLab } from './lab-composebuild.js';
 import { kubeBuildLab } from './lab-kubebuild.js';
 import { pipeBuildLab } from './lab-pipebuild.js';
 import { vimLab } from './lab-vim.js';
+import { regexLab } from './lab-regex.js';
 import { workbench } from './workbench.js';
 import { netLabs } from './netlabs.js';
 import { codeSpaces } from './codespaces.js';
@@ -172,6 +173,8 @@ const LABS = [
     text: 'Jobs, needs, artifacts, caches, a matrix, environments with approvals and secrets. Run it for a push, a pull request or a fork and watch the timeline. Generates the GitHub Actions YAML. Ten challenges.' },
   { id: 'vim', icon: '⌨', title: 'Vim & nano trainer', category: 'Linux',
     text: 'A real Vim emulator with 36 keystroke-golf challenges, from "how do I quit?" to text objects, dot-repeat and :%s. Plus nano basics, a cheat sheet and free practice.' },
+  { id: 'regex', icon: '.*', title: 'Regex lab', category: 'Tools',
+    text: 'Live matching with every group in colour, each token explained in plain English, a step debugger that shows backtracking (and catastrophic backtracking), substitutions, and the same pattern as C#, JavaScript, Python, rg, grep, sed and PowerShell. Seventeen real-task challenges.' },
   { id: 'code', icon: '▶', title: 'Code in motion', category: 'Foundations',
     text: 'Step through any program line by line, forwards and backwards: watch loops count, variables change, arrays get sorted and recursive calls stack up.' },
   { id: 'linq', icon: '⇶', title: 'LINQ in motion', category: 'C#',
@@ -374,6 +377,14 @@ function labsView(id) {
   if (!lab) return notFound();
   if (id === 'linq') return linqLab(lab);
   if (id === 'code') return codeLab(lab);
+  if (id === 'regex') {
+    const host = h('div');
+    page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'),
+      h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`), h('p.muted', 'Type a pattern and watch it match. .NET is the reference flavour (real System.Text.RegularExpressions on the server, with a match timeout); JavaScript runs in your browser.'))),
+      host);
+    leave = regexLab(host, (xp, title) => toast(h('div', h('b', `+${xp} XP`), ` · solved "${title}"`), 'gold'));
+    return;
+  }
   if (id === 'vim') {
     const host = h('div');
     page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'),

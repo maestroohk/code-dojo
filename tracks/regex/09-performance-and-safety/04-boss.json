@@ -1,0 +1,255 @@
+{
+  "title": "Boss: the ReDoS post-incident actions",
+  "summary": "The incident is over; the action items are yours. Rewrite two vulnerable rules, put a safety net around a legacy one, and make the customer search endpoint impossible to hang.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "INC-4471: action items",
+      "body": [
+        "Last week a single request body pinned the API's CPU at 100% for 40 minutes. The post-incident review found four",
+        "places where untrusted text meets a regex, and assigned you the actions:",
+        "",
+        "1. Rewrite the gateway's query-string rule, which a scan flagged as exponential.",
+        "2. Rewrite the hostname validator in the tenant settings page.",
+        "3. Put a timeout and a safe answer around a legacy rule that cannot change this sprint.",
+        "4. Make the customer log search safe for any pattern a customer types.",
+        "",
+        "Every fix must still accept the valid inputs it accepted before."
+      ]
+    },
+    {
+      "type": "regex",
+      "title": "Rewrite the query-string rule",
+      "prompt": [
+        "The gateway checks query strings with `^([^&=]+=[^&]*&?)+$`. On `a=a=a=...a=&&` it never returns.",
+        "",
+        "The spec: one or more `name=value` pairs joined by single `&`. A name is one or more characters other than `=` and",
+        "`&`; a value is zero or more characters other than `=` and `&` (a literal `=` in a value arrives encoded as `%3D`).",
+        "Write a pattern for a whole query string that answers fast."
+      ],
+      "starter": "^([^&=]+=[^&]*&?)+$",
+      "solution": "[^=&]+=[^=&]*(?:&[^=&]+=[^=&]*)*",
+      "tests": {
+        "match": [
+          "a=1",
+          "a=1&b=2",
+          "q=&page=3",
+          "utm_source=mail&id=42",
+          "name=Acme%2C%20Inc."
+        ],
+        "reject": [
+          "",
+          "a",
+          "a=1&",
+          "&a=1",
+          "a=1&&b=2",
+          "=1",
+          "a=1=2"
+        ],
+        "fast": [
+          {
+            "repeat": "a=",
+            "times": 2000,
+            "suffix": "&&"
+          },
+          {
+            "repeat": "ab",
+            "times": 5000,
+            "suffix": "=&"
+          }
+        ]
+      }
+    },
+    {
+      "type": "regex",
+      "title": "Rewrite the hostname validator",
+      "prompt": [
+        "Tenant settings validate custom hostnames with `^([a-z0-9]+-?)+(\\.([a-z0-9]+-?)+)*$`, which hangs on 5,000 letters",
+        "followed by `!`.",
+        "",
+        "The spec: one or more labels separated by single dots. A label is lower-case ASCII letters and digits, and may",
+        "contain hyphens, but not at its start or end. Several hyphens in a row are allowed: international names look like",
+        "`xn--bcher-kva`. Write a pattern for a whole hostname that answers fast."
+      ],
+      "starter": "^([a-z0-9]+-?)+(\\.([a-z0-9]+-?)+)*$",
+      "solution": "[a-z0-9]+(?:-+[a-z0-9]+)*(?:\\.[a-z0-9]+(?:-+[a-z0-9]+)*)*",
+      "tests": {
+        "match": [
+          "api",
+          "api.contoso.com",
+          "eu-west-1.api.contoso.com",
+          "xn--bcher-kva.example"
+        ],
+        "reject": [
+          "",
+          "-api.com",
+          "api-.com",
+          "api..com",
+          "api.com.",
+          ".api.com",
+          "API.com",
+          "api_x.com"
+        ],
+        "fast": [
+          {
+            "repeat": "a",
+            "times": 5000,
+            "suffix": "!"
+          },
+          {
+            "repeat": "a-",
+            "times": 3000,
+            "suffix": "!"
+          },
+          {
+            "repeat": "ab.",
+            "times": 2000,
+            "suffix": "-"
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "title": "A safety net for the legacy rule",
+      "prompt": [
+        "The comment validator uses `^(\\w+\\s?)*$`. Another team's import relies on its exact behaviour, so the pattern stays",
+        "**unchanged** this sprint (the rewrite is ticketed). Your job is the safety net.",
+        "",
+        "Write `string Check(string input)`:",
+        "",
+        "- Build the legacy regex **once** (a top-level variable above the method is fine) with a **50 ms** match timeout.",
+        "- Return `valid` or `invalid`.",
+        "- When matching times out, return `timeout after 50 ms`, built from the exception's `MatchTimeout` so it stays right",
+        "  if someone changes the timeout.",
+        "",
+        "Do not run it without the timeout: the last test is an attack input, and without a timeout it runs until the",
+        "checks are stopped."
+      ],
+      "starter": [
+        "// The legacy rule, unchanged: @\"^(\\w+\\s?)*$\"",
+        "",
+        "string Check(string input)",
+        "{",
+        "    return \"invalid\";",
+        "}"
+      ],
+      "solution": [
+        "var legacy = new Regex(@\"^(\\w+\\s?)*$\", RegexOptions.None, TimeSpan.FromMilliseconds(50));",
+        "",
+        "string Check(string input)",
+        "{",
+        "    try",
+        "    {",
+        "        return legacy.IsMatch(input) ? \"valid\" : \"invalid\";",
+        "    }",
+        "    catch (RegexMatchTimeoutException ex)",
+        "    {",
+        "        return $\"timeout after {ex.MatchTimeout.TotalMilliseconds} ms\";",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"two words are valid\", \"valid\", Check(\"hello world\"));",
+        "Dojo.Eq(\"one trailing space is valid\", \"valid\", Check(\"hello world \"));",
+        "Dojo.Eq(\"punctuation is invalid\", \"invalid\", Check(\"hello!\"));",
+        "Dojo.Eq(\"a leading space is invalid\", \"invalid\", Check(\" hello\"));",
+        "Dojo.Eq(\"the attack input times out safely\", \"timeout after 50 ms\", Check(new string('a', 40) + \"!\"));"
+      ],
+      "require": [
+        {
+          "pattern": "catch\\s*\\(\\s*RegexMatchTimeoutException",
+          "message": "Catches RegexMatchTimeoutException"
+        },
+        {
+          "pattern": "MatchTimeout",
+          "message": "Reports the exception's MatchTimeout"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Make the customer search impossible to hang",
+      "prompt": [
+        "Customers search their logs with their own patterns. Write `string Search(string[] lines, string userPattern)`:",
+        "",
+        "1. Build the regex with `RegexOptions.IgnoreCase | RegexOptions.NonBacktracking` and a 50 ms timeout.",
+        "2. If that throws `NotSupportedException` (the pattern needs lookarounds or backreferences), fall back to",
+        "   `RegexOptions.IgnoreCase` alone, with the same 50 ms timeout.",
+        "3. If the pattern is invalid (`ArgumentException`), return `bad pattern`.",
+        "4. Count the lines with a match and return `N lines` (always `lines`, even for 0 or 1).",
+        "5. If matching times out, return `timeout`.",
+        "",
+        "So most patterns run in linear time, and the few that need backtracking are still bounded.",
+        "`System.Text.RegularExpressions` is imported."
+      ],
+      "starter": [
+        "string Search(string[] lines, string userPattern)",
+        "{",
+        "    return \"0 lines\";",
+        "}"
+      ],
+      "solution": [
+        "string Search(string[] lines, string userPattern)",
+        "{",
+        "    Regex regex;",
+        "    try",
+        "    {",
+        "        regex = new Regex(userPattern, RegexOptions.IgnoreCase | RegexOptions.NonBacktracking, TimeSpan.FromMilliseconds(50));",
+        "    }",
+        "    catch (NotSupportedException)",
+        "    {",
+        "        regex = new Regex(userPattern, RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(50));",
+        "    }",
+        "    catch (ArgumentException)",
+        "    {",
+        "        return \"bad pattern\";",
+        "    }",
+        "    try",
+        "    {",
+        "        return $\"{lines.Count(line => regex.IsMatch(line))} lines\";",
+        "    }",
+        "    catch (RegexMatchTimeoutException)",
+        "    {",
+        "        return \"timeout\";",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "string[] dojoLines = {",
+        "    \"09:12 ERROR checkout failed\",",
+        "    \"09:13 INFO all good\",",
+        "    \"09:14 FATAL disk full\",",
+        "    new string('a', 40) + \"!\",",
+        "    \"09:15 WARN slow\",",
+        "};",
+        "Dojo.Eq(\"a simple search, ignoring case\", \"2 lines\", Search(dojoLines, \"error|fatal\"));",
+        "Dojo.Eq(\"an invalid pattern\", \"bad pattern\", Search(dojoLines, \"(\"));",
+        "Dojo.Eq(\"(a+)+$ runs in linear time and finds nothing\", \"0 lines\", Search(dojoLines, \"(a+)+$\"));",
+        "Dojo.Eq(\"a backreference falls back to backtracking\", \"4 lines\", Search(dojoLines, @\"(\\w)\\1\"));",
+        "Dojo.Eq(\"a lookahead with a catastrophic body times out\", \"timeout\", Search(new[] { new string('a', 40) + \"!\" }, @\"^(?=\\w)(\\w+\\s?)*$\"));",
+        "Dojo.Eq(\"no lines\", \"0 lines\", Search(new string[0], \"x\"));"
+      ],
+      "require": [
+        {
+          "pattern": "RegexOptions\\.NonBacktracking",
+          "message": "Tries NonBacktracking first"
+        },
+        {
+          "pattern": "catch\\s*\\(\\s*NotSupportedException",
+          "message": "Falls back when NonBacktracking is not supported"
+        },
+        {
+          "pattern": "catch\\s*\\(\\s*RegexMatchTimeoutException",
+          "message": "Catches RegexMatchTimeoutException"
+        }
+      ]
+    }
+  ]
+}

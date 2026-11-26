@@ -186,6 +186,9 @@ app.MapPost("/api/pki", (PkiLab.Request req) => Results.Json(PkiLab.Run(req), js
 // LINQ in motion: run a query with every stage tapped, return the order items flowed through it.
 app.MapPost("/api/linqviz", async (LinqViz.Request req) => Results.Json(await LinqViz.Run(runner, req), json));
 
+// Regular expressions: the regex lab and graded "regex" steps, run by System.Text.RegularExpressions with a match timeout.
+RegexLab.Map(app, content);
+
 // Code intelligence for the editors: type-aware completion, go to definition, references, hover.
 app.MapPost("/api/intel", async (CodeIntel.Request req) => Results.Json(await CodeIntel.RunAny(runner, req), json));
 

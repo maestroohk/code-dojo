@@ -1,0 +1,249 @@
+{
+  "title": "Boss: the partner payments ticket",
+  "summary": "Payments from one partner have been failing since Monday. Parse the gateway log, lock down the callback check and find the bad rows in the partner's CSV feed.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "PAY-2291: partner payments failing",
+      "body": [
+        "Since Monday 08:14, payments from the partner Northwind Traders fail now and then. The ticket has three",
+        "attachments: the API gateway log, the partner's webhook settings and their nightly CSV feed. Your job:",
+        "",
+        "1. Parse a gateway log line into fields.",
+        "2. Summarise the log: parsed lines, skipped lines, 5xx count and the slowest path.",
+        "3. Replace the callback URL check. Security found that it accepts look-alike hosts.",
+        "4. List the rows in the partner feed whose date or SDK version is invalid.",
+        "",
+        "Use a regex where the text is flat and fixed, and a real parser everywhere else."
+      ]
+    },
+    {
+      "type": "regex",
+      "title": "A gateway log line",
+      "prompt": [
+        "Gateway lines look like this:",
+        "",
+        "```text",
+        "2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 502 1834ms req=9f3c1a2b",
+        "```",
+        "",
+        "Match a whole line with the named groups `ts`, `ip`, `method`, `path`, `status`, `ms` and `req`:",
+        "",
+        "- `ts`: `yyyy-MM-ddTHH:mm:ssZ` in ASCII digits (validity is checked later, by a parser).",
+        "- `ip`: four dot-separated runs of one to three digits (the shape only).",
+        "- `method`: capital letters. `path`: starts with `/`, no spaces.",
+        "- `status`: 100 to 599, so a first digit of 1 to 5 and two more digits. `ms`: digits, then the literal `ms`.",
+        "- `req`: exactly eight lower-case hex digits after `req=`."
+      ],
+      "solution": "(?<ts>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z) (?<ip>[0-9]{1,3}(?:\\.[0-9]{1,3}){3}) (?<method>[A-Z]+) (?<path>/\\S*) (?<status>[1-5][0-9]{2}) (?<ms>[0-9]+)ms req=(?<req>[0-9a-f]{8})",
+      "tests": {
+        "match": [
+          "2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 502 1834ms req=9f3c1a2b",
+          "2026-11-23T08:14:08Z 10.0.0.7 GET /health 200 2ms req=00000001"
+        ],
+        "reject": [
+          "2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 502 1834ms",
+          "2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 602 1834ms req=9f3c1a2b",
+          "2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 502 1834ms req=9F3C1A2B",
+          "2026-11-23 08:14:07 203.0.113.9 POST /v2/payments 502 1834ms req=9f3c1a2b",
+          "2026-11-23T08:14:07Z 203.0.113.9 POST v2/payments 502 1834ms req=9f3c1a2b",
+          "2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 502 1834ms req=9f3c1a2b extra",
+          "2026-11-23T08:14:07Z 203.0.113 POST /v2/payments 502 1834ms req=9f3c1a2b"
+        ],
+        "captures": [
+          {
+            "input": "2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 502 1834ms req=9f3c1a2b",
+            "groups": {
+              "ts": "2026-11-23T08:14:07Z",
+              "ip": "203.0.113.9",
+              "method": "POST",
+              "path": "/v2/payments",
+              "status": "502",
+              "ms": "1834",
+              "req": "9f3c1a2b"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "title": "Summarise the gateway log",
+      "prompt": [
+        "Write `(int Parsed, int Skipped, int ServerErrors, string Slowest) Summarize(string[] lines)`:",
+        "",
+        "- `Parsed`: lines that match the gateway format (anchor your pattern from the previous step with `^` and `$`).",
+        "- `Skipped`: lines that do not.",
+        "- `ServerErrors`: parsed lines with a status of 500 or more.",
+        "- `Slowest`: the path of the parsed line with the largest `ms` (compare numbers, not strings), or `\"\"` when nothing",
+        "  parsed. On a tie, keep the first one.",
+        "",
+        "`System.Text.RegularExpressions` is imported."
+      ],
+      "starter": [
+        "(int Parsed, int Skipped, int ServerErrors, string Slowest) Summarize(string[] lines)",
+        "{",
+        "    return (0, 0, 0, \"\");",
+        "}"
+      ],
+      "solution": [
+        "(int Parsed, int Skipped, int ServerErrors, string Slowest) Summarize(string[] lines)",
+        "{",
+        "    var gateway = new Regex(@\"^(?<ts>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z) (?<ip>[0-9]{1,3}(?:\\.[0-9]{1,3}){3}) (?<method>[A-Z]+) (?<path>/\\S*) (?<status>[1-5][0-9]{2}) (?<ms>[0-9]+)ms req=(?<req>[0-9a-f]{8})$\");",
+        "    int parsed = 0, skipped = 0, errors = 0, slowestMs = -1;",
+        "    var slowest = \"\";",
+        "    foreach (var line in lines)",
+        "    {",
+        "        var m = gateway.Match(line);",
+        "        if (!m.Success) { skipped++; continue; }",
+        "        parsed++;",
+        "        if (int.Parse(m.Groups[\"status\"].Value) >= 500) errors++;",
+        "        var ms = int.Parse(m.Groups[\"ms\"].Value);",
+        "        if (ms > slowestMs) { slowestMs = ms; slowest = m.Groups[\"path\"].Value; }",
+        "    }",
+        "    return (parsed, skipped, errors, slowest);",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "string[] dojoLog = {",
+        "    \"2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 502 1834ms req=9f3c1a2b\",",
+        "    \"2026-11-23T08:14:08Z 10.0.0.7 GET /health 200 2ms req=00000001\",",
+        "    \"2026-11-23T08:14:09Z 198.51.100.4 GET /v2/orders 200 987ms req=1a2b3c4d\",",
+        "    \"2026-11-23T08:14:10Z 198.51.100.4 POST /v2/payments 503 2410ms req=5e6f7a8b\",",
+        "    \"gateway restarted\",",
+        "    \"2026-11-23T08:14:11Z 203.0.113.9 GET /v2/refunds 504 30001ms req=9a8b7c6d\",",
+        "};",
+        "Dojo.Eq(\"summary of the gateway log\", (5, 1, 3, \"/v2/refunds\"), Summarize(dojoLog));",
+        "Dojo.Eq(\"an empty log\", (0, 0, 0, \"\"), Summarize(new string[0]));",
+        "Dojo.Eq(\"a line with an upper-case request id is skipped\", (0, 1, 0, \"\"), Summarize(new[] { \"2026-11-23T08:14:07Z 203.0.113.9 POST /v2/payments 502 1834ms req=9F3C1A2B\" }));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Lock down the callback check",
+      "prompt": [
+        "**Symptom.** Security's report: the webhook settings page accepted `https://partner.contoso.com.evil.io/hook` and",
+        "`https://partner.contoso.com@evil.io/hook`. The current check is the regex `^https://.*partner\\.contoso\\.com`.",
+        "",
+        "Write `bool IsAllowedCallback(string url)` with `Uri.TryCreate` instead. Allow only:",
+        "",
+        "- an absolute URL with the scheme `https` on port 443 (explicit or default),",
+        "- whose host is exactly `partner.contoso.com` or ends with `.partner.contoso.com` (a subdomain).",
+        "",
+        "`Uri` lower-cases the host for you. Do not use a regex."
+      ],
+      "starter": [
+        "bool IsAllowedCallback(string url)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool IsAllowedCallback(string url)",
+        "{",
+        "    if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;",
+        "    if (uri.Scheme != Uri.UriSchemeHttps || uri.Port != 443) return false;",
+        "    return uri.Host == \"partner.contoso.com\" || uri.Host.EndsWith(\".partner.contoso.com\", StringComparison.Ordinal);",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"the partner host\", true, IsAllowedCallback(\"https://partner.contoso.com/hook\"));",
+        "Dojo.Eq(\"a subdomain with a query\", true, IsAllowedCallback(\"https://eu.partner.contoso.com/hook?x=1\"));",
+        "Dojo.Eq(\"upper case is the same host\", true, IsAllowedCallback(\"HTTPS://Partner.Contoso.com/hook\"));",
+        "Dojo.Eq(\"an explicit port 443\", true, IsAllowedCallback(\"https://partner.contoso.com:443/hook\"));",
+        "Dojo.Eq(\"a look-alike host\", false, IsAllowedCallback(\"https://partner.contoso.com.evil.io/hook\"));",
+        "Dojo.Eq(\"user info in front of the real host\", false, IsAllowedCallback(\"https://partner.contoso.com@evil.io/hook\"));",
+        "Dojo.Eq(\"a host that only ends with the name\", false, IsAllowedCallback(\"https://evilpartner.contoso.com/hook\"));",
+        "Dojo.Eq(\"plain http\", false, IsAllowedCallback(\"http://partner.contoso.com/hook\"));",
+        "Dojo.Eq(\"another port\", false, IsAllowedCallback(\"https://partner.contoso.com:8443/hook\"));",
+        "Dojo.Eq(\"the name in the query string\", false, IsAllowedCallback(\"https://evil.io/?next=https://partner.contoso.com\"));",
+        "Dojo.Eq(\"not a URL\", false, IsAllowedCallback(\"not a url\"));"
+      ],
+      "require": [
+        {
+          "pattern": "Uri\\.TryCreate",
+          "message": "Parses with Uri.TryCreate"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bRegex\\b",
+          "message": "Does not use a regex for the URL"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Find the bad rows in the partner feed",
+      "prompt": [
+        "The partner's nightly CSV has the columns `id,company,signed,sdk`. Company names are quoted when they contain a",
+        "comma or a quote. Write `List<string> BadRows(string csv)`: the `id` of every data row, in file order, where",
+        "",
+        "- `signed` is not a real calendar date in `yyyy-MM-dd` (use `DateOnly.TryParseExact` with",
+        "  `CultureInfo.InvariantCulture`), **or**",
+        "- `sdk` is not a valid semantic version: `MAJOR.MINOR.PATCH` with no leading zeros, an optional `-pre.release` and an",
+        "  optional `+build.meta` (identifiers of `[0-9A-Za-z-]`, separated by single dots).",
+        "",
+        "Read the CSV with `TextFieldParser`. `System.Text.RegularExpressions`, `System.Globalization` and",
+        "`Microsoft.VisualBasic.FileIO` are imported."
+      ],
+      "starter": [
+        "List<string> BadRows(string csv)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> BadRows(string csv)",
+        "{",
+        "    var semver = new Regex(@\"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\\z\");",
+        "    var bad = new List<string>();",
+        "    using var parser = new TextFieldParser(new StringReader(csv));",
+        "    parser.SetDelimiters(\",\");",
+        "    parser.HasFieldsEnclosedInQuotes = true;",
+        "    parser.ReadFields();",
+        "    while (!parser.EndOfData)",
+        "    {",
+        "        var f = parser.ReadFields()!;",
+        "        var dateOk = DateOnly.TryParseExact(f[2], \"yyyy-MM-dd\", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);",
+        "        if (!dateOk || !semver.IsMatch(f[3])) bad.Add(f[0]);",
+        "    }",
+        "    return bad;",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "using System.Globalization;",
+        "using Microsoft.VisualBasic.FileIO;",
+        "{{CODE}}",
+        "var dojoCsv =",
+        "    \"id,company,signed,sdk\\n\" +",
+        "    \"P-001,\\\"Acme, Inc.\\\",2026-11-02,2.4.1\\n\" +",
+        "    \"P-002,Fabrikam,2026-02-30,2.4.1\\n\" +",
+        "    \"P-003,\\\"The \\\"\\\"Best\\\"\\\" Shop\\\",2026-10-15,2.04.0\\n\" +",
+        "    \"P-004,Northwind,2026-11-20,3.0.0-rc.1+build.7\\n\" +",
+        "    \"P-005,\\\"Contoso, Ltd\\\",15/11/2026,1.0.0\\n\" +",
+        "    \"P-006,Tailspin,2026-11-21,1.0\\n\";",
+        "Dojo.Eq(\"bad dates and bad versions, in file order\", new List<string> { \"P-002\", \"P-003\", \"P-005\", \"P-006\" }, BadRows(dojoCsv));",
+        "Dojo.Eq(\"a clean feed with a quoted comma\", new List<string>(), BadRows(\"id,company,signed,sdk\\nP-010,\\\"A, B\\\",2026-01-31,0.1.0\\n\"));",
+        "Dojo.Eq(\"a leap day and a pre-release are fine\", new List<string>(), BadRows(\"id,company,signed,sdk\\nP-011,Litware,2028-02-29,1.0.0-beta.2\\n\"));"
+      ],
+      "require": [
+        {
+          "pattern": "TextFieldParser",
+          "message": "Reads the CSV with a real parser"
+        },
+        {
+          "pattern": "TryParseExact",
+          "message": "Validates the date with TryParseExact"
+        }
+      ]
+    }
+  ]
+}

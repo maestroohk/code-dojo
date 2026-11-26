@@ -259,6 +259,12 @@ public sealed class CSharpRunner
                 nullableContextOptions: NullableContextOptions.Enable,
                 optimizationLevel: OptimizationLevel.Debug,
                 concurrentBuild: false));
+        // [GeneratedRegex] needs the regex source generator that ships in the SDK's targeting pack, as in a real build.
+        if (trees.Any(t => t.ToString().Contains("GeneratedRegex", StringComparison.Ordinal)) && RegexGenerator.Value is { } generator)
+        {
+            CSharpGeneratorDriver.Create([generator], parseOptions: Parse).RunGeneratorsAndUpdateCompilation(comp, out var generated, out _);
+            comp = (CSharpCompilation)generated;
+        }
 
         var dir = Path.Combine(Path.GetTempPath(), "code-dojo", "run-" + Guid.NewGuid().ToString("N")[..12]);
         Directory.CreateDirectory(dir);
@@ -283,6 +289,39 @@ public sealed class CSharpRunner
         File.WriteAllText(Path.Combine(dir, "Exercise.runtimeconfig.json"), efCore ? _ef.Value.RuntimeConfig : web ? _webRuntimeConfig : _runtimeConfig);
         return (new Compiled(dir, dll, web, efCore), diags);
     }
+
+    /// <summary>
+    /// System.Text.RegularExpressions.Generator from the SDK's Microsoft.NETCore.App.Ref pack (the one that matches this
+    /// runtime, else the newest with the same major version), so learner code can use [GeneratedRegex]. Null when no SDK
+    /// pack is installed; such code then fails to compile with the usual "partial method has no implementation" error.
+    /// </summary>
+    static readonly Lazy<ISourceGenerator?> RegexGenerator = new(() =>
+    {
+        try
+        {
+            var coreDir = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
+            var packs = Path.GetFullPath(Path.Combine(coreDir, "..", "..", "..", "packs", "Microsoft.NETCore.App.Ref"));
+            if (!Directory.Exists(packs)) return null;
+            var version = Path.GetFileName(coreDir);
+            var dirs = Directory.GetDirectories(packs)
+                .Where(d => Path.GetFileName(d).StartsWith(Environment.Version.Major + ".", StringComparison.Ordinal))
+                .OrderByDescending(d => Path.GetFileName(d) == version).ThenByDescending(d => Version.TryParse(Path.GetFileName(d).Split('-')[0], out var v) ? v : new Version());
+            foreach (var dir in dirs)
+            {
+                var dll = Path.Combine(dir, "analyzers", "dotnet", "cs", "System.Text.RegularExpressions.Generator.dll");
+                if (!File.Exists(dll)) continue;
+                var asm = System.Reflection.Assembly.LoadFrom(dll);
+                // The assembly also holds code fixers that need Roslyn's Workspaces layer, which this server does not ship.
+                Type[] types;
+                try { types = asm.GetTypes(); }
+                catch (System.Reflection.ReflectionTypeLoadException e) { types = e.Types.Where(t => t is not null).ToArray()!; }
+                var type = types.FirstOrDefault(t => typeof(IIncrementalGenerator).IsAssignableFrom(t) && !t.IsAbstract);
+                if (type is not null && Activator.CreateInstance(type) is IIncrementalGenerator g) return g.AsSourceGenerator();
+            }
+        }
+        catch { /* no generator: [GeneratedRegex] code reports a compile error instead */ }
+        return null;
+    }, LazyThreadSafetyMode.ExecutionAndPublication);
 
     /// <summary>A compilation of plain learner code (no #line mapping), for semantic analysis only.</summary>
     public CSharpCompilation Analyze(SyntaxTree tree) =>

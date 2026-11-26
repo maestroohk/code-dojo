@@ -1,0 +1,354 @@
+{
+  "title": "Named groups and numbering",
+  "summary": "Give groups names so code survives pattern edits, the .NET numbering rule that differs from JavaScript and Python, ExplicitCapture, replacements with ${name}, and extracting fields on the command line.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Named groups: (?<name>...)",
+      "body": [
+        "`m.Groups[3]` tells a reader nothing, and it silently changes meaning when someone adds a group earlier in the",
+        "pattern. Give the group a name instead:",
+        "",
+        "```csharp",
+        "var m = Regex.Match(line, @\"(?<level>[A-Z]+) \\[(?<svc>[\\w-]+)\\] (?<msg>.*)\");",
+        "if (m.Success)",
+        "    Console.WriteLine($\"{m.Groups[\"svc\"].Value}: {m.Groups[\"level\"].Value}\");",
+        "```",
+        "",
+        "In a replacement, refer to a named group with `${name}`, and to a numbered one with `$1` or `${1}`. Use the",
+        "braces when a digit follows: `${1}0` is group 1 and then a zero, but `$10` means group 10.",
+        "",
+        "Below, the replacement reorders the fields by name."
+      ],
+      "regex": {
+        "pattern": "(?<level>[A-Z]+) \\[(?<svc>[\\w-]+)\\] (?<msg>.*)",
+        "text": [
+          "ERROR [checkout] payment declined",
+          "WARN [order-api] slow query 1200ms"
+        ],
+        "replace": "${svc} (${level}): ${msg}"
+      }
+    },
+    {
+      "type": "regex",
+      "title": "A date with named parts",
+      "prompt": [
+        "Match the whole string when it is an ISO date like `2026-11-26`, and name the parts: `y` for the four-digit year,",
+        "`m` for the two-digit month, `d` for the two-digit day. ASCII digits only."
+      ],
+      "solution": "(?<y>[0-9]{4})-(?<m>[0-9]{2})-(?<d>[0-9]{2})",
+      "tests": {
+        "match": [
+          "2026-11-26",
+          "1999-01-01"
+        ],
+        "reject": [
+          "2026-1-26",
+          "26-11-2026",
+          "2026/11/26",
+          "20261126"
+        ],
+        "captures": [
+          {
+            "input": "2026-11-26",
+            "groups": {
+              "y": "2026",
+              "m": "11",
+              "d": "26"
+            }
+          }
+        ]
+      },
+      "hints": [
+        "A named group is `(?<y>...)`. The year is `[0-9]{4}`.",
+        "`(?<y>[0-9]{4})-(?<m>[0-9]{2})-(?<d>[0-9]{2})`"
+      ],
+      "explain": "The checks read the groups by name. This pattern checks the shape only: `2026-13-45` passes. Validate the values with `DateOnly.TryParseExact` after the match."
+    },
+    {
+      "type": "learn",
+      "title": "The .NET numbering rule",
+      "body": [
+        "Named groups also have numbers, and here .NET differs from almost everyone else.",
+        "",
+        "- **.NET**: unnamed groups are numbered first, left to right. Named groups come **after** them, in order.",
+        "- **JavaScript, Python, PCRE, Java**: every capturing group is numbered left to right, named or not.",
+        "",
+        "```text",
+        "pattern:  (?<level>[A-Z]+) (\\d+) (?<svc>\\w+)",
+        ".NET:     1 = (\\d+)     2 = level   3 = svc",
+        "JS/Py:    1 = level     2 = (\\d+)   3 = svc",
+        "```",
+        "",
+        "So a pattern ported from Python with `$1` in the replacement can silently insert the wrong field in C#. The cure",
+        "is to not mix the two styles: name every group you read, and make the rest `(?:...)`.",
+        "",
+        "**`RegexOptions.ExplicitCapture`** (flag `n`, or `(?n)` at the start of the pattern) does that for you: plain",
+        "`(...)` stops capturing, and only named groups capture. Then `Groups[1]` is the first named group."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Remember the .NET rule. What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "var m = Regex.Match(\"ERROR 503 checkout\", @\"(?<level>[A-Z]+) (\\d+) (?<svc>\\w+)\");",
+        "Console.WriteLine(m.Groups[1].Value);",
+        "Console.WriteLine(m.Groups[2].Value);",
+        "Console.WriteLine(m.Groups[3].Value);"
+      ],
+      "answer": [
+        "503",
+        "ERROR",
+        "checkout"
+      ],
+      "explain": "The only unnamed group, `(\\d+)`, is number 1. Then the named groups follow in order: `level` is 2, `svc` is 3. In JavaScript or Python, group 1 would be `ERROR`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "With `RegexOptions.ExplicitCapture`, what is `m.Groups[1].Value`?",
+      "code": [
+        "var m = Regex.Match(\"ref 77-1234\", @\"(\\d+)-(?<id>\\d+)\", RegexOptions.ExplicitCapture);"
+      ],
+      "options": [
+        "`1234`",
+        "`77`",
+        "an empty string: group 1 does not exist",
+        "It throws: ExplicitCapture forbids plain parentheses"
+      ],
+      "answer": 0,
+      "explain": "With ExplicitCapture, `(\\d+)` only groups. The only capturing group is `id`, so it is number 1 (and `m.Groups[\"id\"]` works as usual)."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Symptom: the latency dashboard shows status codes",
+      "prompt": [
+        "**Symptom.** Since Tuesday's deploy, the p95 latency chart shows values like 200 and 503 milliseconds, and the",
+        "alert for slow requests never fires. Nothing in the chart code changed.",
+        "",
+        "The parser below used to have the pattern `(\\S+) (\\d{3}) (\\d+)ms`, where group 3 was the latency. On Tuesday a",
+        "teammate added the method group at the front so another report could read it.",
+        "",
+        "Find the cause, then fix it so the next edit to the pattern cannot break it again: **name the groups and read",
+        "them by name**. `LatencyMs` returns the milliseconds, or `null` for a line that does not fit."
+      ],
+      "starter": [
+        "int? LatencyMs(string line)",
+        "{",
+        "    // Tuesday: added (GET|POST) at the front for the method report.",
+        "    var m = Regex.Match(line, @\"(GET|POST) (\\S+) (\\d{3}) (\\d+)ms\");",
+        "    if (!m.Success) return null;",
+        "    return int.Parse(m.Groups[3].Value);",
+        "}"
+      ],
+      "solution": [
+        "int? LatencyMs(string line)",
+        "{",
+        "    var m = Regex.Match(line, @\"(?<method>GET|POST) (?<path>\\S+) (?<status>\\d{3}) (?<ms>\\d+)ms\");",
+        "    if (!m.Success) return null;",
+        "    return int.Parse(m.Groups[\"ms\"].Value);",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"GET /orders 200 87ms is 87 ms\", (int?)87, LatencyMs(\"GET /orders 200 87ms\"));",
+        "Dojo.Eq(\"POST /pay 503 1200ms is 1200 ms\", (int?)1200, LatencyMs(\"POST /pay 503 1200ms\"));",
+        "Dojo.Eq(\"a line without a latency gives null\", (int?)null, LatencyMs(\"starting worker\"));"
+      ],
+      "forbid": [
+        {
+          "pattern": "Groups\\[\\s*\\d",
+          "message": "Reads groups by name, not by number"
+        }
+      ],
+      "hints": [
+        "Count the groups: adding `(GET|POST)` in front shifted every number by one. Group 3 is now the status code.",
+        "Write `(?<ms>\\d+)ms` and read `m.Groups[\"ms\"].Value`. Naming the other groups too keeps them readable."
+      ],
+      "explain": "A numbered group is a position, and positions move when the pattern changes. A name moves with its group. In review, treat a new group inserted before `Groups[n]` reads as a breaking change."
+    },
+    {
+      "type": "regex",
+      "title": "Reformat dates with a named replacement",
+      "prompt": [
+        "A report needs dates as `day/month/year`. Write a pattern that finds ISO dates like `2026-11-26` with named groups",
+        "`y`, `m` and `d`, and a replacement that rewrites them as `26/11/2026`. Text around the dates stays as it is."
+      ],
+      "solution": "(?<y>[0-9]{4})-(?<m>[0-9]{2})-(?<d>[0-9]{2})",
+      "solutionReplacement": "${d}/${m}/${y}",
+      "tests": {
+        "replace": [
+          {
+            "input": "due 2026-11-26, paid 2026-12-01",
+            "output": "due 26/11/2026, paid 01/12/2026"
+          },
+          {
+            "input": "no date here",
+            "output": "no date here"
+          }
+        ]
+      },
+      "hints": [
+        "The pattern is the one from the earlier step. In the replacement, `${d}` inserts the day.",
+        "Replacement: `${d}/${m}/${y}`"
+      ],
+      "explain": "`Regex.Replace(text, pattern, \"${d}/${m}/${y}\")` does the whole file in one call. Named references in the replacement survive pattern edits for the same reason named reads do."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: pulling fields out of text",
+      "body": "When you need one field from thousands of log lines, print just the capture and pipe it on to sort, uniq or a spreadsheet.",
+      "toolkit": [
+        {
+          "cmd": "rg -o -N -r '$1' 'user=(\\w+)' logs/",
+          "what": "Print only what group 1 captured, one per line. rg supports named groups too: -r '$user' with (?P<user>...) or (?<user>...).",
+          "flags": [["-o", "print only the matched part, not the whole line"], ["-r '$1'", "replace the output with this template; $1 or $name is a group"], ["-N", "no line numbers"], ["--no-filename", "drop the file name in front of each hit"]],
+          "example": "rg -o -N --no-filename -r '$1' 'user=(\\w+)' logs/ | sort | uniq -c | sort -rn | head",
+          "when": "which users, ids or endpoints show up most in a log"
+        },
+        {
+          "cmd": "grep -oP 'order_id=\\K\\d+' app.log",
+          "what": "GNU grep with PCRE. \\K throws away what was matched so far, so -o prints only the part after it. No group needed.",
+          "flags": [["-o", "only the matched part"], ["-P", "Perl-compatible regex (GNU grep; macOS grep has no -P)"], ["\\K", "keep only the text matched after this point"]],
+          "example": "kubectl logs deploy/checkout --since=1h | grep -oP 'order_id=\\K\\d+' | sort -u | wc -l",
+          "when": "on a server or in a container where rg is not installed"
+        },
+        {
+          "cmd": "sed -E 's/^([0-9]{4})-([0-9]{2})-([0-9]{2})/\\3.\\2.\\1/' dates.txt",
+          "what": "Rewrite with groups. -E gives modern syntax, so ( ) group without backslashes, and \\1 inserts a group in the replacement.",
+          "flags": [["-E", "extended regex: ( ), +, ? and {n} without backslashes"], ["\\1", "group 1 in the replacement"], ["-i", "edit the file in place (macOS: -i '')"], ["[0-9]", "sed has no \\d: write the class"]],
+          "example": "sed -E -i 's/version=\"([0-9.]+)\"/version=\"\\1-rc\"/' build.props",
+          "when": "a quick rewrite in a CI script or a Dockerfile"
+        },
+        {
+          "cmd": "if ($line -match '(?<status>\\d{3}) (?<ms>\\d+)ms') { $Matches['ms'] }",
+          "what": "PowerShell's -match uses .NET regex and fills the automatic $Matches hashtable with the groups of the match.",
+          "flags": [["-match", "case-insensitive match, sets $Matches"], ["-cmatch", "case-sensitive"], ["$Matches['name']", "a named group; $Matches[1] for a numbered one"], ["-replace", "Regex.Replace: 'a' -replace '(?<x>a)', '${x}!'"]],
+          "example": "Select-String -Path .\\logs\\*.log -Pattern '(?<ms>\\d+)ms' | ForEach-Object { [int]$_.Matches[0].Groups['ms'].Value } | Measure-Object -Maximum",
+          "when": "on Windows servers and build agents",
+          "lang": "powershell"
+        },
+        {
+          "cmd": "[GeneratedRegex(@\"(?<level>[A-Z]+) \\[(?<svc>[\\w-]+)\\]\", RegexOptions.ExplicitCapture)]",
+          "what": "In C#, the regex source generator turns the pattern into code at build time: no parsing at startup, and a bad pattern is a compile error.",
+          "flags": [["[GeneratedRegex]", "on a static partial method (or, since .NET 9, a partial property) returning Regex"], ["RegexOptions.ExplicitCapture", "only named groups capture"], ["matchTimeoutMilliseconds", "a timeout, for input you do not control"]],
+          "example": "[GeneratedRegex(@\"status=(?<code>\\d{3})\")] private static partial Regex StatusRegex();",
+          "when": "any pattern used on a hot path in a service",
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each piece of syntax to what it does.",
+      "pairs": [
+        [
+          "`rg -o -r '$1'`",
+          "print only group 1 of each match"
+        ],
+        [
+          "`\\K` in `grep -P`",
+          "forget what was matched so far"
+        ],
+        [
+          "`\\2` in a `sed` replacement",
+          "insert what group 2 matched"
+        ],
+        [
+          "`$Matches['ms']`",
+          "a named group after PowerShell's -match"
+        ],
+        [
+          "`${ms}` in `Regex.Replace`",
+          "a named group in a .NET replacement"
+        ]
+      ],
+      "explain": "Every tool can print or reuse a group; only the spelling changes. sed and grep use `\\1`, .NET, rg and JavaScript use `$1`."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the command: list the ten most common endpoints in the access logs, printing only the captured path.",
+      "code": [
+        "rg __1__ -N --no-filename __2__ '$1' '\"GET (/[^ ?\"]*)' logs/ | sort | uniq -c | sort -rn | head"
+      ],
+      "blanks": [
+        "-o",
+        "-r"
+      ],
+      "bank": [
+        "-v",
+        "-F",
+        "-l",
+        "-w"
+      ],
+      "explain": "`-o` prints only the match, and `-r '$1'` replaces it with group 1, the path. `-F` would turn off the regex, so the group would not exist."
+    },
+    {
+      "type": "code",
+      "title": "Parse a log line into a record",
+      "prompt": [
+        "Lines from the checkout service look like this:",
+        "",
+        "```text",
+        "09:12:04 ERROR [checkout] 503 payment declined",
+        "```",
+        "",
+        "A time, a level (capital letters), a service in square brackets (letters, digits and dashes), a three-digit",
+        "status, and the rest of the line as the message.",
+        "",
+        "Write `LogEntry? ParseLog(string line)` that returns a `LogEntry` for a line that fits **the whole format**, and",
+        "`null` for any other line. The record is already declared:",
+        "",
+        "```csharp",
+        "record LogEntry(string Time, string Level, string Service, int Status, string Message);",
+        "```",
+        "",
+        "Use **named groups** and read them by name. `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "LogEntry? ParseLog(string line)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "LogEntry? ParseLog(string line)",
+        "{",
+        "    var m = Regex.Match(line, @\"^(?<time>\\d{2}:\\d{2}:\\d{2}) (?<level>[A-Z]+) \\[(?<svc>[\\w-]+)\\] (?<status>\\d{3}) (?<msg>.*)$\");",
+        "    if (!m.Success) return null;",
+        "    return new LogEntry(",
+        "        m.Groups[\"time\"].Value,",
+        "        m.Groups[\"level\"].Value,",
+        "        m.Groups[\"svc\"].Value,",
+        "        int.Parse(m.Groups[\"status\"].Value),",
+        "        m.Groups[\"msg\"].Value);",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"an ERROR line\", new LogEntry(\"09:12:04\", \"ERROR\", \"checkout\", 503, \"payment declined\"), ParseLog(\"09:12:04 ERROR [checkout] 503 payment declined\"));",
+        "Dojo.Eq(\"a service name with a dash\", new LogEntry(\"09:13:00\", \"INFO\", \"order-api\", 200, \"ok\"), ParseLog(\"09:13:00 INFO [order-api] 200 ok\"));",
+        "Dojo.Eq(\"a message with brackets in it\", new LogEntry(\"09:14:10\", \"WARN\", \"pay\", 429, \"retry [2/5]\"), ParseLog(\"09:14:10 WARN [pay] 429 retry [2/5]\"));",
+        "Dojo.Eq(\"a line that does not fit gives null\", (LogEntry?)null, ParseLog(\"starting up...\"));",
+        "Dojo.Eq(\"a four-digit status gives null\", (LogEntry?)null, ParseLog(\"09:15:00 WARN [checkout] 5030 slow\"));",
+        "Dojo.Eq(\"text before the time gives null\", (LogEntry?)null, ParseLog(\"> 09:12:04 ERROR [checkout] 503 payment declined\"));",
+        "record LogEntry(string Time, string Level, string Service, int Status, string Message);"
+      ],
+      "forbid": [
+        {
+          "pattern": "Groups\\[\\s*\\d",
+          "message": "Reads groups by name, not by number"
+        }
+      ],
+      "hints": [
+        "Anchor both ends with `^` and `$` so a line that only partly fits is rejected. The service is `\\[(?<svc>[\\w-]+)\\]`.",
+        "After `if (!m.Success) return null;`, build `new LogEntry(m.Groups[\"time\"].Value, ..., int.Parse(m.Groups[\"status\"].Value), m.Groups[\"msg\"].Value)`."
+      ]
+    }
+  ]
+}

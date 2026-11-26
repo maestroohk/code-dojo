@@ -1,0 +1,367 @@
+{
+  "title": "Log lines into fields",
+  "summary": "Parse access logs and app logs with named groups, count requests by status, find the slowest ones, and the shell one-liners seniors use during an incident.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A log line is a record in disguise",
+      "body": [
+        "During an incident the question is never \"show me the log\". It is \"how many 502s since 09:12, and which paths?\".",
+        "To answer it you turn each line into fields. A regex with **named groups** does that in one pass.",
+        "",
+        "Below is the nginx/Apache *combined* log format. Three habits make the pattern robust:",
+        "",
+        "- **Anchor** with `^`, so the engine tries one position per line instead of every position.",
+        "- Use **negated classes** for delimited fields: `\\[(?<time>[^\\]]+)\\]` means \"everything up to the closing bracket\".",
+        "  It cannot run past the bracket, so it is both correct and fast.",
+        "- **Name** the groups (`(?<status>...)`), so the code reads `m.Groups[\"status\"]`, not `m.Groups[6]`, and adding a group",
+        "  later does not shift every number.",
+        "",
+        "Click a match to see each group. Try breaking a line and watch it stop matching."
+      ],
+      "regex": {
+        "pattern": "^(?<ip>\\S+) \\S+ \\S+ \\[(?<time>[^\\]]+)\\] \"(?<method>[A-Z]+) (?<path>\\S+) [^\"]*\" (?<status>[0-9]{3}) (?<bytes>[0-9]+|-)",
+        "flags": "m",
+        "text": [
+          "203.0.113.9 - - [26/Nov/2026:09:12:04 +0000] \"GET /api/orders?page=2 HTTP/1.1\" 200 5120 \"-\" \"curl/8.10\"",
+          "198.51.100.4 - alice [26/Nov/2026:09:12:05 +0000] \"POST /api/checkout HTTP/2.0\" 502 0 \"-\" \"Mozilla/5.0\"",
+          "10.0.0.7 - - [26/Nov/2026:09:12:06 +0000] \"GET /health HTTP/1.1\" 200 2 \"-\" \"kube-probe/1.31\""
+        ]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "A teammate wrote `\\[(?<time>.*)\\]` for the timestamp instead of `\\[(?<time>[^\\]]+)\\]`. On which line does it capture the wrong text?",
+      "code": [
+        "1: 10.0.0.7 - - [26/Nov/2026:09:12:06 +0000] \"GET /health HTTP/1.1\" 200 2",
+        "2: 10.0.0.8 - - [26/Nov/2026:09:12:07 +0000] \"GET /search?tags[]=a HTTP/1.1\" 200 88",
+        "3: 10.0.0.9 - bob [26/Nov/2026:09:12:08 +0000] \"POST /login HTTP/1.1\" 401 0"
+      ],
+      "options": [
+        "Line 2: the greedy `.*` runs on to the last `]` on the line, inside the path",
+        "Line 3: the user name `bob` confuses it",
+        "Line 1: `.*` cannot match the `+` in the offset",
+        "None: both patterns always capture the same text"
+      ],
+      "answer": 0,
+      "explain": "`.*` is greedy: it grabs the rest of the line and backs off only to the **last** `]`, which on line 2 is in `tags[]`. The negated class `[^\\]]+` stops at the first `]`. It is also faster: no backing off at all."
+    },
+    {
+      "type": "regex",
+      "title": "Parse the app log",
+      "prompt": [
+        "Your service writes one line per request: time, method, path, status and duration.",
+        "",
+        "```text",
+        "09:12:04 GET /api/orders 200 34ms",
+        "```",
+        "",
+        "Write a pattern that matches a whole line, with the named groups `time`, `method`, `path`, `status` and `ms`.",
+        "The time is `hh:mm:ss` (two ASCII digits each), the method is capital letters, the path starts with `/` and has no",
+        "spaces, the status is exactly three digits, and `ms` is the number before the literal `ms`."
+      ],
+      "solution": "(?<time>[0-9]{2}:[0-9]{2}:[0-9]{2}) (?<method>[A-Z]+) (?<path>/\\S*) (?<status>[0-9]{3}) (?<ms>[0-9]+)ms",
+      "tests": {
+        "match": [
+          "09:12:04 GET /api/orders 200 34ms",
+          "23:59:59 DELETE /api/carts/17 204 3ms"
+        ],
+        "reject": [
+          "09:12:04 GET /api/orders 200",
+          "09:12:04 get /api/orders 200 34ms",
+          "09:12:04 GET /api/orders 2000 34ms",
+          "9:12:04 GET /api/orders 200 34ms",
+          "09:12:04 GET api/orders 200 34ms",
+          "09:12:04 GET /api/orders 200 34 ms"
+        ],
+        "captures": [
+          {
+            "input": "09:12:04 POST /api/checkout 502 1834ms",
+            "groups": {
+              "time": "09:12:04",
+              "method": "POST",
+              "path": "/api/checkout",
+              "status": "502",
+              "ms": "1834"
+            }
+          }
+        ]
+      },
+      "hints": [
+        "Build it field by field with single spaces between them: `(?<time>...) (?<method>...) (?<path>...) ...`.",
+        "Path: `(?<path>/\\S*)`. Duration: `(?<ms>[0-9]+)ms`."
+      ],
+      "explain": "Each field has a precise class: digits for numbers, `[A-Z]+` for the method, `\\S*` for a path that cannot contain the separator. Precise classes reject garbage lines instead of capturing nonsense from them."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "var m = Regex.Match(\"10.0.0.7 GET /health 503 12ms\", @\"(?<ip>\\S+) (?<method>[A-Z]+) (?<path>\\S+) (?<status>[0-9]{3})\");",
+        "Console.WriteLine(m.Groups[\"status\"].Value);",
+        "Console.WriteLine(int.Parse(m.Groups[\"status\"].Value) >= 500);",
+        "Console.WriteLine(m.Groups[\"user\"].Success);"
+      ],
+      "answer": [
+        "503",
+        "True",
+        "False"
+      ],
+      "explain": "A group's `Value` is always a string: parse it before comparing. Asking for a group name the pattern does not have does not throw; you get a group whose `Success` is false. That is why a typo in a group name fails silently: test your parser."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the loop that counts requests per status. Lines that do not parse are skipped.",
+      "lines": [
+        "var counts = new Dictionary<int, int>();",
+        "foreach (var line in lines)",
+        "{",
+        "    var m = logLine.Match(line);",
+        "    if (!m.Success) continue;",
+        "    var status = int.Parse(m.Groups[\"status\"].Value);",
+        "    counts[status] = counts.GetValueOrDefault(status) + 1;",
+        "}"
+      ],
+      "explain": "Match, check `Success`, then read the groups. Reading `m.Groups[\"status\"].Value` on a failed match gives an empty string, and `int.Parse(\"\")` throws."
+    },
+    {
+      "type": "code",
+      "title": "Count requests by status",
+      "prompt": [
+        "Write `string StatusSummary(string[] lines)` for the app log format of the previous steps",
+        "(`09:12:04 GET /api/orders 200 34ms`).",
+        "",
+        "Return the count per status, **sorted by status**, then the number of lines that did not parse:",
+        "",
+        "```text",
+        "200=3 404=1 502=2 skipped=1",
+        "```",
+        "",
+        "Always count skipped lines. A parser that silently drops lines hides the day the log format changes: your 502 count",
+        "drops to zero and the dashboard looks healthy. A rising `skipped` number is how you notice.",
+        "",
+        "Build the `Regex` once, before the loop, and anchor it with `^` and `$`. A `SortedDictionary<int, int>` keeps the",
+        "statuses in order."
+      ],
+      "starter": [
+        "string StatusSummary(string[] lines)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string StatusSummary(string[] lines)",
+        "{",
+        "    var logLine = new Regex(@\"^(?<time>[0-9]{2}:[0-9]{2}:[0-9]{2}) (?<method>[A-Z]+) (?<path>/\\S*) (?<status>[0-9]{3}) (?<ms>[0-9]+)ms$\");",
+        "    var counts = new SortedDictionary<int, int>();",
+        "    var skipped = 0;",
+        "    foreach (var line in lines)",
+        "    {",
+        "        var m = logLine.Match(line);",
+        "        if (!m.Success) { skipped++; continue; }",
+        "        var status = int.Parse(m.Groups[\"status\"].Value);",
+        "        counts.TryGetValue(status, out var seen);",
+        "        counts[status] = seen + 1;",
+        "    }",
+        "    var parts = counts.Select(kv => $\"{kv.Key}={kv.Value}\").Append($\"skipped={skipped}\");",
+        "    return string.Join(\" \", parts);",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "string[] dojoLog = {",
+        "    \"09:12:04 GET /api/orders 200 34ms\",",
+        "    \"09:12:05 POST /api/checkout 502 1834ms\",",
+        "    \"09:12:06 GET /health 200 2ms\",",
+        "    \"09:12:07 GET /api/orders/9 404 12ms\",",
+        "    \"--- log rotated ---\",",
+        "    \"09:12:08 POST /api/payments 502 2210ms\",",
+        "    \"09:12:09 GET /api/search 200 987ms\",",
+        "};",
+        "Dojo.Eq(\"counts per status, sorted, then skipped\", \"200=3 404=1 502=2 skipped=1\", StatusSummary(dojoLog));",
+        "Dojo.Eq(\"a lower-case method does not parse\", \"301=1 skipped=1\", StatusSummary(new[] { \"09:12:10 get /x 200 1ms\", \"09:12:11 GET /x 301 1ms\" }));",
+        "Dojo.Eq(\"an empty log\", \"skipped=0\", StatusSummary(new string[0]));"
+      ],
+      "require": [
+        {
+          "pattern": "Groups\\[",
+          "message": "Reads the status from a named group"
+        }
+      ],
+      "hints": [
+        "Reuse your pattern from the regex step, wrapped in `^...$`. On `!m.Success`, add one to `skipped` and `continue`.",
+        "`string.Join(\" \", counts.Select(kv => $\"{kv.Key}={kv.Value}\").Append($\"skipped={skipped}\"))`"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: slicing logs and data files from the shell",
+      "body": "When the incident call has started you rarely write a program first. You slice the file on the box with these, and write code only for what you will run again.",
+      "toolkit": [
+        {
+          "cmd": "awk '{print $9}' access.log | sort | uniq -c | sort -rn",
+          "what": "awk splits each line on whitespace into $1, $2, ... In the combined log format $9 is the status and $7 the path.",
+          "flags": [["-F,", "split on a comma (or any separator) instead of whitespace"], ["$NF", "the last field; $0 is the whole line"], ["NR", "the current line number"], ["'$9 >= 500 {...}'", "a condition: run the block only on matching lines"]],
+          "example": "awk '$9 >= 500 {print $7}' access.log | sort | uniq -c | sort -rn | head",
+          "when": "quick counts on a server, over SSH, during an incident"
+        },
+        {
+          "cmd": "cut -d, -f1,3 export.csv",
+          "what": "Pick columns from simply delimited text. It knows nothing about quotes, so a quoted \"Acme, Inc.\" shifts every column after it (awk -F, has the same flaw).",
+          "flags": [["-d,", "the delimiter (one character)"], ["-f1,3", "fields 1 and 3 (ranges like 2-4 work)"]],
+          "example": "cut -d: -f1,7 /etc/passwd",
+          "when": "TSV, /etc/passwd style files, CSV you know has no quoted fields"
+        },
+        {
+          "cmd": "rg -o -I -r '$1' 'status=(\\d{3})' logs/ | sort | uniq -c | sort -rn",
+          "what": "Extract just one capture group from every match across many files, then count the values.",
+          "flags": [["-o", "print only the matched part"], ["-r '$1'", "print this replacement instead of the match: here, group 1"], ["-I", "no file names in front of the lines"], ["-N", "no line numbers"]],
+          "example": "rg -o -I -r '$1' 'req=([0-9a-f]{8})' logs/ | sort -u | wc -l",
+          "when": "key=value logs, extracting ids, counting distinct values"
+        },
+        {
+          "cmd": "jq -r 'select(.status >= 500) | .path' app.jsonl",
+          "what": "Query structured JSON logs (one JSON object per line). Never regex JSON: field order, spacing and escaping are not fixed.",
+          "flags": [["-r", "print strings raw, without JSON quotes"], ["-c", "compact output, one object per line"], ["-s", "slurp: read every line into one array first"], ["select(...)", "keep only objects where the condition is true"]],
+          "example": "jq -s 'group_by(.status) | map({status: .[0].status, count: length})' app.jsonl",
+          "when": "Serilog, OpenTelemetry or cloud logs exported as JSON lines"
+        },
+        {
+          "cmd": "Import-Csv .\\partners.csv | Where-Object { $_.Country -eq 'NL' }",
+          "what": "A real CSV parser in PowerShell: quoted fields, embedded commas and doubled quotes all work, and each row becomes an object with a property per column.",
+          "flags": [["-Delimiter ';'", "a different separator (European exports often use ;)"], ["-Header a,b,c", "column names when the file has no header row"], ["ConvertFrom-Json", "the same for JSON; in PowerShell 7 each piped line of a .jsonl file becomes one object"], ["Group-Object -NoElement", "count per group without keeping the rows"]],
+          "example": "Get-Content .\\app.jsonl | ConvertFrom-Json | Group-Object status -NoElement | Sort-Object Count -Descending",
+          "when": "on Windows machines and build agents",
+          "lang": "powershell"
+        },
+        {
+          "cmd": "Select-String -Path .\\app.log -Pattern 'status=(?<s>\\d{3})'",
+          "what": "PowerShell's grep returns match objects, so named groups are right there: $_.Matches[0].Groups['s'].Value.",
+          "flags": [["-AllMatches", "every match on a line, not only the first"], ["-CaseSensitive", "match case (the default ignores it)"], [".Matches", "the .NET Match objects, groups included"]],
+          "example": "Select-String -Path .\\app.log -Pattern 'status=(?<s>\\d{3})' | ForEach-Object { $_.Matches[0].Groups['s'].Value } | Group-Object -NoElement | Sort-Object Count -Descending",
+          "when": "counting by a field on Windows, without writing a script",
+          "lang": "powershell"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each option to what it does.",
+      "pairs": [
+        [
+          "`awk -F,`",
+          "split fields on commas instead of whitespace"
+        ],
+        [
+          "`$NF` in awk",
+          "the last field of the line"
+        ],
+        [
+          "`rg -o -r '$1'`",
+          "print only capture group 1 of each match"
+        ],
+        [
+          "`uniq -c`",
+          "count runs of identical adjacent lines, so sort first"
+        ],
+        [
+          "`jq -r`",
+          "print strings raw, without JSON quotes"
+        ],
+        [
+          "`Group-Object -NoElement`",
+          "count per group without keeping the objects"
+        ]
+      ],
+      "explain": "`uniq` only collapses lines that are next to each other, which is why every counting pipeline is `sort | uniq -c | sort -rn`."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the pipeline: the five most common status codes across every file in `logs/`, most common first.",
+      "code": [
+        "rg -o -I __1__ '$1' 'status=(\\d{3})' logs/ | sort | uniq __2__ | sort __3__ | head -5"
+      ],
+      "blanks": [
+        "-r",
+        "-c",
+        "-rn"
+      ],
+      "bank": [
+        "-F",
+        "-u",
+        "-n",
+        "-v"
+      ],
+      "explain": "`-r '$1'` prints only the status digits, `uniq -c` puts a count in front of each value, and `sort -rn` sorts those counts as numbers, largest first. Plain `sort -n` would put the least common first."
+    },
+    {
+      "type": "code",
+      "title": "The slowest requests",
+      "prompt": [
+        "The incident lead asks: \"what were the slowest requests?\" Write `List<string> SlowestRequests(string[] lines, int n)`.",
+        "",
+        "Parse each line in the same format, skip lines that do not parse, and return the `n` slowest requests, slowest first,",
+        "each formatted as `METHOD path 1234ms`:",
+        "",
+        "```text",
+        "POST /api/payments 2210ms",
+        "POST /api/checkout 1834ms",
+        "GET /api/search 987ms",
+        "```",
+        "",
+        "Careful: the `ms` group is a **string**. Sorted as text, `\"987\"` comes before `\"2210\"`. Parse it to an `int` first.",
+        "LINQ's `OrderByDescending` and `Take` make this short."
+      ],
+      "starter": [
+        "List<string> SlowestRequests(string[] lines, int n)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> SlowestRequests(string[] lines, int n)",
+        "{",
+        "    var logLine = new Regex(@\"^(?<time>[0-9]{2}:[0-9]{2}:[0-9]{2}) (?<method>[A-Z]+) (?<path>/\\S*) (?<status>[0-9]{3}) (?<ms>[0-9]+)ms$\");",
+        "    return lines",
+        "        .Select(line => logLine.Match(line))",
+        "        .Where(m => m.Success)",
+        "        .OrderByDescending(m => int.Parse(m.Groups[\"ms\"].Value))",
+        "        .Take(n)",
+        "        .Select(m => $\"{m.Groups[\"method\"].Value} {m.Groups[\"path\"].Value} {m.Groups[\"ms\"].Value}ms\")",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "string[] dojoLog = {",
+        "    \"09:12:04 GET /api/orders 200 34ms\",",
+        "    \"09:12:05 POST /api/checkout 502 1834ms\",",
+        "    \"09:12:06 GET /health 200 2ms\",",
+        "    \"09:12:07 GET /api/orders/9 404 12ms\",",
+        "    \"--- log rotated ---\",",
+        "    \"09:12:08 POST /api/payments 502 2210ms\",",
+        "    \"09:12:09 GET /api/search 200 987ms\",",
+        "};",
+        "Dojo.Eq(\"the three slowest, slowest first\", new List<string> { \"POST /api/payments 2210ms\", \"POST /api/checkout 1834ms\", \"GET /api/search 987ms\" }, SlowestRequests(dojoLog, 3));",
+        "Dojo.Eq(\"the slowest one\", new List<string> { \"POST /api/payments 2210ms\" }, SlowestRequests(dojoLog, 1));",
+        "Dojo.Eq(\"n larger than the log gives every parsed request\", 6, SlowestRequests(dojoLog, 10).Count);",
+        "Dojo.Eq(\"no lines, no requests\", new List<string>(), SlowestRequests(new string[0], 3));"
+      ],
+      "require": [
+        {
+          "pattern": "int\\.Parse|int\\.TryParse|Convert\\.ToInt32",
+          "message": "Sorts the duration as a number"
+        }
+      ],
+      "hints": [
+        "`lines.Select(line => logLine.Match(line)).Where(m => m.Success)` gives the parsed lines.",
+        "`.OrderByDescending(m => int.Parse(m.Groups[\"ms\"].Value)).Take(n)`, then format each one."
+      ]
+    }
+  ]
+}

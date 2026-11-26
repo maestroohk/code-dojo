@@ -1,0 +1,298 @@
+{
+  "title": "Fast regex in .NET",
+  "summary": "Construct once and reuse, choose between the interpreter, RegexOptions.Compiled and [GeneratedRegex], write patterns that do less work, and use the allocation-free APIs.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Build once, and pick the engine",
+      "body": [
+        "`new Regex(pattern)` parses the pattern and builds a matcher. That is real work, so build each regex **once** and",
+        "reuse it (a `static readonly` field, or the generated property below). Building one per request or per line is the",
+        "most common regex performance bug in code review. The static helpers (`Regex.IsMatch(input, pattern)`) keep a small",
+        "cache, `Regex.CacheSize`, 15 by default: fine for a few patterns, useless once you have more.",
+        "",
+        "Three ways to run the backtracking engine:",
+        "",
+        "- **Interpreter** (the default): cheap to build, slowest to match. Fine for a pattern used a few times.",
+        "- **`RegexOptions.Compiled`**: emits IL at run time. Building costs milliseconds and hurts startup; matching is fast.",
+        "- **`[GeneratedRegex]`** (.NET 7+): a source generator writes the matcher as C# at **build** time. Compiled speed,",
+        "  no run-time compile, works with trimming and Native AOT, and you can read and step through the generated code.",
+        "  The analyzer **SYSLIB1045** flags `new Regex(\"constant\")` that could use it.",
+        "",
+        "```csharp",
+        "static partial class Patterns",
+        "{",
+        "    // C# 13 / .NET 9+: a partial property. On .NET 7 and 8, use a partial method: static partial Regex Slug();",
+        "    [GeneratedRegex(@\"^[a-z0-9]+(?:-[a-z0-9]+)*$\", RegexOptions.None, matchTimeoutMilliseconds: 100)]",
+        "    public static partial Regex Slug { get; }",
+        "}",
+        "",
+        "bool ok = Patterns.Slug.IsMatch(\"checkout-api\");",
+        "```",
+        "",
+        "For a fixed pattern in .NET 7 or later, `[GeneratedRegex]` is the default choice. `NonBacktracking` (previous lesson)",
+        "is the choice when you cannot trust the pattern or must guarantee linear time."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An ASP.NET Core endpoint validates a product slug on every request, with a fixed pattern. Which code belongs in the pull request?",
+      "options": [
+        "A `[GeneratedRegex(..., matchTimeoutMilliseconds: 100)]` static partial property, used by the handler",
+        "`new Regex(pattern, RegexOptions.Compiled).IsMatch(slug)` inside the handler",
+        "`new Regex(pattern).IsMatch(slug)` inside the handler",
+        "`Regex.IsMatch(slug, pattern)` and rely on the cache"
+      ],
+      "answer": 0,
+      "explain": "The generated regex costs nothing at run time to build and matches at compiled speed. `Compiled` inside the handler is the worst option: it generates IL on **every** request. The static helper works but is interpreted and depends on the shared 15-entry cache."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each way of running a regex to its trade-off.",
+      "pairs": [
+        [
+          "The interpreter (no options)",
+          "cheap to build, slowest per match"
+        ],
+        [
+          "`RegexOptions.Compiled`",
+          "IL generated at run time: slow to build, fast to match"
+        ],
+        [
+          "`[GeneratedRegex]`",
+          "C# generated at build time: fast, no start-up cost, AOT-friendly"
+        ],
+        [
+          "`RegexOptions.NonBacktracking`",
+          "linear time guaranteed, but no lookarounds or backreferences"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Patterns that do less work",
+      "body": [
+        "The engine is only as fast as the pattern lets it be. Habits that pay off:",
+        "",
+        "- **Negated classes over a lazy dot.** `\"[^\"]*\"` runs straight to the closing quote. `\".*?\"` stops after each",
+        "  character to check for a quote, and on a line with a missing quote `.` happily runs past other fields.",
+        "- **Anchor** when the match must start at the beginning: `^` lets the engine try one position instead of all.",
+        "- **No leading `.*`**: it makes every start position scan the rest of the line.",
+        "- **Do not capture what you do not read**: use `(?:...)` or `RegexOptions.ExplicitCapture`.",
+        "- **No regex for fixed text**: `Contains`, `StartsWith` and `IndexOf` with `StringComparison.Ordinal` are vectorised",
+        "  and much faster.",
+        "- **Allocation-free APIs** (.NET 7+): `regex.Count(input)`, `regex.EnumerateMatches(input)` (yields `ValueMatch`",
+        "  structs with `Index` and `Length`, no `Match` objects), and `IsMatch(ReadOnlySpan<char>)`.",
+        "",
+        "And **measure** with BenchmarkDotNet before claiming a speed-up. Below, the negated class keeps each value inside its",
+        "own quotes."
+      ],
+      "regex": {
+        "pattern": "(?<k>\\w+)=\"(?<v>[^\"]*)\"",
+        "flags": "",
+        "text": "level=info msg=\"order placed\" user=\"ana\" took=\"34ms\" note=\"\""
+      }
+    },
+    {
+      "type": "regex",
+      "title": "Quoted values without a lazy dot",
+      "prompt": [
+        "Structured log lines carry `key=\"value\"` pairs. Find every pair, with the named groups `k` (a word) and `v` (the text",
+        "between the quotes, possibly empty).",
+        "",
+        "Use a negated class for the value: lazy `.*?` and `.+?` are not allowed here."
+      ],
+      "solution": "(?<k>\\w+)=\"(?<v>[^\"]*)\"",
+      "tests": {
+        "all": [
+          {
+            "input": "id=\"42\" name=\"Acme, Inc.\" note=\"\"",
+            "matches": [
+              "id=\"42\"",
+              "name=\"Acme, Inc.\"",
+              "note=\"\""
+            ]
+          }
+        ],
+        "captures": [
+          {
+            "input": "id=\"42\" name=\"Acme, Inc.\" note=\"\"",
+            "match": 1,
+            "groups": {
+              "k": "name",
+              "v": "Acme, Inc."
+            }
+          },
+          {
+            "input": "id=\"42\" name=\"Acme, Inc.\" note=\"\"",
+            "match": 2,
+            "groups": {
+              "k": "note",
+              "v": ""
+            }
+          }
+        ],
+        "noFind": [
+          "id=42 name=Acme",
+          "msg=\"unterminated"
+        ]
+      },
+      "forbid": [
+        {
+          "pattern": "\\.[*+]\\?",
+          "message": "Uses a negated class instead of a lazy dot"
+        }
+      ],
+      "hints": [
+        "\"Anything but a quote\" is `[^\"]`. Zero or more of them: `[^\"]*`.",
+        "`(?<k>\\w+)=\"(?<v>[^\"]*)\"`"
+      ],
+      "explain": "`[^\"]*` cannot cross a quote, so every match stays inside one pair, and the unterminated value finds nothing instead of swallowing the rest of the line."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "var digits = new Regex(@\"[0-9]+\");",
+        "Console.WriteLine(digits.Count(\"a1 b22 c333\"));",
+        "var total = 0;",
+        "foreach (var m in digits.EnumerateMatches(\"a1 b22 c333\"))",
+        "    total += m.Length;",
+        "Console.WriteLine(total);"
+      ],
+      "answer": [
+        "3",
+        "6"
+      ],
+      "explain": "`Count` counts matches without creating `Match` objects. `EnumerateMatches` yields `ValueMatch` structs: only `Index` and `Length`, no groups, no allocations. Slice the input with `AsSpan(m.Index, m.Length)` when you need the text."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the source-generated regex (.NET 9 or later).",
+      "code": [
+        "static partial class Validators",
+        "{",
+        "    [__1__(@\"^[a-z0-9]+(?:-[a-z0-9]+)*$\", RegexOptions.None, matchTimeoutMilliseconds: 100)]",
+        "    public static __2__ Regex Slug { get; }",
+        "}"
+      ],
+      "blanks": [
+        "GeneratedRegex",
+        "partial"
+      ],
+      "bank": [
+        "RegexCompiled",
+        "readonly",
+        "virtual",
+        "Regex"
+      ],
+      "explain": "The attribute marks a `partial` member, and the generator writes the other half at build time. The containing class must be `partial` too."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Review: the slow, wrong quote extractor",
+      "prompt": [
+        "**Symptom.** The audit export is slow on big files, and for the line `id=\"42\" name=\"Acme, Inc.\"` it reports one value,",
+        "`42\" name=\"Acme, Inc.`, instead of two.",
+        "",
+        "Fix `List<string> QuotedValues(string[] lines)`: every value between double quotes, across all lines, in order.",
+        "",
+        "- Build the `Regex` **once**, before the loop, not once per line.",
+        "- Replace the greedy `.*` with a negated class, so each match stays inside one pair of quotes."
+      ],
+      "starter": [
+        "List<string> QuotedValues(string[] lines)",
+        "{",
+        "    var result = new List<string>();",
+        "    foreach (var line in lines)",
+        "    {",
+        "        var quoted = new Regex(\"\\\"(.*)\\\"\");",
+        "        foreach (Match m in quoted.Matches(line))",
+        "            result.Add(m.Groups[1].Value);",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "List<string> QuotedValues(string[] lines)",
+        "{",
+        "    var quoted = new Regex(\"\\\"([^\\\"]*)\\\"\");",
+        "    var result = new List<string>();",
+        "    foreach (var line in lines)",
+        "        foreach (Match m in quoted.Matches(line))",
+        "            result.Add(m.Groups[1].Value);",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "string[] dojoLines = { \"id=\\\"42\\\" name=\\\"Acme, Inc.\\\"\", \"note=\\\"\\\"\", \"no quotes here\", \"msg=\\\"done\\\"\" };",
+        "Dojo.Eq(\"every value, in order\", new List<string> { \"42\", \"Acme, Inc.\", \"\", \"done\" }, QuotedValues(dojoLines));",
+        "Dojo.Eq(\"no lines, no values\", new List<string>(), QuotedValues(new string[0]));"
+      ],
+      "forbid": [
+        {
+          "pattern": "foreach[^{}]*\\{[^{}]*new\\s+Regex",
+          "message": "Builds the Regex once, outside the loop"
+        }
+      ],
+      "hints": [
+        "Move `var quoted = new Regex(...)` above the `foreach`.",
+        "In a normal C# string a quote is written `\\\"`, so the pattern `\"([^\"]*)\"` is `\"\\\"([^\\\"]*)\\\"\"`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Sum the bytes without allocating",
+      "prompt": [
+        "A transfer log is one big string with lines like `sent 512 bytes`. Write `long TotalBytes(string log)`: the sum of",
+        "every number that is directly followed by ` bytes` (as a whole word: `12 bytesize` does not count, and the number",
+        "must not be glued to a letter in front, like `x512`).",
+        "",
+        "Use `regex.EnumerateMatches(log)`: it yields `ValueMatch` structs, so slice the text with",
+        "`log.AsSpan(m.Index, m.Length)` and parse it with `long.Parse(span)`. No `Match` objects, no substrings.",
+        "A lookahead `(?= bytes\\b)` keeps ` bytes` out of the match."
+      ],
+      "starter": [
+        "long TotalBytes(string log)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "long TotalBytes(string log)",
+        "{",
+        "    var amount = new Regex(@\"\\b[0-9]+(?= bytes\\b)\");",
+        "    long total = 0;",
+        "    foreach (var m in amount.EnumerateMatches(log))",
+        "        total += long.Parse(log.AsSpan(m.Index, m.Length));",
+        "    return total;",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"three transfers\", 3584L, TotalBytes(\"sent 512 bytes\\nsent 1024 bytes\\nretry 3 times\\nsent 2048 bytes to 10.0.0.1\"));",
+        "Dojo.Eq(\"no transfers\", 0L, TotalBytes(\"no data today\"));",
+        "Dojo.Eq(\"bytesize does not count\", 7L, TotalBytes(\"12 bytesize, then 7 bytes\"));",
+        "Dojo.Eq(\"a number glued to a letter does not count\", 0L, TotalBytes(\"x512 bytes\"));",
+        "Dojo.Eq(\"more than int can hold\", 5000000000L, TotalBytes(\"sent 5000000000 bytes\"));"
+      ],
+      "require": [
+        {
+          "pattern": "EnumerateMatches",
+          "message": "Uses the allocation-free EnumerateMatches"
+        }
+      ],
+      "hints": [
+        "Pattern: `\\b[0-9]+(?= bytes\\b)`. `\\b` in front refuses `x512`, the lookahead checks for ` bytes` as a word.",
+        "`foreach (var m in amount.EnumerateMatches(log)) total += long.Parse(log.AsSpan(m.Index, m.Length));`"
+      ]
+    }
+  ]
+}

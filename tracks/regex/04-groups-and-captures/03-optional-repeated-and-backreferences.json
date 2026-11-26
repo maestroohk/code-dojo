@@ -1,0 +1,316 @@
+{
+  "title": "Optional groups, repeats and backreferences",
+  "summary": "Group.Success for a group that may not take part, Group.Captures for a group that repeats, and backreferences that match the same text again: doubled words and matching quotes.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A group that did not take part",
+      "body": [
+        "Put `?` after a group and it becomes optional: `(?<min>[0-9]+)m(?:(?<sec>[0-9]+)s)?` matches `5m` and `5m30s`.",
+        "When the optional part is missing, the match still succeeds, but the group did not take part.",
+        "",
+        "```csharp",
+        "var sec = m.Groups[\"sec\"];",
+        "int seconds = sec.Success ? int.Parse(sec.Value) : 0;",
+        "```",
+        "",
+        "- `Group.Success` tells you whether that group matched. Its `Value` is then `\"\"`.",
+        "- Always test `Success` on an optional group. `int.Parse(\"\")` throws, and an empty string written to a",
+        "  database looks like real data.",
+        "- A typo in a name does not throw: `m.Groups[\"secs\"]` returns a group that never succeeds. A test that covers the",
+        "  optional part catches it, so write one for every group your code reads."
+      ],
+      "regex": {
+        "pattern": "(?<min>[0-9]+)m(?:(?<sec>[0-9]+)s)?",
+        "text": [
+          "retry in 5m",
+          "retry in 5m30s",
+          "cache ttl 15m"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "var m = Regex.Match(\"retry in 5m\", @\"(?<min>\\d+)m(?:(?<sec>\\d+)s)?\");",
+        "Console.WriteLine(m.Groups[\"sec\"].Success);",
+        "Console.WriteLine(m.Groups[\"sec\"].Value.Length);",
+        "Console.WriteLine(m.Groups[\"nope\"].Success);"
+      ],
+      "answer": [
+        "False",
+        "0",
+        "False"
+      ],
+      "explain": "The optional seconds group did not take part, so it reports `Success == false` and an empty value. A group name that does not exist also gives an unsuccessful group, with no exception: a typo fails silently."
+    },
+    {
+      "type": "regex",
+      "title": "A host with an optional port",
+      "prompt": [
+        "Connection settings hold `host` or `host:port`. Match the whole string, with the host (letters, digits, `_`, `.`",
+        "and `-`) in a group named `host` and the port (digits) in a group named `port`. When there is no port, the",
+        "`port` group must not take part, so the colon belongs inside the optional part."
+      ],
+      "solution": "(?<host>[\\w.-]+)(?::(?<port>[0-9]+))?",
+      "tests": {
+        "match": [
+          "db01.contoso.com",
+          "db01:5432",
+          "localhost:8080"
+        ],
+        "reject": [
+          "db01:",
+          ":5432",
+          "db01:abc",
+          "db 01:5432"
+        ],
+        "captures": [
+          {
+            "input": "db01.contoso.com",
+            "groups": {
+              "host": "db01.contoso.com",
+              "port": null
+            }
+          },
+          {
+            "input": "db01:5432",
+            "groups": {
+              "host": "db01",
+              "port": "5432"
+            }
+          }
+        ]
+      },
+      "hints": [
+        "Wrap the colon and the port together in a non-capturing group, and make that group optional with `?`.",
+        "`(?<host>[\\w.-]+)(?::(?<port>[0-9]+))?`"
+      ],
+      "explain": "`(?::(?<port>[0-9]+))?` is optional as a unit, so `db01:` is rejected and a missing port leaves `port` unmatched. In code, `Success` decides between the given port and the default 5432."
+    },
+    {
+      "type": "learn",
+      "title": "A repeated group keeps only its last value",
+      "body": [
+        "When a group repeats, `Value` holds only the **last** repetition. In `tags=api,prod,eu` with",
+        "`tags=(?:(?<t>\\w+),?)+`, `Groups[\"t\"].Value` is `eu`.",
+        "",
+        "Most engines (JavaScript, Python, PCRE) throw the earlier repetitions away. **.NET keeps them** in `Group.Captures`:",
+        "",
+        "```csharp",
+        "foreach (Capture c in m.Groups[\"t\"].Captures)",
+        "    Console.WriteLine(c.Value);    // api, prod, eu",
+        "```",
+        "",
+        "That lets one pattern both validate a list and return its items. Elsewhere, the usual way is two steps: match",
+        "the list, then split it or run a second `Matches` over it. That is still the clearer choice when the items",
+        "themselves are complex."
+      ],
+      "regex": {
+        "pattern": "tags=(?:(?<t>\\w+),?)+",
+        "text": [
+          "user=ada tags=api,prod,eu latency=12"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "var m = Regex.Match(\"tags=api,prod,eu\", @\"tags=(?:(?<t>\\w+),?)+\");",
+        "Console.WriteLine(m.Groups[\"t\"].Value);",
+        "Console.WriteLine(m.Groups[\"t\"].Captures.Count);",
+        "Console.WriteLine(string.Join(\"|\", m.Groups[\"t\"].Captures.Select(c => c.Value)));"
+      ],
+      "answer": [
+        "eu",
+        "3",
+        "api|prod|eu"
+      ],
+      "explain": "`Value` is the last repetition. `Captures` holds every repetition, in order, so the list survives."
+    },
+    {
+      "type": "learn",
+      "title": "Backreferences: the same text again",
+      "body": [
+        "`\\1` inside a pattern matches **the same text** group 1 just matched, not the same pattern. `\\k<name>` does the",
+        "same for a named group.",
+        "",
+        "- Doubled words in docs and commit messages: `\\b(\\w+)\\s+\\1\\b` finds `the the`.",
+        "- Matching quotes: `([\"'])(.*?)\\1` closes with the quote it opened with, so `\"O'Brien\"` is read whole.",
+        "",
+        "Turn on the step debugger below. Watch the engine capture `the`, then try to match exactly `the` again. On `the theme`",
+        "the backreference matches, but `\\b` fails before the `m`, so there is no match there."
+      ],
+      "regex": {
+        "pattern": "\\b(\\w+)\\s+\\1\\b",
+        "text": [
+          "Check the the config and and restart.",
+          "the theme park is fine"
+        ],
+        "debug": true
+      }
+    },
+    {
+      "type": "regex",
+      "title": "Find doubled words",
+      "prompt": [
+        "Find every doubled word: a word, whitespace, and the same word again, as whole words. `the theme` is not a",
+        "doubled word, and neither is `is` inside `this is`."
+      ],
+      "solution": "\\b(\\w+)\\s+\\1\\b",
+      "tests": {
+        "all": [
+          {
+            "input": "it is is fine and and done",
+            "matches": [
+              "is is",
+              "and and"
+            ]
+          }
+        ],
+        "find": [
+          "Paris in the\nthe spring"
+        ],
+        "noFind": [
+          "this is fine",
+          "the theme park",
+          "is this ok"
+        ]
+      },
+      "hints": [
+        "Capture a word with `(\\w+)`, then match whitespace and `\\1`.",
+        "Put `\\b` on both ends: `\\b(\\w+)\\s+\\1\\b`."
+      ],
+      "explain": "`\\1` repeats the text, so `is is` matches and `is this` does not. `\\s+` also crosses a line break, which is exactly where doubled words hide in prose."
+    },
+    {
+      "type": "regex",
+      "title": "A value in matching quotes",
+      "prompt": [
+        "Config values may be quoted with `\"` or `'`. Find a quoted value and capture what is inside the quotes in a group",
+        "named `v`. The closing quote must be the **same** kind as the opening one, so `\"O'Brien\"` gives `O'Brien`.",
+        "",
+        "Name the quote group too (`q`) and close it with `\\k<q>`, or use a numbered group and its backreference."
+      ],
+      "solution": "(?<q>[\"'])(?<v>.*?)\\k<q>",
+      "tests": {
+        "captures": [
+          {
+            "input": "name=\"O'Brien\"",
+            "groups": {
+              "v": "O'Brien"
+            }
+          },
+          {
+            "input": "city='Den Haag'",
+            "groups": {
+              "v": "Den Haag"
+            }
+          },
+          {
+            "input": "note='say \"hi\"' done",
+            "groups": {
+              "v": "say \"hi\""
+            }
+          }
+        ],
+        "noFind": [
+          "name=\"unclosed'",
+          "no quotes here"
+        ]
+      },
+      "hints": [
+        "`[\"'].*?[\"']` stops at the first quote of either kind, so it reads `O`. The closing quote must repeat the opening one.",
+        "`(?<q>[\"'])(?<v>.*?)\\k<q>`"
+      ],
+      "explain": "The backreference closes with the quote that opened, so double quotes inside single quotes are kept. Escaped quotes (`\\\"`) need more than this pattern. For real config formats (JSON, YAML, CSV), use a parser; use this for quick searches and simple formats."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each piece of .NET syntax to what it does.",
+      "pairs": [
+        [
+          "`\\1` in a pattern",
+          "match again the text group 1 matched"
+        ],
+        [
+          "`\\k<q>` in a pattern",
+          "match again the text the group named q matched"
+        ],
+        [
+          "`$1` in a replacement",
+          "insert what group 1 matched"
+        ],
+        [
+          "`(?<q>...)`",
+          "define a group named q"
+        ],
+        [
+          "`Groups[\"q\"].Captures`",
+          "every repetition of a repeated group"
+        ]
+      ],
+      "explain": "Inside the pattern, a group is referred to with a backslash (`\\1`, `\\k<q>`). In a .NET replacement it is `$1` or `${q}`."
+    },
+    {
+      "type": "code",
+      "title": "A doubled-word linter",
+      "prompt": [
+        "The docs team wants a check in CI that flags doubled words. Write `List<string> DoubledWords(string text)` that",
+        "returns the doubled word of each occurrence, in order, **ignoring case**: `The the` counts and returns `The`",
+        "(the first spelling).",
+        "",
+        "| text | result |",
+        "|---|---|",
+        "| `The the cat sat sat on the mat.` | `[\"The\", \"sat\"]` |",
+        "| `Paris in the` (newline) `the spring` | `[\"the\"]` |",
+        "| `the theme park` | `[]` |",
+        "",
+        "Use one `Regex` with a backreference and `RegexOptions.IgnoreCase` (backreferences follow that option too).",
+        "`System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "List<string> DoubledWords(string text)",
+        "{",
+        "    var result = new List<string>();",
+        "    return result;",
+        "}"
+      ],
+      "solution": [
+        "List<string> DoubledWords(string text)",
+        "{",
+        "    var regex = new Regex(@\"\\b(?<w>\\w+)\\s+\\k<w>\\b\", RegexOptions.IgnoreCase);",
+        "    var result = new List<string>();",
+        "    foreach (Match m in regex.Matches(text))",
+        "        result.Add(m.Groups[\"w\"].Value);",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"The the and sat sat\", new List<string> { \"The\", \"sat\" }, DoubledWords(\"The the cat sat sat on the mat.\"));",
+        "Dojo.Eq(\"a doubled word across a line break\", new List<string> { \"the\" }, DoubledWords(\"Paris in the\\nthe spring\"));",
+        "Dojo.Eq(\"the theme is not doubled\", new List<string>(), DoubledWords(\"the theme park\"));",
+        "Dojo.Eq(\"is inside this is not doubled\", new List<string>(), DoubledWords(\"this is fine\"));"
+      ],
+      "require": [
+        {
+          "pattern": "RegexOptions\\.IgnoreCase",
+          "message": "Uses RegexOptions.IgnoreCase"
+        }
+      ],
+      "hints": [
+        "The pattern is `\\b(\\w+)\\s+\\1\\b`. Loop over `regex.Matches(text)`.",
+        "Add `m.Groups[1].Value` (or the named group) for each match."
+      ]
+    }
+  ]
+}
