@@ -92,7 +92,7 @@ function typeDrill(target, ctx, onClose) {
   const run = async () => {
     out.hidden = false;
     out.replaceChildren(h('span.muted.small', 'Compiling and running…'));
-    try { const r = await api('run', { track: ctx.track, code: editor.value }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
+    try { const r = await api('run', { track: ctx.track, code: editor.value, setup: ctx.dataSetup }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
     catch { out.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
   };
   const el = h('div.drill', meter, editor.el,
@@ -109,14 +109,39 @@ function tryIt(source, ctx, onClose) {
   const run = async () => {
     out.hidden = false;
     out.replaceChildren(h('span.muted.small', 'Compiling and running…'));
-    try { const r = await api('run', { track: ctx.track, code: editor.value }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
+    try { const r = await api('run', { track: ctx.track, code: editor.value, setup: ctx.dataSetup }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
     catch { out.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
   };
   setTimeout(() => editor.focus());
-  return h('div.drill', editor.el,
+  return h('div.drill', ctx.dataSetup && sqlData(ctx.dataSetup, ctx), editor.el,
     h('div.code-tools', h('button.btn.ghost', { type: 'button', onclick: run }, '▶ Run'),
       h('button.btn.ghost', { type: 'button', onclick: onClose }, 'Close'),
-      h('span.muted.small', 'Change anything and run it. Some samples are fragments and need the lines around them.')), out);
+      h('span.muted.small', ctx.dataSetup ? 'Change anything and run it. It runs against the tables above; your changes are thrown away when you close it.' : 'Change anything and run it. Some samples are fragments and need the lines around them.')), out);
+}
+
+/**
+ * The tables a SQL step starts with, drawn as grids: a fold that loads them from the server the first time it opens.
+ * `setup` is the step's setup SQL (a string or an array of lines).
+ */
+function sqlData(setup, ctx, { open = false, label = 'The tables' } = {}) {
+  const body = h('div.sql-data-body', h('span.muted.small', 'Loading the tables…'));
+  let loaded = false;
+  const load = async () => {
+    if (loaded) return;
+    loaded = true;
+    try {
+      const r = await api('run', { track: ctx.track, code: '', setup });
+      const tables = r.tables || [];
+      if (!tables.length) { body.replaceChildren(h('span.muted.small', (r.diagnostics || [])[0]?.message || 'This step starts with no tables.')); return; }
+      body.replaceChildren(...tables.map(t => h('div.sql-table-peek', h('div.sql-table-name', t.title), sqlGrid(t, { cap: 50 }))));
+      summary.textContent = `${label}: ${tables.map(t => `${t.title} (${t.rows.length}${t.truncated ? '+' : ''} rows)`).join(', ')}`;
+    } catch { loaded = false; body.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
+  };
+  const summary = h('summary.out-title', label);
+  const el = h('details.sql-data', { open }, summary, body);
+  el.addEventListener('toggle', () => { if (el.open) load(); });
+  if (open) load();
+  return el;
 }
 
 function learn(step, ctx) {
@@ -229,7 +254,7 @@ function predict(step, ctx) {
 
   const shown = h('div.revealed');
   return {
-    el: h('div.predict', prompt(step), h('div', { html: codeBlock(step.code, document.documentElement.dataset.codeLang || 'csharp') }),
+    el: h('div.predict', prompt(step), step.setup && sqlData(step.setup, ctx, { open: true, label: 'The data this query runs on' }), h('div', { html: codeBlock(step.code, document.documentElement.dataset.codeLang || 'csharp') }),
       h('label.field', h('span.field-label', 'Output'), input), shown),
     ready: () => input.value.trim().length > 0,
     async check() {

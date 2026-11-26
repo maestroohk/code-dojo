@@ -629,6 +629,9 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
     hintBox.replaceChildren();
     const view = renderStep(item.step, {
       onChange: refresh, submit, bonus, mode,
+      // SQL: the tables this step works on. A step without its own setup (a learn card's "Try it") borrows the
+      // nearest setup in the same lesson, looking forward first, so samples run against the lesson's data.
+      dataSetup: dataSetupFor(items, pos),
       track: item.track, module: item.module, lesson: item.lesson, idx: item.idx,
       // "uses": the learner's own earlier pieces travel with the check (builds.js, Pacing.cs).
       uses: step => builds.usesPayload(tracks, item.track, step),
@@ -828,6 +831,20 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
   }
 
   show();
+}
+
+/** The SQL setup for step `pos`: its own, else the nearest in the same lesson (forward first). */
+function dataSetupFor(items, pos) {
+  const own = items[pos]?.step.setup;
+  if (own) return own;
+  const key = items[pos]?.lessonKey;
+  for (let d = 1; d < items.length; d++) {
+    for (const i of [pos + d, pos - d]) {
+      const it = items[i];
+      if (it && it.lessonKey === key && it.step.setup) return it.step.setup;
+    }
+  }
+  return undefined;
 }
 
 async function lessonView(trackId, moduleId, lessonId) {
