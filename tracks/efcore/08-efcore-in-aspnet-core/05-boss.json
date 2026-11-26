@@ -1,0 +1,272 @@
+{
+  "title": "Boss: the Friday deploy",
+  "summary": "The Lighthouse Tickets API goes out on Friday. Review fixes from the on-call log: blocking calls, an N+1 page and edits that overwrite each other.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The Friday deploy",
+      "body": [
+        "The Lighthouse Tickets API ships on Friday, before the Saturday on-sale. Last week's on-call notes:",
+        "",
+        "```text",
+        "19:02  p99 latency 9 s on GET /events, thread pool starvation warnings, CPU 15 %",
+        "19:05  DBA: \"a query with no tag runs 40k times a minute, which endpoint is it?\"",
+        "19:20  GET /bookings: 1 + 4,800 SQL commands per request in the dev log",
+        "19:41  support: two agents edited the same booking, the second silently overwrote the first",
+        "```",
+        "",
+        "Three fixes, one per step. Every handler should end up async with the request's `CancellationToken`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Step 1: async, untracked and tagged",
+      "framework": "web+efcore",
+      "prompt": [
+        "`GET /events` (sorted by `StartsAt`) and `GET /events/{id}` (404 if missing) block threads and cannot be found in the DBA's tools. Rewrite both:",
+        "",
+        "- async handlers taking `CancellationToken ct`, with `ToListAsync(ct)` and `FirstOrDefaultAsync(ct)`;",
+        "- `AsNoTracking()` on both queries;",
+        "- the list query tagged `TagWith(\"GET /events\")`.",
+        "",
+        "The API has `Event` (`Id`, `Name`, `StartsAt`, `Bookings`) and `Booking` (`Id`, `EventId`, `Event`, `Customer`, `Note`, and `Version` as a `[ConcurrencyCheck]` token). The POST endpoints that the tests use to create data are given. **Run checks** starts your server and calls it."
+      ],
+      "starter": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddDbContext<TicketsDb>(o => o.UseSqlite(\"Data Source=lighthouse.db\"));\nvar app = builder.Build();\n\nusing (var scope = app.Services.CreateScope())\n    scope.ServiceProvider.GetRequiredService<TicketsDb>().Database.EnsureCreated();\n\n// Seeding endpoints for the tests (already in production).\napp.MapPost(\"/events\", async (Event e, TicketsDb db, CancellationToken ct) =>\n{\n    db.Events.Add(e);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/events/{e.Id}\", new { e.Id });\n});\napp.MapPost(\"/bookings\", async (Booking b, TicketsDb db, CancellationToken ct) =>\n{\n    b.Version = 1;\n    db.Bookings.Add(b);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/bookings/{b.Id}\", new { b.Id, b.Version });\n});\napp.MapGet(\"/events\", (TicketsDb db) =>\n    db.Events.OrderBy(e => e.StartsAt).Select(e => new { e.Id, e.Name, e.StartsAt }).ToList());\n\napp.MapGet(\"/events/{id:int}\", (int id, TicketsDb db) =>\n{\n    var e = db.Events.Where(x => x.Id == id).Select(x => new { x.Id, x.Name, x.StartsAt }).FirstOrDefault();\n    return e is null ? Results.NotFound() : Results.Ok(e);\n});\n\napp.Run();\n\nrecord BookingRow(int Id, string Customer, string EventName);\nrecord BookingEdit(string Note, int Version);\n\nclass Event\n{\n    public int Id { get; set; }\n    public string Name { get; set; } = \"\";\n    public string StartsAt { get; set; } = \"\";\n    public List<Booking> Bookings { get; set; } = [];\n}\n\nclass Booking\n{\n    public int Id { get; set; }\n    public int EventId { get; set; }\n    public Event? Event { get; set; }\n    public string Customer { get; set; } = \"\";\n    public string Note { get; set; } = \"\";\n    [ConcurrencyCheck] public int Version { get; set; }\n}\n\nclass TicketsDb(DbContextOptions<TicketsDb> options) : DbContext(options)\n{\n    public DbSet<Event> Events => Set<Event>();\n    public DbSet<Booking> Bookings => Set<Booking>();\n}",
+      "solution": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddDbContext<TicketsDb>(o => o.UseSqlite(\"Data Source=lighthouse.db\"));\nvar app = builder.Build();\n\nusing (var scope = app.Services.CreateScope())\n    scope.ServiceProvider.GetRequiredService<TicketsDb>().Database.EnsureCreated();\n\n// Seeding endpoints for the tests (already in production).\napp.MapPost(\"/events\", async (Event e, TicketsDb db, CancellationToken ct) =>\n{\n    db.Events.Add(e);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/events/{e.Id}\", new { e.Id });\n});\napp.MapPost(\"/bookings\", async (Booking b, TicketsDb db, CancellationToken ct) =>\n{\n    b.Version = 1;\n    db.Bookings.Add(b);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/bookings/{b.Id}\", new { b.Id, b.Version });\n});\napp.MapGet(\"/events\", async (TicketsDb db, CancellationToken ct) =>\n    await db.Events.AsNoTracking()\n        .TagWith(\"GET /events\")\n        .OrderBy(e => e.StartsAt)\n        .Select(e => new { e.Id, e.Name, e.StartsAt })\n        .ToListAsync(ct));\n\napp.MapGet(\"/events/{id:int}\", async (int id, TicketsDb db, CancellationToken ct) =>\n{\n    var e = await db.Events.AsNoTracking()\n        .Where(x => x.Id == id)\n        .Select(x => new { x.Id, x.Name, x.StartsAt })\n        .FirstOrDefaultAsync(ct);\n    return e is null ? Results.NotFound() : Results.Ok(e);\n});\n\napp.Run();\n\nrecord BookingRow(int Id, string Customer, string EventName);\nrecord BookingEdit(string Note, int Version);\n\nclass Event\n{\n    public int Id { get; set; }\n    public string Name { get; set; } = \"\";\n    public string StartsAt { get; set; } = \"\";\n    public List<Booking> Bookings { get; set; } = [];\n}\n\nclass Booking\n{\n    public int Id { get; set; }\n    public int EventId { get; set; }\n    public Event? Event { get; set; }\n    public string Customer { get; set; } = \"\";\n    public string Note { get; set; } = \"\";\n    [ConcurrencyCheck] public int Version { get; set; }\n}\n\nclass TicketsDb(DbContextOptions<TicketsDb> options) : DbContext(options)\n{\n    public DbSet<Event> Events => Set<Event>();\n    public DbSet<Booking> Bookings => Set<Booking>();\n}",
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"the Lighthouse API\", async () =>",
+        "        {",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"Saltmarsh\", startsAt = \"2026-12-11 20:00\" });",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"The Gannets\", startsAt = \"2026-12-04 20:00\" });",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"Foghorn Choir\", startsAt = \"2026-12-12 18:00\" });",
+        "            foreach (var (dojoE, dojoC) in new[] { (2, \"ana@mail.test\"), (1, \"ben@mail.test\"), (3, \"chloe@mail.test\"), (2, \"dmitri@mail.test\") })",
+        "                await http.PostAsJsonAsync(\"/bookings\", new { eventId = dojoE, customer = dojoC, note = \"\" });",
+        "            lock (DojoSql.Log) DojoSql.Log.Clear();",
+        "            var dojoList = await DojoWeb.Json(await http.GetAsync(\"/events\"));",
+        "            Dojo.Eq(\"GET /events, soonest first\", \"The Gannets|Saltmarsh|Foghorn Choir\", Each(dojoList, \"name\"));",
+        "            string dojoSql; lock (DojoSql.Log) dojoSql = DojoSql.Log.LastOrDefault() ?? \"\";",
+        "            Dojo.Check(\"...tagged GET /events in the SQL\", dojoSql.StartsWith(\"-- GET /events\"), \"the SQL starts with: \" + dojoSql.Split('\\n')[0]);",
+        "            var dojoOne = await DojoWeb.Json(await http.GetAsync(\"/events/3\"));",
+        "            Dojo.Eq(\"GET /events/3\", \"Foghorn Choir\", DojoWeb.Prop(dojoOne, \"name\"));",
+        "            DojoWeb.Status(\"GET /events/9 responds 404\", 404, await http.GetAsync(\"/events/9\"));",
+        "        });",
+        "    }",
+        "    static string Each(JsonElement json, string prop) =>",
+        "        json.ValueKind == JsonValueKind.Array ? string.Join(\"|\", json.EnumerateArray().Select(x => DojoWeb.Prop(x, prop))) : \"(not an array)\";",
+        "}",
+        "static class DojoSql",
+        "{",
+        "    public static int Commands;",
+        "    public static readonly List<string> Log = [];",
+        "",
+        "    [System.Runtime.CompilerServices.ModuleInitializer]",
+        "    internal static void Start() => System.Diagnostics.DiagnosticListener.AllListeners.Subscribe(new Watcher());",
+        "",
+        "    sealed class Watcher : IObserver<System.Diagnostics.DiagnosticListener>, IObserver<KeyValuePair<string, object?>>",
+        "    {",
+        "        public void OnNext(System.Diagnostics.DiagnosticListener listener) { if (listener.Name == \"Microsoft.EntityFrameworkCore\") listener.Subscribe(this); }",
+        "        public void OnNext(KeyValuePair<string, object?> e)",
+        "        {",
+        "            if (e.Key != \"Microsoft.EntityFrameworkCore.Database.Command.CommandExecuted\") return;",
+        "            Interlocked.Increment(ref Commands);",
+        "            if (e.Value is CommandExecutedEventData d) lock (Log) Log.Add(d.Command.CommandText);",
+        "        }",
+        "        public void OnError(Exception error) { }",
+        "        public void OnCompleted() { }",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "ToListAsync\\(\\s*ct\\s*\\)",
+          "message": "ToListAsync(ct)"
+        },
+        {
+          "pattern": "FirstOrDefaultAsync\\(\\s*ct\\s*\\)",
+          "message": "FirstOrDefaultAsync(ct)"
+        },
+        {
+          "pattern": "TagWith\\(",
+          "message": "Tags the list query with TagWith"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\.ToList\\(\\)|\\.FirstOrDefault\\(\\)",
+          "message": "No synchronous query calls"
+        }
+      ],
+      "hints": [
+        "Each handler becomes `async (..., TicketsDb db, CancellationToken ct) => await ...`.",
+        "`db.Events.AsNoTracking().TagWith(\"GET /events\").OrderBy(e => e.StartsAt).Select(...).ToListAsync(ct)`"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Step 2: the bookings page",
+      "framework": "web+efcore",
+      "prompt": [
+        "`GET /bookings` returns every booking as `BookingRow(Id, Customer, EventName)`, by id. The dev log shows one query for the bookings and then one `SELECT ... FROM \"Events\" WHERE \"e\".\"Id\" = @b_EventId` per booking.",
+        "",
+        "Make it **one** SQL command whatever the number of bookings: project through the `Event` navigation. Keep `ToListAsync(ct)`.",
+        "",
+        "The API has `Event` (`Id`, `Name`, `StartsAt`, `Bookings`) and `Booking` (`Id`, `EventId`, `Event`, `Customer`, `Note`, and `Version` as a `[ConcurrencyCheck]` token). The POST endpoints that the tests use to create data are given. **Run checks** starts your server and calls it."
+      ],
+      "starter": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddDbContext<TicketsDb>(o => o.UseSqlite(\"Data Source=lighthouse.db\"));\nvar app = builder.Build();\n\nusing (var scope = app.Services.CreateScope())\n    scope.ServiceProvider.GetRequiredService<TicketsDb>().Database.EnsureCreated();\n\n// Seeding endpoints for the tests (already in production).\napp.MapPost(\"/events\", async (Event e, TicketsDb db, CancellationToken ct) =>\n{\n    db.Events.Add(e);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/events/{e.Id}\", new { e.Id });\n});\napp.MapPost(\"/bookings\", async (Booking b, TicketsDb db, CancellationToken ct) =>\n{\n    b.Version = 1;\n    db.Bookings.Add(b);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/bookings/{b.Id}\", new { b.Id, b.Version });\n});\napp.MapGet(\"/bookings\", async (TicketsDb db, CancellationToken ct) =>\n{\n    var rows = new List<BookingRow>();\n    foreach (var b in await db.Bookings.AsNoTracking().OrderBy(b => b.Id).ToListAsync(ct))\n    {\n        var ev = await db.Events.AsNoTracking().FirstAsync(e => e.Id == b.EventId, ct);\n        rows.Add(new BookingRow(b.Id, b.Customer, ev.Name));\n    }\n    return rows;\n});\n\napp.Run();\n\nrecord BookingRow(int Id, string Customer, string EventName);\nrecord BookingEdit(string Note, int Version);\n\nclass Event\n{\n    public int Id { get; set; }\n    public string Name { get; set; } = \"\";\n    public string StartsAt { get; set; } = \"\";\n    public List<Booking> Bookings { get; set; } = [];\n}\n\nclass Booking\n{\n    public int Id { get; set; }\n    public int EventId { get; set; }\n    public Event? Event { get; set; }\n    public string Customer { get; set; } = \"\";\n    public string Note { get; set; } = \"\";\n    [ConcurrencyCheck] public int Version { get; set; }\n}\n\nclass TicketsDb(DbContextOptions<TicketsDb> options) : DbContext(options)\n{\n    public DbSet<Event> Events => Set<Event>();\n    public DbSet<Booking> Bookings => Set<Booking>();\n}",
+      "solution": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddDbContext<TicketsDb>(o => o.UseSqlite(\"Data Source=lighthouse.db\"));\nvar app = builder.Build();\n\nusing (var scope = app.Services.CreateScope())\n    scope.ServiceProvider.GetRequiredService<TicketsDb>().Database.EnsureCreated();\n\n// Seeding endpoints for the tests (already in production).\napp.MapPost(\"/events\", async (Event e, TicketsDb db, CancellationToken ct) =>\n{\n    db.Events.Add(e);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/events/{e.Id}\", new { e.Id });\n});\napp.MapPost(\"/bookings\", async (Booking b, TicketsDb db, CancellationToken ct) =>\n{\n    b.Version = 1;\n    db.Bookings.Add(b);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/bookings/{b.Id}\", new { b.Id, b.Version });\n});\napp.MapGet(\"/bookings\", async (TicketsDb db, CancellationToken ct) =>\n    await db.Bookings\n        .TagWith(\"GET /bookings\")\n        .OrderBy(b => b.Id)\n        .Select(b => new BookingRow(b.Id, b.Customer, b.Event!.Name))\n        .ToListAsync(ct));\n\napp.Run();\n\nrecord BookingRow(int Id, string Customer, string EventName);\nrecord BookingEdit(string Note, int Version);\n\nclass Event\n{\n    public int Id { get; set; }\n    public string Name { get; set; } = \"\";\n    public string StartsAt { get; set; } = \"\";\n    public List<Booking> Bookings { get; set; } = [];\n}\n\nclass Booking\n{\n    public int Id { get; set; }\n    public int EventId { get; set; }\n    public Event? Event { get; set; }\n    public string Customer { get; set; } = \"\";\n    public string Note { get; set; } = \"\";\n    [ConcurrencyCheck] public int Version { get; set; }\n}\n\nclass TicketsDb(DbContextOptions<TicketsDb> options) : DbContext(options)\n{\n    public DbSet<Event> Events => Set<Event>();\n    public DbSet<Booking> Bookings => Set<Booking>();\n}",
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"the Lighthouse API\", async () =>",
+        "        {",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"Saltmarsh\", startsAt = \"2026-12-11 20:00\" });",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"The Gannets\", startsAt = \"2026-12-04 20:00\" });",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"Foghorn Choir\", startsAt = \"2026-12-12 18:00\" });",
+        "            foreach (var (dojoE, dojoC) in new[] { (2, \"ana@mail.test\"), (1, \"ben@mail.test\"), (3, \"chloe@mail.test\"), (2, \"dmitri@mail.test\") })",
+        "                await http.PostAsJsonAsync(\"/bookings\", new { eventId = dojoE, customer = dojoC, note = \"\" });",
+        "            DojoSql.Commands = 0;",
+        "            var dojoRows = await DojoWeb.Json(await http.GetAsync(\"/bookings\"));",
+        "            var dojoCount = DojoSql.Commands;",
+        "            Dojo.Eq(\"GET /bookings: customers\", \"ana@mail.test|ben@mail.test|chloe@mail.test|dmitri@mail.test\", Each(dojoRows, \"customer\"));",
+        "            Dojo.Eq(\"...with event names\", \"The Gannets|Saltmarsh|Foghorn Choir|The Gannets\", Each(dojoRows, \"eventName\"));",
+        "            Dojo.Check(\"...in one SQL command\", dojoCount == 1, $\"it ran {dojoCount} commands\");",
+        "        });",
+        "    }",
+        "    static string Each(JsonElement json, string prop) =>",
+        "        json.ValueKind == JsonValueKind.Array ? string.Join(\"|\", json.EnumerateArray().Select(x => DojoWeb.Prop(x, prop))) : \"(not an array)\";",
+        "}",
+        "static class DojoSql",
+        "{",
+        "    public static int Commands;",
+        "    public static readonly List<string> Log = [];",
+        "",
+        "    [System.Runtime.CompilerServices.ModuleInitializer]",
+        "    internal static void Start() => System.Diagnostics.DiagnosticListener.AllListeners.Subscribe(new Watcher());",
+        "",
+        "    sealed class Watcher : IObserver<System.Diagnostics.DiagnosticListener>, IObserver<KeyValuePair<string, object?>>",
+        "    {",
+        "        public void OnNext(System.Diagnostics.DiagnosticListener listener) { if (listener.Name == \"Microsoft.EntityFrameworkCore\") listener.Subscribe(this); }",
+        "        public void OnNext(KeyValuePair<string, object?> e)",
+        "        {",
+        "            if (e.Key != \"Microsoft.EntityFrameworkCore.Database.Command.CommandExecuted\") return;",
+        "            Interlocked.Increment(ref Commands);",
+        "            if (e.Value is CommandExecutedEventData d) lock (Log) Log.Add(d.Command.CommandText);",
+        "        }",
+        "        public void OnError(Exception error) { }",
+        "        public void OnCompleted() { }",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "ToListAsync\\(\\s*ct\\s*\\)",
+          "message": "ToListAsync(ct)"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\bforeach\\b",
+          "message": "No query per booking"
+        }
+      ],
+      "hints": [
+        "Select straight into the record: `.Select(b => new BookingRow(b.Id, b.Customer, b.Event!.Name))`.",
+        "EF turns `b.Event!.Name` into a JOIN."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Step 3: edits that do not overwrite",
+      "framework": "web+efcore",
+      "prompt": [
+        "`PUT /bookings/{id}` takes `{ \"note\": \"...\", \"version\": 1 }` (the version the agent's screen loaded) and saves it whatever the version. Fix it:",
+        "",
+        "- compare with the **client's** version (`OriginalValue = edit.Version`), and set `Version = edit.Version + 1`;",
+        "- on success: **200** with `id`, `note`, `version`;",
+        "- on `DbUpdateConcurrencyException`: **409** with a body that includes **`currentVersion`**, the version now in the database (`ex.Entries[0].GetDatabaseValuesAsync(ct)`), so the screen can reload;",
+        "- 404 for an unknown booking, as now.",
+        "",
+        "The API has `Event` (`Id`, `Name`, `StartsAt`, `Bookings`) and `Booking` (`Id`, `EventId`, `Event`, `Customer`, `Note`, and `Version` as a `[ConcurrencyCheck]` token). The POST endpoints that the tests use to create data are given. **Run checks** starts your server and calls it."
+      ],
+      "starter": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddDbContext<TicketsDb>(o => o.UseSqlite(\"Data Source=lighthouse.db\"));\nvar app = builder.Build();\n\nusing (var scope = app.Services.CreateScope())\n    scope.ServiceProvider.GetRequiredService<TicketsDb>().Database.EnsureCreated();\n\n// Seeding endpoints for the tests (already in production).\napp.MapPost(\"/events\", async (Event e, TicketsDb db, CancellationToken ct) =>\n{\n    db.Events.Add(e);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/events/{e.Id}\", new { e.Id });\n});\napp.MapPost(\"/bookings\", async (Booking b, TicketsDb db, CancellationToken ct) =>\n{\n    b.Version = 1;\n    db.Bookings.Add(b);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/bookings/{b.Id}\", new { b.Id, b.Version });\n});\napp.MapPut(\"/bookings/{id:int}\", async (int id, BookingEdit edit, TicketsDb db, CancellationToken ct) =>\n{\n    var booking = await db.Bookings.FirstOrDefaultAsync(b => b.Id == id, ct);\n    if (booking is null) return Results.NotFound();\n    booking.Note = edit.Note;\n    booking.Version++;\n    await db.SaveChangesAsync(ct);\n    return Results.Ok(new { booking.Id, booking.Note, booking.Version });\n});\n\napp.Run();\n\nrecord BookingRow(int Id, string Customer, string EventName);\nrecord BookingEdit(string Note, int Version);\n\nclass Event\n{\n    public int Id { get; set; }\n    public string Name { get; set; } = \"\";\n    public string StartsAt { get; set; } = \"\";\n    public List<Booking> Bookings { get; set; } = [];\n}\n\nclass Booking\n{\n    public int Id { get; set; }\n    public int EventId { get; set; }\n    public Event? Event { get; set; }\n    public string Customer { get; set; } = \"\";\n    public string Note { get; set; } = \"\";\n    [ConcurrencyCheck] public int Version { get; set; }\n}\n\nclass TicketsDb(DbContextOptions<TicketsDb> options) : DbContext(options)\n{\n    public DbSet<Event> Events => Set<Event>();\n    public DbSet<Booking> Bookings => Set<Booking>();\n}",
+      "solution": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddDbContext<TicketsDb>(o => o.UseSqlite(\"Data Source=lighthouse.db\"));\nvar app = builder.Build();\n\nusing (var scope = app.Services.CreateScope())\n    scope.ServiceProvider.GetRequiredService<TicketsDb>().Database.EnsureCreated();\n\n// Seeding endpoints for the tests (already in production).\napp.MapPost(\"/events\", async (Event e, TicketsDb db, CancellationToken ct) =>\n{\n    db.Events.Add(e);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/events/{e.Id}\", new { e.Id });\n});\napp.MapPost(\"/bookings\", async (Booking b, TicketsDb db, CancellationToken ct) =>\n{\n    b.Version = 1;\n    db.Bookings.Add(b);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/bookings/{b.Id}\", new { b.Id, b.Version });\n});\napp.MapPut(\"/bookings/{id:int}\", async (int id, BookingEdit edit, TicketsDb db, CancellationToken ct) =>\n{\n    var booking = await db.Bookings.FirstOrDefaultAsync(b => b.Id == id, ct);\n    if (booking is null) return Results.NotFound();\n    db.Entry(booking).Property(b => b.Version).OriginalValue = edit.Version;\n    booking.Note = edit.Note;\n    booking.Version = edit.Version + 1;\n    try\n    {\n        await db.SaveChangesAsync(ct);\n        return Results.Ok(new { booking.Id, booking.Note, booking.Version });\n    }\n    catch (DbUpdateConcurrencyException ex)\n    {\n        var current = await ex.Entries[0].GetDatabaseValuesAsync(ct);\n        return Results.Conflict(new { error = \"changed by someone else\", currentVersion = current?.GetValue<int>(\"Version\") });\n    }\n});\n\napp.Run();\n\nrecord BookingRow(int Id, string Customer, string EventName);\nrecord BookingEdit(string Note, int Version);\n\nclass Event\n{\n    public int Id { get; set; }\n    public string Name { get; set; } = \"\";\n    public string StartsAt { get; set; } = \"\";\n    public List<Booking> Bookings { get; set; } = [];\n}\n\nclass Booking\n{\n    public int Id { get; set; }\n    public int EventId { get; set; }\n    public Event? Event { get; set; }\n    public string Customer { get; set; } = \"\";\n    public string Note { get; set; } = \"\";\n    [ConcurrencyCheck] public int Version { get; set; }\n}\n\nclass TicketsDb(DbContextOptions<TicketsDb> options) : DbContext(options)\n{\n    public DbSet<Event> Events => Set<Event>();\n    public DbSet<Booking> Bookings => Set<Booking>();\n}",
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"the Lighthouse API\", async () =>",
+        "        {",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"Saltmarsh\", startsAt = \"2026-12-11 20:00\" });",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"The Gannets\", startsAt = \"2026-12-04 20:00\" });",
+        "            await http.PostAsJsonAsync(\"/events\", new { name = \"Foghorn Choir\", startsAt = \"2026-12-12 18:00\" });",
+        "            foreach (var (dojoE, dojoC) in new[] { (2, \"ana@mail.test\"), (1, \"ben@mail.test\"), (3, \"chloe@mail.test\"), (2, \"dmitri@mail.test\") })",
+        "                await http.PostAsJsonAsync(\"/bookings\", new { eventId = dojoE, customer = dojoC, note = \"\" });",
+        "            var dojoOk = await http.PutAsJsonAsync(\"/bookings/2\", new { note = \"wheelchair space\", version = 1 });",
+        "            DojoWeb.Status(\"a save with the loaded version responds 200\", 200, dojoOk);",
+        "            Dojo.Eq(\"...and returns version 2\", \"2\", DojoWeb.Prop(await DojoWeb.Json(dojoOk), \"version\"));",
+        "            var dojoStale = await http.PutAsJsonAsync(\"/bookings/2\", new { note = \"front row\", version = 1 });",
+        "            DojoWeb.Status(\"a stale save responds 409\", 409, dojoStale);",
+        "            Dojo.Eq(\"...with currentVersion 2\", \"2\", DojoWeb.Prop(await DojoWeb.Json(dojoStale), \"currentVersion\"));",
+        "            var dojoAgain = await http.PutAsJsonAsync(\"/bookings/2\", new { note = \"front row\", version = 2 });",
+        "            Dojo.Eq(\"after reloading, the save works and returns version 3\", \"3\", DojoWeb.Prop(await DojoWeb.Json(dojoAgain), \"version\"));",
+        "            DojoWeb.Status(\"PUT /bookings/9 responds 404\", 404, await http.PutAsJsonAsync(\"/bookings/9\", new { note = \"x\", version = 1 }));",
+        "        });",
+        "    }",
+        "    static string Each(JsonElement json, string prop) =>",
+        "        json.ValueKind == JsonValueKind.Array ? string.Join(\"|\", json.EnumerateArray().Select(x => DojoWeb.Prop(x, prop))) : \"(not an array)\";",
+        "}",
+        "static class DojoSql",
+        "{",
+        "    public static int Commands;",
+        "    public static readonly List<string> Log = [];",
+        "",
+        "    [System.Runtime.CompilerServices.ModuleInitializer]",
+        "    internal static void Start() => System.Diagnostics.DiagnosticListener.AllListeners.Subscribe(new Watcher());",
+        "",
+        "    sealed class Watcher : IObserver<System.Diagnostics.DiagnosticListener>, IObserver<KeyValuePair<string, object?>>",
+        "    {",
+        "        public void OnNext(System.Diagnostics.DiagnosticListener listener) { if (listener.Name == \"Microsoft.EntityFrameworkCore\") listener.Subscribe(this); }",
+        "        public void OnNext(KeyValuePair<string, object?> e)",
+        "        {",
+        "            if (e.Key != \"Microsoft.EntityFrameworkCore.Database.Command.CommandExecuted\") return;",
+        "            Interlocked.Increment(ref Commands);",
+        "            if (e.Value is CommandExecutedEventData d) lock (Log) Log.Add(d.Command.CommandText);",
+        "        }",
+        "        public void OnError(Exception error) { }",
+        "        public void OnCompleted() { }",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "OriginalValue\\s*=\\s*edit\\.Version",
+          "message": "Compares with the client's version"
+        },
+        {
+          "pattern": "GetDatabaseValuesAsync\\(",
+          "message": "Reads the current values on conflict"
+        }
+      ],
+      "hints": [
+        "Copy the client's version into `db.Entry(booking).Property(b => b.Version).OriginalValue` before saving.",
+        "In the catch: `var current = await ex.Entries[0].GetDatabaseValuesAsync(ct);` then `current?.GetValue<int>(\"Version\")`."
+      ],
+      "explain": "Ship it. Next week's on-call log should show tagged queries, one command per page, and 409s instead of silent overwrites."
+    }
+  ]
+}

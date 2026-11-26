@@ -1,0 +1,179 @@
+{
+  "title": "Migrations in CI/CD",
+  "summary": "Why EnsureCreated and Migrate() at start-up do not belong in production, idempotent scripts and bundles, catching forgotten migrations in CI, and the rename that drops a column.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "How schema changes reach production",
+      "body": [
+        "Earlier exercises called `EnsureCreated()` at start-up. It creates the schema if the database is empty and does **nothing** otherwise: it cannot add a column to a live database, and it skips the migrations history, so you can never switch to migrations later without trouble. Fine for tests and demos, never for production.",
+        "",
+        "`context.Database.Migrate()` at start-up does apply migrations, but it is still risky in production: with three instances starting together they race (EF Core 9 added a lock against concurrent migrations, but not every provider and setup is covered), the app's login needs rights to alter tables, a failed migration crashes the app on boot, and nobody reviewed the SQL.",
+        "",
+        "The usual pipeline instead:",
+        "",
+        "```bash fragment",
+        "# in CI, on every pull request: fail if someone changed the model but forgot the migration",
+        "dotnet ef migrations has-pending-model-changes",
+        "",
+        "# in the release build: one SQL script that is safe to run against any version of the database",
+        "dotnet ef migrations script --idempotent --output artifacts/migrate.sql",
+        "",
+        "# or a self-contained executable that applies them, for the deploy step",
+        "dotnet ef migrations bundle --self-contained -r linux-x64 --output artifacts/efbundle",
+        "./efbundle --connection \"$DB_CONNECTION\"",
+        "```",
+        "",
+        "`--idempotent` wraps each migration in a check against `__EFMigrationsHistory`, so the same script works whether the database is one migration behind or ten. The deploy applies the script (or bundle) **before** the new app version starts, and the migrations are written so the **old** version still works with the new schema while both run (add a column first, drop the old one in a later release)."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the release pipeline for a schema change in order.",
+      "lines": [
+        "Developer runs dotnet ef migrations add and reviews the generated code",
+        "CI fails the build if dotnet ef migrations has-pending-model-changes finds model changes with no migration",
+        "Release build produces migrate.sql with dotnet ef migrations script --idempotent",
+        "A reviewer (or DBA) reads the SQL",
+        "The deploy applies migrate.sql to the database",
+        "The deploy rolls out the new version of the app"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to what it is for.",
+      "pairs": [
+        [
+          "`dotnet ef migrations add AddSeatMap -o Data/Migrations`",
+          "generate a new migration from the model changes"
+        ],
+        [
+          "`dotnet ef migrations script --idempotent`",
+          "one SQL script safe to run on a database at any migration"
+        ],
+        [
+          "`dotnet ef migrations bundle --self-contained`",
+          "an executable that applies pending migrations"
+        ],
+        [
+          "`dotnet ef database update AddSeats`",
+          "move a dev database to exactly that migration (up or down)"
+        ],
+        [
+          "`dotnet ef migrations remove`",
+          "delete the last migration, if it was never applied"
+        ]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The API runs as 4 instances. A teammate adds `db.Database.Migrate();` to `Program.cs` \"so deploys are simpler\". What is your review comment?",
+      "options": [
+        "Apply migrations in a deploy step (idempotent script or bundle) before the new version starts; the app's login should not need ALTER rights, and a failed migration should not crash every instance on boot",
+        "Use `EnsureCreated()` instead, it is faster",
+        "Fine, as long as it runs inside a transaction",
+        "Only call it when `app.Environment.IsProduction()` is true"
+      ],
+      "answer": 0,
+      "explain": "It works on a laptop, which is why it slips through review. In production it ties schema changes to app start-up: four instances race (or wait on a lock), the app needs owner rights, and nobody saw the SQL before it ran."
+    },
+    {
+      "type": "learn",
+      "title": "The rename that drops a column",
+      "body": [
+        "You rename `Venue.Name` to `Title` and run `dotnet ef migrations add RenameVenueNameToTitle`. EF Core cannot tell a rename from \"one property removed, another added\", so it may scaffold this, and says so:",
+        "",
+        "```text",
+        "An operation was scaffolded that may result in the loss of data. Please review the migration for accuracy.",
+        "```",
+        "",
+        "```csharp fragment",
+        "migrationBuilder.DropColumn(name: \"Name\", table: \"Venues\");",
+        "migrationBuilder.AddColumn<string>(name: \"Title\", table: \"Venues\", nullable: false, defaultValue: \"\");",
+        "```",
+        "",
+        "Applied to production, every venue loses its name. That warning is the reason to **read every generated migration** and the SQL script. The fix is to edit the migration by hand:",
+        "",
+        "```csharp fragment",
+        "migrationBuilder.RenameColumn(name: \"Name\", table: \"Venues\", newName: \"Title\");",
+        "```",
+        "",
+        "Edit migrations freely before they are applied anywhere shared; once applied, add a new migration instead."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Save the venue names",
+      "prompt": [
+        "Two migrations are written out in full (`dotnet ef` cannot run here, so they are hand-written classes, exactly like the generated ones). The program deletes the database, applies both with `Migrate()` and prints every venue's title.",
+        "",
+        "Right now it prints three empty lines: the second migration drops `Name` and adds an empty `Title`. Fix **that migration** so the data survives: the program must print `Pier Hall`, `Chapel Rooms` and `Dockside Arena`."
+      ],
+      "starter": "using var db = new VenuesDb();\ndb.Database.EnsureDeleted();\ndb.Database.Migrate();\nforeach (var v in db.Venues.OrderBy(v => v.Id)) Console.WriteLine(v.Title);\n\nclass Venue\n{\n    public int Id { get; set; }\n    public string Title { get; set; } = \"\";\n}\n\nclass VenuesDb : DbContext\n{\n    public DbSet<Venue> Venues => Set<Venue>();\n    protected override void OnConfiguring(DbContextOptionsBuilder options) => options\n        .UseSqlite(\"Data Source=venues.db\")\n        .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning));\n}\n\n[DbContext(typeof(VenuesDb))]\n[Migration(\"20261101090000_Initial\")]\nclass Initial : Migration\n{\n    protected override void Up(MigrationBuilder migrationBuilder)\n    {\n        migrationBuilder.CreateTable(\n            name: \"Venues\",\n            columns: table => new\n            {\n                Id = table.Column<int>(nullable: false).Annotation(\"Sqlite:Autoincrement\", true),\n                Name = table.Column<string>(nullable: false),\n            },\n            constraints: table => table.PrimaryKey(\"PK_Venues\", x => x.Id));\n        migrationBuilder.Sql(\"INSERT INTO Venues (Name) VALUES ('Pier Hall'), ('Chapel Rooms'), ('Dockside Arena');\");\n    }\n}\n\n// Generated by: dotnet ef migrations add RenameVenueNameToTitle\n[DbContext(typeof(VenuesDb))]\n[Migration(\"20261120143000_RenameVenueNameToTitle\")]\nclass RenameVenueNameToTitle : Migration\n{\n    protected override void Up(MigrationBuilder migrationBuilder)\n    {\n        migrationBuilder.DropColumn(\n            name: \"Name\",\n            table: \"Venues\");\n\n        migrationBuilder.AddColumn<string>(\n            name: \"Title\",\n            table: \"Venues\",\n            nullable: false,\n            defaultValue: \"\");\n    }\n}",
+      "solution": "using var db = new VenuesDb();\ndb.Database.EnsureDeleted();\ndb.Database.Migrate();\nforeach (var v in db.Venues.OrderBy(v => v.Id)) Console.WriteLine(v.Title);\n\nclass Venue\n{\n    public int Id { get; set; }\n    public string Title { get; set; } = \"\";\n}\n\nclass VenuesDb : DbContext\n{\n    public DbSet<Venue> Venues => Set<Venue>();\n    protected override void OnConfiguring(DbContextOptionsBuilder options) => options\n        .UseSqlite(\"Data Source=venues.db\")\n        .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning));\n}\n\n[DbContext(typeof(VenuesDb))]\n[Migration(\"20261101090000_Initial\")]\nclass Initial : Migration\n{\n    protected override void Up(MigrationBuilder migrationBuilder)\n    {\n        migrationBuilder.CreateTable(\n            name: \"Venues\",\n            columns: table => new\n            {\n                Id = table.Column<int>(nullable: false).Annotation(\"Sqlite:Autoincrement\", true),\n                Name = table.Column<string>(nullable: false),\n            },\n            constraints: table => table.PrimaryKey(\"PK_Venues\", x => x.Id));\n        migrationBuilder.Sql(\"INSERT INTO Venues (Name) VALUES ('Pier Hall'), ('Chapel Rooms'), ('Dockside Arena');\");\n    }\n}\n\n// Generated by: dotnet ef migrations add RenameVenueNameToTitle\n[DbContext(typeof(VenuesDb))]\n[Migration(\"20261120143000_RenameVenueNameToTitle\")]\nclass RenameVenueNameToTitle : Migration\n{\n    protected override void Up(MigrationBuilder migrationBuilder)\n    {\n        migrationBuilder.RenameColumn(\n            name: \"Name\",\n            table: \"Venues\",\n            newName: \"Title\");\n    }\n}",
+      "tests": [
+        {
+          "name": "the venues keep their names after the migration",
+          "expect": [
+            "Pier Hall",
+            "Chapel Rooms",
+            "Dockside Arena"
+          ]
+        }
+      ],
+      "require": [
+        {
+          "pattern": "RenameColumn\\s*\\(",
+          "message": "Uses RenameColumn"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "DropColumn\\s*\\(",
+          "message": "Does not drop the column"
+        }
+      ],
+      "hints": [
+        "Replace the DropColumn and AddColumn calls with one call.",
+        "`migrationBuilder.RenameColumn(name: \"Name\", table: \"Venues\", newName: \"Title\");`"
+      ],
+      "explain": "On SQL Server this becomes `EXEC sp_rename`, on PostgreSQL and SQLite `ALTER TABLE ... RENAME COLUMN`. With several app instances running old code, a rename still breaks the old version: the zero-downtime way is add `Title`, copy, deploy code that reads `Title`, and drop `Name` in a later release."
+    },
+    {
+      "type": "blanks",
+      "prompt": "The release job needs one script that works against staging (2 migrations behind) and production (5 behind).",
+      "code": "dotnet ef migrations __1__ __2__ --output artifacts/migrate.sql",
+      "blanks": [
+        "script",
+        "--idempotent"
+      ],
+      "bank": [
+        "bundle",
+        "--force",
+        "--no-build",
+        "update"
+      ],
+      "explain": "Without `--idempotent` the script starts from an empty database (migration 0) by default, so it fails on any database that already has some of the migrations."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An integration test against a fresh database fails with this. What happened?",
+      "code": [
+        "System.InvalidOperationException: An error was generated for warning",
+        "'Microsoft.EntityFrameworkCore.Migrations.PendingModelChangesWarning': The model for context 'TicketsDb'",
+        "has pending changes. Add a new migration before updating the database.",
+        "   at Microsoft.EntityFrameworkCore.Migrations.Internal.Migrator.MigrateAsync(...)"
+      ],
+      "options": [
+        "Someone changed an entity or the model configuration but did not add a migration; run `dotnet ef migrations add` and commit it",
+        "The database server is too old",
+        "The test should call `EnsureCreated()` instead of `MigrateAsync()`",
+        "Suppress the warning with `ConfigureWarnings` and move on"
+      ],
+      "answer": 0,
+      "explain": "Since EF Core 9 this is an error by default: the model no longer matches the last migration snapshot, so migrating would leave the database out of date. CI should catch it earlier with `dotnet ef migrations has-pending-model-changes`. (The exercises here suppress it only because their migrations are hand-written without a snapshot.)"
+    }
+  ]
+}

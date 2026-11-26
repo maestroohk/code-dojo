@@ -1,0 +1,268 @@
+{
+  "title": "Concurrency tokens: rowversion, xmin and DbUpdateConcurrencyException",
+  "summary": "Optimistic concurrency the EF Core way on SQL Server, PostgreSQL and SQLite, from the exception in the log to a 409 in the API.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A concurrency token per provider",
+      "body": [
+        "In the SQL topic you wrote optimistic updates by hand: `UPDATE ... WHERE id = @id AND version = @loaded`. EF Core writes that WHERE for you once a property is a **concurrency token**. Every UPDATE and DELETE of the entity then includes the token's original value, and if no row matches, EF throws `DbUpdateConcurrencyException`.",
+        "",
+        "```csharp fragment",
+        "// SQL Server: a rowversion column, changed by the database on every update",
+        "public class Booking",
+        "{",
+        "    public int Id { get; set; }",
+        "    [Timestamp] public byte[] RowVersion { get; set; } = [];     // or .IsRowVersion() in OnModelCreating",
+        "}",
+        "",
+        "// PostgreSQL (Npgsql provider): map a uint to the system column xmin",
+        "public uint Version { get; set; }",
+        "modelBuilder.Entity<Booking>().Property(b => b.Version).IsRowVersion();",
+        "",
+        "// Any provider, SQLite included: a column you change yourself",
+        "[ConcurrencyCheck] public int Version { get; set; }              // or .IsConcurrencyToken()",
+        "```",
+        "",
+        "SQL Server and PostgreSQL maintain their tokens on every write; SQLite has nothing equivalent, so there you bump `Version` yourself (in the endpoint, or in a SaveChanges interceptor). The SQL EF sends looks like this:",
+        "",
+        "```text",
+        "UPDATE \"Bookings\" SET \"Note\" = @p0, \"Version\" = @p1",
+        "WHERE \"Id\" = @p2 AND \"Version\" = @p3",
+        "RETURNING 1;",
+        "```"
+      ],
+      "txtimeline": {
+        "title": "Two requests, one booking, a concurrency token",
+        "lang": "csharp",
+        "isolation": "optimistic: no locks between load and save",
+        "a": "PUT from Esme (loaded version 1)",
+        "b": "PUT from support (loaded version 1)",
+        "db": "Bookings row 12",
+        "rows": [
+          {
+            "a": "var b = await db.Bookings.FirstAsync(x => x.Id == 12, ct);\n// Version = 1",
+            "db": "Note: window, Version 1",
+            "note": "Esme's request loads the booking. The change tracker remembers Version = 1 as the original value."
+          },
+          {
+            "b": "var b = await db.Bookings.FirstAsync(x => x.Id == 12, ct);\n// Version = 1",
+            "note": "Support's request loads the same row, also version 1."
+          },
+          {
+            "b": "b.Note = \"moved to C14\"; b.Version++;\nawait db.SaveChangesAsync(ct);\n// UPDATE ... WHERE \"Id\" = 12 AND \"Version\" = 1  (1 row)",
+            "db": "Note: moved to C14, Version 2",
+            "mark": "good",
+            "note": "EF adds the token's original value to the WHERE. It matches, so the save succeeds and the version moves on."
+          },
+          {
+            "a": "b.Note = \"aisle seat\"; b.Version++;\nawait db.SaveChangesAsync(ct);\n// UPDATE ... WHERE \"Id\" = 12 AND \"Version\" = 1  (0 rows)",
+            "mark": "bad",
+            "note": "Esme's UPDATE still says Version = 1. No row matches, and EF throws DbUpdateConcurrencyException instead of overwriting."
+          },
+          {
+            "a": "catch (DbUpdateConcurrencyException)\n    return Results.Conflict();",
+            "mark": "good",
+            "note": "The endpoint answers 409; Esme's screen reloads and shows C14."
+          }
+        ],
+        "verdict": "Without the token, the second save would have silently replaced the first."
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Esme and a support agent load the same booking in two contexts. The agent saves first. What does this print?",
+      "code": [
+        "using (var setup = new TicketsDb())",
+        "{",
+        "    setup.Database.EnsureDeleted();",
+        "    setup.Database.EnsureCreated();",
+        "    setup.Bookings.Add(new Booking { Note = \"window please\" });",
+        "    setup.SaveChanges();",
+        "}",
+        "",
+        "using var esme = new TicketsDb();",
+        "using var agent = new TicketsDb();",
+        "var mine = esme.Bookings.Single();",
+        "var theirs = agent.Bookings.Single();",
+        "",
+        "theirs.Note = \"moved to C14\";",
+        "theirs.Version++;",
+        "agent.SaveChanges();",
+        "",
+        "mine.Note = \"aisle seat\";",
+        "mine.Version++;",
+        "try",
+        "{",
+        "    esme.SaveChanges();",
+        "    Console.WriteLine(\"saved\");",
+        "}",
+        "catch (DbUpdateConcurrencyException e)",
+        "{",
+        "    Console.WriteLine(e.GetType().Name);",
+        "    Console.WriteLine(e.Entries.Count);",
+        "}",
+        "",
+        "class Booking",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Note { get; set; } = \"\";",
+        "    [ConcurrencyCheck] public int Version { get; set; } = 1;",
+        "}",
+        "",
+        "class TicketsDb : DbContext",
+        "{",
+        "    public DbSet<Booking> Bookings => Set<Booking>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=tickets.db\");",
+        "}"
+      ],
+      "answer": [
+        "DbUpdateConcurrencyException",
+        "1"
+      ],
+      "explain": "Esme's UPDATE says `WHERE Id = 1 AND Version = 1`, but the agent already made it 2: 0 rows affected. `e.Entries` holds the entry that failed, so the app can read its current database values."
+    },
+    {
+      "type": "learn",
+      "title": "From the exception to a 409",
+      "body": [
+        "In a log it looks like this:",
+        "",
+        "```text",
+        "Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException: The database operation was expected to affect 1 row(s),",
+        "but actually affected 0 row(s); data may have been modified or deleted since entities were loaded.",
+        "See https://go.microsoft.com/fwlink/?LinkId=527962 for information on understanding and handling optimistic",
+        "concurrency exceptions.",
+        "   at Microsoft.EntityFrameworkCore.Update.AffectedCountModificationCommandBatch.ThrowAggregateUpdateConcurrencyExceptionAsync(...)",
+        "   at BookingEndpoints.<>c.<<MapBookings>b__0_2>d.MoveNext() in BookingEndpoints.cs:line 57",
+        "```",
+        "",
+        "Left uncaught, that is a 500 and a lost edit. Handle it where you save:",
+        "",
+        "- **Tell the client** (the usual choice for APIs): `409 Conflict`, or `412 Precondition Failed` when the version came in an `If-Match` header. The client reloads and retries.",
+        "- **Merge**: `await entry.GetDatabaseValuesAsync(ct)` gives the row as it is now; decide field by field, set `entry.OriginalValues.SetValues(dbValues)` and save again.",
+        "- **Last write wins** on purpose: reload the original values and save again. Only when overwriting is really fine.",
+        "",
+        "One trap: for a web API, the token to check is the one **the client loaded**, not the one you just read from the database a millisecond ago. Copy it in before saving:",
+        "",
+        "```csharp fragment",
+        "db.Entry(booking).Property(b => b.Version).OriginalValue = edit.Version;",
+        "```"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each database to the usual EF Core concurrency token.",
+      "pairs": [
+        [
+          "SQL Server",
+          "`[Timestamp] byte[] RowVersion` (a `rowversion` column)"
+        ],
+        [
+          "PostgreSQL with Npgsql",
+          "a `uint` property mapped to `xmin` with `.IsRowVersion()`"
+        ],
+        [
+          "SQLite",
+          "`[ConcurrencyCheck] int Version` that the app increments"
+        ],
+        [
+          "Any provider, any column",
+          "`.IsConcurrencyToken()` on that property"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Configure the token for the PostgreSQL version of the app (Npgsql provider): a `uint Version` property mapped to the system column `xmin`.",
+      "code": "modelBuilder.Entity<Booking>().Property(b => b.__1__).__2__();",
+      "blanks": [
+        "Version",
+        "IsRowVersion"
+      ],
+      "bank": [
+        "Id",
+        "IsRequired",
+        "ValueGeneratedNever"
+      ],
+      "explain": "Npgsql maps a `uint` row-version property to `xmin`, which PostgreSQL changes on every update of the row, so the app never sets it."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The PUT endpoint loads the booking, copies the client's fields onto it and saves, but stale edits still overwrite newer ones. The entity has a SQL Server `rowversion`. What is missing?",
+      "code": [
+        "var booking = await db.Bookings.FindAsync([id], ct);",
+        "booking!.Note = dto.Note;",
+        "await db.SaveChangesAsync(ct);"
+      ],
+      "options": [
+        "Setting the RowVersion original value to the one the client sent, so the UPDATE compares with what the client saw",
+        "A transaction around the load and the save",
+        "Calling `AsNoTracking()` on the load",
+        "Nothing: rowversion makes this safe automatically"
+      ],
+      "answer": 0,
+      "explain": "The load just read the current rowversion, so the UPDATE's WHERE always matches. Copy `dto.RowVersion` into `db.Entry(booking).Property(b => b.RowVersion).OriginalValue` before saving, and the stale edit fails as it should."
+    },
+    {
+      "type": "code",
+      "title": "PUT with a version check",
+      "framework": "web+efcore",
+      "prompt": [
+        "Add `PUT /bookings/{id}` to the bookings API. The body is `{ \"note\": \"...\", \"version\": 1 }`, where `version` is the one the client loaded. **Run checks** starts your server and calls it.",
+        "",
+        "- Load the booking (`FirstOrDefaultAsync(..., ct)`); 404 if there is none.",
+        "- Make EF compare with the **client's** version: set the `Version` property's `OriginalValue` to `edit.Version`.",
+        "- Set the new note and `Version = edit.Version + 1`, then `SaveChangesAsync(ct)`: **200** with the booking.",
+        "- On `DbUpdateConcurrencyException` answer **409 Conflict** and change nothing.",
+        "",
+        "`Version` is already a `[ConcurrencyCheck]` property. POST and GET are given."
+      ],
+      "starter": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddDbContext<TicketsDb>(o => o.UseSqlite(\"Data Source=bookings.db\"));\nvar app = builder.Build();\n\nusing (var scope = app.Services.CreateScope())\n    scope.ServiceProvider.GetRequiredService<TicketsDb>().Database.EnsureCreated();\n\napp.MapPost(\"/bookings\", async (BookingEdit edit, TicketsDb db, CancellationToken ct) =>\n{\n    var booking = new Booking { Note = edit.Note, Version = 1 };\n    db.Bookings.Add(booking);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/bookings/{booking.Id}\", booking);\n});\n\napp.MapGet(\"/bookings/{id:int}\", async (int id, TicketsDb db, CancellationToken ct) =>\n    await db.Bookings.AsNoTracking().FirstOrDefaultAsync(b => b.Id == id, ct) is { } b ? Results.Ok(b) : Results.NotFound());\n\n// PUT /bookings/{id} goes here\n\napp.Run();\n\nrecord BookingEdit(string Note, int Version);\n\nclass Booking\n{\n    public int Id { get; set; }\n    public string Note { get; set; } = \"\";\n    [ConcurrencyCheck] public int Version { get; set; }\n}\n\nclass TicketsDb(DbContextOptions<TicketsDb> options) : DbContext(options)\n{\n    public DbSet<Booking> Bookings => Set<Booking>();\n}",
+      "solution": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddDbContext<TicketsDb>(o => o.UseSqlite(\"Data Source=bookings.db\"));\nvar app = builder.Build();\n\nusing (var scope = app.Services.CreateScope())\n    scope.ServiceProvider.GetRequiredService<TicketsDb>().Database.EnsureCreated();\n\napp.MapPost(\"/bookings\", async (BookingEdit edit, TicketsDb db, CancellationToken ct) =>\n{\n    var booking = new Booking { Note = edit.Note, Version = 1 };\n    db.Bookings.Add(booking);\n    await db.SaveChangesAsync(ct);\n    return Results.Created($\"/bookings/{booking.Id}\", booking);\n});\n\napp.MapGet(\"/bookings/{id:int}\", async (int id, TicketsDb db, CancellationToken ct) =>\n    await db.Bookings.AsNoTracking().FirstOrDefaultAsync(b => b.Id == id, ct) is { } b ? Results.Ok(b) : Results.NotFound());\n\napp.MapPut(\"/bookings/{id:int}\", async (int id, BookingEdit edit, TicketsDb db, CancellationToken ct) =>\n{\n    var booking = await db.Bookings.FirstOrDefaultAsync(b => b.Id == id, ct);\n    if (booking is null) return Results.NotFound();\n\n    // Compare with the version the client loaded, not the one we just read.\n    db.Entry(booking).Property(b => b.Version).OriginalValue = edit.Version;\n    booking.Note = edit.Note;\n    booking.Version = edit.Version + 1;\n    try\n    {\n        await db.SaveChangesAsync(ct);\n        return Results.Ok(booking);\n    }\n    catch (DbUpdateConcurrencyException)\n    {\n        return Results.Conflict(new { error = \"The booking was changed by someone else. Reload it.\" });\n    }\n});\n\napp.Run();\n\nrecord BookingEdit(string Note, int Version);\n\nclass Booking\n{\n    public int Id { get; set; }\n    public string Note { get; set; } = \"\";\n    [ConcurrencyCheck] public int Version { get; set; }\n}\n\nclass TicketsDb(DbContextOptions<TicketsDb> options) : DbContext(options)\n{\n    public DbSet<Booking> Bookings => Set<Booking>();\n}",
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"PUT /bookings/{id}\", async () =>",
+        "        {",
+        "            await http.PostAsJsonAsync(\"/bookings\", new { note = \"window please\", version = 0 });",
+        "            var dojoOk = await http.PutAsJsonAsync(\"/bookings/1\", new { note = \"aisle seat\", version = 1 });",
+        "            DojoWeb.Status(\"a save with the current version responds 200\", 200, dojoOk);",
+        "            Dojo.Eq(\"...and returns version 2\", \"2\", DojoWeb.Prop(await DojoWeb.Json(dojoOk), \"version\"));",
+        "            var dojoStale = await http.PutAsJsonAsync(\"/bookings/1\", new { note = \"front row\", version = 1 });",
+        "            DojoWeb.Status(\"a save with a stale version responds 409\", 409, dojoStale);",
+        "            var dojoNow = await DojoWeb.Json(await http.GetAsync(\"/bookings/1\"));",
+        "            Dojo.Eq(\"...and changes nothing\", \"aisle seat 2\", $\"{DojoWeb.Prop(dojoNow, \"note\")} {DojoWeb.Prop(dojoNow, \"version\")}\");",
+        "            var dojoNext = await http.PutAsJsonAsync(\"/bookings/1\", new { note = \"front row\", version = 2 });",
+        "            DojoWeb.Status(\"after reloading (version 2) the save works\", 200, dojoNext);",
+        "            DojoWeb.Status(\"PUT /bookings/9 responds 404\", 404, await http.PutAsJsonAsync(\"/bookings/9\", new { note = \"x\", version = 1 }));",
+        "        });",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "OriginalValue\\s*=\\s*edit\\.Version",
+          "message": "Compares with the client's version (OriginalValue)"
+        },
+        {
+          "pattern": "catch\\s*\\(\\s*DbUpdateConcurrencyException",
+          "message": "Catches DbUpdateConcurrencyException"
+        },
+        {
+          "pattern": "SaveChangesAsync\\(\\s*ct\\s*\\)",
+          "message": "Saves with SaveChangesAsync(ct)"
+        }
+      ],
+      "hints": [
+        "`db.Entry(booking).Property(b => b.Version).OriginalValue = edit.Version;`",
+        "Wrap `await db.SaveChangesAsync(ct)` in try/catch and return `Results.Conflict()` from the catch."
+      ],
+      "explain": "On SQL Server or PostgreSQL you would not bump the version yourself (the database does), and you would send it as an ETag; the rest of the endpoint is identical."
+    }
+  ]
+}

@@ -560,7 +560,7 @@ export function txTimeline(spec) {
   const caption = h('div.sv-caption');
   const hd = h('div.sv-tl-row.head', h('div.sv-tl-t', 't'), h('div', spec.a || 'Session A'), h('div', spec.b || 'Session B'), h('div', spec.db || 'In the database (committed)'));
   const cell = (text, on, mark, waiting) => h(`div.sv-tl-cell${on && text ? '.on' : ''}${mark ? '.' + mark : ''}${waiting ? '.waiting' : ''}`,
-    text ? h('code', { html: /^[A-Z]{3,}|^--|^\(/.test(text) || /;\s*$/.test(text) ? sqlHtml(text) : esc(text) }) : waiting ? h('span.sv-wait', 'waiting…') : '');
+    text ? h('code', { html: spec.lang ? highlight(text, spec.lang) : /^[A-Z]{3,}|^--|^\(/.test(text) || /;\s*$/.test(text) ? sqlHtml(text) : esc(text) }) : waiting ? h('span.sv-wait', 'waiting…') : '');
   function render(at) {
     const waits = { a: false, b: false };
     table.replaceChildren(hd, ...rows.slice(0, at + 1).map((r, i) => {

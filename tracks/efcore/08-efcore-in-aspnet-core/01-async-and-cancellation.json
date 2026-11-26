@@ -1,0 +1,343 @@
+{
+  "title": "Async queries and the request's CancellationToken",
+  "summary": "ToListAsync, FirstOrDefaultAsync and SaveChangesAsync with the token ASP.NET Core gives every request, and one context doing one thing at a time.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Async all the way, with the request's token",
+      "body": [
+        "Earlier lessons used `ToList()` and `SaveChanges()` to keep the focus on EF itself. In a web API that is the wrong default. A synchronous query **blocks a thread-pool thread** while the database works; under load the pool runs dry, requests queue, and latency climbs although the CPU is idle. The async methods give the thread back while waiting:",
+        "",
+        "```csharp fragment",
+        "app.MapGet(\"/orders/{id:int}\", async (int id, ShopDb db, CancellationToken ct) =>",
+        "    await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.Id == id, ct) is { } order",
+        "        ? Results.Ok(order)",
+        "        : Results.NotFound());",
+        "",
+        "app.MapPost(\"/orders\", async (Order order, ShopDb db, CancellationToken ct) =>",
+        "{",
+        "    db.Orders.Add(order);",
+        "    await db.SaveChangesAsync(ct);",
+        "    return Results.Created($\"/orders/{order.Id}\", order);",
+        "});",
+        "```",
+        "",
+        "The `CancellationToken` parameter is filled in by ASP.NET Core with `HttpContext.RequestAborted`: it fires when the client disconnects (closed tab, mobile app gave up, load balancer timeout). Pass it to **every** async EF call (`ToListAsync(ct)`, `CountAsync(ct)`, `SingleOrDefaultAsync(..., ct)`, `SaveChangesAsync(ct)`), and EF cancels the command on the database, so a report nobody is waiting for stops using a connection and CPU. In MVC controllers, add a `CancellationToken` parameter to the action the same way.",
+        "",
+        "Cancellation surfaces as an `OperationCanceledException` (or its subclass `TaskCanceledException`). ASP.NET Core does not log it as an unhandled error when the request was aborted; do not catch and swallow it in your own code."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A user starts a 20-second export, then closes the tab after 2 seconds. The endpoint awaits `db.Orders.Where(...).ToListAsync(ct)` with the request's token. What happens?",
+      "options": [
+        "The token fires, EF cancels the running command, and the endpoint stops with an OperationCanceledException that nobody sees",
+        "The query runs to the end; the result is thrown away when the response cannot be sent",
+        "The database rolls back every transaction of that user",
+        "ASP.NET Core kills the thread running the query"
+      ],
+      "answer": 0,
+      "explain": "That is the point of passing `ct`. Without it, the database keeps working for 18 more seconds for nobody, holding a pooled connection the whole time."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the endpoint so the query is async and stops when the client goes away.",
+      "code": "app.MapGet(\"/orders\", async (ShopDb db, CancellationToken ct) => await db.Orders.AsNoTracking().OrderBy(o => o.Id).__1__(__2__));",
+      "blanks": [
+        "ToListAsync",
+        "ct"
+      ],
+      "bank": [
+        "ToList",
+        "CancellationToken.None",
+        "Result"
+      ],
+      "explain": "`CancellationToken.None` compiles but throws the request's token away; `ToList()` would block a thread."
+    },
+    {
+      "type": "predict",
+      "prompt": "The token is already cancelled when the query starts (the client left while the request waited for a connection). What does this print?",
+      "code": [
+        "using var cts = new CancellationTokenSource();",
+        "cts.Cancel();",
+        "",
+        "using var db = new ShopDb();",
+        "db.Database.EnsureDeleted();",
+        "db.Database.EnsureCreated();",
+        "try",
+        "{",
+        "    var orders = await db.Orders.ToListAsync(cts.Token);",
+        "    Console.WriteLine($\"{orders.Count} orders\");",
+        "}",
+        "catch (OperationCanceledException)",
+        "{",
+        "    Console.WriteLine(\"cancelled\");",
+        "}",
+        "",
+        "class Customer",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Order> Orders { get; set; } = [];",
+        "}",
+        "",
+        "class Order",
+        "{",
+        "    public int Id { get; set; }",
+        "    public int CustomerId { get; set; }",
+        "    public Customer? Customer { get; set; }",
+        "    public int TotalCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Customer> Customers => Set<Customer>();",
+        "    public DbSet<Order> Orders => Set<Order>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "}"
+      ],
+      "answer": "cancelled",
+      "explain": "EF checks the token before it sends anything, so no command reaches the database. A token that fires mid-query cancels the command instead."
+    },
+    {
+      "type": "learn",
+      "title": "One context, one operation at a time",
+      "body": [
+        "A `DbContext` is not thread-safe, and it runs **one** database operation at a time. This looks like a clever speed-up and is a bug:",
+        "",
+        "```csharp fragment",
+        "// Two queries \"in parallel\" on the same context",
+        "var customers = db.Customers.CountAsync(ct);",
+        "var orders = db.Orders.CountAsync(ct);",
+        "await Task.WhenAll(customers, orders);",
+        "```",
+        "",
+        "On SQL Server or PostgreSQL the second call fails with:",
+        "",
+        "```text",
+        "System.InvalidOperationException: A second operation was started on this context instance before a",
+        "previous operation completed. This is usually caused by different threads concurrently using the same",
+        "instance of DbContext.",
+        "```",
+        "",
+        "Await each call before starting the next. If you really need parallel queries, use a separate context for each (inject `IDbContextFactory<ShopDb>` and `CreateDbContext()` per task). The same rule bites in background work: a `BackgroundService` or a `Task.Run` must create its own scope or context, never reuse the request's.",
+        "",
+        "Also never block on async code with `.Result` or `.Wait()`: it ties up a thread exactly like the sync call did, and can deadlock in code with a synchronization context."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Count them one after the other",
+      "prompt": [
+        "The dashboard's `Counts` method uses `Task.WhenAll` on one context. SQLite's driver happens to finish its async calls synchronously, so it does not crash **here**, but against the production SQL Server it throws the *second operation* exception from the card.",
+        "",
+        "Rewrite `Counts` to await the two counts **one after the other**, passing `ct` to both. It returns `(customers, orders)`."
+      ],
+      "starter": "static async Task<(int Customers, int Orders)> Counts(ShopDb db, CancellationToken ct)\n{\n    var customers = db.Customers.CountAsync(ct);\n    var orders = db.Orders.CountAsync(ct);\n    await Task.WhenAll(customers, orders);\n    return (customers.Result, orders.Result);\n}",
+      "solution": [
+        "static async Task<(int Customers, int Orders)> Counts(ShopDb db, CancellationToken ct)",
+        "{",
+        "    var customers = await db.Customers.CountAsync(ct);",
+        "    var orders = await db.Orders.CountAsync(ct);",
+        "    return (customers, orders);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "using (var dojoDb = new ShopDb())",
+        "{",
+        "    dojoDb.Database.EnsureDeleted();",
+        "    dojoDb.Database.EnsureCreated();",
+        "    var dojoAna = new Customer { Name = \"Ana\" };",
+        "    dojoDb.Customers.AddRange(dojoAna, new Customer { Name = \"Ben\" });",
+        "    dojoDb.Orders.AddRange(new Order { Customer = dojoAna, TotalCents = 4500 }, new Order { Customer = dojoAna, TotalCents = 900 }, new Order { Customer = dojoAna, TotalCents = 1200 });",
+        "    dojoDb.SaveChanges();",
+        "}",
+        "using (var dojoDb = new ShopDb())",
+        "{",
+        "    var dojoCounts = await Counts(dojoDb, CancellationToken.None);",
+        "    Dojo.Eq(\"customers\", 2, dojoCounts.Customers);",
+        "    Dojo.Eq(\"orders\", 3, dojoCounts.Orders);",
+        "}",
+        "class Customer",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public List<Order> Orders { get; set; } = [];",
+        "}",
+        "",
+        "class Order",
+        "{",
+        "    public int Id { get; set; }",
+        "    public int CustomerId { get; set; }",
+        "    public Customer? Customer { get; set; }",
+        "    public int TotalCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb : DbContext",
+        "{",
+        "    public DbSet<Customer> Customers => Set<Customer>();",
+        "    public DbSet<Order> Orders => Set<Order>();",
+        "    protected override void OnConfiguring(DbContextOptionsBuilder options) => options.UseSqlite(\"Data Source=shop.db\");",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "await\\s+db\\.Customers\\.CountAsync\\(\\s*ct\\s*\\)",
+          "message": "Awaits the customer count with ct"
+        },
+        {
+          "pattern": "await\\s+db\\.Orders\\.CountAsync\\(\\s*ct\\s*\\)",
+          "message": "Awaits the order count with ct"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "WhenAll",
+          "message": "No Task.WhenAll on one context"
+        },
+        {
+          "pattern": "\\.Result\\b",
+          "message": "No .Result"
+        }
+      ],
+      "hints": [
+        "`var customers = await db.Customers.CountAsync(ct);`",
+        "Then the same for orders, and return the tuple."
+      ],
+      "explain": "Two round trips one after the other cost a millisecond or two more than the parallel version would. If that matters, the fix is one query that returns both counts, not two contexts."
+    },
+    {
+      "type": "mcq",
+      "prompt": "This appears in the logs of a `BackgroundService` that sends reminder emails. What is wrong?",
+      "code": [
+        "fail: ReminderWorker[0]",
+        "      System.ObjectDisposedException: Cannot access a disposed context instance. A common cause of this error is",
+        "      disposing a context instance that was resolved from dependency injection and then later trying to use the",
+        "      same context instance elsewhere in your application.",
+        "      Object name: 'ShopDb'.",
+        "         at ReminderWorker.ExecuteAsync(CancellationToken stoppingToken) in ReminderWorker.cs:line 31"
+      ],
+      "options": [
+        "The worker kept a context from a scope that has ended; it should create its own scope (or use IDbContextFactory) for each run",
+        "The database is down",
+        "SaveChangesAsync was called without a CancellationToken",
+        "The context needs AsNoTracking"
+      ],
+      "answer": 0,
+      "explain": "A `BackgroundService` is a singleton; `ShopDb` is scoped. Resolve it inside the loop with `using var scope = scopes.CreateScope();` (inject `IServiceScopeFactory`) or call `factory.CreateDbContext()`, and dispose it after each batch."
+    },
+    {
+      "type": "code",
+      "title": "An orders API, async end to end",
+      "framework": "web+efcore",
+      "prompt": [
+        "Build the orders API with async EF calls that all take the request's token. **Run checks** starts your server and calls it.",
+        "",
+        "- Register `ShopDb` with `AddDbContext` and `Data Source=orders.db`; create the database at start-up in a scope (fine for this exercise; production uses migrations, lesson 4).",
+        "- `Order`: `int Id`, `string Customer`, `int TotalCents`. `ShopDb` takes `DbContextOptions<ShopDb>`.",
+        "- `GET /orders`: all orders by id, **no tracking**, with `ToListAsync(ct)`.",
+        "- `GET /orders/{id}`: `FirstOrDefaultAsync(..., ct)`, or 404.",
+        "- `POST /orders` with `{ \"customer\": \"...\", \"totalCents\": 4500 }`: `SaveChangesAsync(ct)`, then **201 Created**.",
+        "",
+        "Every handler takes `CancellationToken ct`. No `ToList()`, `SaveChanges()`, `.Result` or `.Wait()`."
+      ],
+      "starter": "var builder = WebApplication.CreateBuilder(args);\nvar app = builder.Build();\n\napp.Run();\n\nclass Order\n{\n    public int Id { get; set; }\n    public string Customer { get; set; } = \"\";\n    public int TotalCents { get; set; }\n}",
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddDbContext<ShopDb>(o => o.UseSqlite(\"Data Source=orders.db\"));",
+        "var app = builder.Build();",
+        "",
+        "using (var scope = app.Services.CreateScope())",
+        "    scope.ServiceProvider.GetRequiredService<ShopDb>().Database.EnsureCreated();",
+        "",
+        "app.MapGet(\"/orders\", async (ShopDb db, CancellationToken ct) =>",
+        "    await db.Orders.AsNoTracking().OrderBy(o => o.Id).ToListAsync(ct));",
+        "",
+        "app.MapGet(\"/orders/{id:int}\", async (int id, ShopDb db, CancellationToken ct) =>",
+        "    await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.Id == id, ct) is { } order",
+        "        ? Results.Ok(order)",
+        "        : Results.NotFound());",
+        "",
+        "app.MapPost(\"/orders\", async (Order order, ShopDb db, CancellationToken ct) =>",
+        "{",
+        "    db.Orders.Add(order);",
+        "    await db.SaveChangesAsync(ct);",
+        "    return Results.Created($\"/orders/{order.Id}\", order);",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "class Order",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Customer { get; set; } = \"\";",
+        "    public int TotalCents { get; set; }",
+        "}",
+        "",
+        "class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options)",
+        "{",
+        "    public DbSet<Order> Orders => Set<Order>();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"the orders API\", async () =>",
+        "        {",
+        "            var dojoA = await http.PostAsJsonAsync(\"/orders\", new { customer = \"ana@mail.test\", totalCents = 4500 });",
+        "            DojoWeb.Status(\"POST /orders responds 201\", 201, dojoA);",
+        "            Dojo.Eq(\"the first order gets id 1\", \"1\", DojoWeb.Prop(await DojoWeb.Json(dojoA), \"id\"));",
+        "            await http.PostAsJsonAsync(\"/orders\", new { customer = \"ben@mail.test\", totalCents = 3000 });",
+        "            var dojoList = await DojoWeb.Json(await http.GetAsync(\"/orders\"));",
+        "            Dojo.Eq(\"GET /orders lists both, by id\", \"ana@mail.test|ben@mail.test\",",
+        "                dojoList.ValueKind == JsonValueKind.Array ? string.Join(\"|\", dojoList.EnumerateArray().Select(o => DojoWeb.Prop(o, \"customer\"))) : \"(not an array)\");",
+        "            var dojoOne = await http.GetAsync(\"/orders/2\");",
+        "            DojoWeb.Status(\"GET /orders/2 responds 200\", 200, dojoOne);",
+        "            Dojo.Eq(\"...with its total\", \"3000\", DojoWeb.Prop(await DojoWeb.Json(dojoOne), \"totalCents\"));",
+        "            DojoWeb.Status(\"GET /orders/9 responds 404\", 404, await http.GetAsync(\"/orders/9\"));",
+        "        });",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "ToListAsync\\(\\s*ct\\s*\\)",
+          "message": "GET /orders uses ToListAsync(ct)"
+        },
+        {
+          "pattern": "FirstOrDefaultAsync\\([^;]*,\\s*ct\\s*\\)",
+          "message": "GET /orders/{id} uses FirstOrDefaultAsync(..., ct)"
+        },
+        {
+          "pattern": "SaveChangesAsync\\(\\s*ct\\s*\\)",
+          "message": "POST uses SaveChangesAsync(ct)"
+        },
+        {
+          "pattern": "AsNoTracking\\(\\)",
+          "message": "Reads without tracking"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\.ToList\\(\\)|\\bSaveChanges\\(\\)",
+          "message": "No synchronous ToList() or SaveChanges()"
+        },
+        {
+          "pattern": "\\.Result\\b|\\.Wait\\(\\)",
+          "message": "No blocking on tasks"
+        }
+      ],
+      "hints": [
+        "Each handler: `async (..., ShopDb db, CancellationToken ct) => ...`",
+        "`await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.Id == id, ct) is { } order ? Results.Ok(order) : Results.NotFound()`"
+      ],
+      "explain": "This is the shape of every EF Core endpoint you will write at work: async, token passed through, no tracking for reads."
+    }
+  ]
+}
