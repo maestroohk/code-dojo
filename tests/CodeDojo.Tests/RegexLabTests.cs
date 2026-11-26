@@ -158,6 +158,45 @@ public class RegexLabTests
     }
 
     [Fact]
+    public void Preview_returns_spans_and_replacements_per_sample()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(RegexLab.Preview(new(@"(\d+)ms", "", ["took 41ms", "none"], "[$1]")));
+        Assert.Contains("\"Spans\":[[5,4,0],[5,2,1]]", json);
+        Assert.Contains("took [41]", json);
+    }
+
+    [Fact]
+    public void Every_regex_step_in_the_regex_track_is_fair()
+    {
+        // The reference passes and naive patterns fail, for every step; every card's pattern parses in .NET.
+        var content = new Content(FindRoot());
+        var track = content.Tracks().OfType<JsonObject>().Single(t => (string?)t["id"] == "regex");
+        var steps = 0;
+        foreach (var module in (track["modules"] as JsonArray)!.OfType<JsonObject>())
+        foreach (var meta in (module["lessons"] as JsonArray)!.OfType<JsonObject>())
+        {
+            var lesson = content.Lesson("regex", (string)module["id"]!, (string)meta["id"]!)!;
+            foreach (var step in (lesson["steps"] as JsonArray)!.OfType<JsonObject>())
+            {
+                var where = $"{module["id"]}/{meta["id"]} {step["title"]}";
+                if (step["regex"] is JsonObject card)
+                    Assert.True(RegexLab.Build((string)card["pattern"]!, RegexLab.ParseFlags((string?)card["flags"]).Options, 1000).Regex is not null, where);
+                if ((string?)step["type"] != "regex") continue;
+                steps++;
+                Assert.DoesNotContain(RegexLab.Validate(step), i => i.Error);
+            }
+        }
+        Assert.True(steps >= 60, $"only {steps} regex steps");
+    }
+
+    static string FindRoot()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+            if (Directory.Exists(Path.Combine(dir.FullName, "tracks")) && Directory.Exists(Path.Combine(dir.FullName, "ui"))) return dir.FullName;
+        throw new DirectoryNotFoundException("tracks/");
+    }
+
+    [Fact]
     public async Task GeneratedRegex_compiles_with_the_sdk_source_generator()
     {
         var runner = new CSharpRunner();

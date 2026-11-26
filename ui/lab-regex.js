@@ -20,7 +20,7 @@ const SAMPLE_PATTERN = String.raw`^(?<time>\S+) (?<level>[A-Z]+)\s+\[(?<area>\w+
 export const CHALLENGES = [
   { id: 'tickets', title: 'Ticket keys in commit messages', level: 'Starter', par: 22,
     task: 'Find every ticket key like `OPS-311` or `PAY-7`: 2 to 5 capital letters, a dash, digits. Not `ab-12`, not `X-1`, and not the `ISO-8601` inside a word like `PREISO-8601`.',
-    text: 'OPS-311: fix retry\nRevert "PAY-7 add refunds" (see PAY-12)\nformat dates as ISO-8601 in PREISO-8601 mode\nab-12 is not a key, nor X-1',
+    text: 'OPS-311: fix retry\nRevert "PAY-7 add refunds" (see PAY-12)\nrun in PREISO-8601 mode\nab-12 is not a key, nor X-1',
     step: { tests: { all: [{ input: 'OPS-311: fix retry; Revert "PAY-7 add refunds" (see PAY-12)', matches: ['OPS-311', 'PAY-7', 'PAY-12'] }],
       noFind: ['ab-12 is not a key, nor X-1', 'in PREISO-8601 mode'] } }, solution: String.raw`\b[A-Z]{2,5}-\d+\b` },
   { id: 'iso-date', title: 'A valid ISO date', level: 'Starter', par: 50,
@@ -40,13 +40,13 @@ export const CHALLENGES = [
     text: 'GET /orders/1842 200 41ms\nGET /orders/503 200 9ms\nGET /orders/1843 503 30012ms\nPOST /pay 500 12ms\nGET /health 204 5012ms',
     step: { tests: { find: ['GET /orders/1843 503 30012ms', 'POST /pay 500 12ms'], noFind: ['GET /orders/503 200 9ms', 'GET /health 204 5012ms', 'GET /orders/1842 200 41ms'] } },
     solution: String.raw` 5\d\d ` },
-  { id: 'semver', title: 'Semantic versions', level: 'Everyday', par: 70,
+  { id: 'semver', title: 'Semantic versions', level: 'Everyday', par: 90,
     task: 'Match a whole semantic version: `MAJOR.MINOR.PATCH` with no leading zeros, and an optional pre-release like `-rc.1` or `-beta`. Capture `major`, `minor` and `patch` by name.',
     text: '1.2.3\n10.0.0-rc.1\n01.2.3\n1.2\nv1.2.3',
     step: { tests: { match: ['1.2.3', '10.0.0-rc.1', '0.9.12-beta', '2.0.0'], reject: ['01.2.3', '1.2', 'v1.2.3', '1.2.3-', '1.02.3'],
       captures: [{ input: '10.20.30-rc.1', groups: { major: '10', minor: '20', patch: '30' } }] } },
     solution: String.raw`^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(-[0-9A-Za-z.]+)?$` },
-  { id: 'ipv4', title: 'An IPv4 address', level: 'Everyday', par: 70,
+  { id: 'ipv4', title: 'An IPv4 address', level: 'Everyday', par: 80,
     task: 'Match a whole IPv4 address: four numbers 0-255 separated by dots. (In real code, `IPAddress.TryParse` is the final word; the regex finds candidates in text.)',
     text: '192.168.1.10\n10.0.0.256\n203.0.113.7\n1.2.3',
     step: { tests: { match: ['192.168.1.10', '203.0.113.7', '0.0.0.0', '255.255.255.255'], reject: ['10.0.0.256', '1.2.3', '1.2.3.4.5', '300.1.1.1', '1.2.3.04x'] } },
@@ -211,7 +211,12 @@ export function regexLab(host, solved) {
     if (tab === 'matches') panel.replaceChildren(matchesView(r));
     else if (tab === 'explain') panel.replaceChildren(explainView(parsed || parse('', {}), { onHover: range => { active = range; paintPattern(); } }));
     else if (tab === 'debug') { if (!dbg || !panel.contains(dbg.el)) panel.replaceChildren(debugView()); }
-    else if (tab === 'replace') panel.replaceChildren(replaceView(r));
+    else if (tab === 'replace') {
+      // The replacement box lives in this tab: keep the caret where it was while the result re-renders around it.
+      const typing = document.activeElement === rep.ta ? [rep.ta.selectionStart, rep.ta.selectionEnd] : null;
+      panel.replaceChildren(replaceView(r));
+      if (typing) { rep.ta.focus(); rep.ta.setSelectionRange(...typing); }
+    }
     else if (tab === 'code') panel.replaceChildren(codeView());
     else panel.replaceChildren(flavourView());
   }

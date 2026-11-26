@@ -417,7 +417,7 @@ export function explain(parsed) {
     switch (node.type) {
       case 'seq': {
         let run = null;
-        const flush = () => { if (run) { line(depth, run, run.chars.length === 1 ? `Matches the character "${printable(run.chars)}"` : `Matches the text ${quoteText(run.chars)} exactly`, 'literal'); run = null; } };
+        const flush = () => { if (run) { line(depth, run, run.chars === ' ' ? 'Matches a space' : run.chars.length === 1 ? `Matches the character "${printable(run.chars)}"` : `Matches the text ${quoteText(run.chars)} exactly`, 'literal'); run = null; } };
         for (const it of node.items) {
           if (it.type === 'char') {
             const ci = it.fl?.i ? ' (any case)' : '';
@@ -861,7 +861,7 @@ export const FLAVOUR_TABLE = [
   ['Atomic / possessive', '(?>…) / no', 'no / no', '3.11+: both', 'no', 'rg: no; -P: both'],
   ['Inline options', '(?imnsx-imnsx)', '(?i:…) scoped (ES2025)', '(?i) at start, (?i:…)', 'no', '(?i)'],
   ['$ before final \\n', 'yes (\\z = very end)', 'no', 'yes (\\Z = very end)', 'line based', 'line based'],
-  ['Guaranteed linear time', 'RegexOptions.NonBacktracking', 'no', 'no', 'yes (DFA)', 'rg: yes; -P: no'],
+  ['Guaranteed linear time', 'RegexOptions.NonBacktracking', 'no', 'no', 'GNU grep: DFA, unless \\1 is used', 'rg: yes; -P: no'],
   ['Timeout', 'matchTimeout / AppContext', 'no (use a worker)', 'no', '-', '-'],
 ];
 

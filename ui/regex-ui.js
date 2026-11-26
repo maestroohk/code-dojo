@@ -16,7 +16,11 @@ export function hiliteBox({ value = '', rows = 1, placeholder = '', label, onInp
   const back = h('div.rx-back', { 'aria-hidden': 'true' });
   const ta = h('textarea.rx-ta', { rows, spellcheck: spell, autocomplete: 'off', autocapitalize: 'off', placeholder, 'aria-label': label || placeholder, value });
   const wrap = h(`div.rx-box${className ? '.' + className : ''}${mono ? '.mono' : ''}`, back, ta);
-  const sync = () => { back.scrollTop = ta.scrollTop; back.scrollLeft = ta.scrollLeft; };
+  const sync = () => {
+    // A scrollbar narrows the textarea's text area; narrow the coloured copy by the same amount so lines wrap alike.
+    back.style.paddingRight = `${12 + Math.max(0, ta.offsetWidth - ta.clientWidth)}px`;
+    back.scrollTop = ta.scrollTop; back.scrollLeft = ta.scrollLeft;
+  };
   ta.addEventListener('scroll', sync);
   ta.addEventListener('input', () => { autosize(); onInput?.(ta.value); });
   const autosize = () => {
