@@ -1,0 +1,109 @@
+{
+  "title": "Senior's toolkit: certificate duty",
+  "summary": "Request, package, automate and install certificates on Linux, Windows, Java and Kubernetes.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: certificate duty",
+      "body": "A week on certificate duty means CSRs, PFX files for Windows, ACME renewals, cert-manager in the cluster and a private root that every machine must trust. These are the commands.",
+      "toolkit": [
+        { "cmd": "openssl req -new -newkey ec -nodes -keyout key.pem -out req.csr", "what": "Makes a new key and a CSR in one step, with the SAN in the request. The CA signs the CSR; the key never leaves your machine.",
+          "flags": [["-pkeyopt ec_paramgen_curve:prime256v1", "a P-256 key (or `-newkey rsa:3072`)"], ["-nodes", "do not encrypt the key (protect the file instead)"], ["-subj", "the subject, for example `/CN=api.example.com`"], ["-addext", "add `subjectAltName=DNS:...`, which clients actually check"]],
+          "example": "openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout key.pem -out req.csr -subj '/CN=api.example.com' -addext 'subjectAltName=DNS:api.example.com,DNS:www.example.com'", "lang": "bash" },
+        { "cmd": "openssl req -in req.csr -noout -text -verify", "what": "Checks a CSR before you send it: the signature, the subject and the requested SAN list.",
+          "flags": [["-verify", "check the CSR's self-signature"], ["-noout -text", "decode it"]],
+          "example": "openssl req -in req.csr -noout -text -verify | grep -A1 'Subject Alternative Name'", "lang": "bash" },
+        { "cmd": "openssl pkcs12 -export -inkey key.pem -in cert.pem -certfile chain.pem -out site.pfx", "what": "Packs key, certificate and chain into one PFX for IIS, Azure or Windows services.",
+          "flags": [["-certfile", "the intermediates, so the server sends a full chain"], ["-name", "a friendly name shown in the store"], ["-legacy", "OpenSSL 3 uses AES by default; add this for old Windows or Java that need 3DES"]],
+          "example": "openssl pkcs12 -export -inkey key.pem -in cert.pem -certfile chain.pem -name api-2026 -out api.pfx", "lang": "bash" },
+        { "cmd": "certbot certonly --webroot -w <dir> -d <name>", "what": "Gets a certificate from Let's Encrypt over ACME, proving control with a file on your web server. A systemd timer then renews it.",
+          "flags": [["--webroot -w", "HTTP-01: write the challenge file into this directory"], ["--dns-<provider>", "DNS-01 through a plugin: needed for wildcards"], ["renew --dry-run", "test renewal against the staging server"]],
+          "example": "sudo certbot renew --dry-run", "when": "after any change to the web server or DNS", "lang": "bash" },
+        { "cmd": "kubectl get certificate -A", "what": "cert-manager in Kubernetes: every Certificate and whether it is Ready. `describe` shows why one is not.",
+          "flags": [["-A", "all namespaces"], ["describe certificate <name>", "status, conditions and events"], ["get certificaterequest,order,challenge", "follow a stuck ACME issuance step by step"]],
+          "example": "kubectl describe certificate api-tls -n prod", "lang": "bash" },
+        { "cmd": "sudo update-ca-certificates", "what": "Adds your private root to the Linux trust store, so curl, openssl, Python and .NET all trust it.",
+          "flags": [["/usr/local/share/ca-certificates/*.crt", "Debian/Ubuntu: put the PEM here, named `.crt`"], ["update-ca-trust", "RHEL/Fedora: the file goes in `/etc/pki/ca-trust/source/anchors/`"]],
+          "example": "sudo cp corp-root.pem /usr/local/share/ca-certificates/corp-root.crt && sudo update-ca-certificates", "lang": "bash" },
+        { "cmd": "Import-Certificate -FilePath root.cer -CertStoreLocation Cert:\\LocalMachine\\Root", "what": "Trusts a root on Windows for the whole machine. `certutil` does the same from any shell.",
+          "flags": [["Cert:\\LocalMachine\\Root", "machine-wide trusted roots (needs admin)"], ["Cert:\\CurrentUser\\Root", "only your user"], ["certutil -addstore -f Root root.cer", "the cmd.exe equivalent"]],
+          "example": "Get-ChildItem Cert:\\LocalMachine\\My | Where-Object NotAfter -lt (Get-Date).AddDays(30) | Select-Object Subject, NotAfter, Thumbprint", "lang": "powershell" },
+        { "cmd": "keytool -importcert -cacerts", "what": "Java keeps its own trust store. Add the private root there or Java services fail with `PKIX path building failed`.",
+          "flags": [["-cacerts", "the JDK's default trust store"], ["-alias", "a name for the entry"], ["-noprompt", "do not ask to confirm"], ["-storepass changeit", "the default password"]],
+          "example": "keytool -importcert -cacerts -alias corp-root -file corp-root.pem -storepass changeit -noprompt", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make a key and a CSR whose SAN covers `api.example.com`.",
+      "code": "openssl req -__1__ -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -__2__ -keyout key.pem -out req.csr -subj '/CN=api.example.com' -__3__ 'subjectAltName=DNS:api.example.com'",
+      "blanks": ["new", "nodes", "addext"],
+      "bank": ["x509", "text", "extfile", "export"],
+      "explain": "`-new` makes a request, `-nodes` leaves the key unencrypted, `-addext` puts the SAN in the CSR. Without a SAN, browsers and most clients reject the certificate even if the CN matches."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each system to the command that makes it trust your private root.",
+      "pairs": [
+        ["Ubuntu or Debian", "`update-ca-certificates`"],
+        ["RHEL or Fedora", "`update-ca-trust`"],
+        ["Windows", "`Import-Certificate ... Cert:\\LocalMachine\\Root`"],
+        ["A Java service", "`keytool -importcert -cacerts`"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Java service calling your new internal API logs `PKIX path building failed: unable to find valid certification path`. curl on the same host works. What is wrong?",
+      "options": [
+        "The JDK's own trust store lacks your private root; import it with `keytool -importcert -cacerts`",
+        "The API's certificate has expired",
+        "Java does not support ECDSA keys",
+        "The host's DNS is wrong"
+      ],
+      "answer": 0,
+      "explain": "curl reads the system store, which already has the root. Many JDKs read their own `cacerts` file instead. Some distributions link the two; containers based on plain JDK images often do not."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`kubectl get certificate -n prod` shows `api-tls` with `READY False` for an hour. What do you run next?",
+      "options": [
+        "`kubectl describe certificate api-tls -n prod`, then follow it to the `order` and `challenge` resources",
+        "Delete the namespace",
+        "`openssl s_client` against the old certificate",
+        "Restart every node"
+      ],
+      "answer": 0,
+      "explain": "The conditions and events say which step is stuck. Most often it is a challenge that cannot be reached: HTTP-01 blocked by the gateway or a firewall, or DNS-01 lacking credentials."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Windows Server 2016 refuses a PFX you made with OpenSSL 3: `The password you entered is incorrect`, although it is right. What do you do?",
+      "options": [
+        "Export it again with `openssl pkcs12 -export -legacy ...`",
+        "Remove the password",
+        "Convert the certificate to DER first",
+        "Use a longer password"
+      ],
+      "answer": 0,
+      "explain": "OpenSSL 3 encrypts PFX files with AES-256 by default. Older Windows and Java versions only read the legacy 3DES/RC2 format and report it as a wrong password."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a manual certificate request in order.",
+      "lines": [
+        "openssl req -new ... -addext 'subjectAltName=...' (key and CSR)",
+        "openssl req -in req.csr -noout -text -verify",
+        "send the CSR to the CA and receive cert.pem and chain.pem",
+        "openssl verify -untrusted chain.pem cert.pem",
+        "openssl pkcs12 -export -inkey key.pem -in cert.pem -certfile chain.pem -out site.pfx"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Automate everything public with ACME (certbot or cert-manager) and run `renew --dry-run` after any web or DNS change: with lifetimes heading to 47 days, manual renewal is an outage waiting to happen. Keep a short runbook of the trust commands for each platform your company runs, including Java."
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "title": "Senior's toolkit: testing failure on purpose",
+  "summary": "Time a call, read error headers, send idempotency keys and trace ids, inject latency and load: prove your timeouts and retries work.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: testing failure on purpose",
+      "body": "Timeouts, retries and breakers that were never exercised do not work. These commands let you make failures happen and watch what your integration does.",
+      "toolkit": [
+        { "cmd": "curl --max-time / --connect-timeout", "what": "Puts a hard limit on a call, the way your client should. Combined with `-w` it shows where the time went.",
+          "flags": [["--connect-timeout 2", "give up if the TCP/TLS connection takes over 2 s"], ["--max-time 5", "give up if the whole call takes over 5 s (exit code 28)"], ["-w '%{time_connect} %{time_starttransfer} %{time_total}\\n'", "connect, first byte, total"]],
+          "example": "curl -sS -o /dev/null --connect-timeout 2 --max-time 5 -w '%{http_code} %{time_starttransfer} %{time_total}\\n' http://orders:8080/orders/42", "lang": "bash" },
+        { "cmd": "curl -sS -D - -o body.json", "what": "Dumps the response headers to the screen and the body to a file, so you can read `Retry-After`, `Content-Type: application/problem+json` and the error body together.",
+          "flags": [["-D -", "write the response headers to stdout"], ["-o body.json", "body to a file"]],
+          "example": "curl -sS -D - -o body.json http://gateway:8000/orders && jq . body.json", "lang": "bash" },
+        { "cmd": "curl --retry", "what": "Retries transient failures (timeouts, 408, 429, 500, 502, 503, 504) with a growing delay, and honours `Retry-After`. The shell equivalent of a retry policy.",
+          "flags": [["--retry 3", "up to 3 retries"], ["--retry-max-time 20", "stop retrying after 20 s in total"], ["--retry-all-errors", "also retry other errors (use with care)"]],
+          "example": "curl -sS --fail-with-body --retry 3 --retry-max-time 20 http://orders:8080/health", "when": "scripts and health checks that must survive a restart", "lang": "bash" },
+        { "cmd": "curl -H 'Idempotency-Key: <id>'", "what": "Sends the same key twice to prove a retried POST does not create a second order. The server should return the first result again.",
+          "flags": [["Idempotency-Key", "a unique id per logical operation, reused on every retry"], ["$(uuidgen)", "make a fresh one"]],
+          "example": "key=$(uuidgen); for i in 1 2; do curl -sS --json @order.json -H \"Idempotency-Key: $key\" http://localhost:8080/orders; done", "lang": "bash" },
+        { "cmd": "curl -H 'traceparent: ...'", "what": "Sends a W3C trace context header with a trace id you choose, so you can find that one request in the logs of every service it touched.",
+          "flags": [["00-<32 hex trace id>-<16 hex parent id>-01", "version, trace id, parent span id, flags (`01` = sampled)"]],
+          "example": "curl -sS -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' http://gateway:8000/orders/42", "when": "debugging one request across gateway, routes and backends", "lang": "bash" },
+        { "cmd": "toxiproxy-cli toxic add", "what": "Toxiproxy sits between your service and a dependency and injects latency, timeouts or dropped connections on command.",
+          "flags": [["-t latency -a latency=3000", "add 3 s of delay"], ["-t timeout -a timeout=0", "hold the connection and never answer"], ["toxic remove -n <name>", "take a toxic away again"]],
+          "example": "toxiproxy-cli toxic add -t latency -a latency=3000 payments", "when": "proving that your timeout fires and the breaker opens", "lang": "bash" },
+        { "cmd": "k6 run", "what": "A load test written in JavaScript. Run it while a dependency is slowed to see whether threads pile up or the breaker sheds load.",
+          "flags": [["--vus 50", "50 virtual users at once"], ["--duration 2m", "for two minutes"], ["thresholds in the script", "fail the run when, say, p95 latency goes over 500 ms"]],
+          "example": "k6 run --vus 50 --duration 2m load-orders.js", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each header or option to its job.",
+      "pairs": [
+        ["`Idempotency-Key`", "make a retried POST safe to repeat"],
+        ["`traceparent`", "follow one request through every service"],
+        ["`Retry-After`", "the server says how long to wait before trying again"],
+        ["`--max-time 5`", "give up on the whole call after 5 seconds"],
+        ["`-D -`", "print the response headers"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Under load, the orders API stops answering at all, even `/health`. Payments (one of its dependencies) became slow at the same time. Orders calls payments with `HttpClient` and no timeout set beyond the default. What is the likely cause?",
+      "options": [
+        "Requests wait up to 100 s each on payments (HttpClient's default timeout), so every worker is busy waiting and nothing else is served",
+        "Payments returned 500s and orders crashed",
+        "The health endpoint has a bug",
+        "The database ran out of connections because of retries"
+      ],
+      "answer": 0,
+      "explain": "A slow dependency is worse than a dead one: without a short timeout every request holds resources while it waits. Set a timeout well under your own budget, add a breaker, and prove it with `toxiproxy-cli toxic add -t latency` plus a k6 run."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Prove a retried POST creates one order: send it twice with the same key.",
+      "code": [
+        "key=$(__1__)",
+        "curl -sS --json @order.json -H \"__2__: $key\" http://localhost:8080/orders",
+        "curl -sS --json @order.json -H \"__2__: $key\" http://localhost:8080/orders"
+      ],
+      "blanks": ["uuidgen", "Idempotency-Key"],
+      "bank": ["date", "X-Request-Id", "traceparent", "If-Match"],
+      "explain": "Both calls must carry the same key. A fresh key on the retry, or a per-request id like `X-Request-Id`, would let the server create two orders."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which `traceparent` header is valid?",
+      "options": [
+        "`00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`",
+        "`4bf92f3577b34da6a3ce929d0e0e4736`",
+        "`00-4bf92f35-00f067aa-01`",
+        "`trace=4bf92f3577b34da6a3ce929d0e0e4736; span=00f067aa0ba902b7`"
+      ],
+      "answer": 0,
+      "explain": "W3C trace context is `version-traceid-parentid-flags`: `00`, 32 hex digits, 16 hex digits, and `01` for sampled. OpenTelemetry and most gateways read and forward it."
+    },
+    {
+      "type": "order",
+      "prompt": "Order a failure test of the payments timeout.",
+      "lines": [
+        "Start a k6 run against orders: k6 run --vus 50 --duration 2m load-orders.js",
+        "Slow payments down: toxiproxy-cli toxic add -t latency -a latency=3000 payments",
+        "Watch orders' p95 latency and error rate: requests should fail fast, not hang",
+        "Remove the toxic: toxiproxy-cli toxic remove -n latency_downstream payments",
+        "Check that orders recovers on its own once payments is fast again"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Every time you add a timeout, a retry or a breaker, break the dependency on purpose and watch what happens. Send a `traceparent` you chose when you debug, so one search finds the request in every log."
+    }
+  ]
+}

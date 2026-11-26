@@ -1,0 +1,107 @@
+{
+  "title": "Senior's toolkit: brokers and queues",
+  "summary": "The Kafka and RabbitMQ commands you use to see lag, read messages, find stuck queues and replay events.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: brokers and queues",
+      "body": [
+        "When messages are late, lost or duplicated, these commands show what the broker actually holds. The Kafka tools ship in the Kafka `bin/` folder as `kafka-*.sh`; some images (Confluent) drop the `.sh`.",
+        "",
+        "Every Kafka command needs `--bootstrap-server host:9092`."
+      ],
+      "toolkit": [
+        { "cmd": "kafka-consumer-groups.sh --describe --group <g>", "what": "Shows, per partition, the group's committed offset, the latest offset and the LAG between them. Growing lag means consumers are too slow or stuck.",
+          "flags": [["--describe --group g", "offsets and lag for one group"], ["--list", "every consumer group"], ["--members", "with `--describe`: which consumer owns which partitions"]],
+          "example": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing", "when": "the first command when events are \"late\"", "lang": "bash" },
+        { "cmd": "kafka-consumer-groups.sh --reset-offsets", "what": "Moves a group's position, to replay events after a bug fix or to skip past a poison message. The group must have no running consumers.",
+          "flags": [["--to-datetime 2026-11-25T09:00:00.000", "go back to a point in time"], ["--shift-by -100", "move by a number of messages"], ["--dry-run", "show the new offsets only (the default)"], ["--execute", "actually apply them"]],
+          "example": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders --reset-offsets --to-datetime 2026-11-25T09:00:00.000 --dry-run", "lang": "bash" },
+        { "cmd": "kafka-console-consumer.sh", "what": "Reads messages from a topic so you can see what producers really sent, including the key that decides the partition.",
+          "flags": [["--topic t --from-beginning", "start at the oldest retained message"], ["--max-messages 10", "stop after 10"], ["--property print.key=true", "print each key next to its value"]],
+          "example": "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic orders --from-beginning --max-messages 10 --property print.key=true", "lang": "bash" },
+        { "cmd": "kafka-topics.sh --describe --topic <t>", "what": "Lists a topic's partitions, their leaders, replicas and in-sync replicas. Fewer partitions than consumers means some consumers sit idle.",
+          "flags": [["--describe --topic t", "partitions and replicas of one topic"], ["--list", "all topics"], ["--under-replicated-partitions", "only partitions missing a replica"]],
+          "example": "kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic orders", "lang": "bash" },
+        { "cmd": "rabbitmqctl list_queues", "what": "Shows each RabbitMQ queue with the columns you ask for. Ready messages with zero consumers is the classic stuck queue.",
+          "flags": [["name messages_ready messages_unacknowledged consumers", "the columns that matter"], ["-p vhost", "a virtual host other than `/`"]],
+          "example": "rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers", "when": "a queue keeps growing, or a DLQ is filling", "lang": "bash" },
+        { "cmd": "rabbitmq-diagnostics", "what": "Health checks for a RabbitMQ node: is it up, are alarms raised (memory, disk) that block publishers.",
+          "flags": [["check_running", "the node is running"], ["alarms", "list memory or disk alarms; publishers block while one is set"], ["status", "versions, memory, listeners"]],
+          "example": "rabbitmq-diagnostics alarms", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to the question it answers.",
+      "pairs": [
+        ["`kafka-consumer-groups.sh --describe --group billing`", "How far behind is billing?"],
+        ["`kafka-console-consumer.sh --from-beginning`", "What did producers actually send?"],
+        ["`kafka-topics.sh --describe --topic orders`", "How many partitions does the topic have?"],
+        ["`rabbitmqctl list_queues name messages_ready consumers`", "Which queue has messages and nobody reading?"],
+        ["`rabbitmq-diagnostics alarms`", "Why are publishers blocked?"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "Invoices are an hour late. `kafka-consumer-groups.sh --describe --group billing` shows:",
+        "",
+        "```text",
+        "TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG    CONSUMER-ID",
+        "orders  0          88120           88124           4      billing-1",
+        "orders  1          51002           93870           42868  billing-2",
+        "orders  2          90311           90315           4      billing-3",
+        "```",
+        "",
+        "What is the most likely cause?"
+      ],
+      "options": [
+        "The consumer on partition 1 is stuck, often on one message it keeps failing on",
+        "The topic needs more partitions",
+        "The broker is out of disk",
+        "The producers stopped sending"
+      ],
+      "answer": 0,
+      "explain": "Only partition 1 lags; the others keep up. One partition stuck while others flow usually means one consumer is blocked, retrying a poison message or hung on a slow call. Check `billing-2`'s logs, and the message at offset 51002."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Preview replaying billing from 09:00 yesterday, without changing anything yet.",
+      "code": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders --__1__ --__2__ 2026-11-25T09:00:00.000 --__3__",
+      "blanks": ["reset-offsets", "to-datetime", "dry-run"],
+      "bank": ["execute", "to-earliest", "describe", "from-beginning"],
+      "explain": "`--reset-offsets --to-datetime` picks the new position. `--dry-run` prints the offsets it would set; run again with `--execute` once the billing consumers are stopped and the consumer is idempotent, because every event since 09:00 will be processed again."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers` shows `pick-orders 0 500 1`. Nothing new reaches the warehouse. What does that tell you?",
+      "options": [
+        "The one consumer took 500 messages and is not acknowledging them; it is hung or never acks",
+        "The queue is empty, so the producer is broken",
+        "There are no consumers",
+        "RabbitMQ raised a memory alarm"
+      ],
+      "answer": 0,
+      "explain": "Unacknowledged messages are delivered but not finished. With a prefetch of 500 a stuck consumer holds them all and nothing else can get them. Restarting it returns them to the queue; the fix is in the consumer (ack after processing, a lower prefetch, a timeout on the slow call)."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a safe replay of Kafka events in order.",
+      "lines": [
+        "Check the consumer handles duplicates (idempotent by event id)",
+        "Stop every consumer in the group",
+        "Run `--reset-offsets --to-datetime ... --dry-run` and read the offsets",
+        "Run the same command with `--execute`",
+        "Start the consumers and watch the lag fall with `--describe`"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "When someone says \"the event never arrived\", look at the broker before the code: lag per partition in Kafka, ready versus unacked in RabbitMQ. Always `--dry-run` an offset reset first, and only replay into consumers that are idempotent."
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "title": "Senior's toolkit: scripts that survive review",
+  "summary": "Strict mode, shellcheck, bash -x, trap with mktemp, safe expansions, read -r, here-docs and timeout.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: scripts that survive review",
+      "body": "A deploy script runs unattended with real credentials. These are the habits a reviewer looks for first, because each one prevents a known kind of outage.",
+      "toolkit": [
+        { "cmd": "set -euo pipefail", "what": "Stops the script at the first failing command, on unset variables, and when any part of a pipeline fails.",
+          "flags": [["-e", "exit when a command fails"], ["-u", "an unset variable is an error, not an empty string"], ["-o pipefail", "a pipeline fails if any stage fails, not only the last"]],
+          "example": "#!/usr/bin/env bash\nset -euo pipefail", "lang": "bash" },
+        { "cmd": "shellcheck <script>", "what": "A linter for shell scripts. Catches missing quotes, unsafe `rm`, broken tests and many silent bugs. Run it in CI.",
+          "flags": [["-x", "follow `source`d files"], ["-S warning", "only warnings and errors"], ["# shellcheck disable=SC2086", "silence one rule on the next line, with a reason"]],
+          "example": "shellcheck -x deploy.sh", "lang": "bash" },
+        { "cmd": "bash -x <script>", "what": "Prints each command after expansion before running it. Shows exactly which value a variable had when it failed.",
+          "flags": [["-x", "trace every command"], ["set -x / set +x", "trace only one part of the script"], ["PS4='+ ${LINENO}: '", "add line numbers to the trace"]],
+          "example": "PS4='+ ${LINENO}: ' bash -x ./deploy.sh staging", "lang": "bash" },
+        { "cmd": "trap '<cleanup>' EXIT", "what": "Runs cleanup however the script ends: success, error or Ctrl+C. Pair it with `mktemp` for temporary files.",
+          "flags": [["EXIT", "on any exit"], ["mktemp -d", "a fresh private temp folder"], ["ERR", "on a failing command (for logging)"]],
+          "example": "tmp=$(mktemp -d)\ntrap 'rm -rf \"$tmp\"' EXIT", "lang": "bash" },
+        { "cmd": "\"${VAR:?message}\" / \"${VAR:-default}\"", "what": "Parameter expansions that fail loudly on a missing value, or fall back to a default.",
+          "flags": [["${VAR:?msg}", "stop with `msg` if VAR is unset or empty"], ["${VAR:-x}", "use `x` if VAR is unset or empty"], ["${VAR%.tar.gz}", "strip a suffix"]],
+          "example": "rm -rf -- \"${DEPLOY_DIR:?DEPLOY_DIR is not set}/releases/old\"", "lang": "bash" },
+        { "cmd": "while IFS= read -r line; do ...; done < <file>", "what": "Reads a file line by line without mangling spaces or backslashes. `for line in $(cat file)` splits on every space.",
+          "flags": [["IFS=", "keep leading and trailing spaces"], ["-r", "keep backslashes as they are"]],
+          "example": "while IFS= read -r host; do ssh \"$host\" uptime; done < hosts.txt", "lang": "bash" },
+        { "cmd": "cat <<'EOF' > <file>", "what": "A here-doc: writes a multi-line block. Quoting `'EOF'` stops `$` and backticks from being expanded inside.",
+          "flags": [["<<'EOF'", "literal text"], ["<<EOF", "variables are expanded"], ["<<-EOF", "strip leading tabs"]],
+          "example": "cat <<'EOF' | sudo tee /etc/app/env > /dev/null\nASPNETCORE_URLS=http://0.0.0.0:8080\nEOF", "lang": "bash" },
+        { "cmd": "timeout <duration> <cmd>", "what": "Kills a command that runs too long, so one hung `curl` or `ssh` does not stall the whole pipeline.",
+          "flags": [["30s / 5m", "the limit"], ["-k 5s", "send SIGKILL 5 s after the first signal if it is still alive"], ["exit 124", "what `timeout` returns when it fired"]],
+          "example": "timeout 30s curl -fsS http://localhost:8080/health", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A cleanup script ran `rm -rf \"$DEPLOY_DIR\"/*` on a new server and deleted everything under `/`. Nothing else changed. What would have prevented it?",
+      "options": [
+        "`set -u` or `\"${DEPLOY_DIR:?}\"`: the variable was unset, so the path became `/*`",
+        "Quoting `$DEPLOY_DIR` (it already was)",
+        "Running it with `bash -x`",
+        "`set -e`"
+      ],
+      "answer": 0,
+      "explain": "An unset variable expands to an empty string, so `\"$DEPLOY_DIR\"/*` became `/*`. `set -u` stops the script at the first unset variable, and `${DEPLOY_DIR:?}` refuses an empty one too. shellcheck warns about this exact line (SC2115)."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each line to what it does.",
+      "pairs": [
+        ["`set -o pipefail`", "`curl ... | tar xz` fails if curl fails"],
+        ["`\"${PORT:-8080}\"`", "use 8080 when PORT is empty"],
+        ["`\"${TOKEN:?missing}\"`", "stop the script when TOKEN is empty"],
+        ["`trap 'rm -rf \"$tmp\"' EXIT`", "delete the temp folder however the script ends"],
+        ["`timeout 30s ssh web1 uptime`", "give up on a host that hangs"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the strict-mode line at the top of a script.",
+      "code": "set -__1__ __2__",
+      "blanks": ["euo", "pipefail"],
+      "bank": ["ex", "noclobber", "e"],
+      "explain": "`-e` exit on error, `-u` no unset variables, `-o pipefail` take the first failure in a pipeline. `-x` (trace) is for debugging, not for every run."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": ["PORT=\"\"", "echo \"${PORT:-8080}\""],
+      "answer": "8080",
+      "verify": false,
+      "explain": "`:-` uses the default when the variable is unset **or empty**. `${PORT-8080}` (without the colon) would print an empty line, because PORT is set."
+    },
+    {
+      "type": "order",
+      "prompt": "Put the top of a safe download script in order.",
+      "lines": [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "tmp=$(mktemp -d)",
+        "trap 'rm -rf \"$tmp\"' EXIT",
+        "curl -fsSL \"${URL:?URL is not set}\" -o \"$tmp/app.tgz\"",
+        "tar -xzf \"$tmp/app.tgz\" -C /srv/app"
+      ],
+      "also": [[
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "trap 'rm -rf \"$tmp\"' EXIT",
+        "tmp=$(mktemp -d)",
+        "curl -fsSL \"${URL:?URL is not set}\" -o \"$tmp/app.tgz\"",
+        "tar -xzf \"$tmp/app.tgz\" -C /srv/app"
+      ]]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Start every script with the shebang and `set -euo pipefail`, run `shellcheck` before you ask for review, and wrap every network call in `timeout`. When a script misbehaves in CI, rerun it with `bash -x` instead of adding echo lines."
+    }
+  ]
+}

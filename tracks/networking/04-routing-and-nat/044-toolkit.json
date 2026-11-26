@@ -1,0 +1,98 @@
+{
+  "title": "Senior's toolkit: routes and NAT",
+  "summary": "Which route a packet takes, where along the path it dies, and what the NAT and firewall tables do to it.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: routes and NAT",
+      "body": "Routing questions come down to three things: which way does this host send the packet, where along the path does it stop, and does the answer find its way back through NAT.",
+      "toolkit": [
+        { "cmd": "ip route get 10.30.1.5", "what": "Asks the kernel which route, interface and source address it would use for one destination. No guessing from the full table.",
+          "flags": [["get ADDR", "the one route the kernel picks (longest prefix wins)"], ["from 10.0.0.5", "as if sent from that source address"], ["ip r", "the whole table, short for `ip route show`"]],
+          "example": "ip route get 1.1.1.1", "when": "traffic leaves by the wrong interface or VPN", "lang": "bash" },
+        { "cmd": "ip route add 10.30.0.0/16 via 10.0.0.254", "what": "Adds a static route (until reboot). Common on jump hosts and VPN gateways.",
+          "flags": [["via GW", "the next-hop router"], ["dev wg0", "send out of this interface"], ["ip route del ...", "remove it"], ["metric 100", "preference when two routes have the same prefix"]],
+          "example": "sudo ip route add 10.30.0.0/16 via 10.0.0.254 dev eth0", "lang": "bash" },
+        { "cmd": "mtr -rwz -c 100 host", "what": "traceroute and ping combined: loss and latency at every hop. A report you can paste into a ticket for the network team or ISP.",
+          "flags": [["-r -c 100", "report mode after 100 rounds"], ["-w", "wide, full host names"], ["-z", "show the AS number of each hop"], ["-T -P 443", "probe with TCP to port 443 when ICMP is filtered"]],
+          "example": "mtr -rwz -c 100 -T -P 443 api.example.com", "lang": "bash" },
+        { "cmd": "traceroute -T -p 443 host", "what": "Traces the path with TCP SYNs to a real service port, which firewalls let through more often than the default UDP probes.",
+          "flags": [["-T", "TCP SYN probes (needs root)"], ["-p 443", "destination port"], ["-n", "no reverse DNS, faster"], ["tracepath host", "no root needed, also reports the path MTU"]],
+          "example": "sudo traceroute -T -p 443 -n api.example.com", "lang": "bash" },
+        { "cmd": "nft list ruleset", "what": "Every firewall and NAT rule on the host. nftables is the default backend on current Debian, Ubuntu and RHEL; `iptables` there is often a front end to it.",
+          "flags": [["list ruleset", "all tables, chains and rules"], ["list table ip nat", "only the IPv4 NAT table"], ["-a", "show rule handles, needed to delete one"], ["iptables -t nat -L -n -v", "the legacy view, still common on older hosts"]],
+          "example": "sudo nft list table ip nat", "lang": "bash" },
+        { "cmd": "conntrack -L", "what": "The connection-tracking table behind NAT: each flow with its original and translated addresses. Shows whether a port forward actually rewrote the packet.",
+          "flags": [["-L", "list entries"], ["-p tcp --dport 443", "filter by protocol and port"], ["-C", "count entries (a full table drops new connections)"]],
+          "example": "sudo conntrack -L -p tcp --dport 8080", "lang": "bash" },
+        { "cmd": "sysctl net.ipv4.ip_forward", "what": "Whether this Linux box forwards packets between interfaces at all. A router or NAT gateway with it at 0 silently drops transit traffic.",
+          "flags": [["= 1", "forwarding on"], ["-w net.ipv4.ip_forward=1", "turn it on now"], ["/etc/sysctl.d/*.conf", "make it survive a reboot"]],
+          "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to the question it answers.",
+      "pairs": [
+        ["`ip route get 10.30.1.5`", "which interface will this host use for that address?"],
+        ["`mtr -rwz -c 100 host`", "at which hop does loss start?"],
+        ["`nft list table ip nat`", "which NAT rules are loaded?"],
+        ["`conntrack -L -p tcp --dport 8080`", "was this flow actually translated?"],
+        ["`sysctl net.ipv4.ip_forward`", "does this box route between interfaces at all?"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Since you connected to the corporate VPN, `curl` to a public API at `203.0.113.10` times out, while other sites work. What do you run first?",
+      "options": [
+        "`ip route get 203.0.113.10` to see whether that address is routed into the VPN",
+        "`dig 203.0.113.10`",
+        "Restart the API",
+        "`ip neigh flush all`"
+      ],
+      "answer": 0,
+      "explain": "A VPN often pushes routes for whole ranges. If `ip route get` says `dev tun0` or `dev wg0`, the API's address falls inside a VPN route and the corporate side does not forward it."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`mtr -rwz -c 100 api.example.com` shows 60% loss at hop 4 but 0% at hops 5 to 9 and at the destination. Where is the problem?",
+      "options": [
+        "Probably nowhere: hop 4 rate-limits replies to probes, but it forwards real traffic fine",
+        "Hop 4 drops 60% of all traffic",
+        "The destination is overloaded",
+        "Your own Wi-Fi"
+      ],
+      "answer": 0,
+      "explain": "Loss that does not continue to later hops is a router deprioritising its own ICMP replies. Loss that starts at a hop and persists all the way to the destination is real."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Trace the path to a web service with TCP probes to its HTTPS port, without reverse DNS.",
+      "code": "sudo traceroute -__1__ -p __2__ -__3__ shop.example.com",
+      "blanks": ["T", "443", "n"],
+      "bank": ["U", "80", "I", "r"],
+      "explain": "`-T` uses TCP SYN probes, `-p 443` targets the port the firewall lets through, `-n` skips name lookups for each hop."
+    },
+    {
+      "type": "sort",
+      "prompt": "Is the question about this host's own decision, or about the path beyond it?",
+      "buckets": ["This host", "The path beyond"],
+      "items": [
+        ["`ip route get`", 0],
+        ["`nft list ruleset`", 0],
+        ["`sysctl net.ipv4.ip_forward`", 0],
+        ["`conntrack -L`", 0],
+        ["`mtr -rwz`", 1],
+        ["`traceroute -T -p 443`", 1],
+        ["`tracepath`", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Before blaming \"the network\", ask the kernel with `ip route get` and look at the rules with `nft list ruleset`. If the host is fine, attach an `mtr -rwz` report to the ticket: it shows exactly where the path breaks and is the first thing a network team will ask for."
+    }
+  ]
+}

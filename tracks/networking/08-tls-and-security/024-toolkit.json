@@ -1,0 +1,76 @@
+{
+  "title": "Senior's toolkit: inspecting TLS",
+  "summary": "See which certificate and chain a server really sends, which names and dates it has, which versions and ALPN it speaks, and how to test without turning checks off.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: inspecting TLS",
+      "body": "Most TLS errors are one of four things: the wrong name, an expired certificate, a missing intermediate, or a version or cipher mismatch. These commands show each one directly.",
+      "toolkit": [
+        { "cmd": "openssl s_client -connect host:443 -servername host", "what": "Does a real TLS handshake and prints the chain the server sent, the negotiated version and cipher, and `Verify return code`.",
+          "flags": [["-servername", "send SNI; OpenSSL 1.1.1+ sets it from a host name in `-connect`, but never for an IP, and then many servers return a default certificate"], ["-showcerts", "print every certificate the server sent, not just the leaf"], ["</dev/null", "close the connection right after the handshake"], ["-verify_return_error", "fail the handshake if verification fails"]],
+          "example": "openssl s_client -connect api.example.com:443 -servername api.example.com -showcerts </dev/null", "lang": "bash" },
+        { "cmd": "... | openssl x509 -noout -subject -issuer -dates -ext subjectAltName", "what": "Reads the leaf certificate's names and validity straight from the live server.",
+          "flags": [["-noout", "do not print the PEM"], ["-dates", "notBefore and notAfter"], ["-ext subjectAltName", "the DNS names it is valid for (the CN is ignored by clients)"], ["-checkend 864000", "exit 1 if it expires within 10 days"]],
+          "example": "openssl s_client -connect api.example.com:443 -servername api.example.com </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -dates -ext subjectAltName", "lang": "bash" },
+        { "cmd": "openssl s_client -tls1_2 / -tls1_3", "what": "Forces one protocol version. Proves whether an old client fails because the server dropped TLS 1.2, or a scanner flags TLS 1.0 still being on.",
+          "flags": [["-tls1_2 / -tls1_3", "only that version"], ["-alpn h2,http/1.1", "offer ALPN protocols; the output shows `ALPN protocol: h2`"], ["-brief", "one-paragraph summary of what was negotiated"]],
+          "example": "openssl s_client -connect api.example.com:443 -servername api.example.com -tls1_2 -brief </dev/null", "lang": "bash" },
+        { "cmd": "curl --cacert ca.pem https://internal.example/", "what": "Trusts a specific CA for one call: the right way to test a service with a private CA. `-k` turns all checks off and hides the real problem.",
+          "flags": [["--cacert file", "trust this CA bundle"], ["-k / --insecure", "no verification: only for a quick look, never in scripts"], ["--cert / --key", "send a client certificate (mutual TLS)"]],
+          "example": "curl -sS --cacert ./corp-root.pem --cert client.pem --key client.key https://payments.internal/health", "lang": "bash" },
+        { "cmd": "nmap --script ssl-enum-ciphers -p 443 host", "what": "Lists every TLS version and cipher suite the server accepts, with a grade. A quick audit before a security review (scan only hosts you are allowed to).",
+          "flags": [["--script ssl-enum-ciphers", "the TLS enumeration script"], ["-p 443", "the port to check"]],
+          "example": "nmap --script ssl-enum-ciphers -p 443 api.example.com", "lang": "bash" },
+        { "cmd": "openssl s_client -starttls smtp -connect mail:587", "what": "Inspects TLS on protocols that upgrade a plain connection: SMTP, IMAP, PostgreSQL and others.",
+          "flags": [["-starttls smtp", "also `imap`, `ftp`, `postgres`, `mysql`, `ldap`"], ["-connect host:port", "the plain-text port that upgrades"]],
+          "example": "openssl s_client -starttls postgres -connect db.internal:5432 </dev/null", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each symptom to the command that confirms it.",
+      "pairs": [
+        ["`certificate has expired`", "`openssl x509 -noout -dates`"],
+        ["`hostname mismatch`", "`openssl x509 -noout -ext subjectAltName`"],
+        ["`unable to get local issuer certificate`", "`openssl s_client -showcerts` (count the certificates sent)"],
+        ["An old client fails, new ones work", "`openssl s_client -tls1_2 -brief`"],
+        ["Is HTTP/2 negotiated?", "`openssl s_client -alpn h2,http/1.1`"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Browsers open `https://api.example.com` fine, but the .NET service and `curl` fail with `unable to get local issuer certificate`. `openssl s_client -showcerts` shows only one certificate. What is wrong?",
+      "options": [
+        "The server sends only the leaf, not the intermediate. Browsers often fill the gap from cache; other clients cannot. Serve the full chain (fullchain.pem)",
+        "The certificate has expired",
+        "curl is too old",
+        "The client needs `-k`"
+      ],
+      "answer": 0,
+      "explain": "A server must send its leaf plus the intermediates. Browsers cache intermediates and can fetch them, which hides the mistake; most libraries do not."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`openssl s_client -connect 10.0.4.21:443` shows a certificate for `default.example.net`, but the site is `shop.example.com`. Browsers see the right certificate. What did you forget?",
+      "options": ["`-servername shop.example.com`, so the server knows which site you want (SNI)", "`-showcerts`", "`-tls1_3`", "`-CAfile`"],
+      "answer": 0,
+      "explain": "One IP often hosts many sites. Without SNI the server picks a default certificate. Browsers always send SNI; openssl only does when it knows the name."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Print the names and expiry date of the certificate `api.example.com` actually serves.",
+      "code": "openssl s_client -connect api.example.com:443 -__1__ api.example.com </dev/null 2>/dev/null | openssl __2__ -noout -__3__ -ext subjectAltName",
+      "blanks": ["servername", "x509", ["enddate", "dates"]],
+      "bank": ["host", "req", "pkcs12", "text"],
+      "explain": "`-servername` sends SNI, `x509` parses the PEM coming down the pipe, and `-enddate` prints `notAfter`. `-dates` would also work."
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "When a TLS error appears, run `openssl s_client -servername ... -showcerts` before you change anything: the name, dates and chain are right there. Never \"fix\" it with `-k` or a disabled check in code; use `--cacert` for private CAs and fix the server's chain."
+    }
+  ]
+}

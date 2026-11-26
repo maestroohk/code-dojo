@@ -1,0 +1,89 @@
+{
+  "title": "Senior's toolkit: subnets in practice",
+  "summary": "Check a CIDR plan with a calculator, add and inspect addresses, and test IPv6, instead of doing binary in your head under pressure.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: subnets in practice",
+      "body": "You learned the arithmetic so you can reason about it. At work you still check every plan with a tool before it goes into Terraform or a firewall rule, because one wrong prefix length is an outage.",
+      "toolkit": [
+        { "cmd": "ipcalc 10.20.4.0/22", "what": "Prints the mask, network, broadcast, first and last host and the host count for a prefix. Quick proof that a range is what you think.",
+          "flags": [["ADDRESS/PREFIX", "the block to describe"], ["-s 50 50 20", "(Debian's ipcalc) split the block into subnets for those host counts"], ["note", "Debian/Ubuntu and RHEL ship different `ipcalc` programs with different flags; both print the basics"]],
+          "example": "ipcalc 172.16.8.0/21", "lang": "bash" },
+        { "cmd": "python3 -c \"import ipaddress ...\"", "what": "The `ipaddress` module ships with Python everywhere. Use it to split blocks, test membership and check overlaps in a script or a CI check.",
+          "flags": [["ip_network('10.0.0.0/16').subnets(new_prefix=24)", "every /24 inside the /16"], ["ip_address(a) in ip_network(n)", "is this address inside that block?"], ["n1.overlaps(n2)", "do two ranges collide?"]],
+          "example": "python3 -c \"import ipaddress as i; print(i.ip_network('10.0.0.0/16').overlaps(i.ip_network('10.0.128.0/17')))\"", "lang": "bash" },
+        { "cmd": "ip addr add 10.20.4.10/22 dev eth0", "what": "Adds an address with its prefix to an interface (until reboot). The prefix matters: it decides which hosts the machine thinks are local.",
+          "flags": [["/22", "always give the prefix; without it you get a /32"], ["ip addr del ...", "remove it"], ["permanent config", "netplan, NetworkManager (`nmcli`) or systemd-networkd files"]],
+          "example": "sudo ip addr add 192.168.50.2/24 dev eth1", "lang": "bash" },
+        { "cmd": "ip -br -6 a", "what": "The IPv6 addresses on each interface. Expect a `fe80::/64` link-local on every interface plus any global ones from SLAAC or DHCPv6.",
+          "flags": [["-6", "IPv6 only"], ["scope global / scope link", "routable address vs link-local"], ["ip -6 route", "the IPv6 routing table and default gateway"]],
+          "lang": "bash" },
+        { "cmd": "ping -6 -c 3 example.com", "what": "Tests IPv6 reachability on its own. When an app is slow only on some networks, broken IPv6 that clients try first is a classic cause.",
+          "flags": [["-6 / -4", "force IPv6 / IPv4"], ["-c 3", "three packets, then stop"], ["curl -6 / curl -4", "the same choice for an HTTP test"]],
+          "example": "curl -6 -sS -o /dev/null -w '%{http_code}\\n' https://example.com", "lang": "bash" },
+        { "cmd": "Get-NetIPAddress -AddressFamily IPv4", "what": "Windows: every address with its prefix length per interface, as objects you can filter.",
+          "flags": [["-AddressFamily IPv4 / IPv6", "pick a family"], ["-InterfaceAlias Ethernet", "one interface"], ["ipconfig /all", "the classic text view, including DHCP and DNS servers"]],
+          "example": "Get-NetIPAddress -AddressFamily IPv4 | Format-Table InterfaceAlias,IPAddress,PrefixLength", "lang": "powershell" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each prefix to how many addresses it holds.",
+      "pairs": [
+        ["`/24`", "256"],
+        ["`/22`", "1,024"],
+        ["`/27`", "32"],
+        ["`/30`", "4"],
+        ["`/16`", "65,536"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A new VPC peering fails to route, and the cloud console says `overlapping CIDR`. One side is `10.0.0.0/16`. Which one-liner proves which of the other side's subnets collides?",
+      "options": [
+        "`python3 -c \"import ipaddress as i; print(i.ip_network('10.0.0.0/16').overlaps(i.ip_network('10.0.128.0/20')))\"` for each of its subnets",
+        "`ping 10.0.0.1`",
+        "`ip -br a` on one VM",
+        "`traceroute 10.0.128.1`"
+      ],
+      "answer": 0,
+      "explain": "Overlap is a property of the two ranges, not of any packet, so check it with a calculator. Put the same check in CI next to your Terraform and the mistake never reaches a peering request."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You ran `sudo ip addr add 10.20.4.10 dev eth0` on a new VM. It can reach its gateway at `10.20.4.1` only after you add a route by hand. What went wrong?",
+      "options": [
+        "No prefix was given, so the address is a /32 and no neighbour is on-link; it should be `10.20.4.10/22`",
+        "The gateway is down",
+        "eth0 has no IPv6 address",
+        "`ip addr add` needs `--permanent`"
+      ],
+      "answer": 0,
+      "explain": "Without a prefix the kernel adds a /32, so it has no connected route for the rest of the subnet. With `/22` it adds `10.20.4.0/22 dev eth0` automatically."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Print every /24 inside `10.8.0.0/22`.",
+      "code": "python3 -c \"import ipaddress as i; [print(n) for n in i.ip_network('10.8.0.0/22').__1__(new_prefix=__2__)]\"",
+      "blanks": ["subnets", "24"],
+      "bank": ["supernet", "hosts", "22", "8"],
+      "explain": "`subnets(new_prefix=24)` yields 10.8.0.0/24 to 10.8.3.0/24, four in all. `supernet()` goes the other way, `hosts()` lists single addresses."
+    },
+    {
+      "type": "predict",
+      "prompt": "What is the last usable host address that `ipcalc` reports for this block?",
+      "code": "ipcalc 192.168.10.64/26",
+      "answer": "192.168.10.126",
+      "explain": "A /26 is 64 addresses: 192.168.10.64 to .127. .64 is the network, .127 the broadcast, so hosts run from .65 to .126.",
+      "verify": false
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Never type a CIDR into a firewall rule, Terraform or a cloud console without checking it in `ipcalc` or Python first. Keep the overlap check in CI for your network plan, and test `-4` and `-6` separately whenever a problem only shows up on some networks."
+    }
+  ]
+}

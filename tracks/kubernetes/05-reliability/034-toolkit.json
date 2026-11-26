@@ -1,0 +1,99 @@
+{
+  "title": "Senior's toolkit: capacity and failure",
+  "summary": "top, OOMKilled, node pressure, HPAs, PDBs and safe node drains.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: capacity and failure",
+      "body": "Reliability work is measuring real usage, reading why a container died, and taking nodes out without an outage.",
+      "toolkit": [
+        { "cmd": "kubectl top pods --containers --sort-by=memory", "what": "Live CPU and memory per container, from metrics-server. Compare it with requests and limits before you tune them.",
+          "flags": [["--containers", "one line per container, not per pod"], ["--sort-by=memory", "or `cpu`: the biggest first"], ["-A", "every namespace"]],
+          "example": "kubectl top pods -n shop --containers --sort-by=memory", "lang": "bash" },
+        { "cmd": "kubectl top nodes", "what": "Real CPU and memory use per node. A node near 100% memory starts evicting pods.",
+          "flags": [["--sort-by=cpu", "busiest first"]],
+          "example": "kubectl top nodes --sort-by=memory", "lang": "bash" },
+        { "cmd": "kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[*].lastState.terminated.reason}'", "what": "Why the last container instance died. `OOMKilled` means it went over its memory limit (exit code 137).",
+          "flags": [["lastState.terminated.reason", "`OOMKilled`, `Error`, `Completed`"], ["lastState.terminated.exitCode", "137 is SIGKILL, 143 is SIGTERM"]],
+          "example": "kubectl get pod api-7d9f8c6b5-x2k4q -o jsonpath='{.status.containerStatuses[*].lastState.terminated.reason}'", "lang": "bash" },
+        { "cmd": "kubectl describe node <node>", "what": "The `Allocated resources` table shows requests as a share of the node. Scheduling uses requests, not real use, so a node can be full while idle.",
+          "flags": [["Allocated resources", "sum of requests and limits on the node"], ["Conditions", "`MemoryPressure`, `DiskPressure`, `PIDPressure`"]],
+          "example": "kubectl describe node aks-pool1-12345-vmss000002", "when": "pods are Pending with `Insufficient cpu`", "lang": "bash" },
+        { "cmd": "kubectl get hpa -w", "what": "Watches the autoscaler: current against target utilisation and the replica count. `<unknown>` targets mean it has no metrics.",
+          "flags": [["-w", "print every change"], ["describe hpa <name>", "events: why it did or did not scale"]],
+          "example": "kubectl get hpa api -n shop -w", "lang": "bash" },
+        { "cmd": "kubectl get pdb -A", "what": "PodDisruptionBudgets and how many disruptions each allows right now. `ALLOWED DISRUPTIONS 0` will block a drain.",
+          "flags": [["-A", "every namespace"], ["-o wide", "the selector"]],
+          "example": "kubectl get pdb -A", "lang": "bash" },
+        { "cmd": "kubectl drain <node> --ignore-daemonsets --delete-emptydir-data", "what": "Cordons a node and evicts its pods while respecting PDBs. The safe way to patch or replace a node.",
+          "flags": [["--ignore-daemonsets", "DaemonSet pods stay (they would come straight back)"], ["--delete-emptydir-data", "allow evicting pods with `emptyDir` scratch data"], ["--timeout=10m", "give up instead of waiting forever"]],
+          "example": "kubectl drain aks-pool1-12345-vmss000002 --ignore-daemonsets --delete-emptydir-data --timeout=10m", "lang": "bash" },
+        { "cmd": "kubectl cordon <node> / kubectl uncordon <node>", "what": "Stop or allow new pods on a node without touching the running ones.",
+          "flags": [["cordon", "mark unschedulable"], ["uncordon", "back in service after maintenance"]],
+          "example": "kubectl uncordon aks-pool1-12345-vmss000002", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The `api` pod shows `RESTARTS 14` and status flips between `Running` and `CrashLoopBackOff`. The logs end mid-request with no error. What do you check first?",
+      "options": [
+        "`lastState.terminated.reason` (or `kubectl describe pod`) for `OOMKilled`, then `kubectl top pods --containers`",
+        "`kubectl get hpa`",
+        "`kubectl get pdb`",
+        "`kubectl uncordon` the node"
+      ],
+      "answer": 0,
+      "explain": "An app that dies with no error message was usually killed from outside. `OOMKilled` with exit code 137 means it went over its memory limit. Compare real use with the limit, then raise it or fix the leak."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the output to what it means.",
+      "pairs": [
+        ["`Last State: Terminated, Reason: OOMKilled`", "the container exceeded its memory limit"],
+        ["`0/3 nodes are available: 3 Insufficient cpu`", "the pod's CPU request fits on no node"],
+        ["HPA `TARGETS <unknown>/70%`", "the autoscaler gets no metrics"],
+        ["PDB `ALLOWED DISRUPTIONS 0`", "a drain will wait on these pods"],
+        ["Node condition `MemoryPressure True`", "the kubelet may start evicting pods"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Take a node out for patching, safely.",
+      "code": "kubectl __1__ aks-pool1-vm02 --__2__ --__3__",
+      "blanks": ["drain", "ignore-daemonsets", "delete-emptydir-data"],
+      "bank": ["cordon", "delete", "force", "grace-period=0"],
+      "explain": "`drain` cordons and then evicts while honouring PDBs. `--force` and `--grace-period=0` skip the safety you want here."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`kubectl drain` has printed `Cannot evict pod as it would violate the pod's disruption budget` for five minutes. What do you do?",
+      "options": [
+        "Check `kubectl get pdb -A`: the app needs more ready replicas (or a looser PDB) before one pod can leave",
+        "Re-run with `--disable-eviction` straight away",
+        "Delete the PDB",
+        "Restart the kubelet"
+      ],
+      "answer": 0,
+      "explain": "The drain is working as intended: removing that pod now would break the app's availability promise. Scale the app up or fix its unready pods; bypassing the PDB moves the outage onto the users."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which signal uses requests, and which uses real usage?",
+      "buckets": ["Based on requests", "Based on real usage"],
+      "items": [
+        ["Whether a pod can be scheduled on a node", 0],
+        ["`Allocated resources` in `describe node`", 0],
+        ["`kubectl top pods`", 1],
+        ["Being OOMKilled at the limit", 1],
+        ["Node `MemoryPressure` evictions", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Set requests from `kubectl top` numbers, not guesses, and check `lastState` before reading logs when a pod restarts. Before any node maintenance, look at `kubectl get pdb -A`, then `drain`: never delete pods by hand."
+    }
+  ]
+}

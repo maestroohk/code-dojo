@@ -1,0 +1,99 @@
+{
+  "title": "Senior's toolkit: GitHub Actions workflows",
+  "summary": "The workflow keys and tools experienced people use: dispatch inputs, concurrency, permissions, timeouts, step outputs, actionlint and act.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: GitHub Actions workflows",
+      "body": "Most workflow trouble comes from a few keys left out (no timeout, no concurrency, default permissions) and from YAML pushed without a check. These fix that.",
+      "toolkit": [
+        { "cmd": "on: workflow_dispatch: inputs:", "what": "Adds a \"Run workflow\" button and `gh workflow run` support, with typed inputs. Every deploy workflow should have one.",
+          "flags": [["type: choice", "a dropdown with `options:`"], ["required: true", "the run cannot start without it"], ["${{ inputs.environment }}", "read the value in steps"]],
+          "example": "on:\n  workflow_dispatch:\n    inputs:\n      environment:\n        type: choice\n        options: [staging, production]\n        required: true", "lang": "yaml" },
+        { "cmd": "concurrency:", "what": "Allows one run per group at a time. On pull requests, cancel the old run when a new commit arrives; on deploys, queue instead.",
+          "flags": [["group: ${{ github.workflow }}-${{ github.ref }}", "one group per workflow and branch"], ["cancel-in-progress: true", "stop the older run (never for production deploys)"]],
+          "example": "concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "lang": "yaml" },
+        { "cmd": "permissions:", "what": "Limits what the job's `GITHUB_TOKEN` can do. Start from read-only and grant per job only what that job needs.",
+          "flags": [["contents: read", "check out code, nothing more"], ["packages: write", "push to GHCR"], ["id-token: write", "request an OIDC token for keyless cloud login"]],
+          "example": "permissions:\n  contents: read\njobs:\n  publish:\n    permissions:\n      contents: read\n      packages: write", "lang": "yaml" },
+        { "cmd": "timeout-minutes:", "what": "Kills a hung job. The default is 360 minutes, so one stuck test can burn six hours of runner time.",
+          "flags": [["on a job", "the whole job"], ["on a step", "one step"]],
+          "example": "jobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15", "lang": "yaml" },
+        { "cmd": "echo \"name=value\" >> \"$GITHUB_OUTPUT\"", "what": "Sets a step output that later steps and jobs can read. (The old `::set-output` command is deprecated and prints warnings.)",
+          "flags": [["id: meta", "the step needs an id"], ["${{ steps.meta.outputs.version }}", "read it in the same job"], ["jobs.<job>.outputs", "map it so other jobs can use `needs.<job>.outputs.version`"]],
+          "example": "echo \"version=$(git describe --tags --always)\" >> \"$GITHUB_OUTPUT\"", "lang": "bash" },
+        { "cmd": "echo \"...\" >> \"$GITHUB_STEP_SUMMARY\"", "what": "Writes Markdown to the run's summary page: a test table, the image digest, a deploy link. Reviewers see it without opening logs.",
+          "flags": [["Markdown", "headings, tables and links all render"]],
+          "example": "echo \"### Image pushed: \\`ghcr.io/shop/api:${VERSION}\\`\" >> \"$GITHUB_STEP_SUMMARY\"", "lang": "bash" },
+        { "cmd": "actionlint", "what": "Lints workflow files: unknown keys, bad expressions, wrong `needs`, and shellcheck on `run:` scripts. Catches the typo before you push and wait.",
+          "flags": [["(no args)", "checks every file in `.github/workflows/`"], ["<file>", "check one workflow"]],
+          "example": "actionlint .github/workflows/ci.yml", "when": "before every push that touches a workflow", "lang": "bash" },
+        { "cmd": "act", "what": "Runs workflow jobs locally in Docker containers. Good for fast iteration on scripts; not identical to GitHub's runners (other images, no OIDC).",
+          "flags": [["-l", "list the jobs it found"], ["-j build", "run one job"], ["pull_request", "the event to simulate (default `push`)"], ["--secret-file .secrets", "provide secrets from a local file"]],
+          "example": "act pull_request -j build", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A job that normally takes 6 minutes shows as still running after 5 hours. A test is stuck waiting on a socket. What stops this from happening again?",
+      "options": [
+        "Add `timeout-minutes: 15` to the job",
+        "Add `cancel-in-progress: true`",
+        "Add `permissions: contents: read`",
+        "Switch to `runs-on: windows-latest`"
+      ],
+      "answer": 0,
+      "explain": "The default job timeout is 360 minutes. A timeout a bit above the normal duration fails fast and frees the runner. Concurrency only cancels when a newer run starts."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the key to what it does.",
+      "pairs": [
+        ["`cancel-in-progress: true`", "stop the older run when a newer one starts in the group"],
+        ["`permissions: packages: write`", "let this job push images to GHCR"],
+        ["`permissions: id-token: write`", "let this job request an OIDC token"],
+        ["`workflow_dispatch: inputs:`", "a manual run with parameters"],
+        ["`>> \"$GITHUB_OUTPUT\"`", "pass a value to later steps"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Cancel superseded runs on the same branch.",
+      "code": ["concurrency:", "  __1__: ${{ github.workflow }}-${{ github.ref }}", "  __2__: true"],
+      "blanks": ["group", "cancel-in-progress"],
+      "bank": ["name", "queue", "max-parallel", "fail-fast"],
+      "explain": "`max-parallel` and `fail-fast` belong to `strategy:` for matrices; they do not cancel other runs."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In job `build`, step `meta` runs `echo \"version=1.4.2\" >> \"$GITHUB_OUTPUT\"`, and a later step in `build` prints it fine. But job `deploy` (with `needs: build`) gets an empty string from `${{ needs.build.outputs.version }}`. What is missing?",
+      "options": [
+        "An `outputs:` map on the `build` job: `version: ${{ steps.meta.outputs.version }}`",
+        "`permissions: contents: write` on `deploy`",
+        "Writing it to `$GITHUB_ENV` instead",
+        "`concurrency:` on both jobs"
+      ],
+      "answer": 0,
+      "explain": "Step outputs stay inside their job until the job maps them in `jobs.build.outputs`. `$GITHUB_ENV` only reaches later steps of the same job, and expressions that point at a missing output quietly give an empty string."
+    },
+    {
+      "type": "order",
+      "prompt": "Put the edit loop for a workflow change in order.",
+      "lines": [
+        "edit .github/workflows/ci.yml",
+        "actionlint",
+        "act pull_request -j build",
+        "git push",
+        "gh run watch --exit-status"
+      ],
+      "explain": "Lint and run locally first, so each round trip to GitHub tests a real change instead of a typo."
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Every workflow you write gets `permissions:`, `timeout-minutes:` and a `concurrency:` group, and every edit goes through `actionlint` before it is pushed. Put the useful results in `$GITHUB_STEP_SUMMARY` so nobody has to read logs to know what shipped."
+    }
+  ]
+}

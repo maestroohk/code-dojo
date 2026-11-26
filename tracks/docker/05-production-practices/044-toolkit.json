@@ -1,0 +1,98 @@
+{
+  "title": "Senior's toolkit: containers in production",
+  "summary": "Read exits, health, memory and disk; run containers with limits and least privilege; keep secrets out of images.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: containers in production",
+      "body": "On call, a container has crashed, is unhealthy, or the host disk is full. These commands tell you which, and the run flags keep it from happening again.",
+      "toolkit": [
+        { "cmd": "docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' <ctr>", "what": "Why it died: the exit code, and whether the kernel killed it for using too much memory.",
+          "flags": [["137", "SIGKILL: usually OOM (check `OOMKilled`) or a `docker kill`"], ["143", "SIGTERM: a normal stop"], ["139", "segfault in native code"], ["1", "the app threw and exited; read the logs"]],
+          "example": "docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}} {{.RestartCount}}' api", "when": "anything restarts or exits", "lang": "bash" },
+        { "cmd": "docker inspect -f '{{json .State.Health}}' <ctr>", "what": "The healthcheck status and the output of its last runs, so you see exactly why it says unhealthy.",
+          "flags": [["Status", "`starting`, `healthy` or `unhealthy`"], ["Log", "the last checks with exit code and output"]],
+          "example": "docker inspect -f '{{json .State.Health}}' api | jq '.Log[-1]'", "lang": "bash" },
+        { "cmd": "docker stats --no-stream", "what": "CPU, memory against its limit, network and disk IO for every container, once.",
+          "flags": [["--no-stream", "one snapshot instead of a live screen"], ["--format", "pick columns, for example `{{.Name}} {{.MemUsage}}`"]],
+          "example": "docker stats --no-stream --format 'table {{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}'", "lang": "bash" },
+        { "cmd": "docker events --since 1h --filter event=die", "what": "Docker's own timeline: which containers died, were OOM-killed or restarted, and when.",
+          "flags": [["--since 1h", "look back an hour"], ["--filter event=die / event=oom", "only those events"], ["--filter container=api", "one container"]],
+          "example": "docker events --since 1h --filter event=oom --filter event=die", "lang": "bash" },
+        { "cmd": "docker system df", "what": "Disk used by images, containers, volumes and the build cache, and how much of it can be reclaimed.",
+          "flags": [["-v", "per image and per volume"], ["docker builder prune --filter until=72h", "drop build cache older than 3 days"], ["docker image prune -a --filter until=168h", "drop unused images older than a week"]],
+          "example": "docker system df && docker builder prune -f --filter until=72h", "when": "\"no space left on device\" on a host or CI runner", "lang": "bash" },
+        { "cmd": "docker run --memory 512m --cpus 1 --read-only --cap-drop ALL --init", "what": "Runs with limits and least privilege, the way production should: bounded memory and CPU, an immutable filesystem, no Linux capabilities.",
+          "flags": [["--memory / --cpus", "hard memory limit and CPU share"], ["--read-only --tmpfs /tmp", "read-only root, writable scratch"], ["--cap-drop ALL", "drop every capability"], ["--init", "a tiny PID 1 that forwards signals and reaps zombies"]],
+          "example": "docker run -d --name api --memory 512m --cpus 1 --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --init --restart unless-stopped myorg/api:1.4.0", "lang": "bash" },
+        { "cmd": "docker build --secret id=<id>,src=<file>", "what": "Gives one build step a secret (a registry token, a .npmrc) without it ever reaching a layer or the image history.",
+          "flags": [["--secret id=npmrc,src=...", "the file to expose"], ["RUN --mount=type=secret,id=npmrc,target=/root/.npmrc", "where the step sees it"]],
+          "example": "docker build --secret id=npmrc,src=$HOME/.npmrc -t myorg/web:2.1.0 .", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`api` restarts every few minutes. `docker ps -a` shows `Exited (137)`, and the logs end mid-request with no exception. What do you run first?",
+      "options": [
+        "`docker inspect -f '{{.State.OOMKilled}}' api` and `docker stats --no-stream` to compare memory with the limit",
+        "`docker logs --tail 1000 api` to look for the exception",
+        "Rebuild the image with `--no-cache`",
+        "Remove the healthcheck"
+      ],
+      "answer": 0,
+      "explain": "137 is SIGKILL, and no exception means the process was killed from outside. `OOMKilled: true` confirms the memory limit; then fix a leak or raise `--memory`. The app never gets to log an OOM kill."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each exit code to its usual meaning.",
+      "pairs": [
+        ["`0`", "the process finished normally"],
+        ["`1`", "the app failed and exited; read its logs"],
+        ["`137`", "killed with SIGKILL, often out of memory"],
+        ["`139`", "segmentation fault"],
+        ["`143`", "stopped with SIGTERM"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The CI runner fails every job with `no space left on device` during `docker build`. What do you run?",
+      "options": [
+        "`docker system df`, then `docker builder prune` and `docker image prune -a` with an age filter",
+        "`docker compose down -v`",
+        "`rm -rf /var/lib/docker` while Docker runs",
+        "Add `--no-cache` to every build"
+      ],
+      "answer": 0,
+      "explain": "`system df` shows whether the build cache or old images fill the disk (it is usually the build cache). Prune with an `until` filter so today's cache stays. Deleting `/var/lib/docker` under a running daemon corrupts it."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Run `api` with a 512 MB limit, no capabilities, a read-only root filesystem and a proper PID 1.",
+      "code": "docker run -d --__1__ 512m --cap-drop __2__ --__3__ --tmpfs /tmp --__4__ myorg/api:1.4.0",
+      "blanks": ["memory", "ALL", "read-only", "init"],
+      "bank": ["memory-swap", "NET_ADMIN", "privileged", "rm"],
+      "explain": "`--memory` sets the hard limit, `--cap-drop ALL` removes every capability, `--read-only` freezes the image filesystem (`--tmpfs /tmp` gives scratch space), `--init` forwards signals so `docker stop` is quick."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which flag belongs in a production `docker run`, and which is a red flag?",
+      "buckets": ["Good in production", "Red flag in production"],
+      "items": [
+        ["`--memory 512m`", 0],
+        ["`--cap-drop ALL`", 0],
+        ["`--read-only`", 0],
+        ["`--restart unless-stopped`", 0],
+        ["`--privileged`", 1],
+        ["`-v /var/run/docker.sock:/var/run/docker.sock`", 1],
+        ["`-e DB_PASSWORD=...` typed in a shared shell script", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "For any crash, read the exit code and `OOMKilled` before the logs: they tell you whether the app failed or was killed. Give every production container a memory limit, `--cap-drop ALL` and `--init`, and put `docker system df` in your runner maintenance."
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "title": "Senior's toolkit: shipping and watching integrations",
+  "summary": "Tag images by commit, promote by digest, roll out with a check, and read health, metrics and logs during a release.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: shipping and watching integrations",
+      "body": "Build once, promote the same image everywhere, and know within minutes whether a release hurt anyone. These are the commands behind that.",
+      "toolkit": [
+        { "cmd": "docker buildx build -t <image>:<sha> --push", "what": "Builds the image once and tags it with the commit it came from, so any running container can be traced back to its code.",
+          "flags": [["-t registry/orders:$(git rev-parse --short HEAD)", "an immutable tag per commit"], ["--push", "push straight to the registry"], ["--label org.opencontainers.image.revision=<sha>", "record the commit inside the image too"]],
+          "example": "docker buildx build -t ghcr.io/acme/orders:$(git rev-parse --short HEAD) --label org.opencontainers.image.revision=$(git rev-parse HEAD) --push .", "lang": "bash" },
+        { "cmd": "crane digest / crane copy", "what": "Reads an image's digest and copies an image between registries or repositories without pulling or rebuilding it. Promotion means copying the exact bytes you tested.",
+          "flags": [["digest <image>", "print the `sha256:` digest"], ["copy <src> <dst>", "copy all layers and platforms registry to registry"], ["tag <image> <newtag>", "add a tag in place"]],
+          "example": "crane copy ghcr.io/acme/orders@sha256:9f2c... registry.prod.acme.com/orders:1.8.0", "when": "promoting from staging to production", "lang": "bash" },
+        { "cmd": "docker buildx imagetools inspect", "what": "Shows an image's digest and its platforms (amd64, arm64) from the registry, without pulling it.",
+          "flags": [["<image>:<tag>", "the image to look at"], ["--format '{{json .Manifest}}'", "machine-readable output"]],
+          "example": "docker buildx imagetools inspect ghcr.io/acme/orders:4e1d2a9", "lang": "bash" },
+        { "cmd": "kubectl rollout status", "what": "Waits until a new version is fully rolled out and fails if it does not get there, so the pipeline stops instead of declaring success.",
+          "flags": [["deploy/orders", "the deployment"], ["--timeout=3m", "fail after 3 minutes"], ["-n integration", "the namespace"]],
+          "example": "kubectl rollout status deploy/orders -n integration --timeout=3m || kubectl rollout undo deploy/orders -n integration", "lang": "bash" },
+        { "cmd": "curl /health/live and /health/ready", "what": "Live says the process works; ready says it can serve, with its dependencies reachable. Check both after a deploy and when traffic drops.",
+          "flags": [["--fail-with-body", "a non-200 fails the step and shows which check failed"], ["/health/ready", "the one load balancers and Kubernetes use to send traffic"]],
+          "example": "curl -sS --fail-with-body http://orders.integration.svc:8080/health/ready | jq .", "lang": "bash" },
+        { "cmd": "PromQL: error ratio and p95", "what": "Two queries that tell you whether a release hurt users: the share of 5xx responses, and the 95th percentile latency.",
+          "flags": [["rate(x[5m])", "per-second rate over the last 5 minutes"], ["sum by (le) (...)", "keep the bucket label for percentiles"], ["histogram_quantile(0.95, ...)", "the 95th percentile from a histogram"]],
+          "example": "sum(rate(http_server_request_duration_seconds_count{job=\"orders\",http_response_status_code=~\"5..\"}[5m])) / sum(rate(http_server_request_duration_seconds_count{job=\"orders\"}[5m]))", "when": "for 15 minutes after every release", "lang": "bash" },
+        { "cmd": "kubectl logs -l app=<name> --since", "what": "Reads the logs of every pod of a service at once, for the window you care about. With JSON logs, jq finds one trace id.",
+          "flags": [["-l app=orders", "all pods with that label"], ["--since=15m", "only recent lines"], ["--prefix", "show which pod each line came from"]],
+          "example": "kubectl logs -l app=orders -n integration --since=15m --prefix | grep 4bf92f3577b34da6a3ce929d0e0e4736", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to its part of a release.",
+      "pairs": [
+        ["`docker buildx build -t orders:$(git rev-parse --short HEAD) --push`", "build once, tagged by commit"],
+        ["`crane copy orders@sha256:... prod/orders:1.8.0`", "promote the tested image unchanged"],
+        ["`kubectl rollout status deploy/orders --timeout=3m`", "fail the pipeline if the rollout stalls"],
+        ["`curl --fail-with-body .../health/ready`", "check the new pods can serve"],
+        ["`histogram_quantile(0.95, ...)`", "see if latency got worse"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Staging passed, but production behaves differently after the release. The pipeline ran `docker build -t orders:latest .` in the production job. What went wrong in the process?",
+      "options": [
+        "Production got a fresh build, not the image that was tested; build once, then promote that digest",
+        "`latest` is not a valid tag",
+        "Production needs a bigger node",
+        "The health check is too strict"
+      ],
+      "answer": 0,
+      "explain": "A rebuild can pick up a new base image, a new package version or different config. Tag by commit, test that image, and promote the same digest with `crane copy` (or a retag) so production runs exactly what staging ran."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Roll out, and roll back automatically if the new version does not become ready in time.",
+      "code": "kubectl rollout __1__ deploy/orders -n integration --__2__=3m || kubectl rollout __3__ deploy/orders -n integration",
+      "blanks": ["status", "timeout", "undo"],
+      "bank": ["restart", "wait", "history", "revert"],
+      "explain": "`rollout status` exits non-zero when the timeout passes before all new pods are ready; `rollout undo` goes back to the previous revision."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Ten minutes after a release, the dashboard shows the error ratio went from 0.2% to 4%, all `502` from the orders route. Pods are `Running` and `/health/live` is 200. What do you do first?",
+      "options": [
+        "Roll back (`kubectl rollout undo`), then investigate with logs and the trace ids from the failing calls",
+        "Wait an hour to see if it settles",
+        "Scale orders to more replicas",
+        "Restart the gateway"
+      ],
+      "answer": 0,
+      "explain": "The release is the most likely cause and users are hurting now. Roll back first, which is cheap because the old image is still there, then find the cause. Live being 200 only says the process is up, not that it can reach its dependencies."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a release of one image in order.",
+      "lines": [
+        "Build and push the image tagged with the commit",
+        "Deploy it to staging and run the contract and smoke tests",
+        "Promote the same digest to the production registry",
+        "Deploy to production and wait with `kubectl rollout status`",
+        "Watch the error ratio and p95 for 15 minutes"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Never rebuild for production: promote the digest you tested. After every release, keep the error-ratio and p95 queries open for fifteen minutes, and decide in advance which numbers mean \"roll back now\"."
+    }
+  ]
+}

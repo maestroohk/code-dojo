@@ -1,0 +1,95 @@
+{
+  "title": "Senior's toolkit: chains of trust",
+  "summary": "See the chain a server really sends, verify it against a root, and find out what a client trusts.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: chains of trust",
+      "body": "Most \"certificate not trusted\" tickets are a missing intermediate or a missing root. These commands show which one, in a minute.",
+      "toolkit": [
+        { "cmd": "openssl s_client -connect host:443 -servername host -showcerts", "what": "Connects like a client and prints every certificate the server sends, plus the verify result.",
+          "flags": [["-servername", "send SNI; without it many servers return a default certificate"], ["-showcerts", "print the whole chain, not just the leaf"], ["</dev/null", "close the connection right after the handshake"]],
+          "example": "openssl s_client -connect api.example.com:443 -servername api.example.com -showcerts </dev/null", "when": "any TLS error from a client", "lang": "bash" },
+        { "cmd": "openssl verify -CAfile root.pem -untrusted chain.pem leaf.pem", "what": "Checks a chain offline, exactly as a client would, and says which link breaks.",
+          "flags": [["-CAfile", "the roots you trust"], ["-untrusted", "intermediates to build the path with (not trusted by themselves)"], ["-show_chain", "print the path it built"]],
+          "example": "openssl verify -show_chain -CAfile corp-root.pem -untrusted intermediate.pem api.pem", "lang": "bash" },
+        { "cmd": "openssl x509 -noout -subject -issuer", "what": "Walk a chain by hand: each certificate's issuer must be the next one's subject, ending at a self-signed root.",
+          "flags": [["-subject", "this certificate's name"], ["-issuer", "the name of the CA above it"]],
+          "example": "for f in leaf.pem intermediate.pem root.pem; do openssl x509 -in $f -noout -subject -issuer; done", "lang": "bash" },
+        { "cmd": "openssl crl2pkcs7 -nocrl -certfile bundle.pem | openssl pkcs7 -print_certs -noout", "what": "Lists every certificate inside a bundle file. `x509` alone only reads the first one.",
+          "flags": [["-nocrl", "no CRL in the output"], ["-certfile", "the bundle to read"], ["-print_certs -noout", "subject and issuer of each certificate"]],
+          "example": "openssl crl2pkcs7 -nocrl -certfile fullchain.pem | openssl pkcs7 -print_certs -noout", "when": "checking `fullchain.pem` before you deploy it", "lang": "bash" },
+        { "cmd": "openssl x509 -noout -ext authorityInfoAccess", "what": "Shows the CA Issuers URL: where to download the intermediate that signed this certificate.",
+          "flags": [["-ext authorityInfoAccess", "print the AIA extension"]],
+          "example": "openssl x509 -in leaf.pem -noout -ext authorityInfoAccess", "when": "the server forgot to send the intermediate", "lang": "bash" },
+        { "cmd": "curl -v --cacert root.pem https://host", "what": "Tests a chain against one specific root instead of the system store. Proves a private CA works before you install it everywhere.",
+          "flags": [["--cacert", "trust only this CA file"], ["-v", "show the TLS handshake and the verify result"], ["-k", "skip verification: for a quick look only, never in scripts"]],
+          "example": "curl -v --cacert corp-root.pem https://intranet.corp.example/health", "lang": "bash" },
+        { "cmd": "ls /etc/ssl/certs/ca-certificates.crt", "what": "Where the system trust store lives. Most Linux tools, and .NET on Linux, read this bundle.",
+          "flags": [["Debian/Ubuntu", "`/etc/ssl/certs/ca-certificates.crt`"], ["RHEL/Fedora", "`/etc/pki/tls/certs/ca-bundle.crt`"], ["Windows", "`certlm.msc` / `Cert:\\LocalMachine\\Root`"]],
+          "example": "grep -c 'BEGIN CERTIFICATE' /etc/ssl/certs/ca-certificates.crt", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each option to its job.",
+      "pairs": [
+        ["`-servername`", "sends SNI so the server picks the right certificate"],
+        ["`-showcerts`", "prints every certificate the server sent"],
+        ["`-CAfile`", "the roots `openssl verify` trusts"],
+        ["`-untrusted`", "intermediates used to build the path"],
+        ["`--cacert`", "makes curl trust only this CA"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Browsers open `https://shop.example.com` fine, but your .NET service on Linux fails with `UntrustedRoot`/`PartialChain`, and so does `curl`. `s_client -showcerts` prints only one certificate. What is wrong?",
+      "options": [
+        "The server sends only the leaf; configure it to send the intermediate too (serve `fullchain.pem`)",
+        "The root CA is missing from every browser",
+        "The certificate has the wrong name",
+        "Linux does not support TLS 1.3"
+      ],
+      "answer": 0,
+      "explain": "Browsers often fill the gap from a cache or by fetching the AIA URL; most other clients do not. A server must send leaf plus intermediates. Never the root: clients already have it."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Verify `api.pem` against your company root, with the intermediate in a separate file.",
+      "code": "openssl __1__ -__2__ corp-root.pem -__3__ intermediate.pem api.pem",
+      "blanks": ["verify", "CAfile", "untrusted"],
+      "bank": ["x509", "s_client", "trusted_first", "showcerts"],
+      "explain": "`-CAfile` holds what you trust; `-untrusted` holds the intermediates that only help build the path. Swap them and you would trust the intermediate as an anchor."
+    },
+    {
+      "type": "order",
+      "prompt": "A client reports \"certificate not trusted\". Put the triage in order.",
+      "lines": [
+        "openssl s_client -connect host:443 -servername host -showcerts </dev/null",
+        "count the certificates sent and read each subject and issuer",
+        "if the intermediate is missing, fetch it from the leaf's AIA URL and fix the server's chain file",
+        "openssl verify -CAfile root.pem -untrusted chain.pem leaf.pem",
+        "retest from the failing client"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which certificates should a server send in its handshake?",
+      "buckets": ["Send it", "Do not send it"],
+      "items": [
+        ["the leaf for `api.example.com`", 0],
+        ["the intermediate that signed the leaf", 0],
+        ["the self-signed root", 1],
+        ["an expired old intermediate", 1],
+        ["a certificate for a different host", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "When anything says \"not trusted\", run `s_client -showcerts` before you touch config, and count the certificates. Before deploying a new `fullchain.pem`, list it with `pkcs7 -print_certs` and run `openssl verify` on it."
+    }
+  ]
+}
