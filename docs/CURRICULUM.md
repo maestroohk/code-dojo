@@ -1096,3 +1096,58 @@ builds and plays all five floors. Differences from the table in 2.1:
   `Delve.Game`, so the learner's top-level functions cannot call it. Making `uses` work for C# needs the engine to
   compile the step's code inside its own `transform` (or the class to expose members) when `uses` is present.
 - One dream only, so `dojo validate` warns "declare 4 or 5"; Star Trader, Pocket Pet, Quiz Show and Farm Days remain.
+
+## 6. Implementation notes: C# → Sidekick (deviations from 2.2)
+
+What shipped differs from section 2.2 and section 3 in these ways (engine format as committed in d832c04):
+
+- **One project, one class.** Sidekick is a single `dotnet-console` project (`sk.csproj` at the root, packed as
+  the tool `Sidekick.Dojo` with command `sk`), not the `Sidekick.slnx` + `Core`/`sk`/`Web` solution. Every piece
+  is wrapped by its `transform` into `namespace Sidekick; static partial class Sk { ... }`: learner functions become
+  members of `Sk` and learner types become nested types, so one transform works for methods and types and stubs
+  can be swapped file by file. Cross-piece calls are written `Sk.Name(...)` (valid in the grader and in the app).
+  The one exception is `Core/Linq/Batching.cs` (an extension class must be top level). Paths are `Cli/...` and
+  `Core/...` instead of `src/sk/...` and `src/Sidekick.Core/...`. The web dashboard/API stays for the p01 re-theme.
+- **Modules 1-2 pieces are method bodies.** Learners do not know methods yet, so the transform wraps their
+  statements into a fixed signature (`static string FormatMinutes(int minutes) { string result = ""; ...; return result; }`)
+  and the grading template mirrors it exactly. Lesson 1's first code step builds `Cli/Banner.cs`.
+- **Stubs live in the template** (`tracks/csharp/track.json`, generated): every piece file has a stub with the same
+  names that throws `NotBuiltYetException("<module> > <lesson>")`; the host catches it and says which lesson builds
+  the command, or falls back. The host only touches type members that exist from a type's first version
+  (`TaskItem.Id/Title/LoggedMinutes/IsRunning`), so the app builds at every one of the 62 lesson prefixes
+  (checked). Later-version members are reached through later pieces (e.g. `AddTask` sets `Tag`/`Project`).
+- **Interleaved review uses given code, not `uses`.** Each review step's template carries the reference version
+  of the earlier pieces it calls (functions as `internal static` members of a `static partial class Sk`, types
+  verbatim) and is tagged `"review": [...]`. `build.uses` is not set, for two reasons: (1) a used piece plus the
+  given copy would define the same members twice; (2) after its transform a piece's methods are *private* members of
+  `static partial class Sk` (top-level local functions carry no access modifier), so grader code calling `Sk.X(...)`
+  cannot reach a used piece. Before switching to `uses`, the engine must compile used C# pieces with their members
+  visible to the step (for example a grading-only transform that adds `internal`), and the given copies must be
+  removed in the same edit.
+- **Cold rebuilds are short lessons** (`055-cold-rebuild` etc., one per module, before the boss) whose code step
+  carries `"cold": true` and `"coldOf"`; module.json carries `"gate"`. Both are authored to section 3.4/3.5 and are
+  inert until the engine reads them. Cold steps build no piece.
+- **Only the flagship dream is declared**, so `dojo validate` warns "declare 4 or 5"; the engine has no
+  "coming soon" form for the four alternatives, so they are not listed.
+- **Persistence is a JSON snapshot** (`%USERPROFILE%\.sidekick\sidekick.json`, overridable with `SIDEKICK_HOME`):
+  the template owns `Snapshot`/`TaskData`; `JsonFileStore` (07/01) also owns the `TaskItem` ↔ `TaskData` mapping.
+  Before 07/01 the app keeps data for one run only and says so; `--demo` works on sample data from 04/08 on.
+- Reference pieces and the generator live outside the repo (scratchpad `sk-gen`); the track.json template is
+  generated from them. Proof of the assembled artifact: build the template plus every lesson's build-step
+  solution (transformed), then run `sk --demo`, `sk standup --demo`, a real add/start/stop/done/persist cycle,
+  `dotnet pack` and `dotnet tool install`.
+- **Fixes collected from the module conversion** (applied to the lessons, the reference pieces and every given copy):
+  `TaskItem.Label` formats the due date as `Due is DateOnly d ? $" (due {d:ddd d MMM})" : ""`; `Report.Render` and
+  `Standup` join lines with `"
+"` instead of `StringBuilder.AppendLine` (which writes `
+` on Windows and broke
+  exact comparisons); `WordCount` (03/01) uses a loop, not LINQ, because LINQ comes in module 6; the host's
+  `sk focus` parses its argument with the learner's `TryParseMinutes`/`ParseHours`.
+- **Streak rule (09/06):** a streak counts workdays. Saturday and Sunday are ignored: weekend activity neither adds
+  to a streak nor breaks it (Fri, Sat, Mon, Tue = 3; Sat and Sun alone = 0; on a Sunday the current streak counts
+  back from Friday). The first version let a Saturday entry break a Friday-to-Monday run; tests now cover it.
+- Bodies in modules 1-2 avoid constructs not yet taught (no ternary before it appears, no LINQ before module 6), so
+  some piece bodies are longer than the idiomatic version.
+- Proof (wave 1): the artifact assembled from every lesson's build-step solution builds with 0 warnings, runs every
+  command on `--demo` data and on a real data folder (add/start/log/stop/done persist across runs, `sync`,
+  `selftest`, `shell`), packs to `Sidekick.Dojo.1.0.0.nupkg` and installs with `dotnet tool install --tool-path`.

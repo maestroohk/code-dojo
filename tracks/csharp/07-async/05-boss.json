@@ -96,7 +96,12 @@
         "    public static Task<int> GetBalanceAsync(int userId) => Slow(userId == 1 ? 120 : 40);",
         "}"
       ],
-      "forbid": [{ "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter", "message": "Does not block with .Result or .Wait()" }],
+      "forbid": [
+        {
+          "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter",
+          "message": "Does not block with .Result or .Wait()"
+        }
+      ],
       "hints": [
         "Call all three methods first and keep the three tasks in variables. Do not `await` anything until all three have been started.",
         "The tasks have different result types, so `Task.WhenAll` cannot hand you one array. Use `await Task.WhenAll(nameTask, ordersTask, balanceTask);` only to wait.",
@@ -160,7 +165,12 @@
         "catch (Exception e) { outcome = e.GetType().Name; }",
         "Dojo.Eq(\"a failing task still throws its own exception\", \"InvalidOperationException\", outcome);"
       ],
-      "forbid": [{ "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter", "message": "Does not block with .Result or .Wait()" }],
+      "forbid": [
+        {
+          "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter",
+          "message": "Does not block with .Result or .Wait()"
+        }
+      ],
       "hints": [
         "`task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs))` is a task that fails with `TimeoutException` when the time runs out. Await that instead of `task`.",
         "Wrap the `await` in `try` and add `catch (TimeoutException) { return fallback; }`.",
@@ -243,7 +253,12 @@
         "catch (InvalidOperationException e) { outcome = e.Message; }",
         "Dojo.Eq(\"maxAttempts 1 means no retries at all\", \"attempt 1 failed\", outcome);"
       ],
-      "forbid": [{ "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter", "message": "Does not block with .Result or .Wait()" }],
+      "forbid": [
+        {
+          "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter",
+          "message": "Does not block with .Result or .Wait()"
+        }
+      ],
       "hints": [
         "Use a loop that counts attempts from 1. Inside it, `try { return await action(); }`. A successful attempt leaves the method through that `return`.",
         "In the `catch`, decide: if this was attempt number `maxAttempts`, rethrow with `throw;`. Otherwise fall out of the `catch` and continue.",
@@ -252,88 +267,142 @@
     },
     {
       "type": "code",
-      "title": "Bounded concurrency",
+      "title": "Retry and a limit, for Sidekick",
       "prompt": [
-        "`Task.WhenAll` over 500 urls opens 500 connections at once, and the server blocks you. You want concurrency, with a **limit**.",
+        "**Sidekick piece: the resilient client.** `sk links` fetches many pages at once, but at most 4 at a time, and it retries a flaky site. Here are the two helpers it uses. They are generic, so anything in Sidekick can use them.",
         "",
-        "The tests provide `Web.GetAsync(string url)`, which returns a `Task<string>` and takes about 20 ms.",
+        "1. `static async Task<T> Retry<T>(Func<Task<T>> action, int attempts, Func<int, Task> wait)`",
+        "   - `attempts` below 1 throws `ArgumentOutOfRangeException`.",
+        "   - Await `action()`. On success return the value. When it throws and this was not the last attempt, `await wait(attemptNumber)` (1 after the first failure, 2 after the second ...) and try again. The caller decides the backoff: `sk` passes `attempt => Task.Delay(200 * attempt)`.",
+        "   - The last failure's exception reaches the caller; no wait after it.",
+        "2. `static async Task<List<TResult>> ForEachLimited<T, TResult>(IReadOnlyList<T> items, int limit, Func<T, Task<TResult>> work)`",
+        "   - `limit` below 1 throws `ArgumentOutOfRangeException`.",
+        "   - Run `work` for every item with **at most** `limit` running at once (use a `SemaphoreSlim`), and return the results in the order of `items`.",
         "",
-        "Write `static async Task<List<string>> DownloadAllAsync(List<string> urls, int maxConcurrent)`:",
-        "",
-        "- Downloads every url and returns the pages **in the same order** as `urls`.",
-        "- Never has more than `maxConcurrent` downloads in progress at once.",
-        "- Does use the slots it is allowed: with a limit of 2, two downloads should be running together.",
-        "",
-        "The version below is correct but downloads one at a time. Use a `SemaphoreSlim`."
+        "```csharp",
+        "await ForEachLimited(urls, 4, url => Retry(() => fetch(url), 3, a => Task.Delay(200 * a)));",
+        "```"
       ],
       "starter": [
-        "static async Task<List<string>> DownloadAllAsync(List<string> urls, int maxConcurrent)",
+        "static async Task<T> Retry<T>(Func<Task<T>> action, int attempts, Func<int, Task> wait)",
         "{",
-        "    var pages = new List<string>();",
-        "    foreach (string url in urls)",
-        "    {",
-        "        pages.Add(await Web.GetAsync(url));",
-        "    }",
-        "    return pages;",
+        "    return await action();",
+        "}",
+        "",
+        "static async Task<List<TResult>> ForEachLimited<T, TResult>(IReadOnlyList<T> items, int limit, Func<T, Task<TResult>> work)",
+        "{",
+        "    var results = new List<TResult>();",
+        "    foreach (var item in items) results.Add(await work(item));",
+        "    return results;",
         "}"
       ],
       "solution": [
-        "static async Task<List<string>> DownloadAllAsync(List<string> urls, int maxConcurrent)",
+        "static async Task<T> Retry<T>(Func<Task<T>> action, int attempts, Func<int, Task> wait)",
         "{",
-        "    using var gate = new SemaphoreSlim(maxConcurrent);",
-        "",
-        "    async Task<string> DownloadOneAsync(string url)",
+        "    if (attempts < 1) throw new ArgumentOutOfRangeException(nameof(attempts));",
+        "    for (int attempt = 1; ; attempt++)",
         "    {",
-        "        await gate.WaitAsync();",
         "        try",
         "        {",
-        "            return await Web.GetAsync(url);",
+        "            return await action();",
         "        }",
-        "        finally",
+        "        catch (Exception) when (attempt < attempts)",
         "        {",
-        "            gate.Release();",
+        "            await wait(attempt);",
         "        }",
         "    }",
+        "}",
         "",
-        "    string[] pages = await Task.WhenAll(urls.Select(url => DownloadOneAsync(url)));",
-        "    return pages.ToList();",
+        "static async Task<List<TResult>> ForEachLimited<T, TResult>(IReadOnlyList<T> items, int limit, Func<T, Task<TResult>> work)",
+        "{",
+        "    if (limit < 1) throw new ArgumentOutOfRangeException(nameof(limit));",
+        "    using var gate = new SemaphoreSlim(limit);",
+        "    var running = items.Select(async item =>",
+        "    {",
+        "        await gate.WaitAsync();",
+        "        try { return await work(item); }",
+        "        finally { gate.Release(); }",
+        "    }).ToList();",
+        "    return (await Task.WhenAll(running)).ToList();",
         "}"
       ],
       "template": [
+        "using System.Net.Http;",
         "{{CODE}}",
-        "var urls = new List<string> { \"a\", \"b\", \"c\", \"d\", \"e\", \"f\" };",
-        "var expected = new List<string> { \"page a\", \"page b\", \"page c\", \"page d\", \"page e\", \"page f\" };",
-        "Dojo.Eq(\"with a limit of 2, all 6 pages come back in order\", expected, await DownloadAllAsync(urls, 2));",
-        "Dojo.Check(\"never more than 2 downloads at once\", Web.MaxInFlight <= 2, $\"saw {Web.MaxInFlight} downloads in progress at the same time\");",
-        "Dojo.Check(\"but 2 really do run together\", Web.MaxInFlight >= 2, \"downloads ran one at a time\");",
-        "Dojo.Eq(\"each url was downloaded once\", 6, Web.Calls);",
-        "Web.Reset();",
-        "Dojo.Eq(\"with a limit of 3, the pages are still in order\", expected, await DownloadAllAsync(urls, 3));",
-        "Dojo.Eq(\"and at most 3 ran together\", 3, Web.MaxInFlight);",
-        "Web.Reset();",
-        "Dojo.Eq(\"a limit larger than the list is fine\", new List<string> { \"page x\" }, await DownloadAllAsync(new List<string> { \"x\" }, 10));",
-        "Dojo.Eq(\"no urls gives an empty list\", 0, (await DownloadAllAsync(new List<string>(), 2)).Count);",
-        "static class Web",
+        "var dojoWaits = new List<int>();",
+        "Func<int, Task> dojoWait = attempt => { dojoWaits.Add(attempt); return Task.CompletedTask; };",
+        "int dojoCalls = 0;",
+        "int dojoValue = await Retry(async () => { await Task.Delay(1); if (++dojoCalls < 3) throw new HttpRequestException(\"flaky\"); return 42; }, 4, dojoWait);",
+        "Dojo.Eq(\"Retry returns the value once a try works\", 42, dojoValue);",
+        "Dojo.Eq(\"after failing twice it waited with attempt numbers 1 and 2\", new List<int> { 1, 2 }, dojoWaits);",
+        "dojoWaits.Clear();",
+        "dojoCalls = 0;",
+        "await Dojo.ThrowsAsync<HttpRequestException>(\"the last failure reaches the caller\", async () =>",
+        "    await Retry<int>(async () => { await Task.Delay(1); dojoCalls++; throw new HttpRequestException(\"down\"); }, 3, dojoWait));",
+        "Dojo.Eq(\"3 attempts means 3 calls\", 3, dojoCalls);",
+        "Dojo.Eq(\"and no wait after the final failure\", new List<int> { 1, 2 }, dojoWaits);",
+        "await Dojo.ThrowsAsync<ArgumentOutOfRangeException>(\"attempts must be at least 1\", async () => await Retry(() => Task.FromResult(1), 0, dojoWait));",
+        "int dojoInFlight = 0, dojoMax = 0;",
+        "var dojoGate = new object();",
+        "async Task<string> DojoWork(string item)",
         "{",
-        "    static readonly object Gate = new();",
-        "    static int _inFlight;",
-        "    public static int MaxInFlight;",
-        "    public static int Calls;",
-        "    public static void Reset() { lock (Gate) { _inFlight = 0; MaxInFlight = 0; Calls = 0; } }",
-        "    public static async Task<string> GetAsync(string url)",
-        "    {",
-        "        lock (Gate) { Calls++; _inFlight++; MaxInFlight = Math.Max(MaxInFlight, _inFlight); }",
-        "        await Task.Delay(20);",
-        "        lock (Gate) { _inFlight--; }",
-        "        return \"page \" + url;",
-        "    }",
-        "}"
+        "    lock (dojoGate) { dojoInFlight++; dojoMax = Math.Max(dojoMax, dojoInFlight); }",
+        "    await Task.Delay(20);",
+        "    lock (dojoGate) dojoInFlight--;",
+        "    return item.ToUpper();",
+        "}",
+        "var dojoOut = await ForEachLimited(new List<string> { \"a\", \"b\", \"c\", \"d\", \"e\" }, 2, DojoWork);",
+        "Dojo.Eq(\"ForEachLimited keeps the input order\", new List<string> { \"A\", \"B\", \"C\", \"D\", \"E\" }, dojoOut);",
+        "Dojo.Eq(\"never more than 2 at once, and it does use both slots\", 2, dojoMax);",
+        "Dojo.Eq(\"an empty list gives an empty list\", 0, (await ForEachLimited(new List<string>(), 3, DojoWork)).Count);",
+        "await Dojo.ThrowsAsync<ArgumentOutOfRangeException>(\"a limit below 1 is refused\", async () => await ForEachLimited(new List<string> { \"a\" }, 0, DojoWork));",
+        "int dojoFlaky = 0;",
+        "var dojoMixed = await ForEachLimited(new List<int> { 1, 2, 3 }, 3, n => Retry(async () =>",
+        "{",
+        "    await Task.Delay(1);",
+        "    if (n == 2 && Interlocked.Increment(ref dojoFlaky) == 1) throw new HttpRequestException(\"blip\");",
+        "    return n * 10;",
+        "}, 2, _ => Task.CompletedTask));",
+        "Dojo.Eq(\"together: one flaky item is retried, the rest just run\", new List<int> { 10, 20, 30 }, dojoMixed);"
       ],
-      "forbid": [{ "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter", "message": "Does not block with .Result or .Wait()" }],
+      "require": [
+        {
+          "pattern": "\\bSemaphoreSlim\\b",
+          "message": "Limits the work with a SemaphoreSlim"
+        },
+        {
+          "pattern": "\\bfinally\\b",
+          "message": "Releases the slot in a finally block"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\.Result\\b|\\.Wait\\s*\\(|GetAwaiter",
+          "message": "Does not block with .Result or .Wait()"
+        }
+      ],
       "hints": [
-        "Create one `SemaphoreSlim(maxConcurrent)` for the whole method. Then write a small async helper (a local function is fine) that downloads **one** url: take a slot with `await gate.WaitAsync()`, download inside `try`, `gate.Release()` in `finally`.",
-        "Start the helper for *every* url at once and wait with `Task.WhenAll`. The semaphore, not the loop, is what holds the extra ones back.",
-        "`string[] pages = await Task.WhenAll(urls.Select(url => DownloadOneAsync(url)));` then `return pages.ToList();`. `WhenAll` returns results in the order of the urls, whatever order they finished in."
+        "Retry: `for (int attempt = 1; ; attempt++) { try { return await action(); } catch (Exception) when (attempt < attempts) { await wait(attempt); } }`. The filter lets the last failure escape.",
+        "ForEachLimited: `using var gate = new SemaphoreSlim(limit);` and start one task per item: `await gate.WaitAsync(); try { return await work(item); } finally { gate.Release(); }`.",
+        "Collect them with `items.Select(async item => ...).ToList()` and `return (await Task.WhenAll(running)).ToList();`."
+      ],
+      "build": {
+        "file": "Core/Net/Resilient.cs",
+        "title": "Retry and bounded concurrency",
+        "unlocks": "sk links now fetches 4 pages at a time and retries flaky sites.",
+        "transform": [
+          "namespace Sidekick;",
+          "",
+          "// Retry and bounded concurrency: your own passing code from the code-dojo C# track (Async and await > Boss: the resilient client).",
+          "static partial class Sk",
+          "{",
+          "    {{CODE}}",
+          "}"
+        ]
+      },
+      "review": [
+        "csharp/06-generics-and-linq/01-generics",
+        "csharp/05-robust-code/02-exceptions"
       ]
     }
   ]

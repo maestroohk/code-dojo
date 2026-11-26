@@ -368,6 +368,170 @@
         "`orders.CountBy(o => o.Customer).ToDictionary()`",
         "`orders.AggregateBy(o => o.Customer, 0m, (sum, o) => sum + o.Total).ToDictionary()`"
       ]
+    },
+    {
+      "type": "code",
+      "title": "Sidekick: where the time goes, by tag",
+      "review": [
+        "csharp/05-robust-code/01-nullability"
+      ],
+      "prompt": [
+        "**Sidekick piece.** `sk tags` shows how many tasks and how much logged time each tag has. Use `CountBy` and `AggregateBy`, no loops, no `GroupBy`.",
+        "",
+        "`static List<(string Tag, int Tasks, int Minutes)> TagReport(IEnumerable<TaskItem> tasks)`",
+        "",
+        "- a task with no `Tag` counts as `\"(untagged)\"`",
+        "- `Tasks`: how many tasks have the tag (`CountBy`); `Minutes`: the sum of their `LoggedMinutes` (`AggregateBy`, seed `0`)",
+        "- most minutes first; equal minutes by tag in ordinal order (`StringComparer.Ordinal`)",
+        "- read `tasks` once into a list first: it may be a query that is expensive to repeat",
+        "",
+        "Example: `bug` on two tasks with 30 and 60 minutes gives `(\"bug\", 2, 90)`.",
+        "",
+        "Given in the tests, from your earlier Sidekick pieces: `TaskItem` with `Tag` (lower-cased, `null` when blank) and `Log(minutes)`."
+      ],
+      "starter": [
+        "static List<(string Tag, int Tasks, int Minutes)> TagReport(IEnumerable<TaskItem> tasks)",
+        "{",
+        "    return new List<(string Tag, int Tasks, int Minutes)>();",
+        "}"
+      ],
+      "solution": [
+        "static List<(string Tag, int Tasks, int Minutes)> TagReport(IEnumerable<TaskItem> tasks)",
+        "{",
+        "    var list = tasks.ToList();",
+        "    var counts = list.CountBy(t => t.Tag ?? \"(untagged)\").ToDictionary();",
+        "    var minutes = list.AggregateBy(t => t.Tag ?? \"(untagged)\", 0, (sum, t) => sum + t.LoggedMinutes).ToDictionary();",
+        "    return counts.Keys",
+        "        .OrderByDescending(tag => minutes[tag])",
+        "        .ThenBy(tag => tag, StringComparer.Ordinal)",
+        "        .Select(tag => (tag, counts[tag], minutes[tag]))",
+        "        .ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "TaskItem DojoTask(int id, string? tag, int logged) { var t = new TaskItem(id, \"task \" + id) { Tag = tag }; if (logged > 0) t.Log(logged); return t; }",
+        "var dojoTasks = new List<TaskItem> { DojoTask(1, \"bug\", 30), DojoTask(2, \"chore\", 120), DojoTask(3, null, 15), DojoTask(4, \"Bug\", 60), DojoTask(5, \"review\", 0), DojoTask(6, \" \", 0) };",
+        "var dojoReport = TagReport(dojoTasks);",
+        "Dojo.Eq(\"by minutes, most first\", new List<(string, int, int)> { (\"chore\", 1, 120), (\"bug\", 2, 90), (\"(untagged)\", 2, 15), (\"review\", 1, 0) }, dojoReport);",
+        "Dojo.Eq(\"every task counted once\", 6, dojoReport.Sum(r => r.Tasks));",
+        "Dojo.Eq(\"equal minutes: ordinal order\", new List<string> { \"api\", \"zed\" }, TagReport(new List<TaskItem> { DojoTask(1, \"zed\", 10), DojoTask(2, \"api\", 10) }).Select(r => r.Tag).ToList());",
+        "Dojo.Eq(\"nothing\", 0, TagReport(new List<TaskItem>()).Count);",
+        "int dojoReads = 0;",
+        "var dojoQuery = dojoTasks.Select(t => { dojoReads++; return t; });",
+        "TagReport(dojoQuery);",
+        "Dojo.Eq(\"reads the tasks only once\", 6, dojoReads);",
+        "",
+        "class TaskItem",
+        "{",
+        "    string? tag;",
+        "",
+        "    public TaskItem(int id, string title, int estimateMinutes = 0)",
+        "    {",
+        "        if (id < 1) throw new ArgumentOutOfRangeException(nameof(id), \"Task ids start at 1.\");",
+        "        if (string.IsNullOrWhiteSpace(title)) throw new ArgumentException(\"A task needs a title.\", nameof(title));",
+        "        if (estimateMinutes < 0) throw new ArgumentOutOfRangeException(nameof(estimateMinutes), \"An estimate cannot be negative.\");",
+        "        Id = id;",
+        "        Title = title.Trim();",
+        "        EstimateMinutes = estimateMinutes;",
+        "    }",
+        "",
+        "    public int Id { get; }",
+        "    public string Title { get; }",
+        "    public int EstimateMinutes { get; }",
+        "    public int LoggedMinutes { get; private set; }",
+        "    public bool IsRunning { get; private set; }",
+        "    public DateTime StartedAt { get; private set; }",
+        "    public bool Done { get; private set; }",
+        "",
+        "    public string? Tag",
+        "    {",
+        "        get => tag;",
+        "        set => tag = string.IsNullOrWhiteSpace(value) ? null : value.Trim().ToLowerInvariant();",
+        "    }",
+        "",
+        "    public string? Project { get; set; }",
+        "    public DateOnly? Due { get; set; }",
+        "",
+        "    public string Label()",
+        "    {",
+        "        string tagPart = Tag is null ? \"\" : $\" [{Tag}]\";",
+        "        string projectPart = Project is { Length: > 0 } p ? $\" @{p}\" : \"\";",
+        "        string duePart = Due is DateOnly d ? $\" (due {d:ddd d MMM})\" : \"\";",
+        "        return Title + tagPart + projectPart + duePart;",
+        "    }",
+        "",
+        "    public void Start(DateTime at)",
+        "    {",
+        "        if (Done) throw new InvalidOperationException(\"A finished task cannot be started.\");",
+        "        if (IsRunning) return;",
+        "        StartedAt = at;",
+        "        IsRunning = true;",
+        "    }",
+        "",
+        "    public int Stop(DateTime at)",
+        "    {",
+        "        if (!IsRunning) return 0;",
+        "        if (at < StartedAt) throw new ArgumentException(\"A timer cannot stop before it started.\", nameof(at));",
+        "        int minutes = (int)(at - StartedAt).TotalMinutes;",
+        "        LoggedMinutes += minutes;",
+        "        IsRunning = false;",
+        "        return minutes;",
+        "    }",
+        "",
+        "    public void Log(int minutes)",
+        "    {",
+        "        if (minutes < 1) throw new ArgumentOutOfRangeException(nameof(minutes), \"Log at least one minute.\");",
+        "        LoggedMinutes += minutes;",
+        "    }",
+        "",
+        "    public void Complete()",
+        "    {",
+        "        IsRunning = false;",
+        "        Done = true;",
+        "    }",
+        "}"
+      ],
+      "require": [
+        {
+          "pattern": "\\.CountBy\\s*\\(",
+          "message": "Counts with CountBy"
+        },
+        {
+          "pattern": "\\.AggregateBy\\s*\\(",
+          "message": "Sums with AggregateBy"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\b(for|foreach|while)\\b",
+          "message": "No loops"
+        },
+        {
+          "pattern": "GroupBy",
+          "message": "No GroupBy this time"
+        }
+      ],
+      "hints": [
+        "`var list = tasks.ToList();` then `list.CountBy(t => t.Tag ?? \"(untagged)\").ToDictionary()`.",
+        "`list.AggregateBy(t => t.Tag ?? \"(untagged)\", 0, (sum, t) => sum + t.LoggedMinutes).ToDictionary()`.",
+        "Sort the keys: `.OrderByDescending(tag => minutes[tag]).ThenBy(tag => tag, StringComparer.Ordinal)` and select `(tag, counts[tag], minutes[tag])`."
+      ],
+      "explain": "`CountBy` and `AggregateBy` give one pair per key without building the groups in memory. Reading the source into a list first matters as soon as two passes run over it.",
+      "build": {
+        "file": "Core/Reports/TagReport.cs",
+        "title": "Where the time goes, by tag",
+        "unlocks": "`sk tags` now shows where your time goes by tag.",
+        "transform": [
+          "namespace Sidekick;",
+          "",
+          "// Where the time goes, by tag: your own passing code from the code-dojo C# track (LINQ in depth > Grouping deeply).",
+          "static partial class Sk",
+          "{",
+          "    {{CODE}}",
+          "}"
+        ]
+      }
     }
   ]
 }

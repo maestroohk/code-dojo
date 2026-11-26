@@ -25,7 +25,7 @@ const FEATURES = [
     { name: 'Spaced re-proof', status: 'done', link: '#/practice', note: 'A proven module sends a cold rebuild back to Practice after 3 and 10 days ("Can you still do it?"). Not passing marks the module rusty (amber on the map) until you rebuild it.' },
     { name: 'Rush detector', status: 'done', note: 'Finishing far faster than the minutes a lesson suggests while leaning on hints and answers gets a kind nudge to try the cold rebuild, and no quest progress for that lesson. It never blocks you.' },
     { name: 'Profile file and path order', status: 'done', link: '#/', note: 'Your welcome answers are kept in .state/profile.json too. Reorder Your path on the home page (drag or arrows); the order is saved to your profile.' },
-    { name: 'Gates and cold rebuilds in every topic', status: 'building', note: 'The engine is done; C# and Fundamentals are being converted first, other topics follow (see docs/CURRICULUM.md).' },
+    { name: 'Gates and cold rebuilds in every topic', status: 'building', note: 'The engine is done. C# (builds Sidekick, a real CLI tool) and Fundamentals (builds Delve) are converted; PKI, Networking, Linux and Git are next (see docs/CURRICULUM.md and docs/HANDOFF.md).' },
   ] },
   { area: 'Labs', items: [
     { name: 'Certificate chain lab', status: 'done', link: '#/labs/pki', note: 'Lego-style board, real X509Chain validation, fix-it challenges.' },
