@@ -143,62 +143,51 @@
       "explain": "127 is \"command not found\"; `docker run` itself also exits with 127. Because the process never started, `docker ps -a` may show the container as `Created` rather than `Exited`, so the exit code in `docker inspect` is the reliable place to read it. Check the path and the file name's case with `--entrypoint sh` and `ls`."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Diagnose an exit",
+      "type": "terminal",
+      "title": "Diagnose four stopped containers",
+      "image": "docker",
       "prompt": [
-        "Write `string Diagnose(int exitCode, bool oomKilled, string lastLog)`. Check in this order:",
+        "This terminal has a **real Docker Engine**. Four containers stopped overnight: `cache`, `web`, `worker` and `api`.",
         "",
-        "1. `oomKilled` → `out of memory: raise --memory or reduce usage`",
-        "2. `lastLog` contains `exec format error` → `wrong CPU architecture: rebuild for the host platform`",
-        "3. by exit code:",
-        "",
-        "| code | result |",
-        "|---|---|",
-        "| 0 | `main process finished: keep the server in the foreground` |",
-        "| 125 | `docker could not create the container: check the run flags` |",
-        "| 126 | `command not executable: check permissions` |",
-        "| 127 | `command not found: check CMD/ENTRYPOINT and file name case` |",
-        "| 137 | `killed by SIGKILL: docker kill or a stop timeout` |",
-        "| 139 | `segmentation fault: native crash, check libc (alpine/musl?)` |",
-        "| 143 | `stopped by SIGTERM` |",
-        "| other | `app error (exit N): LASTLOG` |"
+        "1. Find out **why** each one stopped, and write one line per container into `~/answers/diagnosis.txt`, as",
+        "   `NAME CAUSE`, where CAUSE is one of:",
+        "   `oom` (killed for memory), `finished` (its main process simply ended), `not-found` (the command does not exist),",
+        "   `app-error` (the app exited with an error of its own).",
+        "2. Then fix `web`: run it again (same name, same image `shop/web:1.0`) so that it **stays up**."
       ],
-      "starter": [
-        "string Diagnose(int exitCode, bool oomKilled, string lastLog)",
-        "{",
-        "    // your code here",
-        "    return \"\";",
-        "}"
+      "setup": [
+        "crashing.sh"
+      ],
+      "checks": [
+        {
+          "name": "diagnosis.txt names each container's cause",
+          "cmd": "diff <(for c in cache web worker api; do docker inspect -f '{{.Name}} {{.State.ExitCode}} {{.State.OOMKilled}}' $c; done | awk '{n=substr($1,2); if ($3==\"true\") r=\"oom\"; else if ($2==0) r=\"finished\"; else if ($2==127) r=\"not-found\"; else r=\"app-error\"; print n, r}' | sort) <(sed '/^$/d' ~/answers/diagnosis.txt | tr -s ' ' | sort)",
+          "fail": "Not quite. One line per container, `NAME CAUSE`, with CAUSE one of `oom`, `finished`, `not-found`, `app-error`. `docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' NAME`."
+        },
+        {
+          "name": "web runs now, in the foreground",
+          "cmd": "docker inspect -f '{{.State.Running}} {{.RestartCount}}' web && docker exec web ps -o args | grep '[h]ttpd'",
+          "expectMatch": "^true 0\\n.*httpd.*-f",
+          "fail": "`web` should be running: `httpd` must stay in the foreground (`-f`), or the container's main process ends."
+        }
+      ],
+      "hints": [
+        "`docker ps -a` shows each exit code; `docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' NAME` gives the facts.",
+        "137 with `OOMKilled: true` is memory; 127 is \"command not found\" (`docker logs` shows it); 0 means the process ended normally.",
+        "`web` was started with `httpd -p 80 -h /www`, without `-f`: httpd forks into the background and the main process exits. The image's own CMD runs it in the foreground: `docker rm web && docker run -d --name web shop/web:1.0`."
       ],
       "solution": [
-        "string Diagnose(int exitCode, bool oomKilled, string lastLog)",
-        "{",
-        "    if (oomKilled) return \"out of memory: raise --memory or reduce usage\";",
-        "    if (lastLog.Contains(\"exec format error\")) return \"wrong CPU architecture: rebuild for the host platform\";",
-        "    return exitCode switch",
-        "    {",
-        "        0 => \"main process finished: keep the server in the foreground\",",
-        "        125 => \"docker could not create the container: check the run flags\",",
-        "        126 => \"command not executable: check permissions\",",
-        "        127 => \"command not found: check CMD/ENTRYPOINT and file name case\",",
-        "        137 => \"killed by SIGKILL: docker kill or a stop timeout\",",
-        "        139 => \"segmentation fault: native crash, check libc (alpine/musl?)\",",
-        "        143 => \"stopped by SIGTERM\",",
-        "        _ => $\"app error (exit {exitCode}): {lastLog}\"",
-        "    };",
-        "}"
+        "docker ps -a",
+        "docker inspect -f '{{.Name}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' cache web worker api",
+        "docker logs worker",
+        "docker logs api",
+        "printf '%s\\n' 'cache oom' 'web finished' 'worker not-found' 'api app-error' > ~/answers/diagnosis.txt",
+        "docker inspect -f '{{json .Config.Cmd}}' web",
+        "docker rm web",
+        "docker run -d --name web shop/web:1.0",
+        "docker ps"
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"OOM beats the exit code\", \"out of memory: raise --memory or reduce usage\", Diagnose(137, true, \"\"));",
-        "Dojo.Eq(\"plain 137\", \"killed by SIGKILL: docker kill or a stop timeout\", Diagnose(137, false, \"\"));",
-        "Dojo.Eq(\"architecture\", \"wrong CPU architecture: rebuild for the host platform\", Diagnose(1, false, \"exec /usr/bin/dotnet: exec format error\"));",
-        "Dojo.Eq(\"exit 0\", \"main process finished: keep the server in the foreground\", Diagnose(0, false, \"Starting nginx: nginx.\"));",
-        "Dojo.Eq(\"exit 127\", \"command not found: check CMD/ENTRYPOINT and file name case\", Diagnose(127, false, \"exec ./start.sh: no such file or directory\"));",
-        "Dojo.Eq(\"exit 139\", \"segmentation fault: native crash, check libc (alpine/musl?)\", Diagnose(139, false, \"\"));",
-        "Dojo.Eq(\"app error\", \"app error (exit 1): Unhandled exception. System.InvalidOperationException: No connection string\", Diagnose(1, false, \"Unhandled exception. System.InvalidOperationException: No connection string\"));"
-      ]
+      "explain": "The exit code plus `OOMKilled` sorts most crashes in seconds: 137 + OOM is memory, 127 is a missing command (often a typo or the wrong image), 0 means the main process ended (a server that daemonized, or a script that finished), anything else is the app's own error, explained in `docker logs`. A container lives exactly as long as its PID 1, which is why servers in containers run in the foreground."
     }
   ]
 }

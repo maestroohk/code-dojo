@@ -162,70 +162,57 @@
       "explain": "`--pull` also helps: it checks the registry for a newer version of the base image instead of using the local copy."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Which steps rebuild?",
+      "type": "terminal",
+      "title": "Fix the cache order",
+      "image": "docker",
       "prompt": [
-        "Write `List<string> Rebuilt(List<string> instructions, List<string> changed)`. `instructions` are Dockerfile instructions (already cleaned up), `changed` are paths of files that changed since the last build. Return each instruction prefixed with `cached: ` or `rebuilt: `.",
+        "This terminal has a **real Docker Engine**. `~/shop` builds with a slow dependency install (it stands in for",
+        "`dotnet restore` or `npm ci`). Build it twice, changing one source line in between, and watch the install run again:",
         "",
-        "The first `COPY` whose sources match a changed file misses the cache, and it **and everything after it** are rebuilt. Everything before it is cached. Other instructions never miss on their own here.",
+        "```bash",
+        "cd ~/shop && docker build -t shop/app:dev .",
+        "echo '# tweak' >> src/app.sh && docker build -t shop/app:dev .",
+        "```",
         "",
-        "For `COPY a b c dest`, the sources are every token except the first (`COPY`) and the last (the destination), ignoring tokens that start with `--`. A `COPY` with `--from=` copies from another stage, not the context: never let it miss. A source matches a file when:",
-        "",
-        "- it is `.` or `./` (the whole context),",
-        "- it starts with `*` and the file ends with the rest (`*.csproj` matches `Api.csproj`),",
-        "- or the file equals it, or lives under it as a folder (`src` or `src/` match `src/Program.cs`)."
+        "Reorder the Dockerfile so that a change under `src/` **reuses the cached install**, while a change to `deps.txt` still",
+        "reinstalls. The image must keep working: `docker run --rm shop/app:dev` prints `app ready (3 packages)`."
       ],
-      "starter": [
-        "List<string> Rebuilt(List<string> instructions, List<string> changed)",
-        "{",
-        "    var result = new List<string>();",
-        "    // your code here",
-        "    return result;",
-        "}"
+      "setup": [
+        "cache.sh"
       ],
-      "solution": [
-        "bool Matches(string source, string file)",
-        "{",
-        "    if (source == \".\" || source == \"./\") return true;",
-        "    if (source.StartsWith(\"*\")) return file.EndsWith(source[1..]);",
-        "    string dir = source.TrimEnd('/');",
-        "    return file == dir || file.StartsWith(dir + \"/\");",
-        "}",
-        "",
-        "List<string> Rebuilt(List<string> instructions, List<string> changed)",
-        "{",
-        "    var result = new List<string>();",
-        "    bool miss = false;",
-        "    foreach (string ins in instructions)",
-        "    {",
-        "        if (!miss && ins.StartsWith(\"COPY \") && !ins.Contains(\"--from=\"))",
-        "        {",
-        "            var parts = ins.Split(' ', StringSplitOptions.RemoveEmptyEntries).Skip(1).Where(p => !p.StartsWith(\"--\")).ToList();",
-        "            var sources = parts.Take(parts.Count - 1).ToList();",
-        "            if (changed.Any(f => sources.Any(s => Matches(s, f)))) miss = true;",
-        "        }",
-        "        result.Add((miss ? \"rebuilt: \" : \"cached: \") + ins);",
-        "    }",
-        "    return result;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoNode = new List<string> { \"FROM node:22-alpine\", \"WORKDIR /app\", \"COPY package.json package-lock.json ./\", \"RUN npm ci\", \"COPY . .\", \"CMD [\\\"node\\\", \\\"server.js\\\"]\" };",
-        "Dojo.Eq(\"source edit keeps npm ci cached\", new List<string> { \"cached: FROM node:22-alpine\", \"cached: WORKDIR /app\", \"cached: COPY package.json package-lock.json ./\", \"cached: RUN npm ci\", \"rebuilt: COPY . .\", \"rebuilt: CMD [\\\"node\\\", \\\"server.js\\\"]\" }, Rebuilt(dojoNode, new List<string> { \"src/index.js\" }));",
-        "Dojo.Eq(\"lock file change reinstalls\", new List<string> { \"cached: FROM node:22-alpine\", \"cached: WORKDIR /app\", \"rebuilt: COPY package.json package-lock.json ./\", \"rebuilt: RUN npm ci\", \"rebuilt: COPY . .\", \"rebuilt: CMD [\\\"node\\\", \\\"server.js\\\"]\" }, Rebuilt(dojoNode, new List<string> { \"package-lock.json\" }));",
-        "Dojo.Eq(\"nothing changed\", 6, Rebuilt(dojoNode, new List<string>()).Count(l => l.StartsWith(\"cached: \")));",
-        "var dojoNet = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:10.0\", \"COPY *.csproj ./\", \"RUN dotnet restore\", \"COPY src/ ./src/\", \"RUN dotnet publish -o /out\", \"COPY --from=tools /bin/x /x\" };",
-        "Dojo.Eq(\"wildcard matches the project file\", \"rebuilt: COPY *.csproj ./\", Rebuilt(dojoNet, new List<string> { \"Api.csproj\" })[1]);",
-        "Dojo.Eq(\"folder source matches files inside it\", new List<string> { \"cached: FROM mcr.microsoft.com/dotnet/sdk:10.0\", \"cached: COPY *.csproj ./\", \"cached: RUN dotnet restore\", \"rebuilt: COPY src/ ./src/\", \"rebuilt: RUN dotnet publish -o /out\", \"rebuilt: COPY --from=tools /bin/x /x\" }, Rebuilt(dojoNet, new List<string> { \"src/Program.cs\" }));",
-        "Dojo.Eq(\"a file outside every source changes nothing\", 6, Rebuilt(dojoNet, new List<string> { \"README.md\" }).Count(l => l.StartsWith(\"cached: \")));"
+      "checks": [
+        {
+          "name": "the image builds and runs",
+          "cmd": "cd ~/shop && docker build -q -t shop/app:dev . >/dev/null && docker run --rm shop/app:dev",
+          "expectOutput": "app ready (3 packages)",
+          "fail": "`docker build` fails or the app does not start."
+        },
+        {
+          "name": "a source change keeps the install cached; a deps.txt change reinstalls",
+          "cmd": "bash $DOJO_FILES/check-cache.sh ~/shop src/app.sh deps.txt",
+          "fail": "The check builds a copy of `~/shop`, changes `src/app.sh`, then `deps.txt`. Copy only what the install needs first, run it, then copy the rest."
+        }
       ],
       "hints": [
-        "Write a helper `bool Matches(string source, string file)` for the three matching rules.",
-        "Keep a `bool miss`; once it is true, it stays true.",
-        "Sources: split, skip `COPY`, drop `--` tokens, then take all but the last."
-      ]
+        "The cache breaks at the first instruction whose input changed, and everything after it rebuilds.",
+        "`COPY . .` copies `src/` too, so any source change invalidates the install that follows it.",
+        "Copy `deps.txt` and `install-deps.sh` first, `RUN` the install, and only then `COPY . .`."
+      ],
+      "solution": [
+        "cd ~/shop",
+        "cat > Dockerfile <<'EOF'",
+        "FROM alpine:3.24",
+        "WORKDIR /app",
+        "COPY deps.txt install-deps.sh ./",
+        "RUN sh install-deps.sh deps.txt",
+        "COPY . .",
+        "CMD [\"sh\", \"src/app.sh\"]",
+        "EOF",
+        "docker build -t shop/app:dev .",
+        "echo '# tweak' >> src/app.sh && docker build -t shop/app:dev .",
+        "docker run --rm shop/app:dev"
+      ],
+      "explain": "Layer caching is a chain: an instruction is reused only when it and everything before it are unchanged. Copying the dependency manifest first means the expensive restore only reruns when the dependencies change, which is the difference between a 2-second and a 2-minute rebuild on every commit. Real .NET Dockerfiles do exactly this: `COPY *.csproj` and `dotnet restore` before `COPY . .`."
     }
   ]
 }

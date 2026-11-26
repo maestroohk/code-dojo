@@ -1,307 +1,201 @@
 {
   "title": "Boss: the compose doctor",
-  "summary": "A linter for compose files: missing images, broken dependencies, port clashes, cycles and health conditions that can never pass.",
+  "summary": "Three Compose tickets on a real Docker Engine: a file Compose refuses, a service that died overnight, and an up --wait that never finishes.",
   "minutes": 15,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "Before anyone runs up",
-      "body": "Your team wants a check that runs in CI on every `compose.yaml`, so broken files fail fast with a clear message instead of a confusing error on someone's laptop. All three exercises read the same YAML subset (two-space indents; `services:` at 0, names at 2, keys at 4, list items or long-form `depends_on` names at 6, `condition:` at 8)."
+      "body": [
+        "Compose tickets arrive as symptoms: \"it won't even start\", \"something died last night\", \"CI hangs at `up --wait`\".",
+        "Each ticket below opens its own machine with a **real Docker Engine** and **Docker Compose**, with the stack in",
+        "`~/shop`. Reach for `docker compose config`, `ps -a`, `logs --since/--tail`, `docker inspect` and `up --wait`."
+      ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Structural checks",
+      "type": "terminal",
+      "title": "Ticket 1: \"Compose won't even load it\"",
+      "image": "docker",
       "prompt": [
-        "Write `List<string> Validate(List<string> lines)` that reports, in this order:",
+        "A real Docker Engine with Compose runs in this terminal. `cd ~/shop && docker compose config` fails.",
         "",
-        "1. for each service in file order: `SVC: needs image or build` if it has neither; then `SVC: depends on missing service 'X'` for each dependency that is not a service (in the order listed);",
-        "2. then, for each host port published by more than one service: `port P published by A and B` (services in file order; ports in order of first appearance; a mapping is `\"HOST:CONTAINER\"` or `\"IP:HOST:CONTAINER\"`).",
-        "",
-        "Return `ok` alone if nothing is wrong."
+        "Fix `~/shop/compose.yaml` until Compose accepts it (the API image is `shop/api:1.1`), and provide the database",
+        "password the file asks for **without writing it into `compose.yaml`** (the value is in `~/shop/NOTES.md`). Then",
+        "`docker compose up -d --wait` must bring up all three services, and `curl http://localhost:8080/` prints `web 1.0`."
       ],
-      "starter": [
-        "List<string> Validate(List<string> lines)",
-        "{",
-        "    var problems = new List<string>();",
-        "    // your code here",
-        "    return problems;",
-        "}"
+      "setup": [
+        "boss-config.sh"
       ],
-      "solution": [
-        "Dictionary<string, Dictionary<string, List<string>>> Parse(List<string> lines)",
-        "{",
-        "    var services = new Dictionary<string, Dictionary<string, List<string>>>();",
-        "    bool inServices = false;",
-        "    string? svc = null, key = null;",
-        "    foreach (string raw in lines)",
-        "    {",
-        "        string line = raw.Trim();",
-        "        if (line == \"\" || line.StartsWith(\"#\")) continue;",
-        "        int indent = raw.Length - raw.TrimStart().Length;",
-        "        if (indent == 0) { inServices = line == \"services:\"; svc = null; continue; }",
-        "        if (!inServices) continue;",
-        "        if (indent == 2) { svc = line.TrimEnd(':'); services[svc] = new Dictionary<string, List<string>>(); key = null; }",
-        "        else if (svc == null) continue;",
-        "        else if (indent == 4)",
-        "        {",
-        "            int colon = line.IndexOf(':');",
-        "            key = line[..colon];",
-        "            string value = line[(colon + 1)..].Trim();",
-        "            var items = new List<string>();",
-        "            if (value.StartsWith(\"[\")) items.AddRange(value.Trim('[', ']').Split(',').Select(x => x.Trim().Trim('\"', '\\'')).Where(x => x != \"\"));",
-        "            else if (value != \"\") items.Add(value.Trim('\"', '\\''));",
-        "            services[svc][key] = items;",
-        "        }",
-        "        else if (indent == 6 && key != null)",
-        "        {",
-        "            if (line.StartsWith(\"- \")) services[svc][key].Add(line[2..].Trim().Trim('\"', '\\''));",
-        "            else if (line.EndsWith(\":\")) services[svc][key].Add(line.TrimEnd(':'));",
-        "            else services[svc][key].Add(line);",
-        "        }",
-        "        else if (indent == 8 && key == \"depends_on\" && line.StartsWith(\"condition:\"))",
-        "        {",
-        "            var deps = services[svc][key];",
-        "            deps[^1] = deps[^1] + \"|\" + line[\"condition:\".Length..].Trim();",
-        "        }",
-        "    }",
-        "    return services;",
-        "}",
-        "",
-        "List<string> Validate(List<string> lines)",
-        "{",
-        "    var services = Parse(lines);",
-        "    List<string> Get(string s, string key) => services[s].TryGetValue(key, out var v) ? v : new List<string>();",
-        "    var problems = new List<string>();",
-        "    var owners = new Dictionary<string, List<string>>();",
-        "    var portOrder = new List<string>();",
-        "    foreach (string s in services.Keys)",
-        "    {",
-        "        if (!services[s].ContainsKey(\"image\") && !services[s].ContainsKey(\"build\")) problems.Add($\"{s}: needs image or build\");",
-        "        foreach (string d in Get(s, \"depends_on\"))",
-        "        {",
-        "            string name = d.Split('|')[0];",
-        "            if (!services.ContainsKey(name)) problems.Add($\"{s}: depends on missing service '{name}'\");",
-        "        }",
-        "        foreach (string map in Get(s, \"ports\"))",
-        "        {",
-        "            string[] p = map.Split(':');",
-        "            string host = p[^2];",
-        "            if (!owners.ContainsKey(host)) { owners[host] = new List<string>(); portOrder.Add(host); }",
-        "            if (!owners[host].Contains(s)) owners[host].Add(s);",
-        "        }",
-        "    }",
-        "    foreach (string port in portOrder)",
-        "        if (owners[port].Count > 1) problems.Add($\"port {port} published by {string.Join(\" and \", owners[port])}\");",
-        "    return problems.Count == 0 ? new List<string> { \"ok\" } : problems;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"valid file\", new List<string> { \"ok\" }, Validate(new List<string> { \"services:\", \"  api:\", \"    build: ./api\", \"    ports:\", \"      - \\\"8080:8080\\\"\", \"    depends_on:\", \"      - db\", \"  db:\", \"    image: postgres:17\" }));",
-        "Dojo.Eq(\"missing image and dependency\", new List<string> { \"web: needs image or build\", \"web: depends on missing service 'apii'\", \"api: depends on missing service 'cache'\" },",
-        "    Validate(new List<string> { \"services:\", \"  web:\", \"    ports:\", \"      - \\\"3000:3000\\\"\", \"    depends_on:\", \"      - apii\", \"  api:\", \"    build: ./api\", \"    depends_on:\", \"      db:\", \"        condition: service_healthy\", \"      cache:\", \"        condition: service_started\", \"  db:\", \"    image: postgres:17\" }));",
-        "Dojo.Eq(\"port clash\", new List<string> { \"port 8080 published by api and admin\" },",
-        "    Validate(new List<string> { \"services:\", \"  api:\", \"    build: ./api\", \"    ports:\", \"      - \\\"8080:8080\\\"\", \"      - \\\"9090:9090\\\"\", \"  admin:\", \"    image: adminer\", \"    ports:\", \"      - \\\"127.0.0.1:8080:8080\\\"\" }));"
+      "checks": [
+        {
+          "name": "compose config accepts it",
+          "cmd": "cd ~/shop && docker compose config -q 2>&1",
+          "fail": "`docker compose config` still reports a problem: fix them one at a time."
+        },
+        {
+          "name": "the password comes from .env, not compose.yaml",
+          "cmd": "cd ~/shop && grep -q '^DB_PASSWORD=..*' .env && ! grep -q example-staging-pw compose.yaml && grep -q '\\${DB_PASSWORD' compose.yaml",
+          "fail": "Keep `${DB_PASSWORD:?...}` in `compose.yaml` and put `DB_PASSWORD=...` in `~/shop/.env` (which stays out of Git)."
+        },
+        {
+          "name": "all three are up",
+          "cmd": "cd ~/shop && docker compose ps -a --format '{{.Service}} {{.State}} {{.Health}}' | sort",
+          "expectOutput": [
+            "api running ",
+            "db running healthy",
+            "web running "
+          ],
+          "fail": "Not all services are up. `docker compose up -d --wait`."
+        },
+        {
+          "name": "web answers",
+          "cmd": "curl -fsS --max-time 2 --retry 4 --retry-all-errors --retry-delay 1 http://localhost:8080/",
+          "expectOutput": "web 1.0",
+          "fail": "`curl http://localhost:8080/` does not print `web 1.0`."
+        }
       ],
       "hints": [
-        "Parse into service → key → values first; long-form depends_on entries may carry a `|condition` suffix if you store it.",
-        "The host port is the second-to-last `:` part of a mapping."
-      ]
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Order or cycle",
-      "prompt": "Write `string Order(List<string> lines)`: `start order: A, B, ...` using the alphabetically-first ready service each time, or `error: dependency cycle among A, B` (stuck services, sorted) when no service is ready but some remain. Dependencies on services that do not exist count as never ready (they will show up as stuck).",
-      "starter": [
-        "string Order(List<string> lines)",
-        "{",
-        "    // your code here",
-        "    return \"\";",
-        "}"
+        "`docker compose config` stops at the first problem: fix it and run it again.",
+        "Three problems: a required variable, a service with no `image`, and a network name that is not declared.",
+        "`echo DB_PASSWORD=example-staging-pw > .env`, add `image: shop/api:1.1` to `api`, and use `front` (declared) instead of `frontend`."
       ],
       "solution": [
-        "Dictionary<string, Dictionary<string, List<string>>> Parse(List<string> lines)",
-        "{",
-        "    var services = new Dictionary<string, Dictionary<string, List<string>>>();",
-        "    bool inServices = false;",
-        "    string? svc = null, key = null;",
-        "    foreach (string raw in lines)",
-        "    {",
-        "        string line = raw.Trim();",
-        "        if (line == \"\" || line.StartsWith(\"#\")) continue;",
-        "        int indent = raw.Length - raw.TrimStart().Length;",
-        "        if (indent == 0) { inServices = line == \"services:\"; svc = null; continue; }",
-        "        if (!inServices) continue;",
-        "        if (indent == 2) { svc = line.TrimEnd(':'); services[svc] = new Dictionary<string, List<string>>(); key = null; }",
-        "        else if (svc == null) continue;",
-        "        else if (indent == 4)",
-        "        {",
-        "            int colon = line.IndexOf(':');",
-        "            key = line[..colon];",
-        "            string value = line[(colon + 1)..].Trim();",
-        "            var items = new List<string>();",
-        "            if (value.StartsWith(\"[\")) items.AddRange(value.Trim('[', ']').Split(',').Select(x => x.Trim().Trim('\"', '\\'')).Where(x => x != \"\"));",
-        "            else if (value != \"\") items.Add(value.Trim('\"', '\\''));",
-        "            services[svc][key] = items;",
-        "        }",
-        "        else if (indent == 6 && key != null)",
-        "        {",
-        "            if (line.StartsWith(\"- \")) services[svc][key].Add(line[2..].Trim().Trim('\"', '\\''));",
-        "            else if (line.EndsWith(\":\")) services[svc][key].Add(line.TrimEnd(':'));",
-        "            else services[svc][key].Add(line);",
-        "        }",
-        "        else if (indent == 8 && key == \"depends_on\" && line.StartsWith(\"condition:\"))",
-        "        {",
-        "            var deps = services[svc][key];",
-        "            deps[^1] = deps[^1] + \"|\" + line[\"condition:\".Length..].Trim();",
-        "        }",
-        "    }",
-        "    return services;",
-        "}",
-        "",
-        "string Order(List<string> lines)",
-        "{",
-        "    var services = Parse(lines);",
-        "    var deps = services.ToDictionary(kv => kv.Key, kv => kv.Value.TryGetValue(\"depends_on\", out var d) ? d.Select(x => x.Split('|')[0]).ToList() : new List<string>());",
-        "    var order = new List<string>();",
-        "    var done = new HashSet<string>();",
-        "    while (order.Count < deps.Count)",
-        "    {",
-        "        string? next = deps.Keys.Where(s => !done.Contains(s) && deps[s].All(done.Contains)).OrderBy(s => s, StringComparer.Ordinal).FirstOrDefault();",
-        "        if (next == null)",
-        "            return \"error: dependency cycle among \" + string.Join(\", \", deps.Keys.Where(s => !done.Contains(s)).OrderBy(s => s, StringComparer.Ordinal));",
-        "        order.Add(next);",
-        "        done.Add(next);",
-        "    }",
-        "    return \"start order: \" + string.Join(\", \", order);",
-        "}"
+        "cd ~/shop",
+        "docker compose config -q",
+        "echo DB_PASSWORD=example-staging-pw > .env",
+        "docker compose config -q",
+        "sed -i 's/^  api:$/  api:\\n    image: shop\\/api:1.1/; s/networks: \\[frontend\\]/networks: [front]/' compose.yaml",
+        "docker compose config -q",
+        "docker compose up -d --wait",
+        "curl http://localhost:8080/"
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"chain with long form\", \"start order: db, migrate, api, web\", Order(new List<string> { \"services:\", \"  web:\", \"    build: ./web\", \"    depends_on:\", \"      - api\", \"  api:\", \"    build: ./api\", \"    depends_on:\", \"      migrate:\", \"        condition: service_completed_successfully\", \"  migrate:\", \"    build: ./api\", \"    depends_on:\", \"      db:\", \"        condition: service_healthy\", \"  db:\", \"    image: postgres:17\" }));",
-        "Dojo.Eq(\"three-way cycle\", \"error: dependency cycle among a, b, c\", Order(new List<string> { \"services:\", \"  a:\", \"    image: x\", \"    depends_on:\", \"      - b\", \"  b:\", \"    image: x\", \"    depends_on:\", \"      - c\", \"  c:\", \"    image: x\", \"    depends_on:\", \"      - a\", \"  d:\", \"    image: x\" }));"
-      ]
+      "explain": "`docker compose config` is Compose's linter: it resolves variables, validates the schema and cross-references (networks, volumes, depends_on) before anything runs. `${VAR:?message}` turns a forgotten secret into a clear error instead of an empty password, and keeping the value in `.env` (git-ignored) keeps it out of the repository."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Health conditions that can never pass",
+      "type": "terminal",
+      "title": "Ticket 2: \"something died last night\"",
+      "image": "docker",
       "prompt": [
-        "Write `List<string> Waits(List<string> lines)` that explains what each service waits for, for every dependency, in file order of the dependent service and then listing order:",
+        "A real Docker Engine with Compose runs in this terminal. The `~/shop` stack ran all night; this morning jobs are piling",
+        "up. Investigate with Compose, then fix it:",
         "",
-        "- short form, or `condition: service_started` → `A waits for B to start`",
-        "- `condition: service_healthy` → `A waits for B to be healthy`, **but** if B has no `healthcheck` key, instead: `error: A waits for B to be healthy, but B has no healthcheck`",
-        "- `condition: service_completed_successfully` → `A waits for B to finish successfully`",
-        "",
-        "Return `no dependencies` alone when there are none."
+        "1. write the name of the **service** that stopped into `~/answers/service.txt`;",
+        "2. write its **exit code** into `~/answers/exit.txt`;",
+        "3. write the **error line** it logged into `~/answers/error.txt`;",
+        "4. fix it the way its error message says, without editing `compose.yaml` (it reads the setting from a variable), and",
+        "   bring it back so it stays up."
       ],
-      "starter": [
-        "List<string> Waits(List<string> lines)",
-        "{",
-        "    var result = new List<string>();",
-        "    // your code here",
-        "    return result;",
-        "}"
+      "setup": [
+        "boss-night.sh"
       ],
-      "solution": [
-        "Dictionary<string, Dictionary<string, List<string>>> Parse(List<string> lines)",
-        "{",
-        "    var services = new Dictionary<string, Dictionary<string, List<string>>>();",
-        "    bool inServices = false;",
-        "    string? svc = null, key = null;",
-        "    foreach (string raw in lines)",
-        "    {",
-        "        string line = raw.Trim();",
-        "        if (line == \"\" || line.StartsWith(\"#\")) continue;",
-        "        int indent = raw.Length - raw.TrimStart().Length;",
-        "        if (indent == 0) { inServices = line == \"services:\"; svc = null; continue; }",
-        "        if (!inServices) continue;",
-        "        if (indent == 2) { svc = line.TrimEnd(':'); services[svc] = new Dictionary<string, List<string>>(); key = null; }",
-        "        else if (svc == null) continue;",
-        "        else if (indent == 4)",
-        "        {",
-        "            int colon = line.IndexOf(':');",
-        "            key = line[..colon];",
-        "            string value = line[(colon + 1)..].Trim();",
-        "            var items = new List<string>();",
-        "            if (value.StartsWith(\"[\")) items.AddRange(value.Trim('[', ']').Split(',').Select(x => x.Trim().Trim('\"', '\\'')).Where(x => x != \"\"));",
-        "            else if (value != \"\") items.Add(value.Trim('\"', '\\''));",
-        "            services[svc][key] = items;",
-        "        }",
-        "        else if (indent == 6 && key != null)",
-        "        {",
-        "            if (line.StartsWith(\"- \")) services[svc][key].Add(line[2..].Trim().Trim('\"', '\\''));",
-        "            else if (line.EndsWith(\":\")) services[svc][key].Add(line.TrimEnd(':'));",
-        "            else services[svc][key].Add(line);",
-        "        }",
-        "        else if (indent == 8 && key == \"depends_on\" && line.StartsWith(\"condition:\"))",
-        "        {",
-        "            var deps = services[svc][key];",
-        "            deps[^1] = deps[^1] + \"|\" + line[\"condition:\".Length..].Trim();",
-        "        }",
-        "    }",
-        "    return services;",
-        "}",
-        "",
-        "List<string> Waits(List<string> lines)",
-        "{",
-        "    var services = Parse(lines);",
-        "    var result = new List<string>();",
-        "    foreach (string s in services.Keys)",
-        "    {",
-        "        if (!services[s].TryGetValue(\"depends_on\", out var deps)) continue;",
-        "        foreach (string d in deps)",
-        "        {",
-        "            string[] parts = d.Split('|');",
-        "            string b = parts[0], condition = parts.Length > 1 ? parts[1] : \"service_started\";",
-        "            if (condition == \"service_healthy\")",
-        "            {",
-        "                bool hasCheck = services.ContainsKey(b) && services[b].ContainsKey(\"healthcheck\");",
-        "                result.Add(hasCheck ? $\"{s} waits for {b} to be healthy\" : $\"error: {s} waits for {b} to be healthy, but {b} has no healthcheck\");",
-        "            }",
-        "            else if (condition == \"service_completed_successfully\") result.Add($\"{s} waits for {b} to finish successfully\");",
-        "            else result.Add($\"{s} waits for {b} to start\");",
-        "        }",
-        "    }",
-        "    return result.Count == 0 ? new List<string> { \"no dependencies\" } : result;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoFile = new List<string> {",
-        "    \"services:\",",
-        "    \"  web:\",",
-        "    \"    build: ./web\",",
-        "    \"    depends_on:\",",
-        "    \"      - api\",",
-        "    \"  api:\",",
-        "    \"    build: ./api\",",
-        "    \"    depends_on:\",",
-        "    \"      db:\",",
-        "    \"        condition: service_healthy\",",
-        "    \"      redis:\",",
-        "    \"        condition: service_healthy\",",
-        "    \"      migrate:\",",
-        "    \"        condition: service_completed_successfully\",",
-        "    \"  migrate:\",",
-        "    \"    build: ./api\",",
-        "    \"  db:\",",
-        "    \"    image: postgres:17\",",
-        "    \"    healthcheck:\",",
-        "    \"      test: [\\\"CMD-SHELL\\\", \\\"pg_isready\\\"]\",",
-        "    \"      interval: 5s\",",
-        "    \"  redis:\",",
-        "    \"    image: redis:7.4-alpine\" };",
-        "Dojo.Eq(\"every kind of wait\", new List<string> { \"web waits for api to start\", \"api waits for db to be healthy\", \"error: api waits for redis to be healthy, but redis has no healthcheck\", \"api waits for migrate to finish successfully\" }, Waits(dojoFile));",
-        "Dojo.Eq(\"no dependencies\", new List<string> { \"no dependencies\" }, Waits(new List<string> { \"services:\", \"  a:\", \"    image: x\" }));"
+      "checks": [
+        {
+          "name": "service.txt names the service",
+          "cmd": "test \"$(xargs < ~/answers/service.txt)\" = worker",
+          "fail": "Not the service that stopped. `docker compose ps -a` shows every service, stopped ones too."
+        },
+        {
+          "name": "exit.txt has its exit code",
+          "cmd": "test \"$(xargs < ~/answers/exit.txt)\" = 75",
+          "fail": "Not its exit code. `docker compose ps -a` shows `Exited (CODE)`; `docker inspect -f '{{.State.ExitCode}}'` prints it."
+        },
+        {
+          "name": "error.txt has the error line",
+          "cmd": "grep -qF 'ERROR queue full' ~/answers/error.txt",
+          "fail": "Not the error line. `docker compose logs --no-log-prefix worker` (add `--tail 20` or `--since 1h` on a busy service)."
+        },
+        {
+          "name": "the worker is up and idle",
+          "cmd": "cd ~/shop && docker compose ps --format '{{.Service}} {{.State}}' worker && docker compose logs --no-log-prefix worker | tail -n 1",
+          "expectOutput": [
+            "worker running",
+            "worker 2.3: idle, waiting for jobs"
+          ],
+          "fail": "The worker is not running and idle yet. Its error says which setting to raise; `compose.yaml` reads it from a variable."
+        },
+        {
+          "name": "compose.yaml is unchanged",
+          "cmd": "cd ~/shop && grep -c 'QUEUE_MAX: \\${QUEUE_MAX:-5}' compose.yaml",
+          "expectOutput": "1",
+          "fail": "Leave `compose.yaml` as it is: set the variable in `.env` (or the shell)."
+        }
       ],
       "hints": [
-        "Store long-form entries as `name|condition` while parsing (the `condition:` line at indent 8 follows its name).",
-        "A service has a healthcheck when its key dictionary contains `healthcheck`."
-      ]
+        "`docker compose ps -a` lists stopped services with their exit code.",
+        "`docker compose logs --no-log-prefix --tail 20 worker` shows its last lines.",
+        "The error says to raise `QUEUE_MAX`: `echo QUEUE_MAX=20 > ~/shop/.env`, then `docker compose up -d worker` recreates it with the new value."
+      ],
+      "solution": [
+        "cd ~/shop",
+        "docker compose ps -a",
+        "echo worker > ~/answers/service.txt",
+        "docker inspect -f '{{.State.ExitCode}}' shop-worker-1 > ~/answers/exit.txt",
+        "docker compose logs --no-log-prefix --tail 20 worker",
+        "docker compose logs --no-log-prefix worker | grep ERROR > ~/answers/error.txt",
+        "echo QUEUE_MAX=20 > .env",
+        "docker compose up -d worker",
+        "docker compose ps"
+      ],
+      "explain": "A stopped service is easy to miss: `docker compose ps` hides it, `ps -a` shows it with its exit code. `logs --tail`/`--since` cut a night of output down to the lines that matter. Changing an environment value needs a **recreate**, not a restart, and `docker compose up -d SERVICE` does exactly that when the resolved config changed. A `restart: on-failure` policy would have retried, but only a fix stops the crash."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 3: \"CI hangs at up --wait\"",
+      "image": "docker",
+      "prompt": [
+        "A real Docker Engine with Compose runs in this terminal. CI runs `docker compose up -d --wait` in `~/shop`, and it",
+        "never succeeds. Try it (it gives up after a while):",
+        "",
+        "```bash",
+        "cd ~/shop && docker compose up -d --wait --wait-timeout 25",
+        "```",
+        "",
+        "Find out why the healthcheck never passes (Docker keeps the output of the last probes) and fix `compose.yaml`, so that",
+        "`docker compose up -d --wait` succeeds and every service is up. The API's health endpoint is `/health`."
+      ],
+      "setup": [
+        "boss-wait.sh"
+      ],
+      "checks": [
+        {
+          "name": "api is healthy",
+          "cmd": "docker inspect -f '{{.State.Health.Status}}' shop-api-1 2>&1",
+          "expectOutput": "healthy",
+          "fail": "`api` is not healthy. `docker inspect -f '{{json .State.Health}}' shop-api-1 | jq` shows the probe's output."
+        },
+        {
+          "name": "db is healthy and web runs",
+          "cmd": "cd ~/shop && docker compose ps -a --format '{{.Service}} {{.State}} {{.Health}}' db web | sort",
+          "expectOutput": [
+            "db running healthy",
+            "web running "
+          ],
+          "fail": "Not all services are up."
+        },
+        {
+          "name": "the healthcheck probes /health",
+          "cmd": "cd ~/shop && docker compose config --format json | jq -r '.services.api.healthcheck.test | join(\" \")'",
+          "expectMatch": "localhost:8000/health",
+          "fail": "The API's healthcheck should probe its `/health` endpoint on the port it listens on."
+        }
+      ],
+      "hints": [
+        "`docker compose ps -a` shows `(unhealthy)`; `docker inspect -f '{{json .State.Health}}' shop-api-1 | jq` shows each probe's exit code and output.",
+        "`docker compose logs api` says which port the API listens on.",
+        "Probe `http://localhost:8000/health` instead of `http://localhost:8080/healthz`, then `docker compose up -d --wait`."
+      ],
+      "solution": [
+        "cd ~/shop",
+        "docker compose up -d --wait --wait-timeout 25",
+        "docker compose ps -a",
+        "docker inspect -f '{{json .State.Health}}' shop-api-1 | jq '.Log[-1]'",
+        "docker compose logs api",
+        "sed -i 's#http://localhost:8080/healthz#http://localhost:8000/health#' compose.yaml",
+        "docker compose up -d --wait",
+        "docker compose ps"
+      ],
+      "explain": "A healthcheck runs **inside** the container, so `localhost` there is the API itself, and the port is the one the app listens on, not the published one. `.State.Health.Log` keeps the last probes' output, which turns \"unhealthy\" into a concrete error. Because `web` waits for `service_healthy`, one wrong probe blocked the whole stack, and `--wait-timeout` is what keeps CI from hanging forever."
     }
   ]
 }

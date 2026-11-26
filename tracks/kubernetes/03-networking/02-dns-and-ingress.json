@@ -43,41 +43,47 @@
       "explain": "Short names only resolve in your own namespace. Add `.identity` (or use the full name)."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Resolve a short name",
+      "type": "terminal",
+      "title": "Call a Service in another namespace",
+      "image": "k8s",
       "prompt": [
-        "Write `string Fqdn(string name, string podNamespace)` that expands a name the way a pod's resolver would for Services:",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `cart` (namespace `shop`) calls the `payments` Service, which lives in the namespace `payments`. Its log",
+        "says it cannot: `kubectl -n shop logs deploy/cart --tail=3`.",
         "",
-        "- one part (`payments`) → `payments.<podNamespace>.svc.cluster.local`",
-        "- two parts (`payments.shop`) → `payments.shop.svc.cluster.local`",
-        "- already ending in `.svc.cluster.local` → unchanged"
+        "1. Write the **fully qualified** DNS name of the `payments` Service into `~/answers/fqdn.txt`.",
+        "2. Fix `cart`'s `PAYMENTS_URL` (an environment variable on the Deployment) so that it reaches payments; its newest log",
+        "   line then says `payments OK`."
       ],
-      "starter": [
-        "string Fqdn(string name, string podNamespace)",
-        "{",
-        "    return name;",
-        "}"
+      "setup": [
+        "dns.sh"
       ],
-      "solution": [
-        "string Fqdn(string name, string podNamespace)",
-        "{",
-        "    if (name.EndsWith(\".svc.cluster.local\")) return name;",
-        "    var parts = name.Split('.');",
-        "    if (parts.Length == 1) return $\"{name}.{podNamespace}.svc.cluster.local\";",
-        "    return $\"{name}.svc.cluster.local\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"payments from shop\", \"payments.shop.svc.cluster.local\", Fqdn(\"payments\", \"shop\"));",
-        "Dojo.Eq(\"auth.identity from blog\", \"auth.identity.svc.cluster.local\", Fqdn(\"auth.identity\", \"blog\"));",
-        "Dojo.Eq(\"full name unchanged\", \"db.data.svc.cluster.local\", Fqdn(\"db.data.svc.cluster.local\", \"shop\"));"
+      "checks": [
+        {
+          "name": "fqdn.txt is the Service's full name",
+          "cmd": "grep -qx 'payments.payments.svc.cluster.local' <(xargs < ~/answers/fqdn.txt)",
+          "fail": "Not the full name. A Service is `NAME.NAMESPACE.svc.cluster.local`."
+        },
+        {
+          "name": "cart reaches payments",
+          "cmd": "kubectl -n shop rollout status deploy/cart --timeout=30s >/dev/null && sleep 4 && kubectl -n shop logs $(kubectl -n shop get pods -l app=cart -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name') --tail=1",
+          "expectMatch": "payments OK",
+          "fail": "`cart`'s newest log line does not say `payments OK`. A short name only resolves in the pod's own namespace."
+        }
       ],
       "hints": [
-        "Check the full suffix first.",
-        "`name.Split('.').Length` tells you how many parts there are."
-      ]
+        "`kubectl -n shop exec deploy/cart -- cat /etc/resolv.conf` shows the search list: `shop.svc.cluster.local` comes first.",
+        "`payments` alone means `payments.shop...`; add the namespace: `payments.payments`, or the full name.",
+        "`kubectl -n shop set env deploy/cart PAYMENTS_URL=http://payments.payments.svc.cluster.local/`."
+      ],
+      "solution": [
+        "kubectl -n shop logs deploy/cart --tail=3",
+        "kubectl -n shop exec deploy/cart -- cat /etc/resolv.conf",
+        "kubectl -n shop exec deploy/cart -- nslookup payments.payments.svc.cluster.local",
+        "echo payments.payments.svc.cluster.local > ~/answers/fqdn.txt",
+        "kubectl -n shop set env deploy/cart PAYMENTS_URL=http://payments.payments.svc.cluster.local/",
+        "kubectl -n shop rollout status deploy/cart"
+      ],
+      "explain": "Pods resolve names through CoreDNS with a search list that starts with their own namespace, so `payments` from `shop` looks for `payments.shop.svc.cluster.local`. Across namespaces use `NAME.NAMESPACE` or the full name. With `ndots:5`, external names get the search list tried first, which is why the trailing dot (`api.example.com.`) is a known latency trick."
     },
     {
       "type": "learn",
@@ -181,58 +187,66 @@
       "explain": "`/api/admin` does not match. Of `/` and `/api`, the longer one wins. Note `/apiary` would *not* match `/api`: Prefix compares segments, not characters."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Route a request",
+      "type": "terminal",
+      "title": "Route traffic with a Gateway API HTTPRoute",
+      "image": "k8s",
       "prompt": [
-        "Write `string Route(string host, string path, List<(string Host, string Prefix, string Service)> rules)` that returns the Service for a request, or `\"404\"` if none matches.",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). It has the **Gateway API** CRDs (v1.7) installed, and the platform team's Gateway `public` in the",
+        "namespace `shop` (`kubectl get gateway -n shop`). There is no gateway controller in this small cluster, so nothing",
+        "serves traffic, but the API server validates your route exactly as a real cluster would.",
         "",
-        "- A rule applies if its `Host` equals `host`, or its `Host` is `\"\"` (any host).",
-        "- Its prefix matches when the path equals it, or starts with it followed by `/`. Prefix `/` matches everything.",
-        "- Prefer rules with an exact host over `\"\"`; among those, the **longest** prefix wins."
-      ],
-      "starter": [
-        "string Route(string host, string path, List<(string Host, string Prefix, string Service)> rules)",
-        "{",
-        "    return \"404\";",
-        "}"
-      ],
-      "solution": [
-        "bool PrefixMatch(string prefix, string path) =>",
-        "    prefix == \"/\" || path == prefix || path.StartsWith(prefix.TrimEnd('/') + \"/\");",
+        "Write and apply an `HTTPRoute` named `shop` in the namespace `shop`, attached to the Gateway `public`, for the host",
+        "`shop.example.com`:",
         "",
-        "string Route(string host, string path, List<(string Host, string Prefix, string Service)> rules)",
-        "{",
-        "    var best = rules",
-        "        .Where(r => (r.Host == host || r.Host == \"\") && PrefixMatch(r.Prefix, path))",
-        "        .OrderByDescending(r => r.Host == host ? 1 : 0)",
-        "        .ThenByDescending(r => r.Prefix.Length)",
-        "        .ToList();",
-        "    return best.Count > 0 ? best[0].Service : \"404\";",
-        "}"
+        "1. requests whose path starts with `/api` go to the Service `api` on port 80;",
+        "2. everything else goes to the Service `web` on port 80.",
+        "",
+        "`kubectl explain httproute.spec.rules` documents every field."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoRules = new List<(string Host, string Prefix, string Service)> {",
-        "    (\"shop.example.com\", \"/\", \"shop-web\"),",
-        "    (\"shop.example.com\", \"/api\", \"shop-api\"),",
-        "    (\"shop.example.com\", \"/api/admin\", \"admin\"),",
-        "    (\"blog.example.com\", \"/\", \"blog\"),",
-        "    (\"\", \"/healthz\", \"health\"),",
-        "};",
-        "Dojo.Eq(\"/api/orders/7\", \"shop-api\", Route(\"shop.example.com\", \"/api/orders/7\", dojoRules));",
-        "Dojo.Eq(\"/api/admin/users\", \"admin\", Route(\"shop.example.com\", \"/api/admin/users\", dojoRules));",
-        "Dojo.Eq(\"/apiary is not /api\", \"shop-web\", Route(\"shop.example.com\", \"/apiary\", dojoRules));",
-        "Dojo.Eq(\"/api exactly\", \"shop-api\", Route(\"shop.example.com\", \"/api\", dojoRules));",
-        "Dojo.Eq(\"blog host\", \"blog\", Route(\"blog.example.com\", \"/posts/1\", dojoRules));",
-        "Dojo.Eq(\"any-host rule\", \"health\", Route(\"other.example.com\", \"/healthz\", dojoRules));",
-        "Dojo.Eq(\"exact host wins over any-host\", \"shop-web\", Route(\"shop.example.com\", \"/healthz\", dojoRules));",
-        "Dojo.Eq(\"unknown host\", \"404\", Route(\"evil.example.com\", \"/\", dojoRules));"
+      "setup": [
+        "gateway.sh"
+      ],
+      "checks": [
+        {
+          "name": "the HTTPRoute shop exists and is attached to the Gateway public",
+          "cmd": "kubectl -n shop get httproute shop -o jsonpath='{.spec.parentRefs[0].name} {.spec.hostnames}'",
+          "expectOutput": "public [\"shop.example.com\"]",
+          "fail": "There is no HTTPRoute `shop` in `shop` attached to `public` for `shop.example.com`."
+        },
+        {
+          "name": "/api goes to the api Service, everything else to web",
+          "cmd": "kubectl -n shop get httproute shop -o json | jq -r '.spec.rules[] | \"\\(.matches[0].path.type // \"-\") \\(.matches[0].path.value // \"-\") -> \\(.backendRefs[0].name):\\(.backendRefs[0].port)\"' | sort",
+          "expectOutput": [
+            "PathPrefix / -> web:80",
+            "PathPrefix /api -> api:80"
+          ],
+          "fail": "The rules should send `PathPrefix /api` to `api:80` and `PathPrefix /` to `web:80`."
+        }
       ],
       "hints": [
-        "Write a `PrefixMatch(prefix, path)` helper first: `/` matches all; otherwise equal or starts with `prefix + \"/\"`.",
-        "Sort the candidates: exact host first, then longest prefix."
-      ]
+        "`apiVersion: gateway.networking.k8s.io/v1`, `kind: HTTPRoute`; `spec.parentRefs: [{name: public}]` attaches it.",
+        "`spec.hostnames: [shop.example.com]`; each rule has `matches: [{path: {type: PathPrefix, value: /api}}]` and `backendRefs: [{name: api, port: 80}]`.",
+        "The longest matching prefix wins, so the `/` rule can sit next to the `/api` one."
+      ],
+      "solution": [
+        "kubectl explain httproute.spec.rules.matches.path",
+        "cat > ~/route.yaml <<'EOF'",
+        "apiVersion: gateway.networking.k8s.io/v1",
+        "kind: HTTPRoute",
+        "metadata: {name: shop, namespace: shop}",
+        "spec:",
+        "  parentRefs: [{name: public}]",
+        "  hostnames: [shop.example.com]",
+        "  rules:",
+        "    - matches: [{path: {type: PathPrefix, value: /api}}]",
+        "      backendRefs: [{name: api, port: 80}]",
+        "    - matches: [{path: {type: PathPrefix, value: /}}]",
+        "      backendRefs: [{name: web, port: 80}]",
+        "EOF",
+        "kubectl apply -f ~/route.yaml",
+        "kubectl -n shop get httproute shop -o yaml"
+      ],
+      "explain": "The Gateway API splits what Ingress mixed together: the platform team owns the `Gateway` (listeners, TLS, which controller), application teams own `HTTPRoute`s that attach to it. Since ingress-nginx was retired in March 2026, this is the API new clusters use; Ingress objects still exist in many clusters and translate almost one to one (`ingress2gateway` does it). On a real cluster, `kubectl get httproute shop -o yaml` would also show `status.parents[].conditions` with `Accepted` and `ResolvedRefs`."
     }
   ]
 }

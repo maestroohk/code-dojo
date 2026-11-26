@@ -77,63 +77,58 @@
       "answer": "120"
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Production readiness check",
+      "type": "terminal",
+      "title": "Make the API production-ready",
+      "image": "k8s",
       "prompt": [
-        "Write `List<string> Check(Container c)` for the record provided by the tests:",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl`; the current namespace is `todo`, and the manifests live in `~/k8s`. `todo-api` runs with no probes and no resources. Change the Deployment so that the `api` container has:",
         "",
-        "```csharp",
-        "record Container(string? ReqCpu, string? ReqMem, string? LimMem, string? LivePath, string? ReadyPath, bool HasStartup);",
-        "```",
+        "1. a **readiness** probe and a **liveness** probe, both `GET /health` on the port `http`;",
+        "2. a **startup** probe on the same endpoint, allowing up to 30 seconds (`failureThreshold` × `periodSeconds`);",
+        "3. requests of `100m` CPU and `64Mi` memory, and a memory limit of `128Mi`.",
         "",
-        "Return, in order:",
-        "",
-        "1. `\"missing cpu request\"`, `\"missing memory request\"` (each if null)",
-        "2. `\"missing memory limit\"` if null; otherwise `\"memory limit below request\"` if both are set and the limit (in Mi) is smaller. Memory values are `NNMi` or `NNGi`.",
-        "3. `\"missing readiness probe\"`, `\"missing liveness probe\"` (each if null)",
-        "4. `\"liveness and readiness use the same path\"` if both are set and equal",
-        "5. `\"no startup probe\"` if `!HasStartup`"
+        "The rollout must finish with 2 ready pods."
       ],
-      "starter": [
-        "List<string> Check(Container c)",
-        "{",
-        "    var problems = new List<string>();",
-        "    return problems;",
-        "}"
+      "setup": [
+        "s4.sh"
       ],
-      "solution": [
-        "int Mi(string q) => q.EndsWith(\"Gi\") ? int.Parse(q[..^2]) * 1024 : int.Parse(q[..^2]);",
-        "",
-        "List<string> Check(Container c)",
-        "{",
-        "    var problems = new List<string>();",
-        "    if (c.ReqCpu is null) problems.Add(\"missing cpu request\");",
-        "    if (c.ReqMem is null) problems.Add(\"missing memory request\");",
-        "    if (c.LimMem is null) problems.Add(\"missing memory limit\");",
-        "    else if (c.ReqMem is not null && Mi(c.LimMem) < Mi(c.ReqMem)) problems.Add(\"memory limit below request\");",
-        "    if (c.ReadyPath is null) problems.Add(\"missing readiness probe\");",
-        "    if (c.LivePath is null) problems.Add(\"missing liveness probe\");",
-        "    if (c.LivePath is not null && c.LivePath == c.ReadyPath) problems.Add(\"liveness and readiness use the same path\");",
-        "    if (!c.HasStartup) problems.Add(\"no startup probe\");",
-        "    return problems;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"stage manifest passes\", new List<string>(), Check(new Container(\"250m\", \"256Mi\", \"512Mi\", \"/health/live\", \"/health/ready\", true)));",
-        "Dojo.Eq(\"bare container\", new List<string> { \"missing cpu request\", \"missing memory request\", \"missing memory limit\", \"missing readiness probe\", \"missing liveness probe\", \"no startup probe\" },",
-        "    Check(new Container(null, null, null, null, null, false)));",
-        "Dojo.Eq(\"limit below request (Gi vs Mi)\", new List<string> { \"memory limit below request\" }, Check(new Container(\"1\", \"2Gi\", \"1536Mi\", \"/live\", \"/ready\", true)));",
-        "Dojo.Eq(\"1Gi limit is fine for 1024Mi\", new List<string>(), Check(new Container(\"1\", \"1024Mi\", \"1Gi\", \"/live\", \"/ready\", true)));",
-        "Dojo.Eq(\"same path\", new List<string> { \"liveness and readiness use the same path\" }, Check(new Container(\"1\", \"1Gi\", \"1Gi\", \"/health\", \"/health\", true)));",
-        "",
-        "record Container(string? ReqCpu, string? ReqMem, string? LimMem, string? LivePath, string? ReadyPath, bool HasStartup);"
+      "checks": [
+        {
+          "name": "probes on /health",
+          "cmd": "kubectl get deploy todo-api -o json | jq -r '.spec.template.spec.containers[0] | [.readinessProbe.httpGet.path, .livenessProbe.httpGet.path, .startupProbe.httpGet.path] | join(\" \")'",
+          "expectOutput": "/health /health /health",
+          "fail": "All three probes should `GET /health` on `http`."
+        },
+        {
+          "name": "the startup probe allows 30 s",
+          "cmd": "kubectl get deploy todo-api -o json | jq -r '.spec.template.spec.containers[0].startupProbe | (.failureThreshold // 3) * (.periodSeconds // 10)'",
+          "expectOutput": "30",
+          "fail": "`failureThreshold` × `periodSeconds` of the startup probe should be 30."
+        },
+        {
+          "name": "requests and limit",
+          "cmd": "kubectl get deploy todo-api -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu} {.spec.template.spec.containers[0].resources.requests.memory} {.spec.template.spec.containers[0].resources.limits.memory}'",
+          "expectOutput": "100m 64Mi 128Mi",
+          "fail": "Requests `100m` / `64Mi`, memory limit `128Mi`."
+        },
+        {
+          "name": "2 ready pods",
+          "cmd": "kubectl rollout status deploy/todo-api --timeout=40s >/dev/null; kubectl get deploy todo-api -o jsonpath='{.status.readyReplicas} {.status.updatedReplicas}'",
+          "expectOutput": "2 2",
+          "fail": "The rollout should finish with 2 ready, updated pods."
+        }
       ],
       "hints": [
-        "Convert memory to Mi: `Gi` × 1024.",
-        "Follow the list in order; each check adds at most one line."
-      ]
+        "Edit `~/k8s/deployment.yaml` and apply it, or `kubectl patch deploy todo-api` with a strategic merge patch naming the container `api`.",
+        "`startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 2, failureThreshold: 15}`.",
+        "`kubectl set resources deploy/todo-api -c api --requests=cpu=100m,memory=64Mi --limits=memory=128Mi`."
+      ],
+      "solution": [
+        "kubectl patch deploy todo-api -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"api\",\"readinessProbe\":{\"httpGet\":{\"path\":\"/health\",\"port\":\"http\"},\"periodSeconds\":2},\"livenessProbe\":{\"httpGet\":{\"path\":\"/health\",\"port\":\"http\"},\"periodSeconds\":5},\"startupProbe\":{\"httpGet\":{\"path\":\"/health\",\"port\":\"http\"},\"periodSeconds\":2,\"failureThreshold\":15}}]}}}}'",
+        "kubectl set resources deploy/todo-api -c api --requests=cpu=100m,memory=64Mi --limits=memory=128Mi",
+        "kubectl rollout status deploy/todo-api"
+      ],
+      "explain": "The startup probe protects slow starts (the liveness probe only begins once it has passed), readiness gates traffic, liveness restarts a hung process. Requests let the scheduler place the pod and protect it under pressure; a memory limit equal to (or a little above) the request keeps one leak from taking the node. In a real repo, change `~/k8s/deployment.yaml` too, so the file stays the source of truth."
     }
   ]
 }

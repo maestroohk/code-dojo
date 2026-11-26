@@ -157,59 +157,62 @@
       "explain": "The host side of the mapping is the port on your machine."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Can they talk?",
+      "type": "terminal",
+      "title": "Give them a network with names",
+      "image": "docker",
       "prompt": [
-        "Write `string CanReach(Dictionary<string, List<string>> networks, string from, string to)`. `networks` maps each container name to the networks it is attached to. The default bridge is called `bridge`.",
+        "This terminal has a **real Docker Engine**. `api`, `db` (it answers like PostgreSQL on port 5432) and `metrics` all",
+        "sit on the **default bridge** network, where names do not resolve and every container can reach every other.",
+        "Try `docker exec api nc -w 2 db 5432`: it fails.",
         "",
-        "Return the first of these that applies:",
+        "Without recreating any container:",
         "",
-        "1. `to` is not in the dictionary → `no: no container named 'TO'`",
-        "2. they share a network other than `bridge` → `yes: TO resolves on NET` (if several, the alphabetically first, ordinal)",
-        "3. both are on `bridge` → `no: the default bridge has no DNS by name; use a user-defined network`",
-        "4. otherwise → `no: no shared network`"
+        "1. create a user-defined network `shop` and attach `api` and `db` to it, so that `docker exec api nc -w 2 db 5432`",
+        "   prints `PostgreSQL 17 ready`;",
+        "2. take `db` **off** the default bridge, so `metrics` cannot reach it at all, not even by IP address."
       ],
-      "starter": [
-        "string CanReach(Dictionary<string, List<string>> networks, string from, string to)",
-        "{",
-        "    // your code here",
-        "    return \"\";",
-        "}"
+      "setup": [
+        "networks.sh"
       ],
-      "solution": [
-        "string CanReach(Dictionary<string, List<string>> networks, string from, string to)",
-        "{",
-        "    if (!networks.ContainsKey(to)) return $\"no: no container named '{to}'\";",
-        "    var shared = networks[from].Intersect(networks[to]).ToList();",
-        "    var named = shared.Where(n => n != \"bridge\").OrderBy(n => n, StringComparer.Ordinal).ToList();",
-        "    if (named.Count > 0) return $\"yes: {to} resolves on {named[0]}\";",
-        "    if (shared.Contains(\"bridge\")) return \"no: the default bridge has no DNS by name; use a user-defined network\";",
-        "    return \"no: no shared network\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoNets = new Dictionary<string, List<string>>",
-        "{",
-        "    [\"api\"] = new List<string> { \"shop\", \"monitoring\" },",
-        "    [\"db\"] = new List<string> { \"shop\" },",
-        "    [\"grafana\"] = new List<string> { \"monitoring\" },",
-        "    [\"old1\"] = new List<string> { \"bridge\" },",
-        "    [\"old2\"] = new List<string> { \"bridge\" },",
-        "    [\"both\"] = new List<string> { \"monitoring\", \"shop\" }",
-        "};",
-        "Dojo.Eq(\"api -> db\", \"yes: db resolves on shop\", CanReach(dojoNets, \"api\", \"db\"));",
-        "Dojo.Eq(\"grafana -> api\", \"yes: api resolves on monitoring\", CanReach(dojoNets, \"grafana\", \"api\"));",
-        "Dojo.Eq(\"several shared networks\", \"yes: both resolves on monitoring\", CanReach(dojoNets, \"api\", \"both\"));",
-        "Dojo.Eq(\"grafana -> db\", \"no: no shared network\", CanReach(dojoNets, \"grafana\", \"db\"));",
-        "Dojo.Eq(\"default bridge\", \"no: the default bridge has no DNS by name; use a user-defined network\", CanReach(dojoNets, \"old1\", \"old2\"));",
-        "Dojo.Eq(\"missing container\", \"no: no container named 'cache'\", CanReach(dojoNets, \"api\", \"cache\"));"
+      "checks": [
+        {
+          "name": "api reaches db by name",
+          "cmd": "docker exec api nc -w 2 db 5432 </dev/null",
+          "expectContains": "PostgreSQL 17 ready",
+          "fail": "`docker exec api nc -w 2 db 5432` does not answer. Names resolve on user-defined networks only: `docker network connect shop api`."
+        },
+        {
+          "name": "they are the same containers",
+          "cmd": "test \"$(docker inspect -f '{{.Id}}' api) $(docker inspect -f '{{.Id}}' db)\" = \"$(cat /opt/dojo/state/api-id) $(cat /opt/dojo/state/db-id)\"",
+          "fail": "`api` or `db` was recreated. `docker network connect` attaches a running container. Press Reset scenario."
+        },
+        {
+          "name": "db is on the shop network only",
+          "cmd": "docker inspect -f '{{range $n, $_ := .NetworkSettings.Networks}}{{$n}} {{end}}' db",
+          "expectOutput": "shop",
+          "fail": "`db` should be on `shop` only. `docker network disconnect bridge db`."
+        },
+        {
+          "name": "metrics cannot reach db",
+          "cmd": "for ip in $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' db) db; do if docker exec metrics nc -w 2 $ip 5432 </dev/null 2>/dev/null | grep -q ready; then echo \"metrics reached db at $ip\"; exit 1; fi; done",
+          "fail": "`metrics` can still reach `db`."
+        }
       ],
       "hints": [
-        "`Intersect` gives the networks both containers are on.",
-        "Filter out `bridge`, sort with `StringComparer.Ordinal`, and take the first."
-      ]
+        "`docker network create shop`, then `docker network connect shop CONTAINER` for each one.",
+        "Docker's embedded DNS (127.0.0.11) answers container names only on user-defined networks.",
+        "`docker network disconnect bridge db` removes it from the default network; `docker inspect -f '{{json .NetworkSettings.Networks}}' db` shows where it is."
+      ],
+      "solution": [
+        "docker exec api nc -w 2 db 5432",
+        "docker network create shop",
+        "docker network connect shop api",
+        "docker network connect shop db",
+        "docker exec api nc -w 2 db 5432",
+        "docker network disconnect bridge db",
+        "docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' shop"
+      ],
+      "explain": "A user-defined network gives you two things the default bridge does not: DNS by container name, and isolation, since containers only reach networks they are attached to. That is the whole point of putting a database on a back-end network: the web tier and random tools simply have no route to it. Networks can be attached and detached while containers run."
     }
   ]
 }

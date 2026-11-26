@@ -1,6 +1,6 @@
 {
   "title": "Boss: controllers in code",
-  "summary": "Selectors with expressions, rollout arithmetic and DaemonSet placement.",
+  "summary": "Three workload tickets on a real Kubernetes cluster: set-based selection, a failed CronJob, and a DaemonSet that runs nowhere.",
   "minutes": 20,
   "kind": "boss",
   "steps": [
@@ -8,163 +8,147 @@
       "type": "learn",
       "title": "The scene",
       "body": [
-        "Real selectors can also use **expressions**:",
-        "",
-        "```yaml",
-        "selector:",
-        "  matchLabels: { app: shop }",
-        "  matchExpressions:",
-        "  - { key: tier, operator: In, values: [web, api] }",
-        "  - { key: env, operator: NotIn, values: [dev] }",
-        "  - { key: canary, operator: DoesNotExist }",
-        "```",
-        "",
-        "All parts must hold. `In` needs the key present with one of the values; `NotIn` passes if the key is absent or its value is not listed; `Exists` / `DoesNotExist` check only the key."
+        "Workload tickets, each on its own one-node **Kubernetes 1.37** cluster: a clean-up that must hit exactly the right",
+        "pods, a nightly job that failed, and an agent that should run on every node but runs on none. Use selectors,",
+        "`kubectl create job --from=cronjob/...`, `kubectl logs`, `kubectl describe` and `kubectl taint`/`label`."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "matchExpressions",
+      "type": "terminal",
+      "title": "Ticket 1: select exactly the right pods",
+      "image": "k8s",
       "prompt": [
-        "Write `bool Expr(Dictionary<string, string> labels, string key, string op, string[] values)` for the four operators `In`, `NotIn`, `Exists`, `DoesNotExist`.",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The same ten labelled pods as in the labels lesson run in `default`.",
         "",
-        "Then `bool MatchAll(Dictionary<string, string> labels, List<(string Key, string Op, string[] Values)> exprs)`: true when every expression holds."
+        "1. Write into `~/answers/api.txt` the pods with `tier=api` in `prod` **or** `staging` that are **not** canaries (they",
+        "   have no `canary` label).",
+        "2. Pods without an `env` label are strays. **Delete** them, and only them, with one label selector."
       ],
-      "starter": [
-        "bool Expr(Dictionary<string, string> labels, string key, string op, string[] values)",
-        "{",
-        "    return false;",
-        "}",
-        "",
-        "bool MatchAll(Dictionary<string, string> labels, List<(string Key, string Op, string[] Values)> exprs)",
-        "{",
-        "    return false;",
-        "}"
+      "setup": [
+        "labels.sh"
       ],
-      "solution": [
-        "bool Expr(Dictionary<string, string> labels, string key, string op, string[] values)",
-        "{",
-        "    bool has = labels.TryGetValue(key, out var v);",
-        "    return op switch",
-        "    {",
-        "        \"In\" => has && values.Contains(v),",
-        "        \"NotIn\" => !has || !values.Contains(v),",
-        "        \"Exists\" => has,",
-        "        \"DoesNotExist\" => !has,",
-        "        _ => throw new ArgumentException(op)",
-        "    };",
-        "}",
-        "",
-        "bool MatchAll(Dictionary<string, string> labels, List<(string Key, string Op, string[] Values)> exprs)",
-        "{",
-        "    return exprs.All(e => Expr(labels, e.Key, e.Op, e.Values));",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoL = new Dictionary<string, string> { [\"app\"] = \"shop\", [\"tier\"] = \"web\", [\"env\"] = \"prod\" };",
-        "Dojo.Check(\"tier In [web, api]\", Expr(dojoL, \"tier\", \"In\", new[] { \"web\", \"api\" }), \"\");",
-        "Dojo.Check(\"tier In [db] is false\", !Expr(dojoL, \"tier\", \"In\", new[] { \"db\" }), \"\");",
-        "Dojo.Check(\"missing key In is false\", !Expr(dojoL, \"zone\", \"In\", new[] { \"a\" }), \"\");",
-        "Dojo.Check(\"env NotIn [dev]\", Expr(dojoL, \"env\", \"NotIn\", new[] { \"dev\" }), \"\");",
-        "Dojo.Check(\"missing key NotIn is true\", Expr(dojoL, \"zone\", \"NotIn\", new[] { \"a\" }), \"\");",
-        "Dojo.Check(\"canary DoesNotExist\", Expr(dojoL, \"canary\", \"DoesNotExist\", Array.Empty<string>()), \"\");",
-        "Dojo.Check(\"app Exists\", Expr(dojoL, \"app\", \"Exists\", Array.Empty<string>()), \"\");",
-        "Dojo.Check(\"MatchAll example\", MatchAll(dojoL, new() { (\"tier\", \"In\", new[] { \"web\", \"api\" }), (\"env\", \"NotIn\", new[] { \"dev\" }), (\"canary\", \"DoesNotExist\", Array.Empty<string>()) }), \"\");",
-        "Dojo.Check(\"MatchAll fails when one fails\", !MatchAll(dojoL, new() { (\"tier\", \"In\", new[] { \"web\" }), (\"app\", \"DoesNotExist\", Array.Empty<string>()) }), \"\");"
+      "checks": [
+        {
+          "name": "api.txt is right",
+          "cmd": "diff <(printf '%s\\n' pay-1 pay-2 search-1) <(sed '/^$/d' ~/answers/api.txt | sort -u)",
+          "fail": "Not the right pods. `-l 'tier=api,env in (prod,staging),!canary'`."
+        },
+        {
+          "name": "the strays are gone, nothing else",
+          "cmd": "kubectl get pods -o name | cut -d/ -f2 | sort | xargs",
+          "expectOutput": "cart-1 cart-2 cart-3 pay-1 pay-2 pay-3 report-1 search-1 search-2",
+          "fail": "Only `debug-1` has no `env` label. `kubectl delete pods -l '!env'`."
+        }
       ],
       "hints": [
-        "Start with `bool has = labels.TryGetValue(key, out var v);`.",
-        "A `switch` expression on `op` keeps it to four lines."
-      ]
+        "Set-based selectors: `key in (a,b)`, `key notin (a)`, `key` (exists) and `!key` (does not exist).",
+        "Always look before you delete: `kubectl get pods -l '!env'` shows what the same selector would delete.",
+        "`kubectl get pods -l 'tier=api,env in (prod,staging),!canary' -o name`, then `kubectl delete pods -l '!env'`."
+      ],
+      "solution": [
+        "kubectl get pods -l 'tier=api,env in (prod,staging),!canary' -o name | cut -d/ -f2 > ~/answers/api.txt",
+        "kubectl get pods -l '!env'",
+        "kubectl delete pods -l '!env'"
+      ],
+      "explain": "These are the same `matchExpressions` operators (`In`, `NotIn`, `Exists`, `DoesNotExist`) that Deployments, NetworkPolicies and affinity rules use in YAML. Running the selector with `get` before `delete` is the habit that prevents deleting a whole namespace's pods with a typo."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Resolve maxSurge and maxUnavailable",
+      "type": "terminal",
+      "title": "Ticket 2: the nightly export failed",
+      "image": "k8s",
       "prompt": [
-        "In YAML the knobs can be a number (`\"1\"`) or a percentage (`\"25%\"`). Write `(int Surge, int Unavailable) Resolve(int replicas, string maxSurge, string maxUnavailable)`. Percentages of `replicas`: surge rounds **up**, unavailable rounds **down**. If both resolve to 0, Kubernetes would never make progress, so set unavailable to 1.",
-        "",
-        "`Resolve(10, \"25%\", \"25%\")` is `(3, 2)`."
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The CronJob `nightly-export` runs at 02:30 UTC. Last night's run (re-run by hand as the Job",
+        "`nightly-export-manual-1`) failed. Find out why from its pod's log, fix the **CronJob** (not just one Job: the",
+        "container's command is right, the configuration it reads is not), and prove the fix by running the CronJob's job",
+        "**now**, by hand, as a Job named `nightly-export-manual-2`, which must complete."
       ],
-      "starter": [
-        "(int Surge, int Unavailable) Resolve(int replicas, string maxSurge, string maxUnavailable)",
-        "{",
-        "    return (0, 0);",
-        "}"
+      "setup": [
+        "boss-cron.sh"
       ],
-      "solution": [
-        "int Part(int replicas, string value, bool roundUp)",
-        "{",
-        "    if (!value.EndsWith(\"%\")) return int.Parse(value);",
-        "    double raw = replicas * int.Parse(value.TrimEnd('%')) / 100.0;",
-        "    return (int)(roundUp ? Math.Ceiling(raw) : Math.Floor(raw));",
-        "}",
-        "",
-        "(int Surge, int Unavailable) Resolve(int replicas, string maxSurge, string maxUnavailable)",
-        "{",
-        "    int s = Part(replicas, maxSurge, true);",
-        "    int u = Part(replicas, maxUnavailable, false);",
-        "    if (s == 0 && u == 0) u = 1;",
-        "    return (s, u);",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"Resolve(10, 25%, 25%)\", (3, 2), Resolve(10, \"25%\", \"25%\"));",
-        "Dojo.Eq(\"Resolve(3, 25%, 25%)\", (1, 0), Resolve(3, \"25%\", \"25%\"));",
-        "Dojo.Eq(\"Resolve(4, 1, 0)\", (1, 0), Resolve(4, \"1\", \"0\"));",
-        "Dojo.Eq(\"Resolve(5, 0%, 0) gets unavailable 1\", (0, 1), Resolve(5, \"0%\", \"0\"));",
-        "Dojo.Eq(\"Resolve(8, 50%, 10%)\", (4, 0), Resolve(8, \"50%\", \"10%\"));"
+      "checks": [
+        {
+          "name": "nightly-export-manual-2 completed",
+          "cmd": "kubectl get job nightly-export-manual-2 -o jsonpath='{.status.succeeded}'",
+          "expectOutput": "1",
+          "fail": "`nightly-export-manual-2` has not completed. `kubectl create job nightly-export-manual-2 --from=cronjob/nightly-export`, then `kubectl wait --for=condition=Complete job/...`."
+        },
+        {
+          "name": "its log shows the export",
+          "cmd": "kubectl logs job/nightly-export-manual-2",
+          "expectOutput": "exported 1204 rows to s3://reports.example.com/nightly",
+          "fail": "The job did not export to the target."
+        },
+        {
+          "name": "the CronJob itself is fixed",
+          "cmd": "kubectl get cronjob nightly-export -o json | jq -r '.spec.jobTemplate.spec.template.spec.containers[0].command[-1]' | grep -c TARGET_URL",
+          "expectOutput": "1",
+          "fail": "Keep the container's command as it is; fix the configuration it reads."
+        }
       ],
       "hints": [
-        "Write a helper that handles one value with a `roundUp` flag.",
-        "`replicas * 25 / 100.0` keeps the fraction, then `Math.Ceiling` or `Math.Floor`."
-      ]
+        "`kubectl logs job/nightly-export-manual-1` shows the error; `kubectl get configmap export-config -o yaml` shows what the job gets.",
+        "The ConfigMap's key is `TARGET`, the command reads `TARGET_URL`: rename the key, or set `TARGET_URL` in the CronJob's container env.",
+        "`kubectl create configmap export-config --from-literal=TARGET_URL=s3://reports.example.com/nightly --dry-run=client -o yaml | kubectl apply -f -`, then `kubectl create job nightly-export-manual-2 --from=cronjob/nightly-export` and `kubectl wait --for=condition=Complete job/nightly-export-manual-2`."
+      ],
+      "solution": [
+        "kubectl get cronjob,jobs,pods",
+        "kubectl logs job/nightly-export-manual-1",
+        "kubectl get configmap export-config -o yaml",
+        "kubectl create configmap export-config --from-literal=TARGET_URL=s3://reports.example.com/nightly --dry-run=client -o yaml | kubectl apply -f -",
+        "kubectl create job nightly-export-manual-2 --from=cronjob/nightly-export",
+        "kubectl wait --for=condition=Complete job/nightly-export-manual-2 --timeout=60s",
+        "kubectl logs job/nightly-export-manual-2"
+      ],
+      "explain": "`kubectl create job --from=cronjob/X` runs a CronJob's exact template now, which is how you test a fix without waiting until 02:30. `--dry-run=client -o yaml | kubectl apply -f -` is the idiom for \"create or update this generated object\". Remember that `envFrom` reads the ConfigMap when the pod starts: running pods never see a change, new ones do."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Place a DaemonSet",
+      "type": "terminal",
+      "title": "Ticket 3: the log agent runs nowhere",
+      "image": "k8s",
       "prompt": [
-        "A DaemonSet with a `nodeSelector` runs one pod on each node whose labels match it. Nodes with the taint `NoSchedule` are skipped unless the DaemonSet tolerates it.",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The DaemonSet `log-agent` in `kube-system` should run one pod on every logging node, but",
+        "`kubectl get ds -n kube-system log-agent` shows `DESIRED 0`. The node `dojo` **is** a logging node, and it is",
+        "reserved for observability workloads with a taint.",
         "",
-        "Write `List<string> DaemonPods(string ds, Dictionary<string, string> nodeSelector, bool toleratesNoSchedule, List<(string Name, Dictionary<string, string> Labels, bool Tainted)> nodes)` returning `\"ds-on-nodename\"` for each node that gets a pod, in node order."
+        "Without removing the taint, make `log-agent` run its pod on `dojo`: label the node the way the DaemonSet expects, and",
+        "let the DaemonSet tolerate the taint."
       ],
-      "starter": [
-        "List<string> DaemonPods(string ds, Dictionary<string, string> nodeSelector, bool toleratesNoSchedule, List<(string Name, Dictionary<string, string> Labels, bool Tainted)> nodes)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "boss-daemon.sh"
       ],
-      "solution": [
-        "List<string> DaemonPods(string ds, Dictionary<string, string> nodeSelector, bool toleratesNoSchedule, List<(string Name, Dictionary<string, string> Labels, bool Tainted)> nodes)",
-        "{",
-        "    return nodes",
-        "        .Where(n => nodeSelector.All(kv => n.Labels.TryGetValue(kv.Key, out var v) && v == kv.Value))",
-        "        .Where(n => !n.Tainted || toleratesNoSchedule)",
-        "        .Select(n => $\"{ds}-on-{n.Name}\")",
-        "        .ToList();",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoNodes = new List<(string Name, Dictionary<string, string> Labels, bool Tainted)> {",
-        "    (\"cp-1\", new() { [\"role\"] = \"control-plane\", [\"os\"] = \"linux\" }, true),",
-        "    (\"n1\", new() { [\"os\"] = \"linux\", [\"gpu\"] = \"true\" }, false),",
-        "    (\"n2\", new() { [\"os\"] = \"linux\" }, false),",
-        "    (\"w1\", new() { [\"os\"] = \"windows\" }, false),",
-        "};",
-        "Dojo.Eq(\"linux, no toleration\", new List<string> { \"logs-on-n1\", \"logs-on-n2\" }, DaemonPods(\"logs\", new() { [\"os\"] = \"linux\" }, false, dojoNodes));",
-        "Dojo.Eq(\"linux, tolerates control plane\", new List<string> { \"cni-on-cp-1\", \"cni-on-n1\", \"cni-on-n2\" }, DaemonPods(\"cni\", new() { [\"os\"] = \"linux\" }, true, dojoNodes));",
-        "Dojo.Eq(\"gpu only\", new List<string> { \"gpu-on-n1\" }, DaemonPods(\"gpu\", new() { [\"gpu\"] = \"true\" }, false, dojoNodes));",
-        "Dojo.Eq(\"no selector, no toleration\", new List<string> { \"x-on-n1\", \"x-on-n2\", \"x-on-w1\" }, DaemonPods(\"x\", new(), false, dojoNodes));"
+      "checks": [
+        {
+          "name": "log-agent runs on dojo",
+          "cmd": "kubectl -n kube-system get ds log-agent -o jsonpath='{.status.desiredNumberScheduled} {.status.numberReady}'",
+          "expectOutput": "1 1",
+          "fail": "`log-agent` should have 1 desired and 1 ready pod."
+        },
+        {
+          "name": "the taint is still there",
+          "cmd": "kubectl get node dojo -o jsonpath='{.spec.taints[?(@.key==\"dedicated\")].effect}'",
+          "expectOutput": "NoSchedule",
+          "fail": "Keep the node's `dedicated=observability:NoSchedule` taint: tolerate it instead."
+        },
+        {
+          "name": "the node is labelled as a logging node",
+          "cmd": "kubectl get node dojo -o jsonpath='{.metadata.labels.node-role\\.example\\.com/logging}'",
+          "expectOutput": "true",
+          "fail": "Label the node with what the DaemonSet's `nodeSelector` asks for."
+        }
       ],
       "hints": [
-        "Reuse your matchLabels logic against each node's labels.",
-        "Then filter out tainted nodes unless `toleratesNoSchedule`."
-      ]
+        "`kubectl get ds log-agent -n kube-system -o yaml` shows its `nodeSelector`; `kubectl describe node dojo` shows labels and taints.",
+        "`kubectl label node dojo node-role.example.com/logging=true`.",
+        "Add `tolerations: [{key: dedicated, operator: Equal, value: observability, effect: NoSchedule}]` to the pod template, for example with `kubectl patch ds log-agent -n kube-system -p '...'`."
+      ],
+      "solution": [
+        "kubectl -n kube-system get ds log-agent -o jsonpath='{.spec.template.spec.nodeSelector}'; echo",
+        "kubectl describe node dojo | grep -A2 -i taints",
+        "kubectl label node dojo node-role.example.com/logging=true",
+        "kubectl -n kube-system patch ds log-agent -p '{\"spec\":{\"template\":{\"spec\":{\"tolerations\":[{\"key\":\"dedicated\",\"operator\":\"Equal\",\"value\":\"observability\",\"effect\":\"NoSchedule\"}]}}}}'",
+        "kubectl -n kube-system rollout status ds/log-agent --timeout=60s"
+      ],
+      "explain": "A DaemonSet puts one pod on each node that its `nodeSelector` (or affinity) matches **and** whose taints it tolerates. Taints repel, tolerations allow: they keep general workloads off dedicated nodes while letting the right agents in. Real clusters' log, metrics and CNI agents all carry broad tolerations for exactly this reason."
     }
   ]
 }

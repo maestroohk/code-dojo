@@ -130,60 +130,71 @@
       "explain": "Install a CNI that enforces policies (Calico, Cilium) when you need to test them locally. Always test that a deny actually denies."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Evaluate ingress policies",
+      "type": "terminal",
+      "title": "Lock a namespace down with NetworkPolicies",
+      "image": "k8s",
       "prompt": [
-        "Model ingress policies within one namespace. Each policy has a pod selector (`Target`) and a list of allowed sources, each `(Dictionary<string,string> From, int Port)`.",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). It enforces NetworkPolicies. In the namespace `shop`, the pods `web` and `debug` can both call the",
+        "Service `api`: try `kubectl -n shop exec web -- wget -qO- -T 2 http://api/`.",
         "",
-        "Write `bool Allowed(Dictionary<string, string> src, Dictionary<string, string> dst, int port, List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> policies)`:",
+        "1. Add a **default-deny** policy for incoming traffic to every pod in `shop`.",
+        "2. Then allow exactly one path: pods labelled `app=web` may reach pods labelled `app=api` on TCP port 80.",
         "",
-        "- if no policy's `Target` matches `dst`, the connection is allowed",
-        "- otherwise it is allowed only if some **selecting** policy has a rule whose `From` matches `src` and whose `Port` equals `port` (`Port` 0 means any port)",
-        "",
-        "Selectors are matchLabels (empty matches all)."
+        "Afterwards `web` reaches `api`, and `debug` does not."
       ],
-      "starter": [
-        "bool Allowed(Dictionary<string, string> src, Dictionary<string, string> dst, int port, List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> policies)",
-        "{",
-        "    return true;",
-        "}"
+      "setup": [
+        "netpol.sh"
       ],
-      "solution": [
-        "bool M(Dictionary<string, string> sel, Dictionary<string, string> labels) =>",
-        "    sel.All(kv => labels.TryGetValue(kv.Key, out var v) && v == kv.Value);",
-        "",
-        "bool Allowed(Dictionary<string, string> src, Dictionary<string, string> dst, int port, List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> policies)",
-        "{",
-        "    var selecting = policies.Where(p => M(p.Target, dst)).ToList();",
-        "    if (selecting.Count == 0) return true;",
-        "    return selecting.Any(p => p.Rules.Any(r => M(r.From, src) && (r.Port == 0 || r.Port == port)));",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoApi = new Dictionary<string, string> { [\"app\"] = \"shop-api\" };",
-        "var dojoWeb = new Dictionary<string, string> { [\"app\"] = \"shop-web\" };",
-        "var dojoDb = new Dictionary<string, string> { [\"app\"] = \"postgres\" };",
-        "var dojoPol = new List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> {",
-        "    (new() { [\"app\"] = \"postgres\" }, new() { (new() { [\"app\"] = \"shop-api\" }, 5432) }),",
-        "};",
-        "Dojo.Check(\"api -> db:5432 allowed\", Allowed(dojoApi, dojoDb, 5432, dojoPol), \"\");",
-        "Dojo.Check(\"web -> db:5432 denied\", !Allowed(dojoWeb, dojoDb, 5432, dojoPol), \"\");",
-        "Dojo.Check(\"api -> db:22 denied\", !Allowed(dojoApi, dojoDb, 22, dojoPol), \"\");",
-        "Dojo.Check(\"web -> api allowed (api not selected)\", Allowed(dojoWeb, dojoApi, 8080, dojoPol), \"\");",
-        "var dojoDeny = new List<(Dictionary<string, string> Target, List<(Dictionary<string, string> From, int Port)> Rules)> {",
-        "    (new(), new()),",
-        "    (new() { [\"app\"] = \"shop-api\" }, new() { (new() { [\"app\"] = \"shop-web\" }, 0) }),",
-        "};",
-        "Dojo.Check(\"default deny: web -> db denied\", !Allowed(dojoWeb, dojoDb, 5432, dojoDeny), \"\");",
-        "Dojo.Check(\"default deny + allow: web -> api any port\", Allowed(dojoWeb, dojoApi, 9999, dojoDeny), \"\");",
-        "Dojo.Check(\"default deny: db -> web denied\", !Allowed(dojoDb, dojoWeb, 80, dojoDeny), \"\");"
+      "checks": [
+        {
+          "name": "a default-deny ingress policy covers every pod",
+          "cmd": "kubectl -n shop get networkpolicy -o json | jq -r '.items[] | select(.spec.podSelector == {} and (.spec.policyTypes | index(\"Ingress\")) and ((.spec.ingress // []) | length) == 0) | .metadata.name' | grep -c .",
+          "expectOutput": "1",
+          "fail": "There is no policy with an empty `podSelector`, `policyTypes: [Ingress]` and no `ingress` rules."
+        },
+        {
+          "name": "web reaches api",
+          "cmd": "kubectl -n shop exec web -- wget -qO- -T 2 http://api/ >/dev/null 2>&1 && echo yes",
+          "expectOutput": "yes",
+          "fail": "`web` cannot reach `api`: allow `app=web` to `app=api` on port 80."
+        },
+        {
+          "name": "debug does not",
+          "cmd": "(kubectl -n shop exec debug -- wget -qO- -T 2 http://api/ >/dev/null 2>&1 && echo reached) || echo blocked",
+          "expectOutput": "blocked",
+          "fail": "`debug` can still reach `api`."
+        }
       ],
       "hints": [
-        "First find the policies that select `dst`. None? Allowed.",
-        "Then `Any` policy with `Any` rule matching source and port."
-      ]
+        "A policy with `podSelector: {}` selects every pod; `policyTypes: [Ingress]` with no `ingress` list allows nothing in.",
+        "Policies add up: a second policy with `podSelector: {matchLabels: {app: api}}` and `ingress: [{from: [{podSelector: {matchLabels: {app: web}}}], ports: [{port: 80}]}]`.",
+        "Write both into one file separated by `---` and `kubectl apply -f` it."
+      ],
+      "solution": [
+        "cat > ~/policies.yaml <<'EOF'",
+        "apiVersion: networking.k8s.io/v1",
+        "kind: NetworkPolicy",
+        "metadata: {name: default-deny-ingress, namespace: shop}",
+        "spec:",
+        "  podSelector: {}",
+        "  policyTypes: [Ingress]",
+        "---",
+        "apiVersion: networking.k8s.io/v1",
+        "kind: NetworkPolicy",
+        "metadata: {name: web-to-api, namespace: shop}",
+        "spec:",
+        "  podSelector: {matchLabels: {app: api}}",
+        "  policyTypes: [Ingress]",
+        "  ingress:",
+        "    - from: [{podSelector: {matchLabels: {app: web}}}]",
+        "      ports: [{protocol: TCP, port: 80}]",
+        "EOF",
+        "kubectl apply -f ~/policies.yaml",
+        "sleep 3",
+        "kubectl -n shop exec web -- wget -qO- -T 2 http://api/",
+        "kubectl -n shop exec debug -- wget -qO- -T 2 http://api/"
+      ],
+      "explain": "Without any policy every pod can reach every other one, across namespaces too. Default-deny plus explicit allows is the production pattern: each allow is an additive rule, and a pod is isolated as soon as one policy selects it. Policies are enforced by the network plugin (here k3s's built-in controller; Cilium or Calico elsewhere): a cluster without one accepts the objects and silently ignores them."
     }
   ]
 }

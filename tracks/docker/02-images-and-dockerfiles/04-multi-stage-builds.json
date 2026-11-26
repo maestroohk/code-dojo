@@ -169,69 +169,69 @@
       "explain": "`--target` stops at the named stage, which is a neat way to run `dotnet test` in the same environment the release is built in."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Map the stages",
+      "type": "terminal",
+      "title": "Split the build into stages",
+      "image": "docker",
       "prompt": [
-        "Write `List<string> Stages(List<string> lines)` that describes a multi-stage Dockerfile:",
+        "This terminal has a **real Docker Engine** with `alpine:3.24` and `busybox:1.37`. `~/site` is a static site whose",
+        "`build.sh` minifies `src/` into `dist/`. Its single-stage image ships everything: sources, build script, Alpine.",
         "",
-        "- each `FROM image [AS name]` adds `stage NAME from IMAGE`; an unnamed stage is named by its 0-based index (`0`, `1`, ...);",
-        "- each `COPY` with a `--from=X` token adds `  CURRENT copies from X` (two leading spaces; CURRENT is the stage it appears in);",
-        "- finally add `final image: NAME` for the last stage.",
+        "Rewrite `~/site/Dockerfile` as a **multi-stage** build and build it as `shop/site:2.0`:",
         "",
-        "Keywords may be in any case (`as`, `from`). Ignore every other instruction.",
+        "1. a stage named `build`, `FROM alpine:3.24`, that runs `build.sh`;",
+        "2. a final stage `FROM busybox:1.37` that copies **only** `dist/` from the build stage into `/www` and serves it with",
+        "   `httpd -f -p 80 -h /www`.",
         "",
-        "```text",
-        "stage build from mcr.microsoft.com/dotnet/sdk:10.0",
-        "stage final from mcr.microsoft.com/dotnet/aspnet:10.0",
-        "  final copies from build",
-        "final image: final",
-        "```"
+        "`docker build --target build ~/site` must also work (it builds just the first stage)."
       ],
-      "starter": [
-        "List<string> Stages(List<string> lines)",
-        "{",
-        "    var result = new List<string>();",
-        "    // your code here",
-        "    return result;",
-        "}"
+      "setup": [
+        "multistage.sh"
       ],
-      "solution": [
-        "List<string> Stages(List<string> lines)",
-        "{",
-        "    var result = new List<string>();",
-        "    var names = new List<string>();",
-        "    foreach (string raw in lines)",
-        "    {",
-        "        string[] t = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);",
-        "        if (t.Length == 0) continue;",
-        "        string keyword = t[0].ToUpper();",
-        "        if (keyword == \"FROM\")",
-        "        {",
-        "            string name = t.Length >= 4 && t[2].ToUpper() == \"AS\" ? t[3] : names.Count.ToString();",
-        "            names.Add(name);",
-        "            result.Add($\"stage {name} from {t[1]}\");",
-        "        }",
-        "        else if (keyword == \"COPY\")",
-        "        {",
-        "            string? from = t.FirstOrDefault(x => x.StartsWith(\"--from=\"));",
-        "            if (from != null) result.Add($\"  {names[^1]} copies from {from[7..]}\");",
-        "        }",
-        "    }",
-        "    result.Add($\"final image: {names[^1]}\");",
-        "    return result;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\".NET two-stage\", new List<string> { \"stage build from mcr.microsoft.com/dotnet/sdk:10.0\", \"stage final from mcr.microsoft.com/dotnet/aspnet:10.0\", \"  final copies from build\", \"final image: final\" }, Stages(new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build\", \"WORKDIR /src\", \"COPY . .\", \"RUN dotnet publish -o /app/publish\", \"FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final\", \"COPY --from=build /app/publish .\" }));",
-        "Dojo.Eq(\"Next.js three-stage\", new List<string> { \"stage deps from node:22-alpine\", \"stage build from node:22-alpine\", \"  build copies from deps\", \"stage runner from node:22-alpine\", \"  runner copies from build\", \"  runner copies from build\", \"final image: runner\" }, Stages(new List<string> { \"FROM node:22-alpine AS deps\", \"RUN npm ci\", \"FROM node:22-alpine AS build\", \"COPY --from=deps /app/node_modules ./node_modules\", \"COPY . .\", \"from node:22-alpine as runner\", \"COPY --from=build /app/.next/standalone ./\", \"COPY --from=build /app/public ./public\" }));",
-        "Dojo.Eq(\"unnamed stages use indexes\", new List<string> { \"stage 0 from golang:1.23\", \"stage 1 from scratch\", \"  1 copies from 0\", \"final image: 1\" }, Stages(new List<string> { \"FROM golang:1.23\", \"RUN go build -o /app\", \"FROM scratch\", \"COPY --from=0 /app /app\" }));"
+      "checks": [
+        {
+          "name": "shop/site:2.0 serves the built page from /www",
+          "cmd": "docker run --rm shop/site:2.0 cat /www/index.html | grep -q 'build-marker: site 2.0' && docker image inspect -f '{{json .Config.Cmd}}' shop/site:2.0 | grep -q httpd",
+          "fail": "`shop/site:2.0` should have the built `index.html` in `/www` and run `httpd` (its CMD)."
+        },
+        {
+          "name": "the page in the image is the minified one",
+          "cmd": "docker run --rm shop/site:2.0 grep -c '^ ' /www/index.html",
+          "expectOutput": "0",
+          "fail": "`/www/index.html` still has indented lines: copy the build stage's output, not `src/`."
+        },
+        {
+          "name": "the final image is busybox, without sources or build script",
+          "cmd": "docker run --rm shop/site:2.0 sh -c 'test ! -e /etc/alpine-release && test ! -e /app/src && test ! -e /app/build.sh'",
+          "fail": "The final image still contains Alpine, `src/` or `build.sh`. The last `FROM` should be `busybox:1.37`, with one `COPY --from=build`."
+        },
+        {
+          "name": "there is a stage named build",
+          "cmd": "cd ~/site && docker build -q --target build . >/dev/null",
+          "fail": "`docker build --target build` fails: name the first stage with `FROM alpine:3.24 AS build`."
+        }
       ],
       "hints": [
-        "Keep a list of stage names; the current stage is the last one in it.",
-        "`--from=build`.Substring(7) is `build`."
-      ]
+        "Each `FROM` starts a new stage; `AS build` names it. Only the last stage becomes the image.",
+        "`COPY --from=build /app/dist/ /www/` copies files out of the build stage.",
+        "Two stages: `FROM alpine:3.24 AS build` + `WORKDIR /app` + `COPY . .` + `RUN sh build.sh`, then `FROM busybox:1.37` + `COPY --from=build` + `CMD`."
+      ],
+      "solution": [
+        "cd ~/site",
+        "cat > Dockerfile <<'EOF'",
+        "FROM alpine:3.24 AS build",
+        "WORKDIR /app",
+        "COPY . .",
+        "RUN sh build.sh",
+        "",
+        "FROM busybox:1.37",
+        "COPY --from=build /app/dist/ /www/",
+        "CMD [\"httpd\", \"-f\", \"-p\", \"80\", \"-h\", \"/www\"]",
+        "EOF",
+        "docker build -t shop/site:2.0 .",
+        "docker image ls shop/site",
+        "docker build --target build -t shop/site:build ."
+      ],
+      "explain": "The build stage can hold every tool it needs; the final stage starts clean and receives only the artifact. The same shape is the standard .NET Dockerfile: `FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build` to restore and publish, then `FROM mcr.microsoft.com/dotnet/aspnet:10.0` with `COPY --from=build /app/publish .`, which turns a ~900 MB SDK image into a ~120 MB runtime one. `--target` builds an intermediate stage, handy for running tests in CI."
     }
   ]
 }

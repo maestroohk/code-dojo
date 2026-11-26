@@ -1,0 +1,107 @@
+{
+  "title": "The kubectl power kit: jsonpath, wait, explain, diff",
+  "summary": "Ask precise questions with -o jsonpath and custom-columns, wait for real conditions, look up fields with explain, and review changes with diff before you apply.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Precise questions, scriptable answers",
+      "body": [
+        "```bash",
+        "kubectl get pods -A -o wide -L app -w                          # every namespace, wider, label column, watch",
+        "kubectl get deploy -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image",
+        "kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name}{\" \"}{.status.phase}{\"\\n\"}{end}'",
+        "kubectl get pods --sort-by=.status.startTime",
+        "kubectl wait --for=condition=Available deploy/api --timeout=60s    # block until it is true (CI!)",
+        "kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 deploy/api",
+        "kubectl explain deployment.spec.strategy.rollingUpdate            # field docs from the API server itself",
+        "kubectl diff -f k8s/                                               # what apply WOULD change (exit 1 if anything)",
+        "kubectl apply --server-side -f k8s/                               # merge on the server, track field owners",
+        "```",
+        "",
+        "`jsonpath` and `custom-columns` read any field the API returns (`-o yaml` shows them all). `wait` replaces `sleep`",
+        "loops in scripts: it returns as soon as the condition holds, and fails at the timeout."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Which command blocks until a Deployment has finished rolling out its pods and they are available?",
+      "code": [
+        "kubectl ____ --for=condition=Available deploy/api --timeout=60s"
+      ],
+      "answer": "wait",
+      "verify": false,
+      "accept": [
+        "wait"
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "A one-line inventory, then wait for a rollout",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). Deployments run in the namespaces `shop` and `payments`.",
+        "",
+        "1. Write an inventory into `~/answers/deploys.txt`: one line per Deployment outside `kube-system`, as",
+        "   `NAMESPACE/NAME REPLICAS IMAGE`, sorted. Use `-o jsonpath` (or `custom-columns`), not hand-typing.",
+        "2. `~/search.yaml` is a new Deployment whose pods take a few seconds to become ready. Apply it, then use",
+        "   `kubectl wait` (not `sleep`) so that your command only returns once it is **Available**."
+      ],
+      "setup": [
+        "report.sh"
+      ],
+      "checks": [
+        {
+          "name": "deploys.txt is the inventory",
+          "cmd": "diff <(kubectl get deploy -A -o json | jq -r '.items[] | \"\\(.metadata.namespace)/\\(.metadata.name) \\(.spec.replicas) \\(.spec.template.spec.containers[0].image)\"' | sort | grep -v '^kube-system/' | grep -v '^shop/search ') <(sed '/^$/d' ~/answers/deploys.txt | grep -v '^shop/search ' | tr -s ' ')",
+          "fail": "Not the inventory. `kubectl get deploy -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.replicas} {.spec.template.spec.containers[0].image}{\"\\n\"}{end}' | grep -v ^kube-system | sort`."
+        },
+        {
+          "name": "search is Available",
+          "cmd": "kubectl -n shop get deploy search -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status} {.status.readyReplicas}'",
+          "expectOutput": "True 2",
+          "fail": "`search` is not Available with 2 ready pods yet. `kubectl apply -f ~/search.yaml`, then `kubectl wait -n shop --for=condition=Available deploy/search --timeout=60s`."
+        }
+      ],
+      "hints": [
+        "`-A` lists every namespace; `{range .items[*]}...{\"\\n\"}{end}` prints one line per item.",
+        "The image is at `.spec.template.spec.containers[0].image`; drop `kube-system` with `grep -v` and `sort` the rest.",
+        "`kubectl apply -f ~/search.yaml && kubectl wait -n shop --for=condition=Available deploy/search --timeout=60s`."
+      ],
+      "solution": [
+        "kubectl get deploy -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.replicas} {.spec.template.spec.containers[0].image}{\"\\n\"}{end}' | grep -v '^kube-system/' | sort > ~/answers/deploys.txt",
+        "cat ~/answers/deploys.txt",
+        "kubectl apply -f ~/search.yaml",
+        "kubectl wait -n shop --for=condition=Available deploy/search --timeout=60s"
+      ],
+      "explain": "`jsonpath` makes kubectl answer exactly the question you have, in a shape a script can use, across namespaces. `kubectl wait` is the honest version of `sleep 30`: it returns the moment the condition holds and fails loudly if it never does, which is what CI pipelines and runbooks need. Note that `Available` waited for the readiness probe, not just for the containers to start."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Before applying a teammate's change to `k8s/` in production, what shows you exactly what would change in the cluster?",
+      "options": [
+        "`kubectl diff -f k8s/`",
+        "`kubectl apply --dry-run=client -f k8s/`",
+        "`kubectl get -f k8s/`",
+        "`kubectl explain -f k8s/`"
+      ],
+      "answer": 0,
+      "explain": "`diff` asks the API server to compute the result of the apply (with defaults, webhooks and other owners' fields) and shows it as a diff; it exits 1 when there is a difference, so CI can use it for drift checks. `--dry-run=client` only renders locally and knows nothing about the live object."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Look up what `maxSurge` accepts without leaving the terminal.",
+      "code": "kubectl __1__ deployment.spec.strategy.__2__.maxSurge",
+      "blanks": [
+        "explain",
+        "rollingUpdate"
+      ],
+      "bank": [
+        "describe",
+        "get",
+        "recreate"
+      ],
+      "explain": "`kubectl explain` reads the API server's own schema (CRDs included), so it is always right for the cluster and version you are on. `--recursive` prints the whole tree under a field."
+    }
+  ]
+}

@@ -64,56 +64,63 @@
       "explain": "Rollouts and scaling compose. That is why the Deployment must not also have `replicas` set in Git, or a sync would fight the HPA."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Plan the release",
+      "type": "terminal",
+      "title": "Publish it with an HTTPRoute and ship v2 safely",
+      "image": "k8s",
       "prompt": [
-        "Write `List<string> Release(int replicas, int maxSurge, int maxUnavailable, bool newPodsGetReady)` that prints the rollout like the module 2 simulation, but stops if new pods never become ready.",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl`; the current namespace is `todo`, and the manifests live in `~/k8s`. The cluster has the Gateway API CRDs and the platform's Gateway `public` in `todo` (no gateway",
+        "controller runs here, so the route is validated and stored but nothing serves it).",
         "",
-        "Start with `old = replicas, new = 0, ready = 0` (ready counts ready new pods). Loop while `old > 0 || new < replicas`:",
-        "",
-        "1. **up**: raise `new` to `min(replicas, replicas + maxSurge - old)` if higher; log `\"up   old=O new=N\"` (three spaces after `up`, as in module 2). If `newPodsGetReady`, set `ready = new`.",
-        "2. **down**: lower `old` to `max(0, replicas - maxUnavailable - ready)` if lower; log `\"down old=O new=N\"`.",
-        "3. If neither step changed anything, log `\"stalled: new pods not ready\"` and stop.",
-        "",
-        "Finish with `\"done\"` if the loop ended normally."
+        "1. Attach an `HTTPRoute` named `todo` to the Gateway `public` for the host `todo.example.com`, sending every path to",
+        "   the Service `todo-api` on port 80.",
+        "2. Ship v2 without ever dropping below 2 ready pods: set the rolling update to `maxSurge: 1`, `maxUnavailable: 0`,",
+        "   change the container's argument to `--name=todo-api-v2`, and wait for the rollout to complete."
       ],
-      "starter": [
-        "List<string> Release(int replicas, int maxSurge, int maxUnavailable, bool newPodsGetReady)",
-        "{",
-        "    var log = new List<string>();",
-        "    return log;",
-        "}"
+      "setup": [
+        "s5.sh"
       ],
-      "solution": [
-        "List<string> Release(int replicas, int maxSurge, int maxUnavailable, bool newPodsGetReady)",
-        "{",
-        "    var log = new List<string>();",
-        "    int oldPods = replicas, newPods = 0, ready = 0;",
-        "    while (oldPods > 0 || newPods < replicas)",
-        "    {",
-        "        bool changed = false;",
-        "        int up = Math.Min(replicas, replicas + maxSurge - oldPods);",
-        "        if (up > newPods) { newPods = up; changed = true; log.Add($\"up   old={oldPods} new={newPods}\"); }",
-        "        if (newPodsGetReady) ready = newPods;",
-        "        int down = Math.Max(0, replicas - maxUnavailable - ready);",
-        "        if (down < oldPods) { oldPods = down; changed = true; log.Add($\"down old={oldPods} new={newPods}\"); }",
-        "        if (!changed) { log.Add(\"stalled: new pods not ready\"); return log; }",
-        "    }",
-        "    log.Add(\"done\");",
-        "    return log;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"healthy release, 3 replicas\", new List<string> { \"up   old=3 new=1\", \"down old=2 new=1\", \"up   old=2 new=2\", \"down old=1 new=2\", \"up   old=1 new=3\", \"down old=0 new=3\", \"done\" }, Release(3, 1, 0, true));",
-        "Dojo.Eq(\"broken release stalls with all old pods\", new List<string> { \"up   old=3 new=1\", \"stalled: new pods not ready\" }, Release(3, 1, 0, false));",
-        "Dojo.Eq(\"maxUnavailable 1, broken\", new List<string> { \"up   old=3 new=1\", \"down old=2 new=1\", \"up   old=2 new=2\", \"stalled: new pods not ready\" }, Release(3, 1, 1, false));"
+      "checks": [
+        {
+          "name": "the route sends todo.example.com to todo-api:80",
+          "cmd": "kubectl get httproute todo -o json | jq -r '\"\\(.spec.parentRefs[0].name) \\(.spec.hostnames[0]) \\(.spec.rules[0].backendRefs[0].name):\\(.spec.rules[0].backendRefs[0].port)\"'",
+          "expectOutput": "public todo.example.com todo-api:80",
+          "fail": "There should be an HTTPRoute `todo` on `public` for `todo.example.com` with the backend `todo-api:80`."
+        },
+        {
+          "name": "the rollout strategy keeps capacity",
+          "cmd": "kubectl get deploy todo-api -o jsonpath='{.spec.strategy.rollingUpdate.maxSurge} {.spec.strategy.rollingUpdate.maxUnavailable}'",
+          "expectOutput": "1 0",
+          "fail": "`maxSurge: 1`, `maxUnavailable: 0`."
+        },
+        {
+          "name": "v2 is fully rolled out",
+          "cmd": "kubectl rollout status deploy/todo-api --timeout=40s >/dev/null; kubectl get deploy todo-api -o jsonpath='{.spec.template.spec.containers[0].args} {.status.updatedReplicas} {.status.readyReplicas}'",
+          "expectOutput": "[\"--name=todo-api-v2\"] 2 2",
+          "fail": "All pods should run `--name=todo-api-v2`, 2 updated and ready."
+        }
       ],
       "hints": [
-        "Track whether either step changed something in a `bool changed`.",
-        "The scale-down limit uses `ready`, not `new`: unready new pods do not count as available."
-      ]
+        "An HTTPRoute with `parentRefs: [{name: public}]`, `hostnames: [todo.example.com]` and one rule with `backendRefs: [{name: todo-api, port: 80}]` (no `matches` means every path).",
+        "`kubectl patch deploy todo-api -p '{\"spec\":{\"strategy\":{\"rollingUpdate\":{\"maxSurge\":1,\"maxUnavailable\":0}}}}'`.",
+        "Then change the args (`kubectl patch ... --type=json`, `replace` on `/spec/template/spec/containers/0/args`) and `kubectl rollout status deploy/todo-api`."
+      ],
+      "solution": [
+        "cat > ~/k8s/route.yaml <<'EOF'",
+        "apiVersion: gateway.networking.k8s.io/v1",
+        "kind: HTTPRoute",
+        "metadata: {name: todo}",
+        "spec:",
+        "  parentRefs: [{name: public}]",
+        "  hostnames: [todo.example.com]",
+        "  rules:",
+        "    - backendRefs: [{name: todo-api, port: 80}]",
+        "EOF",
+        "kubectl apply -f ~/k8s/route.yaml",
+        "kubectl patch deploy todo-api -p '{\"spec\":{\"strategy\":{\"rollingUpdate\":{\"maxSurge\":1,\"maxUnavailable\":0}}}}'",
+        "kubectl patch deploy todo-api --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":[\"--name=todo-api-v2\"]}]'",
+        "kubectl rollout status deploy/todo-api"
+      ],
+      "explain": "The app is now reachable the modern way: the platform's Gateway owns the listener, your HTTPRoute owns the host and the backend. And with `maxUnavailable: 0` plus a readiness probe, the release added one v2 pod at a time and removed a v1 pod only after its replacement was Ready, so capacity never dropped. If v2 had failed its probe, the rollout would have stalled with v1 still serving, and `kubectl rollout undo` would end it."
     },
     {
       "type": "code",
@@ -154,7 +161,8 @@
       ],
       "hints": [
         "Compute the three numbers first, then the three outcomes in order."
-      ]
+      ],
+      "explain": "This one stays a code step: it is capacity planning before the event, arithmetic over load-test numbers, with nothing in the cluster to look at yet."
     }
   ]
 }

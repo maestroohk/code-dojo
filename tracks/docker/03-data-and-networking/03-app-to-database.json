@@ -151,61 +151,51 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Check a connection string",
+      "type": "terminal",
+      "title": "Fix \"connection refused\" to the database",
+      "image": "docker",
       "prompt": [
-        "Write `string Check(string connectionString, bool inContainer, List<string> services)`. The connection string is `Key=Value` pairs separated by `;` (keys are case-insensitive; the host is under `Host` or `Server`). `services` are the container names on the app's network.",
+        "This terminal has a **real Docker Engine**. The database container `db` (it answers like PostgreSQL on port 5432)",
+        "is on the network `shop`. The API container `api` (image `shop/api:3.0`, configured by `DB_HOST` and `DB_PORT`)",
+        "keeps logging an error: `docker logs api`.",
         "",
-        "Return the first that applies:",
-        "",
-        "1. `inContainer` and the host is `localhost` or `127.0.0.1` → `localhost is this container: use the database service name`",
-        "2. `inContainer` and the host is neither in `services` nor `host.docker.internal` → `unknown host 'HOST': not a service on this network`",
-        "3. not `inContainer` and the host **is** in `services` → `'HOST' only resolves inside the Docker network: use localhost and the published port`",
-        "4. otherwise → `ok`"
+        "Run a fixed `api` (same name, same image) so that its newest log line says `connected to ...:5432`."
       ],
-      "starter": [
-        "string Check(string connectionString, bool inContainer, List<string> services)",
-        "{",
-        "    // your code here",
-        "    return \"\";",
-        "}"
+      "setup": [
+        "dbconn.sh"
       ],
-      "solution": [
-        "string Check(string connectionString, bool inContainer, List<string> services)",
-        "{",
-        "    string host = \"\";",
-        "    foreach (string pair in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries))",
-        "    {",
-        "        int eq = pair.IndexOf('=');",
-        "        if (eq < 0) continue;",
-        "        string key = pair[..eq].Trim().ToLower();",
-        "        if (key == \"host\" || key == \"server\") host = pair[(eq + 1)..].Trim();",
-        "    }",
-        "    if (inContainer && (host == \"localhost\" || host == \"127.0.0.1\"))",
-        "        return \"localhost is this container: use the database service name\";",
-        "    if (inContainer && !services.Contains(host) && host != \"host.docker.internal\")",
-        "        return $\"unknown host '{host}': not a service on this network\";",
-        "    if (!inContainer && services.Contains(host))",
-        "        return $\"'{host}' only resolves inside the Docker network: use localhost and the published port\";",
-        "    return \"ok\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoServices = new List<string> { \"api\", \"db\", \"redis\" };",
-        "Dojo.Eq(\"container, service name\", \"ok\", Check(\"Host=db;Port=5432;Database=shop\", true, dojoServices));",
-        "Dojo.Eq(\"container, localhost\", \"localhost is this container: use the database service name\", Check(\"Host=localhost;Port=5433\", true, dojoServices));",
-        "Dojo.Eq(\"container, 127.0.0.1 via Server\", \"localhost is this container: use the database service name\", Check(\"server=127.0.0.1;port=5432\", true, dojoServices));",
-        "Dojo.Eq(\"container, typo\", \"unknown host 'postgres': not a service on this network\", Check(\"Host=postgres;Port=5432\", true, dojoServices));",
-        "Dojo.Eq(\"container, host database\", \"ok\", Check(\"Host=host.docker.internal;Port=5432\", true, dojoServices));",
-        "Dojo.Eq(\"host, service name\", \"'db' only resolves inside the Docker network: use localhost and the published port\", Check(\"Database=shop;HOST=db;Port=5432\", false, dojoServices));",
-        "Dojo.Eq(\"host, localhost\", \"ok\", Check(\"Host=localhost;Port=5433\", false, dojoServices));"
+      "checks": [
+        {
+          "name": "the API logs that it is connected",
+          "cmd": "docker logs --tail 1 api 2>&1",
+          "expectMatch": "^connected to [a-z0-9.-]+:5432$",
+          "fail": "The API's newest log line is not `connected to ...`. `docker logs api` shows what it tries to reach."
+        },
+        {
+          "name": "it runs from shop/api:3.0 on the shop network",
+          "cmd": "test \"$(docker inspect -f '{{.State.Running}} {{.Config.Image}} {{range $n, $_ := .NetworkSettings.Networks}}{{$n}}{{end}}' api)\" = 'true shop/api:3.0 shop'",
+          "fail": "There should be a running `api` from `shop/api:3.0` attached to the `shop` network (only)."
+        },
+        {
+          "name": "DB_HOST is not localhost",
+          "cmd": "! docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' api | grep -Eqx 'DB_HOST=(localhost|127\\.0\\.0\\.1)'",
+          "fail": "`DB_HOST` still points at localhost: inside a container that is the container itself."
+        }
       ],
       "hints": [
-        "Split on `;`, then each pair at its first `=`.",
-        "Compare keys in lower case so `HOST`, `host` and `Server` all work."
-      ]
+        "`docker inspect -f '{{json .Config.Env}}' api` and `docker inspect -f '{{json .NetworkSettings.Networks}}' api` show its configuration.",
+        "Two things are wrong: `localhost` inside a container is the container itself, and `api` is not on the network `db` is on.",
+        "`docker rm -f api`, then `docker run -d --name api --network shop -e DB_HOST=db shop/api:3.0`."
+      ],
+      "solution": [
+        "docker logs --tail 3 api",
+        "docker inspect -f '{{json .Config.Env}} {{json .NetworkSettings.Networks}}' api",
+        "docker rm -f api",
+        "docker run -d --name api --network shop -e DB_HOST=db shop/api:3.0",
+        "sleep 2",
+        "docker logs api"
+      ],
+      "explain": "\"Connection refused to localhost\" from a container almost always means the app is talking to itself: each container has its own network namespace and its own `127.0.0.1`. The database is reached by its **name** on a **shared** network, which is exactly what Compose sets up for you, so `Host=db` in a connection string just works there."
     }
   ]
 }

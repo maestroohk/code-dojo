@@ -1,199 +1,194 @@
 {
   "title": "Boss: where did my data go?",
-  "summary": "Model mounts, addresses and persistence well enough to answer the questions teammates ask after an incident.",
+  "summary": "Three data and network tickets on a real Docker Engine: mounts done right, three tiers wired, a clean-up that keeps the data.",
   "minutes": 15,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "Post-incident questions",
-      "body": "Someone ran `docker rm` on the wrong thing, a dashboard cannot reach the database, and nobody is sure which files survived. Build tools that answer these precisely."
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Read --mount",
-      "prompt": [
-        "Write `string ParseMount(string spec)` for the long `--mount` syntax: comma-separated `key=value` pairs, plus the bare flag `readonly` (or `ro`).",
-        "",
-        "- `type` is `volume` (default), `bind` or `tmpfs`",
-        "- the source is `source` or `src`; the target is `target`, `dst` or `destination`",
-        "",
-        "Output, with ` (read-only)` appended when the flag is present:",
-        "",
-        "| type | output |",
-        "|---|---|",
-        "| volume with a source | `named volume SOURCE -> TARGET` |",
-        "| volume without a source | `anonymous volume -> TARGET` |",
-        "| bind | `bind mount SOURCE -> TARGET` |",
-        "| tmpfs | `tmpfs -> TARGET` |"
-      ],
-      "starter": [
-        "string ParseMount(string spec)",
-        "{",
-        "    // your code here",
-        "    return \"\";",
-        "}"
-      ],
-      "solution": [
-        "string ParseMount(string spec)",
-        "{",
-        "    string type = \"volume\", source = \"\", target = \"\";",
-        "    bool readOnly = false;",
-        "    foreach (string part in spec.Split(','))",
-        "    {",
-        "        int eq = part.IndexOf('=');",
-        "        string key = eq < 0 ? part : part[..eq];",
-        "        string value = eq < 0 ? \"\" : part[(eq + 1)..];",
-        "        if (key == \"readonly\" || key == \"ro\") readOnly = true;",
-        "        else if (key == \"type\") type = value;",
-        "        else if (key == \"source\" || key == \"src\") source = value;",
-        "        else if (key == \"target\" || key == \"dst\" || key == \"destination\") target = value;",
-        "    }",
-        "    string text = type switch",
-        "    {",
-        "        \"bind\" => $\"bind mount {source} -> {target}\",",
-        "        \"tmpfs\" => $\"tmpfs -> {target}\",",
-        "        _ => source == \"\" ? $\"anonymous volume -> {target}\" : $\"named volume {source} -> {target}\"",
-        "    };",
-        "    return readOnly ? text + \" (read-only)\" : text;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"named volume\", \"named volume pgdata -> /var/lib/postgresql/data\", ParseMount(\"type=volume,source=pgdata,target=/var/lib/postgresql/data\"));",
-        "Dojo.Eq(\"default type\", \"named volume uploads -> /app/uploads\", ParseMount(\"src=uploads,dst=/app/uploads\"));",
-        "Dojo.Eq(\"bind, readonly\", \"bind mount ./nginx.conf -> /etc/nginx/nginx.conf (read-only)\", ParseMount(\"type=bind,source=./nginx.conf,target=/etc/nginx/nginx.conf,readonly\"));",
-        "Dojo.Eq(\"tmpfs\", \"tmpfs -> /tmp\", ParseMount(\"type=tmpfs,destination=/tmp\"));",
-        "Dojo.Eq(\"anonymous\", \"anonymous volume -> /cache\", ParseMount(\"type=volume,target=/cache\"));"
+      "body": [
+        "Data and networking tickets are where Docker surprises people: a site that a container could overwrite, a web tier",
+        "that can talk straight to the database, a clean-up that took the data with it. Each ticket below opens its own",
+        "machine with a **real Docker Engine**. Use `--mount`, `docker network`, `docker volume` and `docker inspect -f`."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Which address?",
+      "type": "terminal",
+      "title": "Ticket 1: serve a folder, read-only",
+      "image": "docker",
       "prompt": [
-        "Write `string Address(string from, string target, int containerPort, Dictionary<string, string> published, Dictionary<string, string> networkOf)`.",
+        "A real Docker Engine runs in this terminal. Serve `~/site` with a container named `web` (`busybox:1.37` running",
+        "`httpd -f -p 80 -h /www`), published on host port `8080`, so that:",
         "",
-        "- `from` is `host` or a container name; `target` is a container name.",
-        "- `published[c]` holds container c's `-p` mappings as `\"hostPort:containerPort\"`, comma-separated (`\"8080:8080,8443:8443\"`); a container with nothing published is missing from the dictionary.",
-        "- `networkOf[c]` is the one user-defined network container c is on.",
-        "",
-        "From `host`: if `target` publishes `containerPort`, return `localhost:HOSTPORT`, otherwise `not reachable: port CONTAINERPORT is not published`.",
-        "From a container: if both are on the same network, return `TARGET:CONTAINERPORT`, otherwise `not reachable: no shared network`."
+        "1. `~/site` is mounted at `/www` **read-only**, written with the long `--mount` syntax;",
+        "2. `/tmp` in the container is a **tmpfs** (in memory, gone when the container stops);",
+        "3. `curl http://localhost:8080/` shows the page, and an edit to `~/site/index.html` shows up without restarting."
       ],
-      "starter": [
-        "string Address(string from, string target, int containerPort, Dictionary<string, string> published, Dictionary<string, string> networkOf)",
-        "{",
-        "    // your code here",
-        "    return \"\";",
-        "}"
+      "setup": [
+        "boss-mount.sh"
       ],
-      "solution": [
-        "string Address(string from, string target, int containerPort, Dictionary<string, string> published, Dictionary<string, string> networkOf)",
-        "{",
-        "    if (from == \"host\")",
-        "    {",
-        "        if (published.TryGetValue(target, out string? maps))",
-        "        {",
-        "            foreach (string map in maps.Split(','))",
-        "            {",
-        "                string[] p = map.Split(':');",
-        "                if (int.Parse(p[1]) == containerPort) return $\"localhost:{p[0]}\";",
-        "            }",
-        "        }",
-        "        return $\"not reachable: port {containerPort} is not published\";",
-        "    }",
-        "    return networkOf[from] == networkOf[target] ? $\"{target}:{containerPort}\" : \"not reachable: no shared network\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoPub = new Dictionary<string, string> { [\"db\"] = \"5433:5432\", [\"web\"] = \"80:3000,443:3443\" };",
-        "var dojoNet = new Dictionary<string, string> { [\"db\"] = \"shop\", [\"api\"] = \"shop\", [\"web\"] = \"shop\", [\"grafana\"] = \"ops\" };",
-        "Dojo.Eq(\"host -> db\", \"localhost:5433\", Address(\"host\", \"db\", 5432, dojoPub, dojoNet));",
-        "Dojo.Eq(\"host -> web 443\", \"localhost:443\", Address(\"host\", \"web\", 3443, dojoPub, dojoNet));",
-        "Dojo.Eq(\"host -> api\", \"not reachable: port 8080 is not published\", Address(\"host\", \"api\", 8080, dojoPub, dojoNet));",
-        "Dojo.Eq(\"host -> db wrong port\", \"not reachable: port 5433 is not published\", Address(\"host\", \"db\", 5433, dojoPub, dojoNet));",
-        "Dojo.Eq(\"api -> db\", \"db:5432\", Address(\"api\", \"db\", 5432, dojoPub, dojoNet));",
-        "Dojo.Eq(\"grafana -> db\", \"not reachable: no shared network\", Address(\"grafana\", \"db\", 5432, dojoPub, dojoNet));"
-      ]
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "What survives docker rm?",
-      "prompt": [
-        "A container was run with some mounts and wrote some files; then someone ran `docker rm` on it (with `-v` if `withV` is true). Write `List<string> AfterRm(List<string> mounts, List<string> files, bool withV)`.",
-        "",
-        "`mounts` are `-v` style values: `name:/target` (named volume), `./x:/target` or `/x:/target` (bind mount; source starts with `/` `.` or `~`), `/target` alone (anonymous volume), or `tmpfs:/target` (tmpfs). For each file, find the mount whose target is the **longest** match (the file equals the target or is under `target/`), and output one line:",
-        "",
-        "| where | line |",
-        "|---|---|",
-        "| no mount | `PATH: lost (container writable layer)` |",
-        "| named volume | `PATH: kept (named volume NAME)` |",
-        "| bind mount | `PATH: kept (host folder SOURCE)` |",
-        "| anonymous volume | `PATH: lost (anonymous volume removed by -v)` when `withV`, else `PATH: kept (anonymous volume, now orphaned)` |",
-        "| tmpfs | `PATH: lost (tmpfs lives in memory)` |"
-      ],
-      "starter": [
-        "List<string> AfterRm(List<string> mounts, List<string> files, bool withV)",
-        "{",
-        "    var result = new List<string>();",
-        "    // your code here",
-        "    return result;",
-        "}"
-      ],
-      "solution": [
-        "List<string> AfterRm(List<string> mounts, List<string> files, bool withV)",
-        "{",
-        "    var result = new List<string>();",
-        "    foreach (string file in files)",
-        "    {",
-        "        string? best = null;",
-        "        string bestTarget = \"\";",
-        "        foreach (string m in mounts)",
-        "        {",
-        "            int colon = m.IndexOf(':');",
-        "            string target = colon < 0 ? m : m[(colon + 1)..];",
-        "            bool under = file == target || file.StartsWith(target.TrimEnd('/') + \"/\");",
-        "            if (under && target.Length > bestTarget.Length) { best = m; bestTarget = target; }",
-        "        }",
-        "        string where;",
-        "        if (best == null) where = \"lost (container writable layer)\";",
-        "        else if (!best.Contains(':')) where = withV ? \"lost (anonymous volume removed by -v)\" : \"kept (anonymous volume, now orphaned)\";",
-        "        else",
-        "        {",
-        "            string source = best[..best.IndexOf(':')];",
-        "            if (source == \"tmpfs\") where = \"lost (tmpfs lives in memory)\";",
-        "            else if (source.StartsWith(\"/\") || source.StartsWith(\".\") || source.StartsWith(\"~\")) where = $\"kept (host folder {source})\";",
-        "            else where = $\"kept (named volume {source})\";",
-        "        }",
-        "        result.Add($\"{file}: {where}\");",
-        "    }",
-        "    return result;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoMounts = new List<string> { \"pgdata:/var/lib/postgresql/data\", \"./uploads:/app/uploads\", \"/app/cache\", \"tmpfs:/tmp\" };",
-        "Dojo.Eq(\"one of each\", new List<string> {",
-        "    \"/var/lib/postgresql/data/base/1: kept (named volume pgdata)\",",
-        "    \"/app/uploads/a.png: kept (host folder ./uploads)\",",
-        "    \"/app/cache/x: kept (anonymous volume, now orphaned)\",",
-        "    \"/tmp/session: lost (tmpfs lives in memory)\",",
-        "    \"/app/app.log: lost (container writable layer)\" },",
-        "    AfterRm(dojoMounts, new List<string> { \"/var/lib/postgresql/data/base/1\", \"/app/uploads/a.png\", \"/app/cache/x\", \"/tmp/session\", \"/app/app.log\" }, false));",
-        "Dojo.Eq(\"with -v the anonymous volume goes\", new List<string> { \"/app/cache/x: lost (anonymous volume removed by -v)\", \"/var/lib/postgresql/data/pg_hba.conf: kept (named volume pgdata)\" },",
-        "    AfterRm(dojoMounts, new List<string> { \"/app/cache/x\", \"/var/lib/postgresql/data/pg_hba.conf\" }, true));",
-        "Dojo.Eq(\"longest target wins; prefix is not enough\", new List<string> { \"/app/data/keep/a: kept (named volume keep)\", \"/app/data/b: kept (host folder /srv/data)\", \"/app/database/c: lost (container writable layer)\" },",
-        "    AfterRm(new List<string> { \"/srv/data:/app/data\", \"keep:/app/data/keep\" }, new List<string> { \"/app/data/keep/a\", \"/app/data/b\", \"/app/database/c\" }, false));"
+      "checks": [
+        {
+          "name": "web serves ~/site on port 8080",
+          "cmd": "diff <(curl -fsS --max-time 2 --retry 4 --retry-all-errors --retry-delay 1 http://localhost:8080/) ~/site/index.html",
+          "fail": "`curl http://localhost:8080/` does not return `~/site/index.html`."
+        },
+        {
+          "name": "~/site is bind-mounted read-only at /www",
+          "cmd": "docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}} {{.Destination}} {{.RW}}{{\"\\n\"}}{{end}}' web | grep -qx 'bind  /home/learner/site /www false'",
+          "fail": "`/www` is not a read-only bind mount of `~/site`. `--mount type=bind,source=$HOME/site,target=/www,readonly`."
+        },
+        {
+          "name": "/tmp is a tmpfs",
+          "cmd": "docker exec web sh -c \"grep -E '^[^ ]+ /tmp tmpfs ' /proc/mounts\"",
+          "fail": "`/tmp` is not a tmpfs mount. `--mount type=tmpfs,target=/tmp`."
+        },
+        {
+          "name": "the container cannot write the site",
+          "cmd": "! docker exec web touch /www/hacked 2>/dev/null",
+          "fail": "The container can write into `/www`: mount it read-only."
+        },
+        {
+          "name": "it was written with --mount",
+          "cmd": "docker inspect -f '{{json .HostConfig.Mounts}}' web | grep -q '\"Type\":\"bind\"'",
+          "fail": "Use the long `--mount type=bind,...` syntax for the site (it records the mount under `HostConfig.Mounts`)."
+        }
       ],
       "hints": [
-        "The target is everything after the first `:`, or the whole value when there is no colon.",
-        "`/app/database` must not match the target `/app/data`: compare with `target + \"/\"`.",
-        "Remember the longest matching target, then classify only that mount."
-      ]
+        "`--mount` takes comma-separated `key=value` pairs: `type`, `source`, `target`, plus the bare flag `readonly`.",
+        "`--mount` needs an absolute source path: `source=$HOME/site` (the shell expands `$HOME`).",
+        "`docker run -d --name web -p 8080:80 --mount type=bind,source=$HOME/site,target=/www,readonly --mount type=tmpfs,target=/tmp busybox:1.37 httpd -f -p 80 -h /www`."
+      ],
+      "solution": [
+        "docker run -d --name web -p 8080:80 --mount type=bind,source=$HOME/site,target=/www,readonly --mount type=tmpfs,target=/tmp busybox:1.37 httpd -f -p 80 -h /www",
+        "curl http://localhost:8080/",
+        "docker exec web touch /www/hacked",
+        "docker inspect -f '{{json .Mounts}}' web | jq"
+      ],
+      "explain": "`--mount` spells out what `-v` leaves implicit, and fails loudly where `-v` would silently create an empty folder for a mistyped path. Read-only mounts are a cheap security control: a compromised web server cannot deface what it serves. tmpfs gives scratch space that never reaches the disk, which also suits `--read-only` containers."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 2: wire three tiers",
+      "image": "docker",
+      "prompt": [
+        "A real Docker Engine runs in this terminal with `web` (published on port 8080), `api` (HTTP on port 5000) and `db`",
+        "(PostgreSQL-like on 5432), all on the default bridge. Wire them like production, keeping the same containers:",
+        "",
+        "1. `web` reaches `api` by name: `docker exec web wget -qO- http://api:5000/` prints `api 1.0`;",
+        "2. `api` reaches `db` by name: `docker exec api nc -w 2 db 5432` prints `PostgreSQL 17 ready`;",
+        "3. `web` cannot reach `db` in any way, and nothing but `api` shares a network with `db`;",
+        "4. `curl http://localhost:8080/` still answers `web 1.0` from this machine.",
+        "",
+        "Use two networks: `front` and `back`."
+      ],
+      "setup": [
+        "boss-wire.sh"
+      ],
+      "checks": [
+        {
+          "name": "web reaches api by name",
+          "cmd": "docker exec web wget -qO- -T 2 http://api:5000/",
+          "expectOutput": "api 1.0",
+          "fail": "`web` cannot reach `http://api:5000/`."
+        },
+        {
+          "name": "api reaches db by name",
+          "cmd": "docker exec api nc -w 2 db 5432 </dev/null",
+          "expectContains": "PostgreSQL 17 ready",
+          "fail": "`api` cannot reach `db:5432` by name."
+        },
+        {
+          "name": "web cannot reach db",
+          "cmd": "for ip in $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' db) db; do if docker exec web nc -w 2 $ip 5432 </dev/null 2>/dev/null | grep -q ready; then echo \"web reached db at $ip\"; exit 1; fi; done",
+          "fail": "`web` can still reach `db`. Keep `db` off every network `web` is on (the default bridge included)."
+        },
+        {
+          "name": "db shares a network with api only",
+          "cmd": "for n in $(docker inspect -f '{{range $n, $_ := .NetworkSettings.Networks}}{{$n}} {{end}}' db); do docker network inspect -f '{{range .Containers}}{{.Name}}{{\"\\n\"}}{{end}}' $n; done | sort -u | xargs",
+          "expectOutput": "api db",
+          "fail": "Something other than `api` and `db` shares a network with `db`."
+        },
+        {
+          "name": "the host still reaches web",
+          "cmd": "curl -fsS --max-time 2 http://localhost:8080/",
+          "expectOutput": "web 1.0",
+          "fail": "`curl http://localhost:8080/` does not answer `web 1.0`."
+        }
+      ],
+      "hints": [
+        "`docker network create front` and `docker network create back`; a container can be on several networks.",
+        "`api` joins both; `web` joins `front`; `db` joins `back` and leaves `bridge`.",
+        "Published ports keep working when a container leaves the default bridge, as long as it is on some bridge network."
+      ],
+      "solution": [
+        "docker network create front",
+        "docker network create back",
+        "docker network connect front web",
+        "docker network connect front api",
+        "docker network connect back api",
+        "docker network connect back db",
+        "docker network disconnect bridge db",
+        "docker network disconnect bridge api",
+        "docker exec web wget -qO- http://api:5000/",
+        "docker exec api nc -w 2 db 5432"
+      ],
+      "explain": "Networks are Docker's security boundary between containers: a container can only reach networks it is attached to, so the database on `back` is invisible to the web tier on `front`, and `api` is the one bridge between them. Compose builds exactly this with `networks:` per service."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 3: clean up, keep the data",
+      "image": "docker",
+      "prompt": [
+        "A real Docker Engine runs in this terminal. The dev box is full: `docker ps -a`, `docker volume ls`,",
+        "`docker system df`. Clean it up:",
+        "",
+        "1. remove every **stopped** container (the retired `old-db` included); `web` keeps running;",
+        "2. remove the **anonymous** volumes nobody uses any more;",
+        "3. keep the named volumes `pgdata` (the retired database's data, needed for a migration) and `reports`, with their",
+        "   contents."
+      ],
+      "setup": [
+        "boss-clean.sh"
+      ],
+      "checks": [
+        {
+          "name": "no stopped containers are left, web still runs",
+          "cmd": "test -z \"$(docker ps -aq --filter status=exited --filter status=created)\" && test \"$(docker inspect -f '{{.State.Running}}' web)\" = true",
+          "fail": "There are still stopped containers (`docker ps -a --filter status=exited`), or `web` was removed."
+        },
+        {
+          "name": "no anonymous volumes are left",
+          "cmd": "docker volume ls -q | grep -E '^[0-9a-f]{64}$' | wc -l",
+          "expectOutput": "0",
+          "fail": "Anonymous volumes (the 64-hex names) are still there. `docker volume prune` removes unused anonymous volumes."
+        },
+        {
+          "name": "pgdata and reports kept their data",
+          "cmd": "docker run --rm -v pgdata:/p -v reports:/r busybox:1.37 cat /p/base.txt /r/q3.txt",
+          "expectOutput": [
+            "customers: 1204 rows",
+            "Q3 revenue report"
+          ],
+          "fail": "`pgdata` or `reports` is gone or empty. Since Docker 23, `docker volume prune` keeps named volumes; `docker volume prune -a` (and `docker system prune --volumes -a`) delete them."
+        }
+      ],
+      "hints": [
+        "`docker container prune -f` removes every stopped container; `docker rm` does not remove a container's volumes unless you add `-v`.",
+        "`docker volume ls -f dangling=true` lists volumes no container uses; anonymous ones have 64-hex names.",
+        "`docker volume prune -f` (no `-a`) removes only anonymous unused volumes."
+      ],
+      "solution": [
+        "docker system df",
+        "docker ps -a",
+        "docker container prune -f",
+        "docker volume ls -f dangling=true",
+        "docker volume prune -f",
+        "docker volume ls",
+        "docker system df"
+      ],
+      "explain": "Containers, images, volumes and build cache are cleaned separately, and volumes are the dangerous one: they hold data. Since Docker 23 `docker volume prune` only removes anonymous volumes; adding `-a` (or `docker system prune -a --volumes`) also deletes named ones, which is how people lose a database on a Friday. `docker system df` shows where the space went before you delete anything."
     }
   ]
 }

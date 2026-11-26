@@ -1,196 +1,181 @@
 {
   "title": "Boss: the Dockerfile reviewer",
-  "summary": "Build the review bot your team runs on every Dockerfile: summary, stage checks and a cache-cost estimate.",
+  "summary": "Three image tickets on a real Docker Engine: read an image you did not build, repair a multi-stage build, make a slow build fast.",
   "minutes": 15,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "The review bot",
-      "body": "Pull requests that touch a Dockerfile get an automatic review comment. You are writing the parts of the bot: a one-line summary, a check that `COPY --from` points at real stages, and an estimate of how long a rebuild costs after a change."
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "One-line summary",
-      "prompt": [
-        "Write `string Summary(List<string> lines)` returning `\"I instructions, S stages, runs: COMMAND\"`.",
-        "",
-        "- I counts instructions: non-blank lines not starting with `#` (no line continuations in this task).",
-        "- S counts `FROM` lines.",
-        "- COMMAND is the final stage's ENTRYPOINT items followed by its CMD items (the **last** of each in the final stage wins; both reset at every `FROM`). Exec form `[\"a\", \"b\"]` gives `a b`; shell form `CMD npm start` gives `/bin/sh -c npm start`. If the final stage has neither, COMMAND is `(inherited from base image)`.",
-        "",
-        "Example: `12 instructions, 2 stages, runs: dotnet Api.dll`."
-      ],
-      "starter": [
-        "string Summary(List<string> lines)",
-        "{",
-        "    // your code here",
-        "    return \"\";",
-        "}"
-      ],
-      "solution": [
-        "string Part(string args)",
-        "{",
-        "    args = args.Trim();",
-        "    if (!args.StartsWith(\"[\")) return \"/bin/sh -c \" + args;",
-        "    return string.Join(\" \", args.Trim('[', ']').Split(',').Select(p => p.Trim().Trim('\"')).Where(p => p != \"\"));",
-        "}",
-        "",
-        "string Summary(List<string> lines)",
-        "{",
-        "    int count = 0, stages = 0;",
-        "    string? entrypoint = null, cmd = null;",
-        "    foreach (string raw in lines)",
-        "    {",
-        "        string line = raw.Trim();",
-        "        if (line == \"\" || line.StartsWith(\"#\")) continue;",
-        "        count++;",
-        "        int space = line.IndexOf(' ');",
-        "        string keyword = (space < 0 ? line : line[..space]).ToUpper();",
-        "        string args = space < 0 ? \"\" : line[(space + 1)..];",
-        "        if (keyword == \"FROM\") { stages++; entrypoint = null; cmd = null; }",
-        "        else if (keyword == \"ENTRYPOINT\") entrypoint = Part(args);",
-        "        else if (keyword == \"CMD\") cmd = Part(args);",
-        "    }",
-        "    string command = string.Join(\" \", new[] { entrypoint, cmd }.Where(x => x != null));",
-        "    if (command == \"\") command = \"(inherited from base image)\";",
-        "    return $\"{count} instructions, {stages} stages, runs: {command}\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\".NET multi-stage\", \"8 instructions, 2 stages, runs: dotnet Api.dll\", Summary(new List<string> { \"# build\", \"FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build\", \"WORKDIR /src\", \"COPY . .\", \"RUN dotnet publish -o /out\", \"\", \"FROM mcr.microsoft.com/dotnet/aspnet:10.0\", \"WORKDIR /app\", \"COPY --from=build /out .\", \"ENTRYPOINT [\\\"dotnet\\\", \\\"Api.dll\\\"]\" }));",
-        "Dojo.Eq(\"last CMD wins, entrypoint plus cmd\", \"5 instructions, 1 stages, runs: curl --help\", Summary(new List<string> { \"FROM alpine:3.20\", \"RUN apk add curl\", \"ENTRYPOINT [\\\"curl\\\"]\", \"CMD [\\\"-v\\\"]\", \"CMD [\\\"--help\\\"]\" }));",
-        "Dojo.Eq(\"shell form\", \"2 instructions, 1 stages, runs: /bin/sh -c npm start\", Summary(new List<string> { \"FROM node:22-alpine\", \"CMD npm start\" }));",
-        "Dojo.Eq(\"commands reset at FROM\", \"3 instructions, 2 stages, runs: (inherited from base image)\", Summary(new List<string> { \"FROM node:22 AS build\", \"CMD [\\\"node\\\"]\", \"FROM nginx:1.27\" }));"
-      ],
-      "hints": [
-        "Track `entrypoint` and `cmd` as nullable strings; set both to null on every FROM.",
-        "Write a helper that turns an argument string into its printable form for exec or shell form."
+      "body": [
+        "Image tickets reach you from every direction: a vendor image nobody can explain, a Dockerfile a teammate \"tidied up\",",
+        "a CI job that rebuilds everything on every commit. Each ticket below opens its own machine with a **real Docker",
+        "Engine** and the problem already on it. Use `docker image inspect -f`, `docker history --no-trunc`, `docker build`",
+        "(with `--target`, `--check` and `--progress=plain`) and `.dockerignore`."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Check COPY --from",
+      "type": "terminal",
+      "title": "Ticket 1: \"what does this vendor image do?\"",
+      "image": "docker",
       "prompt": [
-        "Write `List<string> CheckStages(List<string> lines)` that validates stage references (lines numbered from 1):",
+        "A real Docker Engine runs in this terminal. Security asks about `vendor/reporting:3.2`, an image with no Dockerfile in",
+        "sight. Read it **without running it**, and answer:",
         "",
-        "- `FROM x AS name` where `name` was already used → `line N: duplicate stage name 'name'`",
-        "- `COPY --from=X` where X is not the name **or index** of an **earlier** stage → `line N: unknown stage 'X'`, unless X contains `:` or `/` (then it is an image reference like `--from=nginx:1.27`, which is allowed). A `COPY --from` that names the current stage itself is also unknown (a stage cannot copy from itself).",
-        "",
-        "Return `ok` alone if there are no problems."
+        "1. `~/answers/port.txt`: the port it says it listens on;",
+        "2. `~/answers/user.txt`: the user it runs as;",
+        "3. `~/answers/command.txt`: the full command a plain `docker run vendor/reporting:3.2` starts (entrypoint, then",
+        "   arguments, separated by spaces);",
+        "4. `~/answers/leak.txt`: the password that one of its build steps wrote and then deleted. (Deleting a file in a",
+        "   later step does not remove it from the image.)"
       ],
-      "starter": [
-        "List<string> CheckStages(List<string> lines)",
-        "{",
-        "    var problems = new List<string>();",
-        "    // your code here",
-        "    return problems;",
-        "}"
+      "setup": [
+        "boss-inspect.sh"
       ],
-      "solution": [
-        "List<string> CheckStages(List<string> lines)",
-        "{",
-        "    var problems = new List<string>();",
-        "    var names = new List<string>();",
-        "    for (int i = 0; i < lines.Count; i++)",
-        "    {",
-        "        string[] t = lines[i].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);",
-        "        if (t.Length == 0) continue;",
-        "        string keyword = t[0].ToUpper();",
-        "        if (keyword == \"FROM\")",
-        "        {",
-        "            string name = t.Length >= 4 && t[2].ToUpper() == \"AS\" ? t[3] : names.Count.ToString();",
-        "            if (names.Contains(name)) problems.Add($\"line {i + 1}: duplicate stage name '{name}'\");",
-        "            names.Add(name);",
-        "        }",
-        "        else if (keyword == \"COPY\")",
-        "        {",
-        "            string? from = t.FirstOrDefault(x => x.StartsWith(\"--from=\"));",
-        "            if (from == null) continue;",
-        "            string target = from[7..];",
-        "            if (target.Contains(':') || target.Contains('/')) continue;",
-        "            var earlier = names.Take(names.Count - 1).ToList();",
-        "            bool known = earlier.Contains(target) || (int.TryParse(target, out int index) && index >= 0 && index < earlier.Count);",
-        "            if (!known) problems.Add($\"line {i + 1}: unknown stage '{target}'\");",
-        "        }",
-        "    }",
-        "    return problems.Count == 0 ? new List<string> { \"ok\" } : problems;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"valid file\", new List<string> { \"ok\" }, CheckStages(new List<string> { \"FROM node:22 AS deps\", \"FROM node:22 AS build\", \"COPY --from=deps /app/node_modules ./node_modules\", \"FROM node:22-alpine\", \"COPY --from=build /app/dist ./dist\", \"COPY --from=nginx:1.27 /etc/nginx/nginx.conf /tmp/\" }));",
-        "Dojo.Eq(\"typo in a stage name\", new List<string> { \"line 3: unknown stage 'biuld'\" }, CheckStages(new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build\", \"FROM mcr.microsoft.com/dotnet/aspnet:10.0\", \"COPY --from=biuld /out .\" }));",
-        "Dojo.Eq(\"copy from a later stage or itself\", new List<string> { \"line 2: unknown stage 'final'\", \"line 4: unknown stage 'final'\" }, CheckStages(new List<string> { \"FROM alpine:3.20 AS build\", \"COPY --from=final /x /x\", \"FROM alpine:3.20 AS final\", \"COPY --from=final /y /y\" }));",
-        "Dojo.Eq(\"indexes and duplicates\", new List<string> { \"line 2: duplicate stage name 'build'\", \"line 4: unknown stage '3'\" }, CheckStages(new List<string> { \"FROM golang:1.23 AS build\", \"FROM golang:1.23 AS build\", \"COPY --from=0 /a /a\", \"COPY --from=3 /b /b\" }));"
+      "checks": [
+        {
+          "name": "port.txt is the exposed port",
+          "cmd": "test \"$(xargs < ~/answers/port.txt)\" = \"$(docker image inspect -f '{{range $p, $_ := .Config.ExposedPorts}}{{$p}}{{end}}' vendor/reporting:3.2 | cut -d/ -f1)\"",
+          "fail": "Not the exposed port. `docker image inspect -f '{{json .Config.ExposedPorts}}' vendor/reporting:3.2`."
+        },
+        {
+          "name": "user.txt is the user it runs as",
+          "cmd": "test \"$(xargs < ~/answers/user.txt)\" = \"$(docker image inspect -f '{{.Config.User}}' vendor/reporting:3.2)\"",
+          "fail": "Not the image's user. `docker image inspect -f '{{.Config.User}}' ...`."
+        },
+        {
+          "name": "command.txt is entrypoint plus default arguments",
+          "cmd": "test \"$(xargs < ~/answers/command.txt)\" = \"$(docker image inspect -f '{{join .Config.Entrypoint \" \"}} {{join .Config.Cmd \" \"}}' vendor/reporting:3.2)\"",
+          "fail": "Not the full command. It is the Entrypoint's items followed by the Cmd's: `docker image inspect -f '{{json .Config.Entrypoint}} {{json .Config.Cmd}}'`."
+        },
+        {
+          "name": "leak.txt has the leaked password",
+          "cmd": "grep -qx 'hunter2-example' <(xargs < ~/answers/leak.txt)",
+          "fail": "Not the leaked password. `docker history --no-trunc vendor/reporting:3.2` prints every build step's full command."
+        }
       ],
       "hints": [
-        "The earlier stages are all names except the last (the current one).",
-        "An index is valid when it is less than the number of earlier stages."
-      ]
+        "`docker image inspect -f '{{json .Config}}' vendor/reporting:3.2 | jq` shows the user, ports, entrypoint and cmd.",
+        "`docker history --no-trunc --format '{{.CreatedBy}}' vendor/reporting:3.2` lists the commands that built each layer.",
+        "The password is in a `RUN` line that writes `/root/.netrc`."
+      ],
+      "solution": [
+        "docker image inspect -f '{{json .Config}}' vendor/reporting:3.2 | jq",
+        "docker image inspect -f '{{range $p, $_ := .Config.ExposedPorts}}{{$p}}{{end}}' vendor/reporting:3.2",
+        "echo 9100 > ~/answers/port.txt",
+        "docker image inspect -f '{{.Config.User}}' vendor/reporting:3.2 > ~/answers/user.txt",
+        "echo \"sh /usr/local/bin/run-reporting --daily\" > ~/answers/command.txt",
+        "docker history --no-trunc --format '{{.CreatedBy}}' vendor/reporting:3.2 | grep netrc",
+        "echo hunter2-example > ~/answers/leak.txt"
+      ],
+      "explain": "An image documents itself: its config holds the user, ports, environment and start command, and its history holds every build command, secrets included. That is why a credential written in one `RUN` and deleted in the next is still leaked (`docker save` would even extract the file), and why build secrets go in `RUN --mount=type=secret` instead."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "What will this rebuild cost?",
+      "type": "terminal",
+      "title": "Ticket 2: \"the multi-stage build broke\"",
+      "image": "docker",
       "prompt": [
-        "Each instruction now carries how many seconds it takes when it is **not** cached: `\"RUN dotnet restore|40\"`. Write `int RebuildSeconds(List<string> steps, List<string> changed)` that returns the total seconds of the steps that will rebuild, using the cache rules from the layers lesson (the first `COPY` without `--from=` whose sources match a changed file misses, and every step from there on rebuilds; sources are the tokens between `COPY` and the destination, ignoring `--` flags; `.`/`./` match anything, `*.ext` matches by suffix, a path matches itself or files under it).",
-        "",
-        "Then the reviewer can say: *\"This change costs 52 s to rebuild; move the restore above COPY . . and it costs 12 s.\"*"
+        "A real Docker Engine runs in this terminal. A teammate tidied up `~/tool/Dockerfile` and now",
+        "`docker build -t shop/tool:1.0 ~/tool` fails. Read the error, fix the Dockerfile (keep its three stages: assemble,",
+        "check, small final image), and build `shop/tool:1.0` so that `docker run --rm shop/tool:1.0` prints `tool 1.0 ok`.",
+        "The final image must stay on `busybox:1.37`, with only the tool in `/opt/tool`."
       ],
-      "starter": [
-        "int RebuildSeconds(List<string> steps, List<string> changed)",
-        "{",
-        "    // your code here",
-        "    return 0;",
-        "}"
+      "setup": [
+        "boss-stages.sh"
       ],
-      "solution": [
-        "bool Matches(string source, string file)",
-        "{",
-        "    if (source == \".\" || source == \"./\") return true;",
-        "    if (source.StartsWith(\"*\")) return file.EndsWith(source[1..]);",
-        "    string dir = source.TrimEnd('/');",
-        "    return file == dir || file.StartsWith(dir + \"/\");",
-        "}",
-        "",
-        "int RebuildSeconds(List<string> steps, List<string> changed)",
-        "{",
-        "    int total = 0;",
-        "    bool miss = false;",
-        "    foreach (string step in steps)",
-        "    {",
-        "        int bar = step.LastIndexOf('|');",
-        "        string ins = step[..bar];",
-        "        int seconds = int.Parse(step[(bar + 1)..]);",
-        "        if (!miss && ins.StartsWith(\"COPY \") && !ins.Contains(\"--from=\"))",
-        "        {",
-        "            var parts = ins.Split(' ', StringSplitOptions.RemoveEmptyEntries).Skip(1).Where(p => !p.StartsWith(\"--\")).ToList();",
-        "            var sources = parts.Take(parts.Count - 1).ToList();",
-        "            if (changed.Any(f => sources.Any(s => Matches(s, f)))) miss = true;",
-        "        }",
-        "        if (miss) total += seconds;",
-        "    }",
-        "    return total;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoNaive = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:10.0|0\", \"WORKDIR /src|0\", \"COPY . .|2\", \"RUN dotnet restore|40\", \"RUN dotnet publish -o /out --no-restore|10\" };",
-        "var dojoGood = new List<string> { \"FROM mcr.microsoft.com/dotnet/sdk:10.0|0\", \"WORKDIR /src|0\", \"COPY Api.csproj .|1\", \"RUN dotnet restore|40\", \"COPY . .|2\", \"RUN dotnet publish -o /out --no-restore|10\" };",
-        "Dojo.Eq(\"naive file, code edit\", 52, RebuildSeconds(dojoNaive, new List<string> { \"Program.cs\" }));",
-        "Dojo.Eq(\"good file, code edit\", 12, RebuildSeconds(dojoGood, new List<string> { \"Program.cs\" }));",
-        "Dojo.Eq(\"good file, new package\", 53, RebuildSeconds(dojoGood, new List<string> { \"Api.csproj\" }));",
-        "Dojo.Eq(\"nothing changed\", 0, RebuildSeconds(dojoGood, new List<string>()));",
-        "Dojo.Eq(\"folder and flags\", 31, RebuildSeconds(new List<string> { \"FROM node:22|0\", \"COPY --chown=node:node package*.json ./|1\", \"RUN npm ci|60\", \"COPY --chown=node:node src ./src|1\", \"RUN npm run build|30\" }, new List<string> { \"src/app.ts\" }));"
+      "checks": [
+        {
+          "name": "docker build succeeds",
+          "cmd": "docker build -q -t shop/tool:1.0 ~/tool 2>&1 | tail -n 8",
+          "expectMatch": "^sha256:",
+          "fail": "`docker build -t shop/tool:1.0 ~/tool` still fails. Read the first error line: which stage name does it not know?"
+        },
+        {
+          "name": "docker run prints tool 1.0 ok",
+          "cmd": "docker run --rm shop/tool:1.0",
+          "expectOutput": "tool 1.0 ok",
+          "fail": "The image does not print `tool 1.0 ok`."
+        },
+        {
+          "name": "the final image is busybox with only the tool",
+          "cmd": "docker run --rm --entrypoint sh shop/tool:1.0 -c 'test ! -e /etc/alpine-release && test ! -e /src && ls /opt/tool' | sort | xargs",
+          "expectOutput": "VERSION tool.sh",
+          "fail": "The final image should be `busybox:1.37` with only `tool.sh` and `VERSION` in `/opt/tool`."
+        },
+        {
+          "name": "there are still three stages",
+          "cmd": "grep -ciE '^FROM[[:space:]]' ~/tool/Dockerfile",
+          "expectOutput": "3",
+          "fail": "Keep the three stages (assemble, check, final): rename, do not delete."
+        }
       ],
       "hints": [
-        "Split each step at its last `|` into the instruction and its seconds.",
-        "This is your `Rebuilt` logic with a running total instead of labels."
-      ]
+        "`docker build` names the problem: a stage that copies from a name no stage has, and two stages with one name.",
+        "Stage names must be unique; `COPY --from=NAME` must name an earlier stage (or an image).",
+        "Name the second stage `check` (`FROM build AS check`), and copy from `build`: `COPY --from=build /out/ /opt/tool/`."
+      ],
+      "solution": [
+        "docker build -t shop/tool:1.0 ~/tool",
+        "sed -i 's/^FROM build AS build$/FROM build AS check/; s/--from=builder/--from=build/' ~/tool/Dockerfile",
+        "docker build -t shop/tool:1.0 ~/tool",
+        "docker run --rm shop/tool:1.0"
+      ],
+      "explain": "Stage names are how stages refer to each other, so they must be unique and spelled the same in `COPY --from`. Note what BuildKit did with the `check` stage: the final stage does not depend on it, so a plain `docker build` skips it entirely. To run such a test stage in CI, build it on purpose: `docker build --target check .`."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 3: \"CI rebuilds everything on every commit\"",
+      "image": "docker",
+      "prompt": [
+        "A real Docker Engine runs in this terminal. Every commit to `~/web` reinstalls its packages, and the build sends a",
+        "20 MB `logs/` folder and the `.git` folder to the builder each time. Fix `~/web` so that:",
+        "",
+        "1. changing anything under `logs/` (or `.git/`) does **not rebuild the image at all**;",
+        "2. changing `src/server.sh` reuses the cached install, while changing `packages.txt` reinstalls;",
+        "3. the image contains neither `logs/` nor `.git`;",
+        "4. `docker run --rm shop/web:dev` (build it with that name) prints `web up with 2 packages`."
+      ],
+      "setup": [
+        "boss-fast.sh"
+      ],
+      "checks": [
+        {
+          "name": "the image builds and runs",
+          "cmd": "cd ~/web && docker build -q -t shop/web:dev . >/dev/null && docker run --rm shop/web:dev",
+          "expectOutput": "web up with 2 packages",
+          "fail": "`docker build` fails, or the app does not print `web up with 2 packages`."
+        },
+        {
+          "name": "logs/ and .git are not in the image",
+          "cmd": "docker run --rm --entrypoint sh shop/web:dev -c 'test ! -e /app/logs && test ! -e /app/.git'",
+          "fail": "`/app/logs` or `/app/.git` is in the image."
+        },
+        {
+          "name": "logs/ changes do not rebuild; src changes keep the install; packages.txt changes reinstall",
+          "cmd": "bash $DOJO_FILES/check-cache.sh ~/web src/server.sh packages.txt logs/today.log",
+          "fail": "The check builds a copy of `~/web` and changes `logs/today.log`, `src/server.sh`, then `packages.txt`. Use a `.dockerignore`, and copy only what the install needs before running it."
+        }
+      ],
+      "hints": [
+        "Two separate problems: what is sent to the builder (`.dockerignore`), and the instruction order (cache).",
+        "`.dockerignore` with `logs/` and `.git` keeps them out of the context, so they can neither bust the cache nor end up in a layer.",
+        "`COPY packages.txt install.sh ./`, `RUN sh install.sh`, then `COPY . .`."
+      ],
+      "solution": [
+        "cd ~/web",
+        "printf '%s\\n' logs/ .git > .dockerignore",
+        "cat > Dockerfile <<'EOF'",
+        "FROM alpine:3.24",
+        "WORKDIR /app",
+        "COPY packages.txt install.sh ./",
+        "RUN sh install.sh",
+        "COPY . .",
+        "CMD [\"sh\", \"src/server.sh\"]",
+        "EOF",
+        "docker build --progress=plain -t shop/web:dev . 2>&1 | grep -E 'transferring context|CACHED|DONE' | tail -n 6",
+        "docker run --rm shop/web:dev"
+      ],
+      "explain": "`.dockerignore` decides what the builder can see: ignored files are never sent (the context shrank from 20 MB to a few KB), so they can neither invalidate a cached `COPY . .` nor leak into a layer. Ordering decides what each change costs. Together they turn \"every commit reinstalls\" into \"only a dependency change reinstalls\", and on CI that is the difference between seconds and minutes per build."
     }
   ]
 }

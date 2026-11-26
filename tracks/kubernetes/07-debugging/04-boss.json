@@ -1,0 +1,160 @@
+{
+  "title": "Boss: a night on call",
+  "summary": "Six seeded faults in a real cluster, three tickets: CrashLoopBackOff and OOMKilled, ImagePullBackOff and a Service with no endpoints, a stuck rollout and a Pending pod.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Your pager goes off",
+      "body": [
+        "It is 02:10 and the `shop` namespace is on fire. Each ticket opens its own one-node **Kubernetes 1.37** cluster with",
+        "**two** faults in it. Work symptom-first: `get pods`, `get events --sort-by=.lastTimestamp`, `describe`, `logs -p`,",
+        "`get endpointslices`, `rollout history`. Fix the cause, not the symptom, and leave the namespace healthy."
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 1: orders crash-loops, resizer keeps restarting",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). In the namespace `shop`:",
+        "",
+        "1. `orders` is in `CrashLoopBackOff`. The URL it needs is `http://payments.shop.svc.cluster.local`; it reads its",
+        "   settings from the ConfigMap `orders-config`. Make it start and stay up.",
+        "2. `resizer` keeps restarting. Find out why and fix its resources (it needs about 40 MB) so it stays up."
+      ],
+      "setup": [
+        "bash \"$DOJO_FILES/boss-oncall.sh\" 1"
+      ],
+      "checks": [
+        {
+          "name": "orders is up",
+          "cmd": "kubectl -n shop rollout status deploy/orders --timeout=40s >/dev/null && sleep 2 && kubectl -n shop logs $(kubectl -n shop get pods -l app=orders -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name') --tail=1",
+          "expectOutput": "orders: ready, payments at http://payments.shop.svc.cluster.local",
+          "fail": "`orders` is not up. `kubectl -n shop logs deploy/orders -p`."
+        },
+        {
+          "name": "PAYMENTS_URL lives in the ConfigMap",
+          "cmd": "kubectl -n shop get configmap orders-config -o jsonpath='{.data.PAYMENTS_URL}'",
+          "expectOutput": "http://payments.shop.svc.cluster.local",
+          "fail": "Put `PAYMENTS_URL` into `orders-config`."
+        },
+        {
+          "name": "resizer stays up with enough memory",
+          "cmd": "kubectl -n shop rollout status deploy/resizer --timeout=40s >/dev/null && sleep 3 && kubectl -n shop logs $(kubectl -n shop get pods -l app=resizer -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name') --tail=1",
+          "expectOutput": "resizer: ready (40000000 bytes)",
+          "fail": "`resizer` is not up. Its last state says `OOMKilled`: raise its memory limit (and request), to 128Mi say."
+        }
+      ],
+      "hints": [
+        "`kubectl -n shop get pods`, `kubectl -n shop logs deploy/orders -p`, `kubectl -n shop describe pod -l app=resizer`.",
+        "orders: add the key to the ConfigMap, then `rollout restart`. resizer: `Last State: Terminated, Reason: OOMKilled`.",
+        "`kubectl -n shop patch configmap orders-config -p '{\"data\":{\"PAYMENTS_URL\":\"http://payments.shop.svc.cluster.local\"}}'`, `kubectl -n shop rollout restart deploy/orders`, `kubectl -n shop set resources deploy/resizer --requests=memory=128Mi --limits=memory=128Mi`."
+      ],
+      "solution": [
+        "kubectl -n shop get pods",
+        "kubectl -n shop logs deploy/orders -p",
+        "kubectl -n shop patch configmap orders-config -p '{\"data\":{\"PAYMENTS_URL\":\"http://payments.shop.svc.cluster.local\"}}'",
+        "kubectl -n shop rollout restart deploy/orders",
+        "kubectl -n shop get pods -l app=resizer -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated.reason}'; echo",
+        "kubectl -n shop set resources deploy/resizer --requests=memory=128Mi --limits=memory=128Mi",
+        "kubectl -n shop rollout status deploy/orders",
+        "kubectl -n shop rollout status deploy/resizer"
+      ],
+      "explain": "Two kinds of restart, told apart in seconds: `orders` exited with its own error (in `logs -p`), `resizer` was killed by the kernel (`OOMKilled`, exit 137, in `describe`). One needed configuration, the other resources."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 2: the catalog is down",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). In the namespace `shop`, nothing answers on the `catalog` Service:",
+        "`kubectl -n shop exec shell -- wget -qO- -T 2 http://catalog/` fails. Two things are wrong, one in the Deployment and one",
+        "in the Service. Fix both so that the request answers `Name: catalog`."
+      ],
+      "setup": [
+        "bash \"$DOJO_FILES/boss-oncall.sh\" 2"
+      ],
+      "checks": [
+        {
+          "name": "catalog's pods run",
+          "cmd": "kubectl -n shop rollout status deploy/catalog --timeout=40s >/dev/null; kubectl -n shop get deploy catalog -o jsonpath='{.status.readyReplicas}'",
+          "expectOutput": "2",
+          "fail": "`catalog` has no ready pods. Its events say which image cannot be pulled (the tag needs its `v`)."
+        },
+        {
+          "name": "the Service has endpoints and answers",
+          "cmd": "kubectl -n shop exec shell -- wget -qO- -T 3 http://catalog/ | grep '^Name:'",
+          "expectOutput": "Name: catalog",
+          "fail": "The Service still does not answer. `kubectl -n shop get endpointslices`: does its selector match the pods' labels?"
+        }
+      ],
+      "hints": [
+        "`kubectl -n shop describe pod -l app=catalog | tail` and `kubectl -n shop get endpointslices -l kubernetes.io/service-name=catalog`.",
+        "The image is `traefik/whoami:1.11` (no `v`); the Service selects `app=catalog-api`.",
+        "`kubectl -n shop set image deploy/catalog catalog=traefik/whoami:v1.11` and `kubectl -n shop patch svc catalog -p '{\"spec\":{\"selector\":{\"app\":\"catalog\"}}}'`."
+      ],
+      "solution": [
+        "kubectl -n shop get pods",
+        "kubectl -n shop get events --sort-by=.lastTimestamp | grep -i pull | tail -n 1",
+        "kubectl -n shop set image deploy/catalog catalog=traefik/whoami:v1.11",
+        "kubectl -n shop rollout status deploy/catalog",
+        "kubectl -n shop get endpointslices -l kubernetes.io/service-name=catalog",
+        "kubectl -n shop patch svc catalog -p '{\"spec\":{\"selector\":{\"app\":\"catalog\"}}}'",
+        "kubectl -n shop exec shell -- wget -qO- -T 3 http://catalog/"
+      ],
+      "explain": "Fixing the image alone would have left the outage in place: the pods would be healthy and the Service would still have no endpoints. Checking every hop (pods ready, endpoints present, request answers) is what tells you the incident is really over."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 3: checkout's release is stuck, reports never starts",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). In the namespace `shop`:",
+        "",
+        "1. The new `checkout` release (v2) is stuck halfway: its pods never become ready, while v1 keeps serving. Get",
+        "   `checkout` back to the last good version with a **rollback**, fully rolled out.",
+        "2. `reports` has been `Pending` since it was deployed. Fix its resources (it needs `250m` CPU and `128Mi`) so it runs."
+      ],
+      "setup": [
+        "bash \"$DOJO_FILES/boss-oncall.sh\" 3"
+      ],
+      "checks": [
+        {
+          "name": "checkout is back on v1, fully rolled out",
+          "cmd": "kubectl -n shop rollout status deploy/checkout --timeout=40s >/dev/null; kubectl -n shop get deploy checkout -o jsonpath='{.spec.template.spec.containers[0].args} {.status.updatedReplicas} {.status.readyReplicas}'",
+          "expectOutput": "[\"--name=checkout-v1\"] 3 3",
+          "fail": "`checkout` should run v1 (`--name=checkout-v1`) with 3 updated, ready pods. `kubectl -n shop rollout undo deploy/checkout`."
+        },
+        {
+          "name": "it was a rollback (a new revision)",
+          "cmd": "kubectl -n shop get deploy checkout -o jsonpath='{.metadata.annotations.deployment\\.kubernetes\\.io/revision}'",
+          "expectOutput": "3",
+          "fail": "Use `kubectl rollout undo`: it records the rollback as revision 3."
+        },
+        {
+          "name": "reports runs",
+          "cmd": "kubectl -n shop rollout status deploy/reports --timeout=40s >/dev/null; kubectl -n shop get deploy reports -o jsonpath='{.status.readyReplicas} {.spec.template.spec.containers[0].resources.requests.cpu}'",
+          "expectOutput": "1 250m",
+          "fail": "`reports` should run with a realistic CPU request (`250m`)."
+        }
+      ],
+      "hints": [
+        "`kubectl -n shop rollout status deploy/checkout --timeout=5s`, `kubectl -n shop describe pod` on a new pod (`Unhealthy`), `kubectl -n shop rollout history deploy/checkout`.",
+        "`kubectl -n shop get events --field-selector reason=FailedScheduling`: `Insufficient cpu`.",
+        "`kubectl -n shop rollout undo deploy/checkout` and `kubectl -n shop set resources deploy/reports --requests=cpu=250m,memory=128Mi`."
+      ],
+      "solution": [
+        "kubectl -n shop get pods",
+        "kubectl -n shop rollout history deploy/checkout",
+        "kubectl -n shop rollout undo deploy/checkout",
+        "kubectl -n shop rollout status deploy/checkout",
+        "kubectl -n shop get events --field-selector reason=FailedScheduling | tail -n 1",
+        "kubectl -n shop set resources deploy/reports --requests=cpu=250m,memory=128Mi",
+        "kubectl -n shop rollout status deploy/reports"
+      ],
+      "explain": "`maxUnavailable: 0` is why the bad release never hurt anyone: v1 kept all its pods until v2 pods became ready, which they never did. `rollout undo` is the fast, safe exit; the fix to v2's probe path goes in the next release. And `Pending` from `Insufficient cpu` is always about **requests**, never about actual usage: a 64-core request waits forever on a laptop-sized node."
+    }
+  ]
+}

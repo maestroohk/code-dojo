@@ -124,60 +124,46 @@
       "explain": "The scheduler never looks at actual usage. Over-generous requests waste capacity; too-small requests cause noisy neighbours and evictions."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Parse quantities and classify QoS",
+      "type": "terminal",
+      "title": "Set requests and limits, read the QoS class",
+      "image": "k8s",
       "prompt": [
-        "Write:",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `api` and `worker` run with no requests or limits: `kubectl get pods -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass`",
+        "shows `BestEffort`, the first pods the kubelet evicts when the node runs short.",
         "",
-        "- `int Millicores(string cpu)`: `\"250m\"` → 250, `\"2\"` → 2000, `\"0.5\"` → 500",
-        "- `string Qos(string? reqCpu, string? reqMem, string? limCpu, string? limMem)` for a single-container pod, where `null` means not set. Apply the rule that a missing request defaults to the limit if a limit is set. Return `\"Guaranteed\"`, `\"Burstable\"` or `\"BestEffort\"`.",
-        "",
-        "Compare values as written (strings) for this exercise."
+        "1. Give `api` the **Guaranteed** class: requests equal to limits, `250m` CPU and `128Mi` memory.",
+        "2. Give `worker` the **Burstable** class: requests of `100m` CPU and `64Mi` memory, and a memory limit of `256Mi`."
       ],
-      "starter": [
-        "int Millicores(string cpu)",
-        "{",
-        "    return 0;",
-        "}",
-        "",
-        "string Qos(string? reqCpu, string? reqMem, string? limCpu, string? limMem)",
-        "{",
-        "    return \"BestEffort\";",
-        "}"
+      "setup": [
+        "qos.sh"
       ],
-      "solution": [
-        "int Millicores(string cpu)",
-        "{",
-        "    if (cpu.EndsWith(\"m\")) return int.Parse(cpu[..^1]);",
-        "    return (int)Math.Round(double.Parse(cpu) * 1000);",
-        "}",
-        "",
-        "string Qos(string? reqCpu, string? reqMem, string? limCpu, string? limMem)",
-        "{",
-        "    reqCpu ??= limCpu;",
-        "    reqMem ??= limMem;",
-        "    if (reqCpu is null && reqMem is null && limCpu is null && limMem is null) return \"BestEffort\";",
-        "    if (limCpu is not null && limMem is not null && reqCpu == limCpu && reqMem == limMem) return \"Guaranteed\";",
-        "    return \"Burstable\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"250m\", 250, Millicores(\"250m\"));",
-        "Dojo.Eq(\"2\", 2000, Millicores(\"2\"));",
-        "Dojo.Eq(\"0.5\", 500, Millicores(\"0.5\"));",
-        "Dojo.Eq(\"nothing set\", \"BestEffort\", Qos(null, null, null, null));",
-        "Dojo.Eq(\"requests equal limits\", \"Guaranteed\", Qos(\"500m\", \"1Gi\", \"500m\", \"1Gi\"));",
-        "Dojo.Eq(\"limits only\", \"Guaranteed\", Qos(null, null, \"1\", \"512Mi\"));",
-        "Dojo.Eq(\"cpu request only\", \"Burstable\", Qos(\"100m\", null, null, null));",
-        "Dojo.Eq(\"memory limit above request\", \"Burstable\", Qos(\"100m\", \"256Mi\", \"100m\", \"512Mi\"));",
-        "Dojo.Eq(\"no cpu limit\", \"Burstable\", Qos(\"200m\", \"256Mi\", null, \"256Mi\"));"
+      "checks": [
+        {
+          "name": "api is Guaranteed with 250m / 128Mi",
+          "cmd": "kubectl rollout status deploy/api --timeout=30s >/dev/null && kubectl get pods -l app=api -o json | jq -j '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == \"Running\")] | sort_by(.metadata.creationTimestamp) | last | .status.qosClass' && kubectl get deploy api -o jsonpath=' {.spec.template.spec.containers[0].resources.requests.cpu} {.spec.template.spec.containers[0].resources.limits.memory}'",
+          "expectOutput": "Guaranteed 250m 128Mi",
+          "fail": "`api`'s pods should be `Guaranteed`: requests = limits for both CPU and memory (`250m`, `128Mi`)."
+        },
+        {
+          "name": "worker is Burstable",
+          "cmd": "kubectl rollout status deploy/worker --timeout=30s >/dev/null && kubectl get pods -l app=worker -o json | jq -j '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == \"Running\")] | sort_by(.metadata.creationTimestamp) | last | .status.qosClass' && kubectl get deploy worker -o jsonpath=' {.spec.template.spec.containers[0].resources.requests.memory} {.spec.template.spec.containers[0].resources.limits.memory}'",
+          "expectOutput": "Burstable 64Mi 256Mi",
+          "fail": "`worker` should request `100m`/`64Mi` with a `256Mi` memory limit (Burstable)."
+        }
       ],
       "hints": [
-        "`reqCpu ??= limCpu;` applies the defaulting rule.",
-        "Guaranteed needs both limits set and both requests equal to them."
-      ]
+        "`kubectl set resources deploy/api --requests=cpu=250m,memory=128Mi --limits=cpu=250m,memory=128Mi`.",
+        "Guaranteed needs requests = limits for **both** resources in every container; anything less with some request is Burstable.",
+        "`kubectl set resources deploy/worker --requests=cpu=100m,memory=64Mi --limits=memory=256Mi`."
+      ],
+      "solution": [
+        "kubectl set resources deploy/api --requests=cpu=250m,memory=128Mi --limits=cpu=250m,memory=128Mi",
+        "kubectl set resources deploy/worker --requests=cpu=100m,memory=64Mi --limits=memory=256Mi",
+        "kubectl rollout status deploy/api",
+        "kubectl rollout status deploy/worker",
+        "kubectl get pods -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass"
+      ],
+      "explain": "Requests are what the scheduler reserves; limits are what the kernel enforces (CPU is throttled, memory over the limit is OOM-killed). The QoS class falls out of them and decides eviction order under node pressure: BestEffort first, Guaranteed last. Many teams set a memory limit equal to the request and no CPU limit, avoiding throttling while keeping memory predictable."
     }
   ]
 }

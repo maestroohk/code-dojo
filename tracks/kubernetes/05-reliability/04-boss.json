@@ -1,6 +1,6 @@
 {
   "title": "Boss: capacity and failure",
-  "summary": "A scheduler, an OOM detector and a scaling planner.",
+  "summary": "Reliability tickets: Pending pods and OOM kills on a real Kubernetes cluster, then an autoscaling capacity plan.",
   "minutes": 25,
   "kind": "boss",
   "steps": [
@@ -8,97 +8,92 @@
       "type": "learn",
       "title": "The scene",
       "body": [
-        "Black Friday is coming. You need to know where new pods would land, which pods are dying of memory, and how far the HPA would scale. Build the tools.",
-        "",
-        "The scheduler's core is simple: **filter** nodes that can fit the pod's requests (free = allocatable − sum of requests already placed), then **score** the survivors and pick the best."
+        "Reliability tickets. The first two open their own one-node **Kubernetes 1.37** cluster with the problem happening:",
+        "read `kubectl describe`, `kubectl get events --sort-by=.lastTimestamp` and the containers' `lastState`, then fix the",
+        "resources. The last one is capacity planning on paper, before Black Friday."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "A tiny scheduler",
+      "type": "terminal",
+      "title": "Ticket 1: pods stuck in Pending",
+      "image": "k8s",
       "prompt": [
-        "Write `Dictionary<string, string> Schedule(List<(string Name, int CpuM, int MemMi)> pods, List<(string Name, int CpuM, int MemMi)> nodes)`.",
-        "",
-        "For each pod **in order**: candidates are nodes whose free CPU and free memory are both at least the pod's requests. Pick the node with the **most free CPU** after placement (spreading); ties by node name. Map pod → node name, or → `\"Pending\"` if nothing fits. Placing a pod uses up its requests on that node."
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `search` has two pods that have been `Pending` since it was deployed. Find out why from the",
+        "scheduler's events, and fix the Deployment's resources (the service needs about `256Mi` of memory) so that both pods",
+        "run."
       ],
-      "starter": [
-        "Dictionary<string, string> Schedule(List<(string Name, int CpuM, int MemMi)> pods, List<(string Name, int CpuM, int MemMi)> nodes)",
-        "{",
-        "    var result = new Dictionary<string, string>();",
-        "    return result;",
-        "}"
+      "setup": [
+        "boss-pending.sh"
       ],
-      "solution": [
-        "Dictionary<string, string> Schedule(List<(string Name, int CpuM, int MemMi)> pods, List<(string Name, int CpuM, int MemMi)> nodes)",
-        "{",
-        "    var result = new Dictionary<string, string>();",
-        "    var freeCpu = nodes.ToDictionary(n => n.Name, n => n.CpuM);",
-        "    var freeMem = nodes.ToDictionary(n => n.Name, n => n.MemMi);",
-        "    foreach (var p in pods)",
-        "    {",
-        "        var best = nodes.Select(n => n.Name)",
-        "            .Where(n => freeCpu[n] >= p.CpuM && freeMem[n] >= p.MemMi)",
-        "            .OrderByDescending(n => freeCpu[n] - p.CpuM)",
-        "            .ThenBy(n => n, StringComparer.Ordinal)",
-        "            .FirstOrDefault();",
-        "        if (best is null) { result[p.Name] = \"Pending\"; continue; }",
-        "        freeCpu[best] -= p.CpuM;",
-        "        freeMem[best] -= p.MemMi;",
-        "        result[p.Name] = best;",
-        "    }",
-        "    return result;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoNodes = new List<(string Name, int CpuM, int MemMi)> { (\"node-a\", 2000, 4096), (\"node-b\", 1000, 8192) };",
-        "var dojoS = Schedule(new() { (\"api-1\", 500, 512), (\"api-2\", 500, 512), (\"api-3\", 500, 512), (\"db-0\", 1000, 6000), (\"big\", 3000, 100) }, dojoNodes);",
-        "Dojo.Eq(\"api-1 to most free CPU\", \"node-a\", dojoS[\"api-1\"]);",
-        "Dojo.Eq(\"api-2 node-a still has the most free CPU\", \"node-a\", dojoS[\"api-2\"]);",
-        "Dojo.Eq(\"api-3 tie broken by name\", \"node-a\", dojoS[\"api-3\"]);",
-        "Dojo.Eq(\"db-0 needs memory\", \"node-b\", dojoS[\"db-0\"]);",
-        "Dojo.Eq(\"big fits nowhere\", \"Pending\", dojoS[\"big\"]);",
-        "var dojoS2 = Schedule(new() { (\"x\", 100, 5000) }, dojoNodes);",
-        "Dojo.Eq(\"memory filter\", \"node-b\", dojoS2[\"x\"]);"
+      "checks": [
+        {
+          "name": "both search pods run",
+          "cmd": "kubectl rollout status deploy/search --timeout=40s >/dev/null; kubectl get deploy search -o jsonpath='{.status.readyReplicas}'",
+          "expectOutput": "2",
+          "fail": "`search` should have 2 ready pods."
+        },
+        {
+          "name": "its memory request is realistic",
+          "cmd": "kubectl get deploy search -o jsonpath='{.spec.template.spec.containers[0].resources.requests.memory}'",
+          "expectMatch": "^(256Mi|512Mi|268435456)$",
+          "fail": "Request what the service needs (`256Mi`), not 64 GiB."
+        }
       ],
       "hints": [
-        "Track free CPU and memory per node in two dictionaries.",
-        "Filter, then `OrderByDescending(n => freeCpu[n] - p.CpuM).ThenBy(n => n)`."
-      ]
+        "`kubectl get events --sort-by=.lastTimestamp` (or `kubectl describe pod -l app=search`) shows `FailedScheduling ... Insufficient memory`.",
+        "The pods ask for 64Gi; `kubectl describe node dojo` shows what the node can allocate.",
+        "`kubectl set resources deploy/search --requests=cpu=250m,memory=256Mi --limits=memory=256Mi`."
+      ],
+      "solution": [
+        "kubectl get pods",
+        "kubectl get events --sort-by=.lastTimestamp | grep FailedScheduling | tail -n 1",
+        "kubectl describe node dojo | grep -A6 Allocatable",
+        "kubectl set resources deploy/search --requests=cpu=250m,memory=256Mi --limits=memory=256Mi",
+        "kubectl rollout status deploy/search"
+      ],
+      "explain": "The scheduler places a pod only on a node whose **allocatable** capacity minus other pods' **requests** covers its requests; actual usage does not matter. `Insufficient memory` in a `FailedScheduling` event is the whole diagnosis, and the fix is either a realistic request or more capacity (the cluster autoscaler reacts to exactly these Pending pods)."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Find OOM victims",
-      "prompt": "Given lines of `kubectl get pods -o custom-columns=NAME:.metadata.name,REASON:.status.containerStatuses[0].lastState.terminated.reason,RESTARTS:.status.containerStatuses[0].restartCount` (header first; `<none>` when there is no reason), write `List<string> OomVictims(string output, int minRestarts)` returning names whose `REASON` is `OOMKilled` and whose restarts are at least `minRestarts`, sorted by restarts descending, then name.",
-      "starter": [
-        "List<string> OomVictims(string output, int minRestarts)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "type": "terminal",
+      "title": "Ticket 2: something keeps getting OOM-killed",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). Three workers run here, and one of them keeps restarting. Find the one that is killed for using too much",
+        "memory (its container's **last state** says so), write its Deployment's name into `~/answers/oom.txt`, then give it a",
+        "memory limit (and request) of `128Mi` so it stays up and logs `ready`."
       ],
-      "solution": [
-        "List<string> OomVictims(string output, int minRestarts)",
-        "{",
-        "    return output.Split('\\n').Skip(1)",
-        "        .Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries))",
-        "        .Where(c => c.Length == 3 && c[1] == \"OOMKilled\" && int.Parse(c[2]) >= minRestarts)",
-        "        .OrderByDescending(c => int.Parse(c[2])).ThenBy(c => c[0], StringComparer.Ordinal)",
-        "        .Select(c => c[0]).ToList();",
-        "}"
+      "setup": [
+        "boss-oom.sh"
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoOut = \"NAME          REASON      RESTARTS\\nreport-1      OOMKilled   12\\napi-1         <none>      0\\napi-2         Error       3\\nworker-a      OOMKilled   4\\nworker-b      OOMKilled   12\\nbatch-z       OOMKilled   1\";",
-        "Dojo.Eq(\"minRestarts 2\", new List<string> { \"report-1\", \"worker-b\", \"worker-a\" }, OomVictims(dojoOut, 2));",
-        "Dojo.Eq(\"minRestarts 0\", new List<string> { \"report-1\", \"worker-b\", \"worker-a\", \"batch-z\" }, OomVictims(dojoOut, 0));",
-        "Dojo.Eq(\"none\", new List<string>(), OomVictims(\"NAME REASON RESTARTS\\na <none> 0\", 0));"
+      "checks": [
+        {
+          "name": "oom.txt names the OOM-killed worker",
+          "cmd": "test \"$(xargs < ~/answers/oom.txt)\" = thumbnails",
+          "fail": "Not the right one. `kubectl get pods -o custom-columns=NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount,LAST:.status.containerStatuses[0].lastState.terminated.reason`."
+        },
+        {
+          "name": "thumbnails is up with a 128Mi limit",
+          "cmd": "kubectl rollout status deploy/thumbnails --timeout=40s >/dev/null; sleep 3; kubectl get deploy thumbnails -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}'; echo; kubectl logs $(kubectl get pods -l app=thumbnails -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name') --tail=1",
+          "expectOutput": [
+            "128Mi",
+            "thumbnails: ready (40000000 bytes)"
+          ],
+          "fail": "`thumbnails` should run with a `128Mi` limit and log `ready`."
+        }
       ],
       "hints": [
-        "Split into columns like before; there are exactly three.",
-        "Sort with `OrderByDescending` on the parsed restarts, then `ThenBy` name."
-      ]
+        "`kubectl get pods` shows which one restarts; `kubectl describe pod NAME` shows `Last State: Terminated, Reason: OOMKilled, Exit Code: 137`.",
+        "`-o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'` reads it directly.",
+        "`kubectl set resources deploy/thumbnails --requests=memory=128Mi --limits=memory=128Mi`."
+      ],
+      "solution": [
+        "kubectl get pods -o custom-columns=NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount,LAST:.status.containerStatuses[0].lastState.terminated.reason",
+        "echo thumbnails > ~/answers/oom.txt",
+        "kubectl set resources deploy/thumbnails --requests=memory=128Mi --limits=memory=128Mi",
+        "kubectl rollout status deploy/thumbnails",
+        "kubectl logs deploy/thumbnails --tail=1"
+      ],
+      "explain": "An OOM kill shows up as a restart with `lastState.terminated.reason: OOMKilled` and exit code 137, while the current state already says `Running` again, which is why the RESTARTS column and `describe` are where you see it. Raising the limit is the quick fix; the lasting one is knowing the working set (from metrics) and setting the request and limit from it."
     },
     {
       "type": "code",
@@ -139,7 +134,8 @@
       "hints": [
         "Reuse the HPA formula.",
         "Integer division gives how many pods fit."
-      ]
+      ],
+      "explain": "This ticket stays a code step: it is capacity planning on paper (the HPA formula against free CPU), done before the incident, with no cluster to look at."
     }
   ]
 }

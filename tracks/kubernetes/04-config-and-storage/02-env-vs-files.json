@@ -161,55 +161,59 @@
       "explain": "`items` picks keys and their file names. Mounting a directory (not `subPath`) keeps automatic updates working."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Resolve a container's environment",
+      "type": "terminal",
+      "title": "Env vars, an override and a config file",
+      "image": "k8s",
       "prompt": [
-        "Write `Dictionary<string, string> ResolveEnv(List<Dictionary<string, string>> envFrom, List<(string Name, string Value)> env)` producing the final variables: apply each `envFrom` source in order (later overwrites earlier), then each `env` entry in order (overwrites anything).",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The ConfigMap `shop-config` holds two settings (`LOG_LEVEL`, `FEATURE_COUPONS`) and a whole file,",
+        "`app.json`. The `worker` Deployment loads every key as an environment variable with `envFrom`.",
         "",
-        "Then write `string Show(Dictionary<string, string> vars)` as `NAME=value` lines sorted by name (ordinal), joined with `\"\\n\"`."
-      ],
-      "starter": [
-        "Dictionary<string, string> ResolveEnv(List<Dictionary<string, string>> envFrom, List<(string Name, string Value)> env)",
-        "{",
-        "    var result = new Dictionary<string, string>();",
-        "    return result;",
-        "}",
+        "Change `worker` (keep `envFrom`) so that:",
         "",
-        "string Show(Dictionary<string, string> vars)",
-        "{",
-        "    return \"\";",
-        "}"
-      ],
-      "solution": [
-        "Dictionary<string, string> ResolveEnv(List<Dictionary<string, string>> envFrom, List<(string Name, string Value)> env)",
-        "{",
-        "    var result = new Dictionary<string, string>();",
-        "    foreach (var source in envFrom)",
-        "        foreach (var (k, v) in source) result[k] = v;",
-        "    foreach (var (name, value) in env) result[name] = value;",
-        "    return result;",
-        "}",
+        "1. `LOG_LEVEL` is `debug` for the worker only (the ConfigMap stays `info` for everyone else);",
+        "2. `app.json` is also available as a **file**, `/etc/shop/app.json`, mounted from the same ConfigMap.",
         "",
-        "string Show(Dictionary<string, string> vars)",
-        "{",
-        "    return string.Join(\"\\n\", vars.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $\"{kv.Key}={kv.Value}\"));",
-        "}"
+        "Check inside the new pod: `kubectl exec deploy/worker -- printenv LOG_LEVEL` and `... cat /etc/shop/app.json`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoCm = new Dictionary<string, string> { [\"LOG_LEVEL\"] = \"info\", [\"PAYMENTS_URL\"] = \"http://payments.shop\" };",
-        "var dojoCm2 = new Dictionary<string, string> { [\"LOG_LEVEL\"] = \"warn\", [\"REGION\"] = \"weu\" };",
-        "var dojoR = ResolveEnv(new() { dojoCm, dojoCm2 }, new() { (\"DB_PASSWORD\", \"x\"), (\"REGION\", \"neu\") });",
-        "Dojo.Eq(\"later envFrom wins\", \"warn\", dojoR[\"LOG_LEVEL\"]);",
-        "Dojo.Eq(\"env beats envFrom\", \"neu\", dojoR[\"REGION\"]);",
-        "Dojo.Eq(\"Show\", \"DB_PASSWORD=x\\nLOG_LEVEL=warn\\nPAYMENTS_URL=http://payments.shop\\nREGION=neu\", Show(dojoR));",
-        "Dojo.Eq(\"last env entry wins\", \"b\", ResolveEnv(new(), new() { (\"A\", \"a\"), (\"A\", \"b\") })[\"A\"]);"
+      "setup": [
+        "envfiles.sh"
+      ],
+      "checks": [
+        {
+          "name": "LOG_LEVEL is debug in the worker",
+          "cmd": "kubectl rollout status deploy/worker --timeout=30s >/dev/null && kubectl exec deploy/worker -- printenv LOG_LEVEL FEATURE_COUPONS",
+          "expectOutput": [
+            "debug",
+            "true"
+          ],
+          "fail": "In the worker, `LOG_LEVEL` should be `debug` and `FEATURE_COUPONS` still `true`. An `env` entry overrides the same name from `envFrom`."
+        },
+        {
+          "name": "app.json is a file in /etc/shop",
+          "cmd": "kubectl exec deploy/worker -- cat /etc/shop/app.json",
+          "expectOutput": "{\"currency\": \"EUR\", \"pageSize\": 20}",
+          "fail": "`/etc/shop/app.json` is not there. Mount the ConfigMap as a volume (only the `app.json` key, or all of it) at `/etc/shop`."
+        },
+        {
+          "name": "the ConfigMap is unchanged",
+          "cmd": "kubectl get configmap shop-config -o jsonpath='{.data.LOG_LEVEL}'",
+          "expectOutput": "info",
+          "fail": "Leave `shop-config` as it is: the override belongs to the worker."
+        }
       ],
       "hints": [
-        "Assigning `result[k] = v` overwrites earlier values, which is exactly the precedence you need.",
-        "Sort with `StringComparer.Ordinal` so uppercase names sort predictably."
-      ]
+        "`kubectl set env deploy/worker LOG_LEVEL=debug` adds an `env` entry; `env` wins over `envFrom`.",
+        "A ConfigMap volume: `volumes: [{name: config, configMap: {name: shop-config, items: [{key: app.json, path: app.json}]}}]` and a `volumeMounts` entry at `/etc/shop`.",
+        "`kubectl patch deploy worker --type=strategic -p '{\"spec\":{\"template\":{\"spec\":{\"volumes\":[...],\"containers\":[{\"name\":\"worker\",\"volumeMounts\":[...]}]}}}}'`."
+      ],
+      "solution": [
+        "kubectl set env deploy/worker LOG_LEVEL=debug",
+        "kubectl patch deploy worker -p '{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\":\"config\",\"configMap\":{\"name\":\"shop-config\",\"items\":[{\"key\":\"app.json\",\"path\":\"app.json\"}]}}],\"containers\":[{\"name\":\"worker\",\"volumeMounts\":[{\"name\":\"config\",\"mountPath\":\"/etc/shop\",\"readOnly\":true}]}]}}}}'",
+        "kubectl rollout status deploy/worker",
+        "kubectl exec deploy/worker -- printenv LOG_LEVEL",
+        "kubectl exec deploy/worker -- cat /etc/shop/app.json"
+      ],
+      "explain": "Environment variables suit single values and are fixed at start; files suit structured config (`appsettings.json`, `nginx.conf`) and are refreshed in place when the ConfigMap changes (unless mounted with `subPath`). Precedence is simple: `envFrom` first, then `env` entries, so a per-workload override never needs a second ConfigMap."
     }
   ]
 }
