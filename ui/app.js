@@ -22,6 +22,7 @@ import { dbStudio } from './dbstudio.js';
 import * as builds from './builds.js';
 import { welcomeView, pathPanel, shouldWelcome } from './welcome.js';
 import * as gamify from './gamify.js';
+import * as pacing from './pacing.js';
 
 const app = document.getElementById('app');
 let tracks = [];
@@ -78,11 +79,8 @@ function header(active) {
       h(`a.nav-link${active === 'practice' ? '.active' : ''}`, { href: '#/practice' }, 'Practice', due > 0 && h('span.badge', due)),
       link('#/projects', 'Projects', 'projects'),
       link('#/builds', 'Builds', 'builds'),
-      link('#/workbench', 'Workbench', 'workbench'),
-      link('#/spaces', 'Code spaces', 'spaces'),
-      link('#/db', 'Databases', 'db'),
-      link('#/playground', 'Playground', 'playground'),
-      link('#/profile', 'Profile', 'profile')),
+      moreMenu(active, [['#/workbench', 'Workbench', 'workbench'], ['#/spaces', 'Code spaces', 'spaces'], ['#/db', 'Databases', 'db'],
+        ['#/playground', 'Playground', 'playground'], ['#/features', "What's in the dojo", 'features'], ['#/profile', 'Profile', 'profile']])),
     h('div.stats',
       h(`div.stat.streak${days > 0 && game.state.days[game.dayKey()] ? '.lit' : ''}`, { title: `${days}-day streak${gamify.freezes() ? ` · ${gamify.freezes()} streak freeze${gamify.freezes() === 1 ? '' : 's'}` : ''}` },
         h('span', '🔥'), h('b', days), gamify.freezes() > 0 && h('span.stat-freeze', '❄'.repeat(gamify.freezes()))),
@@ -91,6 +89,55 @@ function header(active) {
       h('a.stat.level', { href: '#/profile', title: `${lv.rank}: ${lv.into} of ${lv.need} XP to the next level` },
         h('span.level-num', lv.level),
         h('div.level-meta', h('span.level-rank', gamify.headerTitle(lv.rank)), h('div.bar', h('div.bar-fill', { style: { width: `${(lv.into / lv.need) * 100}%` } }))))));
+}
+
+/**
+ * "More ▾": the less-used destinations, so the header stays calm. A menu button (Enter, Space or ↓ opens it,
+ * ↑ ↓ Home End move, Escape closes and returns focus). The menu is fixed-positioned because the nav scrolls.
+ */
+function moreMenu(active, items) {
+  const current = items.find(([, , id]) => id === active);
+  const btn = h(`button.nav-link.nav-more${current ? '.active' : ''}`, { type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'nav-more-menu' },
+    current ? current[1] : 'More', h('span.nav-caret', { 'aria-hidden': 'true' }, '▾'));
+  const menu = h('div.nav-menu', { id: 'nav-more-menu', role: 'menu', hidden: true, 'aria-label': 'More destinations' },
+    items.map(([hash, label, id]) => h(`a.nav-menu-item${id === active ? '.active' : ''}`, { href: hash, role: 'menuitem', tabindex: '-1', 'aria-current': id === active ? 'page' : null }, label)));
+  const links = () => [...menu.querySelectorAll('a')];
+  const onDoc = e => { if (!menu.contains(e.target) && !btn.contains(e.target)) close(); };
+  function open(focusAt = 0) {
+    const r = btn.getBoundingClientRect();
+    menu.style.top = `${Math.round(r.bottom + 6)}px`;
+    menu.style.left = `${Math.round(Math.max(8, Math.min(r.left, innerWidth - 240)))}px`;
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('mousedown', onDoc);
+    const list = links();
+    list[(focusAt + list.length) % list.length]?.focus();
+  }
+  function close(refocus) {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('mousedown', onDoc);
+    if (refocus) btn.focus();
+  }
+  btn.addEventListener('click', () => (menu.hidden ? open() : close()));
+  btn.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (menu.hidden) open(0); else close(true); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); open(-1); }
+    else if (e.key === 'Escape') close(true);
+  });
+  menu.addEventListener('keydown', e => {
+    const list = links();
+    const at = list.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); list[(at + 1) % list.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); list[(at - 1 + list.length) % list.length].focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); list[0].focus(); }
+    else if (e.key === 'End') { e.preventDefault(); list[list.length - 1].focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(true); }
+    else if (e.key === 'Tab') close();
+  });
+  menu.addEventListener('click', () => close());
+  return h('div.nav-more-wrap', btn, menu);
 }
 
 function page(active, ...content) {
@@ -248,6 +295,7 @@ function trackView(id) {
   const track = tracks.find(t => t.id === id);
   if (!track) return notFound();
   sessionStorage.setItem('track', track.id);
+  if (game.syncGates(track).length) game.save();
   const prog = game.trackProgress(track);
   const next = game.nextLesson(track);
   const first = prog.done === 0;
@@ -263,7 +311,9 @@ function trackView(id) {
     : h('section.hero', h('div', h('div.eyebrow', 'Track complete'), h('h1', `You finished ${track.title} 🏆`),
       h('p.muted', 'Replay lessons for three stars, or keep sharp in Practice.')), h('a.btn.primary.big', { href: '#/practice' }, 'Practice'));
 
-  const modules = game.lessonModules(track).map((m, mi) => moduleSection(track, m, String(mi + 1).padStart(2, '0'), next?.key));
+  const modules = game.lessonModules(track).map((m, mi, all) => [
+    moduleSection(track, m, String(mi + 1).padStart(2, '0'), next?.key),
+    m.gate && gateCard(track, m, all[mi + 1], mi + 2)]);
   const projects = game.projectModules(track);
 
   page('home',
@@ -351,11 +401,48 @@ function labsView(id) {
   leave = pkiLab(host, (xp, title) => toast(h('div', h('b', `+${xp} XP`), ` · solved "${title}"`), 'gold'));
 }
 
+/**
+ * The mastery gate after a module (pacing.js): what proving it takes, with links, and what it unlocks. Proven gates
+ * shrink to one line; a rusty one (a re-proof failed) asks for the cold rebuild again.
+ */
+function gateCard(track, m, nextM, nextNum) {
+  const st = pacing.gateStatus(track, m, game.state, { tracks });
+  const rusty = pacing.isRusty(game.state, track, m);
+  const free = game.state.settings.freeRoam;
+  const what = nextM ? `Module ${nextNum}: ${nextM.title}` : 'the rest of the topic';
+  const needRow = n => h(`li.gate-need${n.done ? '.done' : ''}`,
+    h('span.gate-mark', { 'aria-hidden': 'true' }, n.done ? '✓' : '○'),
+    h('a', { href: n.href }, n.kind === 'cold' ? (/^cold/i.test(n.title) ? n.title : `Cold rebuild: ${n.title}`) : `${n.boss ? 'Boss: ' : ''}${n.title}`),
+    h('span.muted.small', n.kind === 'cold' ? (n.done ? 'passed from memory' : 'pass it from memory')
+      : `${n.want} star${n.want === 1 ? '' : 's'} needed${n.done ? '' : n.have ? `, you have ${n.have}` : ''}`));
+  if (st.proven && !rusty) {
+    return h('div.gate-card.proven', { role: 'note' }, h('span.gate-icon', { 'aria-hidden': 'true' }, '✓'),
+      h('div.grow', h('b', `${m.title}: proven`), h('span.muted.small', nextM ? ` · ${what} is open` : '')));
+  }
+  if (st.proven && rusty) {
+    const cold = st.needs.find(n => n.kind === 'cold') || st.needs[0];
+    return h('div.gate-card.rusty', { role: 'note' }, h('span.gate-icon', { 'aria-hidden': 'true' }, '!'),
+      h('div.grow', h('b', `${m.title} is getting rusty`),
+        h('p.muted.small', 'A "Can you still do it?" check did not pass. Rebuild it from memory to make it solid again. Nothing is locked.'),
+        cold && h('a.btn.ghost.small', { href: cold.href }, `Re-prove: ${cold.title}`)));
+  }
+  return h('div.gate-card', { role: 'note' },
+    h('span.gate-icon', { 'aria-hidden': 'true' }, '🔒'),
+    h('div.grow',
+      h('b', `Prove it to unlock ${what}`),
+      h('p.muted.small', free
+        ? 'Free roam is on, so the next module is open anyway, but this one is not yet proven.'
+        : 'Pass these and the next module opens. It is how the skills here stick, not a test you can fail.'),
+      h('ul.gate-needs', st.needs.map(needRow))));
+}
+
 /** One module (or project) card with its lessons (or stages). */
 function moduleSection(track, m, label, nextKey) {
   const project = game.isProject(m);
   const done = m.lessons.filter(l => game.isDone(game.lessonKey(track, m, l))).length;
-  return h(`section.module${project ? '.project' : ''}`,
+  const blocker = !project && game.gateBlocker(track, m);
+  const rusty = !project && m.gate && pacing.isRusty(game.state, track, m);
+  return h(`section.module${project ? '.project' : ''}${rusty ? '.rusty' : ''}${blocker && !game.state.settings.freeRoam ? '.gated' : ''}`,
     h('div.module-head',
       h('div.module-num', label),
       h('div.module-text', h('h2', m.title), h('p.muted', m.summary || ''),
@@ -376,7 +463,7 @@ function moduleSection(track, m, label, nextKey) {
       ];
       return open
         ? h(`a.lesson${cls}`, { href: `#/lesson/${key}`, title: l.summary || '' }, inner)
-        : h(`div.lesson${cls}`, { title: `Finish the previous ${project ? 'stage' : 'lesson'} to unlock this one` }, inner);
+        : h(`div.lesson${cls}`, { title: blocker ? `Prove "${blocker.title}" first: see its gate above` : `Finish the previous ${project ? 'stage' : 'lesson'} to unlock this one` }, inner);
     })));
 }
 
@@ -421,6 +508,9 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
   const total = items.length;
   let pos = Math.min(startAt, Math.max(0, items.length - 1)), combo = 0, bestCombo = 0, earned = 0, mistakes = 0, firstTry = 0, answered = 0;
   let current = null, phase = 'answer', attempts = 0, hints = 0, revealed = false;
+  // For the rush detector (pacing.js): how long the session took and how much it leaned on hints and reveals.
+  const startedAt = Date.now();
+  let hintsUsed = 0, reveals = 0;
   let furthest = pos; // steps before this one are finished; going Back to them is a read-only review
   const replay = mode === 'lesson' && game.isDone(meta.key);
   const project = !!meta?.project;
@@ -489,11 +579,12 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
       mainBtn.disabled = !current.view.ready();
     }
     const left = (step.hints?.length || 0) - hints;
-    hintBtn.hidden = phase !== 'answer' || !step.hints?.length;
+    // A cold rebuild has no hints and no solution to show. In Practice it can be given up honestly (it turns rusty).
+    hintBtn.hidden = phase !== 'answer' || !step.hints?.length || !!step.cold;
     hintBtn.disabled = left <= 0;
     hintBtn.textContent = left > 0 ? `💡 Hint (${left})` : '💡 No more hints';
-    skipBtn.hidden = !(phase === 'answer' && attempts >= 2 && step.type !== 'learn');
-    skipBtn.textContent = step.type === 'code' ? 'Show solution' : 'Show answer';
+    skipBtn.hidden = !(phase === 'answer' && attempts >= 2 && step.type !== 'learn') || (step.cold && mode !== 'practice');
+    skipBtn.textContent = step.cold ? 'I cannot remember it yet' : step.type === 'code' ? 'Show solution' : 'Show answer';
     backBtn.hidden = pos === 0;
   }
 
@@ -504,13 +595,21 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
     feedback.hidden = true; feedback.className = 'feedback';
     hintBox.replaceChildren();
     const view = renderStep(item.step, {
-      onChange: refresh, submit, bonus,
+      onChange: refresh, submit, bonus, mode,
       track: item.track, module: item.module, lesson: item.lesson, idx: item.idx,
+      // "uses": the learner's own earlier pieces travel with the check (builds.js, Pacing.cs).
+      uses: step => builds.usesPayload(tracks, item.track, step),
       draftKey: `${item.lessonKey}#${item.idx}`,
       // Projects: open with the learner's latest passing program, and remember each new one.
       carried: project ? game.state.projects[meta.moduleKey] : undefined,
-      onPassed: codeNow => {
+      onPassed: (codeNow, info) => {
         if (project) game.state.projects[meta.moduleKey] = codeNow;
+        // A cold step passed from memory: gates and re-proofs can see it; a "coldOf" re-proof marks the original piece proven.
+        if (info?.cold) {
+          pacing.recordCold(game.state, item.lessonKey, item.idx, { at: game.dayKey(), ms: info.ms, inTime: info.inTime });
+          const src = /^(.+)#(\d+)$/.exec(item.step.coldOf || '');
+          if (src) builds.markCold(src[1], Number(src[2]) - 1);
+        }
         const added = builds.record(tracks, item, codeNow);   // "Your builds": the newest version of this piece
         if (added) toast(builds.pieceToast(added), 'info');
         game.save();
@@ -564,7 +663,8 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
 
   function showHint() {
     const step = current.item.step;
-    if (hints >= (step.hints?.length || 0)) return;
+    if (hints >= (step.hints?.length || 0) || step.cold) return;
+    hintsUsed++;
     hintBox.append(h('div.hint', h('span.hint-n', `Hint ${hints + 1}`), h('div', { html: md(step.hints[hints]) })));
     hints++;
     game.state.stats.hints++;
@@ -596,7 +696,8 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
       game.state.stats.bestCombo = Math.max(game.state.stats.bestCombo, bestCombo);
     }
     game.emit('answer', { correct: correctNow && !revealed, firstTry: attempts === 1 && hints === 0, combo, mode, type: step.type, typed: !!current.typed, track: item.track });
-    if (mode === 'practice') game.reviewed(item.lessonKey, item.idx, correctNow && !revealed && attempts === 1);
+    // A cold step in Practice is a re-proof: passing within three runs counts (it is written from memory).
+    if (mode === 'practice') game.reviewed(item.lessonKey, item.idx, correctNow && !revealed && (step.cold ? attempts <= 3 : attempts === 1));
     else if (step.type !== 'code' && (attempts > 1 || revealed)) game.missed(item.lessonKey, item.idx);
 
     if (xp) {
@@ -628,6 +729,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
 
     if (result.correct) {
       phase = 'done';
+      if (result.overTime) mistakes++;                       // a cold step over its timeLimit: one star less, never a fail
       view.lock(true);
       const xp = award(true);
       game.sound('right');
@@ -654,13 +756,28 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
 
   function reveal() {
     const { view, item } = current;
+    if (item.step.cold) return giveUp();
     revealed = true;
+    reveals++;
     phase = 'done';
     view.retry?.();
     view.reveal();
     view.lock(true);
     award(false);
     setFeedback('info', 'Here is the answer', item.step.explain ? md(item.step.explain) : 'Study it, then carry on. It will come back in Practice.');
+    mainBtn.textContent = pos === total - 1 ? 'Finish' : 'Continue';
+    mainBtn.disabled = false;
+    refresh();
+  }
+
+  /** Practice only: a re-proof the learner cannot do from memory. No answer is shown; the module turns rusty. */
+  function giveUp() {
+    const { view } = current;
+    revealed = true;
+    phase = 'done';
+    view.lock(true);
+    award(false);
+    setFeedback('info', 'Marked as rusty', 'That is useful to know. It comes back tomorrow; rebuilding it in its lesson makes it solid again.');
     mainBtn.textContent = pos === total - 1 ? 'Finish' : 'Continue';
     mainBtn.disabled = false;
     refresh();
@@ -673,7 +790,8 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
     progress.firstChild.style.width = '100%';
     current.view.destroy?.();
     current = null;
-    onFinish({ earned, mistakes, firstTry, bestCombo, exercises: items.filter(i => i.step.type !== 'learn').length, replay, boss });
+    onFinish({ earned, mistakes, firstTry, bestCombo, exercises: items.filter(i => i.step.type !== 'learn').length, replay, boss,
+      ms: Date.now() - startedAt, hints: hintsUsed, reveals });
   }
 
   show();
@@ -716,7 +834,12 @@ async function lessonView(trackId, moduleId, lessonId) {
       };
       if (r.mistakes === 0 && r.exercises > 0) game.state.stats.perfect++;
       if (r.boss && !before) game.state.stats.bosses++;
-      game.emit('lesson', { key, track: trackId, stars: starCount, boss: meta.kind === 'boss', replay: r.replay, mistakes: r.mistakes, exercises: r.exercises,
+      // The rush detector: much faster than the lesson's minutes while leaning on hints and reveals. Never blocks.
+      const rushed = !r.replay && pacing.isRushed({ ms: r.ms, minutes: meta.minutes, hints: r.hints, reveals: r.reveals, exercises: r.exercises });
+      const coldNext = rushed ? pacing.coldStepsOf(track, module).find(c => c.key !== key) : null;
+      if (coldNext) pacing.queueReproof(game.state, coldNext, `${trackId}/${moduleId}`, game.dayKey(game.addDays(1)));
+      const proven = game.syncGates(track);
+      game.emit('lesson', { key, track: trackId, stars: starCount, boss: meta.kind === 'boss', replay: r.replay, mistakes: r.mistakes, exercises: r.exercises, rushed,
         firstTime: !before, project: game.isProject(module), firstInTrack: !before && game.flatLessons(track).filter(x => game.isDone(x.key)).length === 1 });
       const { leveledUp, level } = game.addXp(bonus);
       game.save(true);
@@ -726,6 +849,7 @@ async function lessonView(trackId, moduleId, lessonId) {
       const lastStage = isProject && index === module.lessons.length - 1;
       summary({
         r, starCount, bonus, fresh, leveledUp, level, track, key, lessonTitle: lesson.title, detour: onDetour ? detour : null,
+        rushed, coldNext, proven,
         heading: lastStage ? 'Project shipped!' : isProject ? 'Stage complete!' : meta.kind === 'boss' ? 'Boss defeated!' : 'Lesson complete!',
         siblings: isProject ? module.lessons.map(l => ({ key: game.lessonKey(track, module, l), lesson: l })) : null,
       });
@@ -734,7 +858,7 @@ async function lessonView(trackId, moduleId, lessonId) {
   if (!onDetour && !returning && builds.needsReveal(track, key)) builds.revealScreen(app, track, start); else start();
 }
 
-function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice, siblings, detour, again }) {
+function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, heading, lessonTitle, practice, siblings, detour, again, rushed, coldNext, proven }) {
   leave?.(); leave = null;
   game.sound('done');
   confetti();
@@ -756,6 +880,17 @@ function summary({ r, starCount, bonus, fresh, leveledUp, level, track, key, hea
         h('div', h('b', r.bestCombo), h('span.muted', 'best combo'))),
       bonus > 0 && h('p.muted.small', `Includes a ${bonus} XP completion bonus${r.replay ? ' (replays earn less)' : ''}.`),
       leveledUp && h('div.level-up', `⬆️ Level ${level.level}: ${level.rank}`),
+      proven?.length > 0 && h('div.gate-card.proven.summary-gate', h('span.gate-icon', { 'aria-hidden': 'true' }, '✓'),
+        h('div.grow', h('b', `${proven.map(m => m.title).join(', ')}: proven`),
+          h('div.muted.small', 'The next module is open. In 3 and 10 days a cold rebuild from it comes back in Practice: can you still do it?'))),
+      rushed && h('div.rush-nudge', { role: 'note' },
+        h('b', 'You moved fast'),
+        h('p.small', `That took ${pacing.clock(r.ms)} with ${r.hints + r.reveals} hint${r.hints + r.reveals === 1 ? '' : 's'} and answers shown. Speed is fine; skills stick when you rebuild them from memory. `,
+          coldNext ? 'Try the cold rebuild before moving on? It is also in tomorrow\'s Practice.' : 'Try this lesson again without hints before moving on?',
+          ' (No quest progress for this one.)'),
+        h('div.rush-actions',
+          coldNext && h('a.btn.ghost.small', { href: `#/lesson/${coldNext.key}` }, 'Try the cold rebuild'),
+          h('a.btn.ghost.small', { href: `#/lesson/${key}`, onclick: () => setTimeout(route) }, 'Replay without hints'))),
       !practice && track && builds.summaryPanel(track, key),
       fresh.length > 0 && h('div.summary-badges', fresh.map(a => h('div.badge-row', h('span.badge-icon', a.icon), h('div', h('strong', a.title), h('div.muted.small', a.text))))),
       h('div.summary-actions',
@@ -825,7 +960,9 @@ async function practiceView() {
     const picks = shuffle(due).slice(0, SIZE).map(r => ({ key: r.key, idx: r.idx }));
     const cache = new Map();
     const lessonOf = async key => {
-      if (!cache.has(key)) cache.set(key, await api(`lesson/${key}`).catch(() => null));
+      const t = tracks.find(x => x.id === key.split('/')[0]);
+      const dream = t ? builds.dreamParam(t) : '';
+      if (!cache.has(key)) cache.set(key, await api(`lesson/${key}${dream ? `?dream=${encodeURIComponent(dream)}` : ''}`).catch(() => null));
       return cache.get(key);
     };
     // Top up with random quick questions from finished lessons.
@@ -864,7 +1001,7 @@ async function practiceView() {
       h('div',
         h('div.eyebrow', 'Practice'),
         h('h1', due.length ? `${due.length} question${due.length === 1 ? '' : 's'} to review` : 'Keep it fresh'),
-        h('p.muted', 'Questions you got wrong come back here after 1, 3, 7 and 14 days. Answer one right each time and it is mastered. Sessions are topped up with quick questions from lessons you have finished.')),
+        h('p.muted', 'Questions you got wrong come back here after 1, 3, 7 and 14 days. Answer one right each time and it is mastered. Modules you proved send a cold rebuild back after 3 and 10 days: can you still do it? Sessions are topped up with quick questions from lessons you have finished.')),
       doneKeys.length || due.length
         ? h('button.btn.primary.big', { type: 'button', onclick: start }, 'Start a session')
         : h('a.btn.primary.big', { href: '#/' }, 'Finish a lesson first')),

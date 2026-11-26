@@ -7,6 +7,7 @@ import { state, save } from './game.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
 import { sqlGrid } from './sqlgrid.js';
+import { overTime, clock } from './pacing.js';
 
 export const DRAG_TYPES = new Set(['order', 'blanks', 'match', 'sort']);
 
@@ -472,7 +473,17 @@ export function renderRunOutput(panel, r, { stdin } = {}) {
   const diagRow = d => h(`div.diag.${d.severity}`,
     d.file === 'tests'
       ? h('span', { html: `<strong>The tests could not use your code.</strong> ${esc(d.message)} <span class="muted">Check the names and signatures the task asks for.</span>` })
-      : [h('span.diag-where', `Line ${d.line}`), h('span', `${d.message} `), h('span.muted', d.id)]);
+      // An error inside an earlier piece this step uses ("uses"): name the file, it is not the code in the editor.
+      : [h('span.diag-where', d.file && !['Program.cs', 'Source.cs'].includes(d.file) && r.uses?.some(u => u.file === d.file) ? `${d.file} line ${d.line}` : `Line ${d.line}`),
+        h('span', `${d.message} `), h('span.muted', d.id)]);
+
+  // "uses": which earlier pieces ran with this step, and whose they were.
+  if (r.uses?.length) {
+    panel.append(h('div.out-section.uses-notes',
+      h('div.out-title', 'Built on your earlier pieces'),
+      r.uses.map(u => h(`div.uses-note.${u.source}`, h('span.uses-mark', u.source === 'yours' ? '✓' : '◇'), h('span', u.note))),
+      r.usesProblems?.length > 0 && h('p.muted.small', r.usesProblems.join(' '))));
+  }
 
   if (r.sql) return renderSqlOutput(panel, r, errors, diagRow);
   if (errors.length) {
@@ -529,19 +540,36 @@ function renderSqlOutput(panel, r, errors, diagRow) {
 }
 
 function code(step, ctx) {
-  const draftKey = ctx.draftKey;
+  // A cold rebuild (pacing.js): blank editor, no hints, no solution, no autocomplete, no saved draft to peek at.
+  const cold = !!step.cold;
+  const draftKey = cold ? null : ctx.draftKey;
   // In a project, a stage opens with the learner's own program from the stage before.
-  const starter = (step.carry && ctx.carried) || (step.starter ?? '');
+  const starter = cold ? '' : (step.carry && ctx.carried) || (step.starter ?? '');
   const panel = h('div.output', { hidden: true });
   const status = h('span.muted.small');
   let busy = false, passed = false;
+  const started = Date.now();
+  let passedMs = null;
 
   const editor = createEditor({
     value: (draftKey && state.drafts[draftKey]) ?? starter,
     onChange: v => { if (draftKey) { state.drafts[draftKey] = v; save(); } ctx.onChange(); },
     onRun: () => ctx.submit(),
-    minLines: Math.max(6, starter.split('\n').length + 2),
+    minLines: Math.max(cold ? 10 : 6, starter.split('\n').length + 2),
+    assist: !cold,
   });
+
+  // A gentle timer for a cold step with a "timeLimit": it never fails the step, but going over costs a star.
+  const timer = cold && step.timeLimit ? h('span.cold-timer', { role: 'timer', 'aria-live': 'off' }) : null;
+  const tick = () => {
+    if (!timer) return;
+    const ms = (passedMs ?? Date.now() - started);
+    const over = overTime(ms, step.timeLimit);
+    timer.textContent = over ? `${clock(ms)}: over ${clock(step.timeLimit * 1000)}, keep going` : `${clock(ms)} / ${clock(step.timeLimit * 1000)}`;
+    timer.classList.toggle('over', over);
+  };
+  const interval = timer ? setInterval(tick, 1000) : null;
+  tick();
 
   const firstInput = step.tests?.find(t => t.stdin)?.stdin;
   const setBusy = (on, label) => { busy = on; runBtn.disabled = on; status.textContent = on ? label : ''; ctx.onChange(); };
@@ -578,7 +606,13 @@ function code(step, ctx) {
     },
   }, '↺ Reset');
 
-  const el = h('div.code-step',
+  const el = h(`div.code-step${cold ? '.cold' : ''}`,
+    cold && h('div.cold-banner',
+      h('div', h('b', ctx.mode === 'practice' ? 'Can you still do it?' : 'Cold rebuild: from memory'),
+        h('div.muted.small', ctx.mode === 'practice'
+          ? 'You proved this before. Write it again from memory: no starter, no hints, no autocomplete.'
+          : 'No starter, no hints, no autocomplete, no solution to reveal. Same tests as before. Write what you remember.')),
+      timer),
     h('div.code-head', step.title && h('h2', step.title), step.mode === 'fix' && h('span.tag.fix', '🐞 Fix the bug'),
       (step.framework || '').split('+').includes('web') && h('span.tag.web', '🌐 Live web server'),
       (step.framework || '').split('+').includes('efcore') && h('span.tag.web', '🗄 EF Core + SQLite'),
@@ -594,14 +628,16 @@ function code(step, ctx) {
     async check() {
       setBusy(true, 'Running the checks…');
       try {
-        const r = await api('check', { track: ctx.track, module: ctx.module, lesson: ctx.lesson, step: ctx.idx, code: editor.value, dream: step.variant });
+        const r = await api('check', { track: ctx.track, module: ctx.module, lesson: ctx.lesson, step: ctx.idx, code: editor.value, dream: step.variant, uses: ctx.uses?.(step) });
         editor.mark(r.diagnostics);
         renderRunOutput(panel, r);
         passed = r.passed;
-        if (r.passed) ctx.onPassed?.(editor.value);
+        const ms = Date.now() - started;
+        const late = cold && overTime(ms, step.timeLimit);
+        if (r.passed) { passedMs = ms; tick(); if (interval) clearInterval(interval); ctx.onPassed?.(editor.value, { cold, ms, inTime: !late }); }
         const failed = r.tests.filter(t => !t.pass).length;
         return {
-          correct: r.passed,
+          correct: r.passed, overTime: r.passed && late,
           detail: r.passed ? '' : !r.compiled ? (r.sql ? 'Your SQL has an error. Read it below.' : 'It does not compile yet. Read the first error below.') : `${failed} check${failed === 1 ? '' : 's'} failed. The details are below.`,
         };
       } catch (e) {
@@ -615,5 +651,6 @@ function code(step, ctx) {
     },
     lock() { /* the editor stays live so you can keep experimenting after passing */ },
     focus() { if (!passed) editor.focus(); },
+    destroy() { if (interval) clearInterval(interval); },
   };
 }

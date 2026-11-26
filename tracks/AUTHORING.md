@@ -472,6 +472,10 @@ dream keeps its own pieces, and pieces carry over to the new dream when its skel
 ```
 
 - The first dream is the flagship and the default. The dream's `id` is its artifact id.
+- **Coming soon**: `{ "id": "pantry", "title": "Pantry", "icon": "◇", "pitch": "...", "soon": true }` announces a
+  dream that is not built yet. The picker shows it greyed out with "Coming soon"; it needs no `artifact`, is never
+  suggested or chosen, and `dojo validate` skips it. A track with one real dream plus coming-soon ones does not get
+  the "declare 4 or 5" warning.
 - `tags` match the interests in the learner's profile; `needs: ["docker"]` lowers it for Windows-only learners.
 - A build marker for the chosen dream says `"artifact": "@dream"` (or leaves `artifact` out).
 - **Lexicon**: `{{key}}` in a step's title, prompt, starter, solution, template, tests, explain, hints, a learn
@@ -495,3 +499,113 @@ It warns when an artifact has no pitch, no `run`, or no lesson that builds it.
 "Open as a Code space" writes the template plus the learner's pieces into a space named after the artifact. The
 space remembers the hash of every file it wrote. A file the learner has edited in the space since is never
 overwritten: the new version is written beside it as `name.dojo-new`. "Download as .zip" gives the same files.
+
+## Pacing: prove it, keep it
+
+Learners must not rush through. Four fields make them prove a skill, come back to it, and see their earlier work
+reused (the plan is `docs/CURRICULUM.md` 1.2 and 3.4-3.5; the engine is `server/Pacing.cs` and `ui/pacing.js`).
+Every field is optional: a track without them behaves exactly as before.
+
+### `uses`: call the learner's earlier pieces
+
+A code step lists earlier pieces its code depends on, either inside its `build` or on the step itself (a review
+step that builds nothing):
+
+```json
+{ "type": "code", "title": "Weekly report", "...": "...",
+  "template": ["{{CODE}}", "Dojo.Eq(\"Report\", \"2h 05m\", Report(entries));"],
+  "build": { "file": "src/Sidekick.Core/Report.cs", "uses": ["src/Sidekick.Core/Duration.cs"] } }
+```
+
+| Entry | Means |
+|---|---|
+| `"src/Core/Journal.cs"` | that file of the artifact this step builds (its `build.artifact`, else the learner's dream, else the track's only artifact) |
+| `"gitkit:Lint.cs"` | that file of artifact `gitkit` in this track |
+| `"csharp/sidekick:src/X.cs"` | that file of artifact `sidekick` in track `csharp` |
+| `"csharp/@dream:src/X.cs"` | that file of whichever dream the learner builds in `csharp` |
+
+- Lexicon tokens work in entries (`"src/{{App}}.Core/Duration.cs"`).
+- When the step is checked, the learner's **current** version of each file (template, stub, then their pieces, each
+  wrapped by its own step's `transform`, as the artifact assembles them) is compiled with their code: C# as an extra
+  source file, Python as a module beside `main.py` (on `sys.path`), JavaScript/TypeScript as a sibling file at the
+  same relative path, SQL run after the step's `setup`.
+- **C#: the step's own code is wrapped too.** A C# step with `uses` and a `build.transform` is compiled the way the
+  artifact compiles: the learner's code goes inside its own transform as a separate file (so members of one
+  `static partial class Game` from several pieces meet), and the `template` becomes only the harness. Its
+  `{{CODE}}` is left empty, so the checks call **through the wrapper**: with
+  `"transform": ["namespace Delve;", "public static partial class Game", "{", "    {{CODE}}", "}"]` the template
+  says `Dojo.Eq("Potion(5)", 25, Delve.Game.Potion(5));` (Sidekick: `Sidekick.Sk.Format(...)`). Members therefore
+  need an access level the harness can reach (`public static` or `internal static`). The learner's code can call
+  the earlier members directly (`Heal(hp)`), exactly as in the finished artifact. Compiler errors keep the learner's
+  own line numbers. Add `"wrap": false` to the step to put the code at `{{CODE}}` as usual instead (then the template
+  must reach the pieces by their full names).
+- **`uses` replaces given copies.** Before `uses` existed, steps pasted a reference copy of earlier pieces into their
+  `template` or `starter` as given code. With `uses`, delete those copies: the engine supplies the piece (the
+  learner's or the reference one), and a second copy is a duplicate definition that does not compile (`dojo
+  validate` reports it as "reference solution does not pass").
+- A piece the learner has not earned (or only has in an older version than the one this step expects) is replaced
+  by the **reference** version: the `solution` of the step that builds it, after that step's `transform`. The
+  results say so ("Using the reference version of Duration.cs").
+- If the learner's own piece is broken, the review fails. That is the point: fix the earlier piece.
+- Rules (`dojo validate`): every entry must be built by a step **earlier in teaching order** (lesson key, then
+  step), never the step's own `build.file`, and the reference solution must pass with the reference pieces.
+  Pieces must compile together with the step: no top-level statements in a used C# piece, unique type names.
+
+### `cold`: rebuild it from memory
+
+```json
+{ "type": "code", "title": "Cold rebuild: Duration.Format", "cold": true, "timeLimit": 300,
+  "prompt": "Write `static string Format(int seconds)` again, from memory.", "solution": "...", "template": ["..."] }
+```
+
+- `"cold": true` on a code step (or on the lesson object, for every code step in it): the editor starts empty
+  (`starter` and `carry` are ignored), hints and "Show solution" are hidden, autocomplete is off, the step cannot be
+  skipped and no draft is kept. The server strips `starter`, `hints` and `solution` before the page gets the lesson;
+  grading uses the full step. The UI frames it as "Cold rebuild: from memory".
+- `"timeLimit"` (seconds, 10-3600, cold steps only): a gentle timer. Going over never fails the step; it counts as one
+  mistake for the lesson's stars.
+- `"coldOf": "csharp/02-methods/04-duration#6"` (step number counting from 1): the cold step borrows `tests`,
+  `template`, `require`, `forbid`, `setup`, `check`, `stateQuery`, `framework`, `stdin`, `solution`, `uses`,
+  `prompt` and `title` from that step, so the two never drift apart. Fields written on the cold step win. A
+  `coldOf` step is cold automatically; passing it marks the original piece as proven from memory. It does not
+  rebuild the piece (it has no `build`).
+- Put one short cold step (one piece) in each module, just before the boss. Leave `hints` out: they are hidden anyway.
+
+### `gate` in `module.json`: prove it to unlock the next module
+
+```json
+{ "title": "Methods and collections",
+  "gate": { "requires": ["boss"], "minStars": 2, "cold": ["055-cold-rebuild"] } }
+```
+
+| Field | Meaning |
+|---|---|
+| `requires` | `"boss"` (every boss lesson of this module), lesson ids of this module, or full `"track/module/lesson"` keys. Each must be finished with at least `minStars`. |
+| `minStars` | 1-3, default 1. Learners whose profile says "build things for myself" get 1 (relaxed); the cold check still counts. |
+| `cold` | Lesson ids (or `"lesson#N"` for one step) whose cold steps must be passed. A lesson with no cold step counts when finished (and `dojo validate` warns). |
+| `boss` | Older form: `"boss": { "minStars": 2 }` means `"requires": ["boss"], "minStars": 2`. |
+
+- Until a module's gate is proven, **every later module** on the map stays locked (lessons already finished stay
+  open). The map shows a gate card after the module: "Prove it to unlock Module 4", what is still needed, links.
+- Free roam (Profile) still opens everything; the gate card then says "not yet proven".
+- **Spaced re-proof**: when a gate is first proven, the module's first cold step (from `gate.cold`, else any cold step
+  in the module) comes back in Practice after 3 and 10 days as "Can you still do it?". Passing within three runs
+  keeps it proven; "I cannot remember it yet" or failing marks the module **rusty** (amber on the map) until a
+  re-proof passes. Nothing is locked by rust.
+- **Rush detector** (no field): a lesson finished in under 35% of its `minutes` while using at least
+  max(2, exercises / 4) hints and answer reveals gets a kind nudge on the summary ("You moved fast: try the cold
+  rebuild?"), earns no quest progress, and queues the module's cold step for tomorrow. It never blocks. So give
+  every lesson an honest `minutes`.
+
+### What `dojo validate` checks for pacing
+
+`uses` entries resolve to a piece built earlier and the reference solution passes with the reference pieces;
+`cold`, `timeLimit` and `coldOf` sit on code steps, `timeLimit` is 10-3600 and `coldOf` points at a code step; a cold
+step with hints is a warning; every gate's lessons exist, a gate that asks for the boss has one, `minStars` is 1-3,
+and its `cold` lessons have a cold step.
+
+### The learner profile file
+
+The welcome answers are kept in `.state/profile.json` (`GET`/`PUT /api/profile`) as well as in the progress file
+(`state.profile`, the cache). The newer of the two wins on load. Reordering "Your path" on the home page (Reorder,
+then drag or the arrows) saves `path` to the profile.

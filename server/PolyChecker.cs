@@ -38,7 +38,8 @@ public static partial class PolyChecker
 
     public static bool Handles(string language) => language is "python" or "javascript" or "typescript";
 
-    public static async Task<CheckResult> Check(LangRunner langs, JsonObject step, string code, string language)
+    /// <param name="extra">Earlier pieces this step "uses": written beside main.py / main.ts at their own paths (Pacing.cs).</param>
+    public static async Task<CheckResult> Check(LangRunner langs, JsonObject step, string code, string language, IReadOnlyList<(string Path, string Text)>? extra = null)
     {
         if (langs.Find(language) is not { } lang)
             return new(false, false, [new Diag("error", language, $"{language} is not installed on this machine, so this exercise cannot run here.", 0, 0, "")], [], "", "", false, 0);
@@ -51,7 +52,9 @@ public static partial class PolyChecker
             results.Add(new(message, !Regex.IsMatch(bare, pattern, RegexOptions.Singleline), "This exercise asks you to solve it another way."));
 
         var template = step["template"] is JsonArray lines ? string.Join('\n', lines.Select(l => (string?)l)) : (string?)step["template"];
-        var program = Prelude(language) + "\n" + (string.IsNullOrEmpty(template) ? code : template.Replace("{{CODE}}", code));
+        // Python runs isolated (-I), so the folder holding the used modules goes on sys.path, on the prelude's one line.
+        var prelude = Prelude(language) + (extra is { Count: > 0 } && language == "python" ? "; __import__('sys').path.insert(0, __import__('os').getcwd())" : "");
+        var program = prelude + "\n" +(string.IsNullOrEmpty(template) ? code : template.Replace("{{CODE}}", code));
         var tests = step["tests"] as JsonArray ?? [];
         string stdout = "", stderr = "";
         var timedOut = false;
@@ -59,7 +62,7 @@ public static partial class PolyChecker
 
         if (tests.Count == 0)
         {
-            var r = await langs.Run(lang, program, (string?)step["stdin"]);
+            var r = await langs.Run(lang, program, (string?)step["stdin"], extra);
             if (!r.Compiled) return new(false, false, [new Diag("error", lang.Name, Fix(r.CompileOutput, language), 0, 0, "")], results, "", "", false, r.Ms);
             var (visible, marks) = Marks(r.Stdout);
             (stdout, stderr, timedOut, ms) = (visible, Fix(r.Stderr, language), r.TimedOut, r.Ms);
@@ -75,7 +78,7 @@ public static partial class PolyChecker
             {
                 n++;
                 var name = (string?)t["name"] ?? (tests.Count == 1 ? "Prints the expected output" : $"Test {n}");
-                var r = await langs.Run(lang, program, (string?)t["stdin"]);
+                var r = await langs.Run(lang, program, (string?)t["stdin"], extra);
                 ms += r.Ms;
                 if (!r.Compiled) return new(false, false, [new Diag("error", lang.Name, Fix(r.CompileOutput, language), 0, 0, "")], results, "", "", false, ms);
                 var (visible, marks) = Marks(r.Stdout);

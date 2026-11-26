@@ -1,6 +1,7 @@
 // Progress and game rules: XP, levels, daily streak, stars, achievements, spaced review.
 // State lives in .state/progress.json on this machine (via the local server).
 import { api } from './util.js';
+import * as pacing from './pacing.js';
 
 const DEFAULTS = () => ({
   v: 1,
@@ -8,7 +9,8 @@ const DEFAULTS = () => ({
   lessons: {},        // "track/module/lesson" -> { stars, bestXp, runs, completedAt }
   days: {},           // "2026-11-24" -> XP earned that day
   achievements: {},   // id -> date earned
-  review: [],         // [{ key, idx, box, due }]  steps answered wrong, resurfaced in Practice
+  review: [],         // [{ key, idx, box, due, kind? }]  steps answered wrong, resurfaced in Practice; kind 'reproof' = a cold step re-asked (pacing.js)
+  pacing: { modules: {}, cold: {} },   // module gates proven / rusty, cold steps passed (pacing.js)
   drafts: {},         // "track/module/lesson#idx" -> code the learner left in the editor
   projects: {},       // "track/module" -> the learner's latest passing program in that project
   builds: {},         // artifact or dream id -> { pieces: { key: { file, mode, code, at, lessonKey, stepIdx, title } }, done, revealed } (builds.js)
@@ -28,7 +30,7 @@ const DEFAULTS = () => ({
 });
 
 /** Nested objects that later versions grew new fields in: merged field by field on load. */
-const NESTED = ['stats', 'settings', 'habit', 'league', 'challenge', 'rewards'];
+const NESTED = ['stats', 'settings', 'habit', 'league', 'challenge', 'rewards', 'pacing'];
 
 export let state = DEFAULTS();
 let saveTimer = null;
@@ -38,6 +40,16 @@ export async function load() {
   const base = DEFAULTS();
   state = { ...base, ...saved };
   for (const k of NESTED) state[k] = { ...base[k], ...(saved[k] || {}) };
+  // The welcome profile also lives in .state/profile.json (GET/PUT /api/profile); state.profile is its cache.
+  const file = await api('profile').catch(() => null);
+  if (file && typeof file === 'object' && (!state.profile || (file.updatedAt || file.createdAt || '') >= (state.profile.updatedAt || state.profile.createdAt || ''))) state.profile = file;
+  else if (state.profile) putProfile();
+}
+
+/** Writes state.profile to .state/profile.json. */
+export function putProfile() {
+  if (!state.profile) return Promise.resolve();
+  return api('profile', state.profile, 'PUT').catch(e => console.error('Could not save the profile', e));
 }
 
 // ---------------------------------------------------------------- events
@@ -130,11 +142,23 @@ export const starsFor = mistakes => (mistakes === 0 ? 3 : mistakes <= 2 ? 2 : 1)
 export const lessonKey = (track, module, lesson) => `${track.id}/${module.id}/${lesson.id}`;
 export const isDone = key => !!state.lessons[key];
 
-/** The first lesson of every module is open, so you can start at your level. After that, in order. */
+/**
+ * The first lesson of every module is open, so you can start at your level. After that, in order. A module after an
+ * unproven mastery gate stays locked (pacing.js), except lessons already finished. Free roam opens everything.
+ */
 export function isUnlocked(track, module, index) {
-  if (state.settings.freeRoam || index === 0) return true;
+  if (state.settings.freeRoam) return true;
+  if (isDone(lessonKey(track, module, module.lessons[index]))) return true;
+  if (!isProject(module) && gateBlocker(track, module)) return false;
+  if (index === 0) return true;
   return isDone(lessonKey(track, module, module.lessons[index - 1]));
 }
+
+/** The earlier module whose gate still locks this one, or null. */
+export const gateBlocker = (track, module) => pacing.gateBlocker(track, module, state);
+
+/** Stamp newly proven gates and schedule their re-proofs. Returns the modules proven just now. */
+export const syncGates = track => pacing.syncGates(track, state, dayKey(), n => dayKey(addDays(n)));
 
 export const isProject = module => module.kind === 'project';
 export const lessonModules = track => track.modules.filter(m => !isProject(m));
@@ -165,13 +189,15 @@ export function trackProgress(track) {
 const INTERVALS = [1, 3, 7, 14];
 
 export function missed(key, idx) {
-  const item = state.review.find(r => r.key === key && r.idx === idx);
+  const item = state.review.find(r => r.key === key && r.idx === idx && r.kind !== 'reproof');
   if (item) { item.box = 0; item.due = dayKey(); }
   else state.review.push({ key, idx, box: 0, due: dayKey() });
 }
 
 export function reviewed(key, idx, correct) {
-  const item = state.review.find(r => r.key === key && r.idx === idx);
+  // A cold step re-asked after its module was proven: pass clears "rusty", fail sets it (pacing.js).
+  if (pacing.reproofResult(state, key, idx, correct, dayKey(), dayKey(addDays(1)))) return;
+  const item = state.review.find(r => r.key === key && r.idx === idx && r.kind !== 'reproof');
   if (!item) return;
   if (!correct) { item.box = 0; item.due = dayKey(); return; }
   item.box++;

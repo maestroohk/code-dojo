@@ -24,11 +24,13 @@ import { suggestDream } from './pathrules.js';
 /** Fixed artifacts and dreams as one list; a dream's own fields are laid over its "artifact". Same as Builds.Artifacts. */
 export function artifactsOf(track) {
   const fixed = (Array.isArray(track?.artifacts) ? track.artifacts : []).filter(a => a && a.id);
-  const dreams = (Array.isArray(track?.dreams) ? track.dreams : []).filter(d => d && d.id)
+  const dreams = (Array.isArray(track?.dreams) ? track.dreams : []).filter(d => d && d.id && !d.soon)
     .map(d => { const { artifact, ...rest } = d; return { ...(artifact || {}), ...rest, dream: true }; });
   return [...fixed, ...dreams];
 }
 export const dreamsOf = track => artifactsOf(track).filter(a => a.dream);
+/** Dreams announced as "coming soon" ("soon": true): shown in the picker, not selectable yet. */
+export const soonDreamsOf = track => (Array.isArray(track?.dreams) ? track.dreams : []).filter(d => d && d.id && d.soon);
 
 /** The dream this learner builds in a track: their choice, else the profile's suggestion, else the first. */
 export function chosenDream(track) {
@@ -173,12 +175,55 @@ export function record(tracks, item, code) {
   const existing = e.pieces[pieceKey];
   // A replace piece keeps the version from the furthest lesson; replaying an earlier lesson does not shrink it.
   if (!(mode === 'replace' && existing && existing.lessonKey > item.lessonKey)) {
-    e.pieces[pieceKey] = { file: b.file, mode, code: transform(b.transform, code), at: new Date().toISOString(), lessonKey: item.lessonKey, stepIdx: item.idx, title: b.title || item.step.title || b.file };
+    e.pieces[pieceKey] = { file: b.file, mode, code: transform(b.transform, code), at: new Date().toISOString(), lessonKey: item.lessonKey, stepIdx: item.idx, title: b.title || item.step.title || b.file, cold: !!item.step.cold };
   }
   e.done[id] ||= game.dayKey();
   (e.fresh ||= []).push(id);        // lit with an animation the next time the blueprint is drawn
   const p = progress(track, artifact);
   return { track, artifact, n: p.n, m: p.m, fresh, title: b.title || item.step.title || b.file, unlocks: b.unlocks };
+}
+
+/**
+ * What a check sends for a step's "uses" (Pacing.cs): for each entry, the artifact it means and the learner's pieces of
+ * that file. The server compiles them with the step, or the reference version of any piece not earned yet.
+ *   "Core/Journal.cs"  this step's artifact (its build marker, else the chosen dream)   "kit:Lint.cs"  artifact kit
+ *   "csharp/@dream:src/X.cs"  the dream the learner builds in csharp
+ */
+export function usesPayload(tracks, trackId, step) {
+  const raws = Array.isArray(step?.build?.uses) ? step.build.uses : Array.isArray(step?.uses) ? step.uses : null;
+  if (!raws?.length) return undefined;
+  const out = {};
+  for (const raw of raws) {
+    const colon = String(raw).indexOf(':');
+    const left = colon < 0 ? '' : raw.slice(0, colon);
+    const file = colon < 0 ? raw : raw.slice(colon + 1);
+    const [tid, aid] = left.includes('/') ? left.split('/') : [trackId, left || null];
+    const track = tracks.find(t => t.id === tid);
+    if (!track) continue;
+    let artifact;
+    if (!aid) {
+      const own = step.build?.artifact;
+      artifact = tid === trackId && own && !meansDream(own) ? artifactsOf(track).find(a => a.id === own)
+        : (dreamsOf(track).find(d => d.id === step.variant) || chosenDream(track) || activeArtifacts(track)[0]);
+    } else artifact = meansDream(aid) ? chosenDream(track) : artifactsOf(track).find(a => a.id === aid);
+    if (!artifact) continue;
+    const want = lex(file, artifact.lexicon);
+    out[raw] = {
+      artifact: artifact.id,
+      pieces: Object.values(peek(artifact.id).pieces || {}).filter(p => p.file === want)
+        .map(p => ({ file: p.file, mode: p.mode, code: p.code, lesson: p.lessonKey, step: p.stepIdx })),
+    };
+  }
+  return out;
+}
+
+/** A cold re-proof ("coldOf") passed: the piece the original step built counts as proven from memory. */
+export function markCold(lessonKey, stepIdx) {
+  let changed = false;
+  for (const b of Object.values(game.state.builds || {}))
+    for (const p of Object.values(b.pieces || {}))
+      if (p.lessonKey === lessonKey && p.stepIdx === stepIdx && !p.cold) { p.cold = true; changed = true; }
+  return changed;
 }
 
 /** The toast body for a new piece. */
@@ -301,7 +346,11 @@ export function dreamPicker(track, { onPick, label = 'Build this one' } = {}) {
         d.id === game.state.dreams?.[track.id] && h('span.bd-pick-tag.mine', 'Your pick'),
         earned > 0 && h('span.muted.small', `${earned} piece${earned === 1 ? '' : 's'} built`),
         (d.tags || []).length > 0 && h('span.bd-pick-tags.small.muted', d.tags.join(' · ')));
-    }));
+    }), ...soonDreamsOf(track).map(d => h('button.bd-pick.soon', { type: 'button', disabled: true, title: d.pitch || '', 'aria-disabled': 'true' },
+      h('span.bd-pick-icon', d.icon || '◇'),
+      h('span.bd-pick-title', d.title),
+      h('span.bd-pick-tag', 'Coming soon'),
+      d.pitch && h('span.bd-pick-tags.small.muted', d.pitch))));
     const d = list.find(x => x.id === selected);
     detail.replaceChildren(d ? dreamFull(track, d, {
       cta: h('button.btn.primary.big', { type: 'button', onclick: () => { chooseDream(track, d.id); onPick?.(d); } },

@@ -24,6 +24,13 @@ public static class Validator
             if (issue.Error) Error(issue.Where, issue.Message); else Warn(issue.Where, issue.Message);
         }
 
+        // Pacing: module gates name real lessons (Pacing.cs).
+        foreach (var issue in Pacing.CheckGates(allTracks))
+        {
+            if (filter is not null && !issue.Where.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
+            if (issue.Error) Error(issue.Where, issue.Message); else Warn(issue.Where, issue.Message);
+        }
+
         foreach (var track in allTracks.OfType<JsonObject>())
         foreach (var module in (track["modules"] as JsonArray ?? []).OfType<JsonObject>())
         foreach (var meta in (module["lessons"] as JsonArray ?? []).OfType<JsonObject>())
@@ -51,6 +58,8 @@ public static class Validator
                 where += $" ({type})";
                 try
                 {
+                    foreach (var issue in Pacing.CheckStep(lesson, step, where))
+                        if (issue.Error) Error(issue.Where, issue.Message); else Warn(issue.Where, issue.Message);
                     if (step["build"] is { } build)
                     {
                         if (type != "code") throw new("\"build\" only works on code steps");
@@ -158,7 +167,7 @@ public static class Validator
                         case "code":
                             // A step with "variants" (one per dream) is several exercises: prove every one is solvable.
                             // In a track with dreams, every step is checked once per dream (variant + lexicon applied).
-                            var trackDreams = (track["dreams"] as JsonArray ?? []).OfType<JsonObject>().Where(d => d["id"] is JsonValue).ToList();
+                            var trackDreams = (track["dreams"] as JsonArray ?? []).OfType<JsonObject>().Where(d => d["id"] is JsonValue && !Builds.IsSoon(d)).ToList();
                             var versions = new List<(string Label, JsonObject Step)>();
                             if (trackDreams.Count > 0)
                                 foreach (var d in trackDreams)
@@ -174,8 +183,12 @@ public static class Validator
                                 code++;
                                 Need(version, "prompt");
                                 var solution = Need(version, "solution");
-                                async Task<CheckResult> Grade(string c) => language == "csharp" ? await checker.Check(version, c)
-                                    : language == "sql" ? SqlChecker.Check(version, c) : await PolyChecker.Check(langs, version, c, language);
+                                // "uses": earlier pieces compiled with the step, always the reference versions here.
+                                var used = Pacing.UsesOf(version).Count > 0
+                                    ? Pacing.Resolve(content, allTracks, (string)track["id"]!, key, i, version, (string?)version["variant"], null)
+                                    : null;
+                                foreach (var problem in used?.Problems ?? []) Error(where + label, problem);
+                                async Task<CheckResult> Grade(string c) => await Pacing.Grade(checker, langs, language, version, c, used?.Files);
                                 var good = await Grade(solution);
                                 if (!good.Passed)
                                 {

@@ -85,7 +85,7 @@ app.MapGet("/api/tracks", () => Results.Text(content.Tracks().ToJsonString(), "a
 // ?dream= serves each step's variant for the learner's chosen dream (see Builds.cs, "dreams").
 app.MapGet("/api/lesson/{track}/{module}/{lesson}", (string track, string module, string lesson, string? dream) =>
     content.Lesson(track, module, lesson, dream) is { } l
-        ? Results.Text(l.ToJsonString(), "application/json")
+        ? Results.Text(Pacing.ForLearner(l).ToJsonString(), "application/json")   // cold steps lose starter, hints and solution
         : Results.NotFound());
 
 app.MapGet("/api/progress", () =>
@@ -148,10 +148,34 @@ app.MapPost("/api/check", async (CheckRequest req) =>
     var lesson = content.Lesson(req.Track, req.Module, req.Lesson, req.Dream);
     if ((lesson?["steps"] as JsonArray)?.ElementAtOrDefault(req.Step) is not JsonObject step || (string?)step["type"] != "code")
         return Results.NotFound();
-    if (language == "sql") return Results.Json<object>(SqlChecker.Check(step, req.Code ?? ""), json);
-    return Results.Json(language == "csharp"
-        ? await checker.Check(step, req.Code ?? "")
-        : await PolyChecker.Check(langs, step, req.Code ?? "", language), json);
+    // "uses": the learner's own earlier pieces (or the reference ones they have not earned) are compiled with the step (Pacing.cs).
+    var uses = Pacing.UsesOf(step).Count > 0
+        ? Pacing.Resolve(content, content.Tracks(), req.Track, $"{req.Track}/{req.Module}/{req.Lesson}", req.Step, step, req.Dream, req.Uses)
+        : null;
+    var result = await Pacing.Grade(checker, langs, language, step, req.Code ?? "", uses?.Files);
+    return Results.Text(Pacing.WithUses(result, uses, json).ToJsonString(json), "application/json");
+});
+
+// The welcome profile (docs/CURRICULUM.md 3.8) as its own file, so it survives a progress reset and can be edited by hand.
+var profileFile = Path.Combine(stateDir, "profile.json");
+app.MapGet("/api/profile", () =>
+{
+    lock (progressLock)
+        return Results.Text(File.Exists(profileFile) ? File.ReadAllText(profileFile) : "null", "application/json");
+});
+app.MapPut("/api/profile", async (HttpRequest req) =>
+{
+    using var doc = await JsonDocument.ParseAsync(req.Body);
+    if (doc.RootElement.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null)) return Results.BadRequest("a profile is a JSON object");
+    var text = JsonSerializer.Serialize(doc.RootElement, new JsonSerializerOptions { WriteIndented = true });
+    lock (progressLock)
+    {
+        Directory.CreateDirectory(stateDir);
+        var tmp = profileFile + ".tmp";
+        File.WriteAllText(tmp, text);
+        File.Move(tmp, profileFile, overwrite: true);
+    }
+    return Results.NoContent();
 });
 
 // Certificate lab: build a small PKI from a description and validate a chain with the real X509Chain.
@@ -199,6 +223,10 @@ return 0;
 
 static string FindRoot()
 {
+    // The current folder wins when it is a code-dojo folder itself, so a build placed elsewhere (tests, another
+    // checkout's artifacts) validates and serves the content you are standing in.
+    var here = Directory.GetCurrentDirectory();
+    if (Directory.Exists(Path.Combine(here, "tracks")) && Directory.Exists(Path.Combine(here, "ui"))) return here;
     foreach (var start in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
         for (var dir = new DirectoryInfo(start); dir is not null; dir = dir.Parent)
             if (Directory.Exists(Path.Combine(dir.FullName, "tracks")) && Directory.Exists(Path.Combine(dir.FullName, "ui")))
@@ -207,4 +235,5 @@ static string FindRoot()
 }
 
 record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework, string? Language = null, System.Text.Json.Nodes.JsonNode? Setup = null);
-record CheckRequest(string Track, string Module, string Lesson, int Step, string? Code, string? Dream = null);
+record CheckRequest(string Track, string Module, string Lesson, int Step, string? Code, string? Dream = null,
+    Dictionary<string, Pacing.UsesInput>? Uses = null);

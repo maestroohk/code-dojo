@@ -5,6 +5,7 @@
 import { h } from './util.js';
 import * as game from './game.js';
 import { recommend, suggestDreams, pacingFor } from './pathrules.js';
+import { movePath } from './pacing.js';
 
 const AREAS = [
   ['programming', 'Programming', '⌨'],
@@ -49,6 +50,14 @@ export function saveProfile(answers, tracks) {
   };
   game.state.settings.dailyGoal = plan.pacing.dailyGoalXp;
   game.save(true);
+  game.putProfile();                        // .state/profile.json (GET/PUT /api/profile)
+}
+
+/** The learner reordered "Your path": keep their order in the profile (and its file). */
+function savePath(path) {
+  game.state.profile = { ...game.state.profile, path, pathEdited: true, updatedAt: new Date().toISOString() };
+  game.save();
+  game.putProfile();
 }
 
 /** Fresh install with no progress and no profile: the welcome questions come first. */
@@ -124,7 +133,7 @@ export function welcomeView(page, tracks) {
 }
 
 /** Home page: the recommended path with the next step highlighted, or an optional banner to make one. */
-export function pathPanel(tracks, { nextLesson, trackProgress }) {
+export function pathPanel(tracks, { nextLesson, trackProgress, editing: editingStart = false }) {
   const profile = game.state.profile;
   if (!profile) {
     if (game.state.tailorDismissed) return null;
@@ -139,18 +148,55 @@ export function pathPanel(tracks, { nextLesson, trackProgress }) {
   const steps = path.map(id => tracks.find(t => t.id === id)).filter(Boolean);
   if (!steps.length) return null;
   const current = steps.find(t => nextLesson(t)) || null;
-  return h('section.wl-yourpath',
+  let editing = false;
+  const ids = steps.map(t => t.id);
+  const redraw = focusId => {
+    const fresh = pathPanel(tracks, { nextLesson, trackProgress, editing: true });
+    section.replaceWith(fresh);
+    // Keep keyboard focus on the moved topic's arrow (the other arrow when that one is now disabled).
+    const [id, dir] = focusId || [];
+    const btns = id ? [`${id}-${dir}`, `${id}-${dir === 'up' ? 'down' : 'up'}`].map(k => fresh.querySelector(`[data-move="${k}"]`)) : [];
+    btns.find(b => b && !b.disabled)?.focus();
+  };
+  const move = (id, delta, to) => { savePath(movePath(ids, id, delta, to)); redraw([id, delta > 0 ? 'down' : 'up']); };
+  let dragId = null;
+  const section = h('section.wl-yourpath',
     h('div.wl-yourpath-head', h('div', h('div.eyebrow', 'Your path'), h('h2', current ? `Next: ${nextLesson(current).lesson.title}` : 'Path complete')),
-      h('a.btn.ghost.small', { href: '#/welcome' }, 'Retake')),
-    h('ol.wl-path.row', steps.map(t => {
+      h('div.wl-yourpath-actions',
+        h('button.btn.ghost.small', { type: 'button', 'aria-pressed': 'false', onclick: e => {
+          editing = !editing;
+          section.classList.toggle('editing', editing);
+          e.currentTarget.setAttribute('aria-pressed', String(editing));
+          e.currentTarget.textContent = editing ? 'Done' : 'Reorder';
+        } }, 'Reorder'),
+        h('a.btn.ghost.small', { href: '#/welcome' }, 'Retake'))),
+    h('p.muted.small.wl-reorder-tip', 'Drag a topic, or use its arrows, to put your path in the order you want. It is saved to your profile.'),
+    h('ol.wl-path.row', steps.map((t, i) => {
       const prog = trackProgress(t);
       const done = prog.total > 0 && prog.done === prog.total;
       const now = t === current;
       const next = now && nextLesson(t);
-      return h(`li.wl-path-step${now ? '.now' : ''}${done ? '.done' : ''}`, { title: profile.why?.[t.id] ? `Because ${profile.why[t.id]}` : '' },
+      return h(`li.wl-path-step${now ? '.now' : ''}${done ? '.done' : ''}`, {
+        title: profile.why?.[t.id] ? `Because ${profile.why[t.id]}` : '',
+        dataset: { id: t.id },
+        ondragstart: e => { if (!section.classList.contains('editing')) return e.preventDefault(); dragId = t.id; e.dataTransfer.effectAllowed = 'move'; },
+        ondragover: e => { if (dragId && dragId !== t.id) { e.preventDefault(); e.currentTarget.classList.add('drop'); } },
+        ondragleave: e => e.currentTarget.classList.remove('drop'),
+        ondrop: e => { e.preventDefault(); if (dragId && dragId !== t.id) move(dragId, 0, ids.indexOf(t.id)); dragId = null; },
+        ondragend: () => { dragId = null; },
+      },
         h('a.wl-path-link', { href: now && next ? `#/lesson/${next.key}` : `#/track/${t.id}`, onclick: () => sessionStorage.setItem('track', t.id) },
           h('span.wl-path-icon', done ? '✓' : t.icon || t.title.slice(0, 2)),
           h('div.grow', h('b', t.title), h('div.muted.small', now && next ? `Continue: ${next.lesson.title}` : `${prog.done}/${prog.total} lessons`)),
-          h('div.bar', h('div.bar-fill', { style: { width: `${(prog.done / Math.max(1, prog.total)) * 100}%` } }))));
+          h('div.bar', h('div.bar-fill', { style: { width: `${(prog.done / Math.max(1, prog.total)) * 100}%` } }))),
+        h('div.wl-move',
+          h('button.icon-btn.small', { type: 'button', 'data-move': `${t.id}-up`, disabled: i === 0, 'aria-label': `Move ${t.title} earlier`, onclick: () => move(t.id, -1) }, '↑'),
+          h('button.icon-btn.small', { type: 'button', 'data-move': `${t.id}-down`, disabled: i === steps.length - 1, 'aria-label': `Move ${t.title} later`, onclick: () => move(t.id, +1) }, '↓')));
     })));
+  // Steps are draggable only while reordering, so a normal click on the card still opens the topic.
+  const setDraggable = () => section.querySelectorAll('li.wl-path-step').forEach(li => { li.draggable = section.classList.contains('editing'); });
+  new MutationObserver(setDraggable).observe(section, { attributes: true, attributeFilter: ['class'] });
+  if (editingStart) { editing = true; section.classList.add('editing'); const b = section.querySelector('[aria-pressed]'); b.setAttribute('aria-pressed', 'true'); b.textContent = 'Done'; }
+  setDraggable();
+  return section;
 }

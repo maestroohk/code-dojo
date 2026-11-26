@@ -64,6 +64,8 @@ public sealed partial class Content(string root)
                     // "Your builds": which code steps add a piece to an artifact, so the UI can count pieces
                     // without loading every lesson (see Builds.cs).
                     if (BuildMarkers(steps) is { Count: > 0 } builds) meta["builds"] = builds;
+                    // Pacing: which steps are cold rebuilds, so module gates can be checked on the map (Pacing.cs).
+                    if (Pacing.ColdSteps(lesson) is { Count: > 0 } cold) meta["cold"] = cold;
                     lessons.Add(meta);
                 }
                 module["lessons"] = lessons;
@@ -189,7 +191,8 @@ public sealed partial class Content(string root)
         return list;
     }
 
-    public JsonObject? Lesson(string track, string module, string lesson, string? dream = null)
+    /// <param name="coldOf">Fill "coldOf" steps from the step they re-prove (Pacing.ApplyColdOf); off when reading that source.</param>
+    public JsonObject? Lesson(string track, string module, string lesson, string? dream = null, bool coldOf = true)
     {
         if (!SafeSegment(track) || !SafeSegment(module) || !SafeSegment(lesson)) return null;
         var file = Path.Combine(TracksDir, track, module, lesson + ".json");
@@ -210,6 +213,7 @@ public sealed partial class Content(string root)
         if (Framework(track) is { Length: > 0 } framework)
             foreach (var step in (obj["steps"] as JsonArray ?? []).OfType<JsonObject>())
                 if ((string?)step["type"] is "code" or "predict" && step["framework"] is null) step["framework"] = framework;
+        if (coldOf) Pacing.ApplyColdOf(this, track, obj, dream);
         obj["id"] = lesson;
         obj["key"] = $"{track}/{module}/{lesson}";
         return obj;

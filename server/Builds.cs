@@ -226,12 +226,16 @@ public static partial class Builds
     /// or "dreams" (4-5 builds the learner picks from); a dream's "artifact" object holds kind, template and run,
     /// and the dream's own id, title, icon, pitch, features and preview are laid over it. Dream entries get "dream": true.
     /// </summary>
+    /// <summary>A dream announced as "coming soon" ("soon": true): only id, title, pitch (and icon, tags) are needed.</summary>
+    public static bool IsSoon(JsonObject dream) => (bool?)(dream["soon"] as JsonValue) == true;
+
     public static List<JsonObject> Artifacts(JsonObject track)
     {
         var list = new List<JsonObject>();
         foreach (var a in (track["artifacts"] as JsonArray ?? []).OfType<JsonObject>()) list.Add(a);
         foreach (var d in (track["dreams"] as JsonArray ?? []).OfType<JsonObject>())
         {
+            if (IsSoon(d)) continue;                       // "coming soon": shown in the picker, not buildable yet
             var art = d["artifact"] is JsonObject inner ? (JsonObject)inner.DeepClone() : [];
             foreach (var (k, v) in d) if (k != "artifact") art[k] = v?.DeepClone();
             art["dream"] = true;
@@ -268,7 +272,8 @@ public static partial class Builds
         return stubs;
     }
 
-    static IEnumerable<(string Key, JsonObject Marker)> MarkersOf(JsonObject track) =>
+    /// <summary>Every build marker of a track with its lesson key ("track/module/lesson"), in map order.</summary>
+    public static IEnumerable<(string Key, JsonObject Marker)> MarkersOf(JsonObject track) =>
         from module in (track["modules"] as JsonArray ?? []).OfType<JsonObject>()
         from lesson in (module["lessons"] as JsonArray ?? []).OfType<JsonObject>()
         from m in (lesson["builds"] as JsonArray ?? []).OfType<JsonObject>()
@@ -287,7 +292,8 @@ public static partial class Builds
                 if (track[k] is { } node && (node is not JsonArray arr || arr.Any(x => x is not JsonObject))) issues.Add(new(true, tid, $"\"{k}\" must be an array of objects"));
             if (track["dreams"] is JsonArray ds && ds.Count == 1) issues.Add(new(false, tid, "a dream is a choice: declare 4 or 5 (or use \"artifacts\" for one fixed build)"));
             foreach (var d in (track["dreams"] as JsonArray ?? []).OfType<JsonObject>())
-                if (d["artifact"] is not JsonObject) issues.Add(new(true, $"{tid} dream {d["id"]}", "missing \"artifact\": { kind, template, run }"));
+                if (IsSoon(d)) { if ((string?)(d["title"] as JsonValue) is not { Length: > 0 }) issues.Add(new(true, $"{tid} dream {d["id"]}", "a coming-soon dream needs a \"title\"")); }
+                else if (d["artifact"] is not JsonObject) issues.Add(new(true, $"{tid} dream {d["id"]}", "missing \"artifact\": { kind, template, run }"));
             foreach (var art in Artifacts(track))
             {
                 var id = (string?)(art["id"] as JsonValue);

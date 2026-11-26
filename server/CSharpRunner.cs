@@ -241,7 +241,9 @@ public sealed class CSharpRunner
 
     /// <param name="live">A web app for the Workbench: no tests, plus a tracer that reports every request it handles.</param>
     /// <param name="efCore">Reference EF Core + SQLite (the packages this server ships with) and make them loadable at run time.</param>
-    public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false, bool live = false, bool efCore = false)
+    /// <param name="extra">More source files compiled with it: the learner's earlier pieces a step "uses" (Pacing.cs).</param>
+    public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false, bool live = false, bool efCore = false,
+        IEnumerable<(string Path, string Text)>? extra = null)
     {
         var tree = CSharpSyntaxTree.ParseText(BuildSource(code, template), Parse, path: "Source.cs", encoding: Encoding.UTF8);
         web |= live;
@@ -255,6 +257,8 @@ public sealed class CSharpRunner
             refs = _webRefs.Concat(ef.Refs);
             trees = web ? [.. trees, ef.Support] : [.. trees, ef.Support, ef.ConsoleSupport];
         }
+        if (extra is not null)
+            trees = [.. trees, .. extra.Select(e => CSharpSyntaxTree.ParseText(e.Text, Parse, path: e.Path, encoding: Encoding.UTF8))];
         var comp = CSharpCompilation.Create("Exercise", trees, refs,
             new CSharpCompilationOptions(OutputKind.ConsoleApplication,
                 nullableContextOptions: NullableContextOptions.Enable,

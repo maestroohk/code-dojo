@@ -123,7 +123,7 @@ export function suggestDreams(profile, tracks, path) {
   const out = {};
   for (const id of path) {
     const t = tracks.find(x => x.id === id);
-    const dreams = Array.isArray(t?.dreams) ? t.dreams : [];
+    const dreams = (Array.isArray(t?.dreams) ? t.dreams : []).filter(d => !d.soon);   // "coming soon" dreams cannot be built yet
     if (dreams.length) out[id] = suggestDream(t, dreams, { ...profile, dreams: out });
   }
   return out;

@@ -15,7 +15,10 @@ public record CheckResult(bool Passed, bool Compiled, List<Diag> Diagnostics, Li
 /// </summary>
 public sealed class Checker(CSharpRunner runner)
 {
-    public async Task<CheckResult> Check(JsonObject step, string code)
+    /// <param name="extra">Earlier pieces this step "uses", compiled alongside (Pacing.cs).</param>
+    /// <param name="wrapped">The learner's code already wrapped into its own file (a "uses" step, Pacing.cs): the template is
+    /// then compiled on its own as the harness, and the code is compiled from this file instead of at {{CODE}}.</param>
+    public async Task<CheckResult> Check(JsonObject step, string code, IReadOnlyList<(string Path, string Text)>? extra = null, (string Path, string Text)? wrapped = null)
     {
         var results = new List<TestResult>();
         var bare = StripCommentsAndStrings(code);
@@ -26,7 +29,8 @@ public sealed class Checker(CSharpRunner runner)
             results.Add(new(rule.Message, !Regex.IsMatch(bare, rule.Pattern, RegexOptions.Singleline), "This exercise asks you to solve it another way."));
 
         var (web, efCore) = CSharpRunner.Frameworks((string?)step["framework"]);
-        var (program, diags) = runner.Compile(code, (string?)step["template"], web, efCore: efCore);
+        var files = wrapped is { } w ? [.. extra ?? [], w] : extra;
+        var (program, diags) = runner.Compile(wrapped is null ? code : "", (string?)step["template"], web, efCore: efCore, extra: files);
         if (program is null)
             return new(false, false, diags, results, "", "", false, 0);
 

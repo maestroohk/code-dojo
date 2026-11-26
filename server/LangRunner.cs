@@ -119,12 +119,20 @@ public sealed class LangRunner
         catch { return false; }
     }
 
-    public async Task<Result> Run(Lang lang, string code, string? stdin)
+    /// <param name="extra">More files written into the run folder first (relative paths, never the main file).</param>
+    public async Task<Result> Run(Lang lang, string code, string? stdin, IReadOnlyList<(string Path, string Text)>? extra = null)
     {
         var dir = Path.Combine(Path.GetTempPath(), "code-dojo", $"{lang.Id}-" + Guid.NewGuid().ToString("N")[..10]);
         Directory.CreateDirectory(dir);
         try
         {
+            foreach (var (rel, text) in extra ?? [])
+            {
+                if (Builds.CleanPath(rel, out _) is not { } clean || clean == lang.File) continue;
+                var full = Path.Combine(dir, clean.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                await File.WriteAllTextAsync(full, text, new UTF8Encoding(false));
+            }
             await File.WriteAllTextAsync(Path.Combine(dir, lang.File), code, new UTF8Encoding(false));
             if (lang.Compile is { } compile)
             {

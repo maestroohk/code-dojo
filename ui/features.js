@@ -18,6 +18,15 @@ const FEATURES = [
     { name: 'Welcome questions and Your path', status: 'done', link: '#/welcome', note: 'Seven quick questions give you a path through the topics, dream suggestions and a daily goal. Retake from Profile.' },
     { name: 'Visualizers in lessons', status: 'done', note: 'Code in motion (step through programs) and LINQ in motion on learn cards.' },
   ] },
+  { area: 'Pacing: prove it, keep it', items: [
+    { name: 'Lessons that call your earlier pieces', status: 'done', note: 'A step can "use" pieces you built before: your own latest code is compiled with it, or the reference version (clearly labelled) if you have not built it yet. If your old piece is broken, the review shows it.' },
+    { name: 'Cold rebuilds', status: 'done', note: 'From memory: blank editor, no hints, no autocomplete, no solution to reveal, cannot be skipped. An optional gentle timer costs a star when you go over, never the step.' },
+    { name: 'Mastery gates', status: 'done', note: 'The next module opens once you prove this one: the boss with enough stars and its cold rebuild. The map shows what is left, with links. Free roam still opens everything but shows the gate as not yet proven.' },
+    { name: 'Spaced re-proof', status: 'done', link: '#/practice', note: 'A proven module sends a cold rebuild back to Practice after 3 and 10 days ("Can you still do it?"). Not passing marks the module rusty (amber on the map) until you rebuild it.' },
+    { name: 'Rush detector', status: 'done', note: 'Finishing far faster than the minutes a lesson suggests while leaning on hints and answers gets a kind nudge to try the cold rebuild, and no quest progress for that lesson. It never blocks you.' },
+    { name: 'Profile file and path order', status: 'done', link: '#/', note: 'Your welcome answers are kept in .state/profile.json too. Reorder Your path on the home page (drag or arrows); the order is saved to your profile.' },
+    { name: 'Gates and cold rebuilds in every topic', status: 'building', note: 'The engine is done; C# and Fundamentals are being converted first, other topics follow (see docs/CURRICULUM.md).' },
+  ] },
   { area: 'Labs', items: [
     { name: 'Certificate chain lab', status: 'done', link: '#/labs/pki', note: 'Lego-style board, real X509Chain validation, fix-it challenges.' },
     { name: 'Code in motion', status: 'done', link: '#/labs/code', note: 'Step forwards and backwards through any program.' },

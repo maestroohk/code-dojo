@@ -116,8 +116,10 @@ export function list() {
 export function track(type, data) {
   const q = today();
   const fresh = [];
+  // The rush detector (pacing.js): a lesson rushed through with hints and reveals earns no quest progress.
+  const rushed = type === 'lesson' && !!data?.rushed;
   for (const def of q.ids.map(byId).filter(Boolean)) {
-    if (!def.value && def.on) {
+    if (!def.value && def.on && !rushed) {
       const step = def.on(type, data || {});
       if (step && typeof step === 'object') q.progress[def.id] = Math.max(q.progress[def.id] || 0, step.max || 0);
       else if (step > 0) q.progress[def.id] = (q.progress[def.id] || 0) + step;
