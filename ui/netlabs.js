@@ -2,6 +2,8 @@
 // terminal. The server (NetLabs.cs) starts and stops labs, checks tasks by running commands inside
 // the containers, and bridges each terminal tab to `docker exec` over a WebSocket.
 import { h, api, md, ask, loader } from './util.js';
+import { OSC, oscPending, parseMark } from './termmarks.js';
+import { openFileEditor, askAndOpen } from './fileedit.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 const s = (tag, attrs = {}, ...kids) => {
@@ -43,6 +45,11 @@ function dockerBanner(info, refresh) {
   if (!info.image) {
     const b = info.build;
     const building = b.state === 'building';
+    if (b.outdated && building) {
+      return h('div.nl-banner.warn', h('b', 'Updating the lab tools image...'),
+        h('p', 'Its files changed since it was built, so it is rebuilt (usually well under a minute: Docker reuses what it can). Labs start once it is done.'),
+        b.log?.length > 0 && h('pre.nl-log', b.log.join('\n')));
+    }
     return h('div.nl-banner.warn',
       h('b', building ? 'Building the lab tools image...' : b.state === 'failed' ? 'The tools image build failed' : 'One-time setup'),
       h('p', building ? 'This takes a few minutes the first time (it downloads Debian and the network tools). You can leave this page open.'
@@ -172,14 +179,25 @@ const SGR = { 30: '#5c6370', 31: 'var(--bad)', 32: 'var(--good)', 33: 'var(--war
  * under a pty, so the shell echoes what you send and Ctrl+C really interrupts.
  * Also used by "terminal" lesson steps (steps.js): `url` then names their WebSocket, `onKey(e)` sees every key
  * first (return true to swallow it), and `label` names the terminal for screen readers.
+ * `files` ({ call(op, body), host }) gives the terminal a file editor: `nano file`, `vim file` and `sudoedit file`
+ * print a marker (ui/termmarks.js) that opens the file in a modal editor (ui/fileedit.js), and an "Open file…" button.
  */
-export function terminal(labId, node, { onStatus, url, onKey, label } = {}) {
+export function terminal(labId, node, { onStatus, url, onKey, label, files } = {}) {
   const out = h('pre.nl-term-out', { role: 'log', 'aria-live': 'polite', 'aria-label': label || `Terminal output on ${node}`, tabindex: 0 });
   const input = h('input.nl-term-in', { type: 'text', spellcheck: false, autocomplete: 'off', autocapitalize: 'off', 'aria-label': `Command on ${node}`, placeholder: `command on ${node}, Enter to run` });
+  let lastPath = '';
+  const edited = ({ saved, path }) => {
+    lastPath = path;
+    write(saved ? `\r\n\x1b[32m[saved ${path}]\x1b[0m\r\n` : `\r\n[closed ${path} without saving]\r\n`);
+    input.focus();
+  };
+  const editFile = (path, root) => { lastPath = path; openFileEditor({ call: files.call, host: files.host || node, path, root, onDone: edited }); };
   const el = h('div.nl-term', { onclick: e => { if (e.target === out && !getSelection().toString()) input.focus(); } }, out,
     h('div.nl-term-bar', h('span.nl-term-prompt', '›'), input,
       h('button.btn.ghost.small', { type: 'button', title: 'Send Ctrl+C (interrupt)', onclick: () => send('\x03') }, 'Ctrl+C'),
       h('button.btn.ghost.small', { type: 'button', title: 'Clear the screen', onclick: () => { out.replaceChildren(); line = newLine(); } }, 'Clear'),
+      files && h('button.btn.ghost.small', { type: 'button', title: 'Edit a file in this machine in an editor on the page (nano FILE or vim FILE in the terminal does the same)',
+        onclick: () => askAndOpen({ call: files.call, host: files.host || node, last: lastPath, onDone: edited }) }, 'Open file…'),
       h('span.nl-term-sep'),
       h('button.btn.ghost.small', { type: 'button', title: 'Smaller text', 'aria-label': 'Smaller text', onclick: () => termSize(-1) }, 'A−'),
       h('button.btn.ghost.small', { type: 'button', title: 'Bigger text', 'aria-label': 'Bigger text', onclick: () => termSize(+1) }, 'A+'),
@@ -238,9 +256,15 @@ export function terminal(labId, node, { onStatus, url, onKey, label } = {}) {
       if (c === '\x1b') {
         const rest = text.slice(i);
         const csi = rest.match(/^\x1b\[([0-9;?]*)([ -\/]*)([@-~])/);
-        const osc = rest.match(/^\x1b\][^\x07\x1b]*(\x07|\x1b\\)/);
+        const osc = rest.match(OSC);
         if (csi) { flush(); if (csi[3] === 'm' && !csi[1].startsWith('?')) sgr(csi[1]); else if (csi[3] === 'K') { /* erase to end of line: nothing to the right in line mode */ } i += csi[0].length; continue; }
-        if (osc) { i += osc[0].length; continue; }
+        if (osc) {
+          // The shell's stand-ins ask the page to open a file (dojo-linerc); other OSC sequences (titles) are dropped.
+          const mark = files && parseMark(osc[0]);
+          if (mark) setTimeout(() => editFile(mark.path, mark.root));
+          i += osc[0].length; continue;
+        }
+        if (oscPending(rest)) { pending = rest; break; }   // a marker split across messages: wait for its end
         if (/^\x1b[()][0-9A-Za-z]/.test(rest)) { i += 3; continue; }
         if (rest.length < 3 || (/^\x1b[\[\]]/.test(rest) && rest.length < 64)) { pending = rest; break; }   // split sequence: wait for more
         i += 2; continue;
@@ -328,7 +352,8 @@ function labPage(page, id, cleanups, kind) {
 
   function openTerm(node) {
     if (!lab?.running) { flash('Start the lab first, then open a terminal on any host.'); return; }
-    if (!terms.has(node)) terms.set(node, terminal(id, node, { onStatus: () => renderTabs() }));
+    if (!terms.has(node)) terms.set(node, terminal(id, node, { onStatus: () => renderTabs(),
+      files: { host: node, call: (op, body) => api(`netlabs/${encodeURIComponent(id)}/file/${op}`, { node, ...body }) } }));
     active = node;
     renderTabs();
     termHost.replaceChildren(terms.get(node).el);

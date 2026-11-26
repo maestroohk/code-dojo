@@ -201,14 +201,16 @@ public sealed partial class TermSteps : IAsyncDisposable
         var docker = await NetLabs.Probe();
         if (!docker.Ok) return new("docker", docker.Message);
         var image = ImageFor(spec.Image);
-        if (!await image.Ready())
+        if (!await image.Usable())
         {
             if (!ImageExists(spec.Image)) return new("failed", $"There is no image folder netlabs/images/{spec.Image}.");
             if (!waitForImage)
             {
                 if (image.State == "failed") return new("failed", "The shell image build failed. Press Try again; the log is below.", image.Info());
                 image.StartBuild();
-                return new("building", "Building the shell image (first time only: a few minutes, it downloads Debian and the tools).", image.Info());
+                return new("building", image.Outdated
+                    ? "Updating the shell image: its files changed since it was built (usually under a minute, Docker reuses what it can)."
+                    : "Building the shell image (first time only: a few minutes, it downloads Debian and the tools).", image.Info());
             }
             if (!await image.Ensure()) return new("failed", "The shell image build failed.", image.Info());
         }
@@ -417,8 +419,11 @@ public sealed partial class TermSteps : IAsyncDisposable
         s.Touch();
         try
         {
-            await NetLabs.Bridge(ctx, ws, ["exec", "-i", "-u", User, "-w", Home, "-e", "HOME=" + Home, "-e", "TERM=xterm-256color",
-                "-e", "DOJO_LINE_TERM=1", "-e", "DOJO_FILES=" + FilesIn, s.Name, "sh", "-c", NetLabs.ShellBoot], s.Touch);
+            // The image's dojo-bashrc sources the stand-ins (dojo-linerc) under DOJO_LINE_TERM=1, so nothing is sent along.
+            var args = new List<string> { "exec", "-i", "-u", User, "-w", Home, "-e", "HOME=" + Home, "-e", "DOJO_FILES=" + FilesIn };
+            foreach (var e in NetLabs.LineTermEnv) { args.Add("-e"); args.Add(e); }
+            args.AddRange([s.Name, "sh", "-c", NetLabs.ShellBoot]);
+            await NetLabs.Bridge(ctx, ws, args, s.Touch);
         }
         finally
         {
@@ -438,6 +443,7 @@ public sealed partial class TermSteps : IAsyncDisposable
     // ---------------------------------------------------------------- HTTP endpoints
 
     public record StepRequest(string? Track, string? Module, string? Lesson, int? Step);
+    public record FileRequest(string? Track, string? Module, string? Lesson, int? Step, string? Path, string? Text, string? Eol, string? Hash, bool? Root);
 
     /// <summary>The terminal step a request names, looked up in the server's own content. Null when it is not one.</summary>
     static Spec? Find(Content content, StepRequest? req, out string? error)
@@ -483,6 +489,22 @@ public sealed partial class TermSteps : IAsyncDisposable
             if (Find(content, req, out var err) is not { } spec) return NotFound(err);
             var r = await steps.RunChecks(spec);
             return Results.Json(new { ok = r.State == "ready", state = r.State, msg = r.Message, passed = r.Passed, tests = r.Rows.Select(x => new { name = x.Name, pass = x.Pass, detail = x.Detail }) }, json);
+        });
+        // The page's file editor (ui/fileedit.js): `nano file` in the terminal, or its Open file button. As the learner,
+        // or as root for sudoedit / "save as root" (the learner has password-less sudo in the machine anyway).
+        app.MapPost("/api/termstep/file/{op}", async (string op, FileRequest req) =>
+        {
+            if (Find(content, new(req.Track, req.Module, req.Lesson, req.Step), out var err) is not { } spec) return NotFound(err);
+            if (!steps._sessions.TryGetValue(spec.Key, out var s) || !await Running(s.Name))
+                return Results.Json(new { ok = false, state = "gone", msg = "The scenario is not running any more. Press Reset scenario to start it again." }, json);
+            s.Touch();
+            var user = req.Root == true ? "root" : User;
+            return op switch
+            {
+                "read" => NetLabs.FileReply(await ContainerFiles.Read(s.Name, user, Home, req.Path ?? "")),
+                "write" => NetLabs.FileReply(await ContainerFiles.Write(s.Name, user, Home, req.Path ?? "", req.Text ?? "", req.Eol, req.Hash)),
+                _ => Results.NotFound(),
+            };
         });
         // The terminal. Like the live labs' one, a WebSocket must come from our own page, so the Origin is required.
         app.Map("/api/termstep/term/{track}/{module}/{lesson}/{step:int}", async (HttpContext ctx, string track, string module, string lesson, int step) =>

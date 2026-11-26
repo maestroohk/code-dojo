@@ -123,6 +123,9 @@ export function highlight(code, lang) {
   if (MARKUP_LANGS.has(L)) return highlightMarkup(code);
   if (L === 'css') return highlightCss(code);
   if (SHELL_LANGS.has(L)) return highlightShell(code);
+  if (L === 'yaml' || L === 'yml') return highlightYaml(code);
+  if (L === 'conf' || L === 'ini') return highlightConf(code);
+  if (L === 'plain') return esc(code);
   const [TOKEN, KEYWORDS] = LANGS[L] || [CS_TOKEN, CS_KEYWORDS];
   const ctx = { depth: 0 };
   if (JSX_LANGS.has(L)) return highlightJs(code, 0, false, ctx)[0];
@@ -402,6 +405,45 @@ function highlightShell(code) {
     if (!(word && /^(do|then|else|elif|while|until|if|sudo|!)$/.test(text))) start = false;
   }
   return out;
+}
+
+// ---------------------------------------------------------------- YAML and config files (the page's file editor)
+
+const YAML_VALUE = /(\s#[^\n]*$)|("(?:\\.|[^"\\])*"?|'(?:''|[^'])*'?)|(\b(?:true|false|null|yes|no|on|off|True|False|Null)\b|~)|(-?\b\d[\d_.:]*\b)|([&*!][\w./-]+)|([|>][-+]?\s*$|[{}[\],])|([\s\S])/g;
+
+function yamlValue(text) {
+  let out = '', m;
+  YAML_VALUE.lastIndex = 0;
+  while ((m = YAML_VALUE.exec(text))) {
+    const [t, com, str, kw, num, anchor, punct] = m;
+    out += com ? `<span class="t-com">${esc(t)}</span>` : str ? `<span class="t-str">${esc(t)}</span>` : kw ? `<span class="t-kw">${t}</span>`
+      : num ? `<span class="t-num">${t}</span>` : anchor ? `<span class="t-type">${esc(t)}</span>` : punct ? `<span class="t-punct">${esc(t)}</span>` : esc(t);
+  }
+  return out;
+}
+
+/** YAML, line by line: comments, keys, list dashes, then the value's strings, numbers, booleans and anchors. */
+function highlightYaml(code) {
+  return code.split('\n').map(line => {
+    if (/^\s*#/.test(line)) return `<span class="t-com">${esc(line)}</span>`;
+    if (/^(---|\.\.\.)\s*$/.test(line)) return `<span class="t-punct">${line}</span>`;
+    const m = /^(\s*(?:-\s+)*)("[^"]*"|'[^']*'|[^\s#'"\-][^:#]*?|-[^\s:#][^:#]*?)(\s*:)(?=\s|$)(.*)$/.exec(line);
+    if (m) return esc(m[1]).replace(/-/g, '<span class="t-punct">-</span>') + `<span class="t-attr">${esc(m[2])}</span><span class="t-punct">${m[3]}</span>` + yamlValue(m[4]);
+    const d = /^(\s*(?:-\s+)+)(.*)$/.exec(line);
+    if (d) return esc(d[1]).replace(/-/g, '<span class="t-punct">-</span>') + yamlValue(d[2]);
+    return yamlValue(line);
+  }).join('\n');
+}
+
+/** Config files (/etc/hosts, sshd_config, .ini, .env, systemd units): comments, [sections], the key of each line, then values. */
+function highlightConf(code) {
+  return code.split('\n').map(line => {
+    if (/^\s*[#;]/.test(line)) return `<span class="t-com">${esc(line)}</span>`;
+    if (/^\s*\[[^\]]*\]\s*$/.test(line)) return `<span class="t-kw">${esc(line)}</span>`;
+    const m = /^(\s*)([^\s=:#]+)(\s*[=:]\s*|\s+)?(.*)$/.exec(line);
+    if (!m || !m[2]) return esc(line);
+    return esc(m[1]) + `<span class="t-attr">${esc(m[2])}</span>` + (m[3] ? `<span class="t-punct">${esc(m[3])}</span>` : '') + yamlValue(m[4]);
+  }).join('\n');
 }
 
 // ---------------------------------------------------------------- CSS

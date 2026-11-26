@@ -30,7 +30,7 @@ cd ..               # one level up
 cd                  # home (same as cd ~)
 ```
 
-The **Up arrow** brings back your previous command. (On a real server, **Tab** completes names: type `cd /var/l` and press Tab. The in-page terminal here is line based, so Tab and full-screen programs such as `less` and `nano` do not work in it.)
+The **Up arrow** brings back your previous command. (On a real server, **Tab** completes names: type `cd /var/l` and press Tab. The in-page terminal here is line based, so Tab does not work in it; `less` just prints the file, and `nano file` opens the file in an editor on the page.)
 
 ## Reading files
 
