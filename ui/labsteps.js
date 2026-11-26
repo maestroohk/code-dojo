@@ -216,6 +216,9 @@ const VISUAL = {
   kubebuild: { title: 'Kubernetes builder', icon: '☸', load: () => import('./lab-kubebuild.js').then(m => m.kubeBuildLab), sim: () => import('./kubesim.js') },
   pipebuild: { title: 'Pipeline builder', icon: '⛓', load: () => import('./lab-pipebuild.js').then(m => m.pipeBuildLab), sim: () => import('./pipesim.js') },
   pki: { title: 'Certificate chain lab', icon: '🔐', load: () => import('./lab-pki.js').then(m => m.pkiLab) },
+  // Real keystrokes on the Vim and nano emulator (vim-core.js); a challenge is a level id from vim-levels.js.
+  vim: { title: 'Vim & nano trainer', icon: '⌨', load: () => import('./lab-vim.js').then(m => m.vimLab),
+    sim: () => import('./vim-levels.js').then(m => ({ CHALLENGES: [...m.VIM_LEVELS, ...m.NANO_LEVELS] })) },
 };
 
 /** Remember this step, so the lab page can offer "Back to the lesson" (netlabs.js) and the lesson reopens here (app.js). */

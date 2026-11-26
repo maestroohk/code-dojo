@@ -1,7 +1,7 @@
 # The shared image for "terminal" lesson steps (server/TermSteps.cs): an everyday Linux workstation on
 # Debian slim with the tools seniors reach for, a non-root learner with sudo, and Git with a fake identity.
 # Built on first use; every terminal step starts a throwaway container from it.
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Keep man pages (Debian slim drops them), still skip docs and translations to stay small.
 RUN printf '%s\n' 'path-exclude /usr/share/doc/*' 'path-include /usr/share/doc/*/copyright' \
@@ -11,8 +11,9 @@ RUN printf '%s\n' 'path-exclude /usr/share/doc/*' 'path-include /usr/share/doc/*
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates bash-completion sudo less man-db manpages \
       git vim nano tmux make \
-      curl jq ripgrep fd-find tree file unzip zip xz-utils bc gawk \
-      procps psmisc iproute2 lsof strace sysstat dnsutils openssh-client \
+      curl jq ripgrep fd-find tree file unzip zip xz-utils bc gawk bsdextrautils \
+      procps psmisc iproute2 lsof strace sysstat bind9-dnsutils openssh-client acl \
+      cron systemd shellcheck \
       python3 sqlite3 \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --reinstall coreutils grep sed findutils tar gzip \
  && rm -rf /var/lib/apt/lists/* \
