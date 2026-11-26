@@ -1,0 +1,245 @@
+{
+  "title": "Reading PostgreSQL plans",
+  "summary": "EXPLAIN (ANALYZE, BUFFERS) node by node: estimated against actual rows, loops, time and buffers, and the two fixes they usually point to.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "EXPLAIN (ANALYZE, BUFFERS)",
+      "body": [
+        "Production runs PostgreSQL, and its plans carry more than SQLite's: `EXPLAIN (ANALYZE, BUFFERS)` **runs** the query and prints, for every node, what the planner expected and what really happened.",
+        "",
+        "- A plan is a tree. Each node pulls rows from the nodes indented under it; read it from the innermost node outwards.",
+        "- `(cost=0.00..69351.00 rows=58 width=24)` is the **estimate**: cost in planner units (not milliseconds), rows it expected, bytes per row.",
+        "- `(actual time=0.412..402.201 rows=61 loops=1)` is **what happened**: milliseconds to the first and last row, rows produced, and how many times the node ran. Time and rows are **per loop**.",
+        "- `Buffers: shared hit=2117 read=29734`: 8 kB pages found in PostgreSQL's cache (hit) or fetched from the OS or disk (read). Since PostgreSQL 18, `ANALYZE` includes buffers by default, prints actual rows with decimals (`rows=61.00`) and adds `Index Searches` to index scans.",
+        "- `Rows Removed by Filter` is work thrown away.",
+        "",
+        "Below: the customer order history, before and after an index on `orders (customer_id, placed_at DESC)`. Note `ANALYZE` executes the statement: wrap an UPDATE or DELETE in `BEGIN; ... ROLLBACK;`."
+      ],
+      "pgplan": {
+        "query": "EXPLAIN (ANALYZE, BUFFERS)\nSELECT id, placed_at, total_cents FROM orders\nWHERE customer_id = 42\nORDER BY placed_at DESC\nLIMIT 20;",
+        "text": [
+          "Limit  (cost=69352.31..69352.36 rows=20 width=24) (actual time=402.315..402.322 rows=20 loops=1)",
+          "  Buffers: shared hit=2117 read=29734",
+          "  ->  Sort  (cost=69352.31..69352.46 rows=58 width=24) (actual time=402.313..402.317 rows=20 loops=1)",
+          "        Sort Key: placed_at DESC",
+          "        Sort Method: top-N heapsort  Memory: 27kB",
+          "        Buffers: shared hit=2117 read=29734",
+          "        ->  Seq Scan on orders  (cost=0.00..69351.00 rows=58 width=24) (actual time=0.412..402.201 rows=61 loops=1)",
+          "              Filter: (customer_id = 42)",
+          "              Rows Removed by Filter: 2999939",
+          "              Buffers: shared hit=2117 read=29734",
+          "Planning Time: 0.142 ms",
+          "Execution Time: 402.351 ms"
+        ],
+        "after": [
+          "Limit  (cost=0.43..80.12 rows=20 width=24) (actual time=0.031..0.068 rows=20 loops=1)",
+          "  Buffers: shared hit=24",
+          "  ->  Index Scan using ix_orders_customer_placed on orders  (cost=0.43..231.53 rows=58 width=24) (actual time=0.030..0.064 rows=20 loops=1)",
+          "        Index Cond: (customer_id = 42)",
+          "        Buffers: shared hit=24",
+          "Planning Time: 0.201 ms",
+          "Execution Time: 0.087 ms"
+        ],
+        "labels": [
+          "No index on customer_id",
+          "Index on (customer_id, placed_at DESC)"
+        ],
+        "note": "After: the estimate says 58 rows but the index scan produced 20. That is not a bad estimate: the Limit above it stopped asking after 20. Compare estimates and actuals on nodes that ran to completion."
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "In the *before* plan, where did the 402 ms go?",
+      "options": [
+        "Reading all 3 million orders (about 32,000 pages, most of them from disk) to keep 61",
+        "Sorting the result",
+        "Planning the query",
+        "Sending 20 rows to the client"
+      ],
+      "answer": 0,
+      "explain": "The Seq Scan finishes at 402.2 ms of the 402.4 total; the Sort above it adds almost nothing (a top-N heapsort of 61 rows). `Rows Removed by Filter: 2999939` and `read=29734` say why."
+    },
+    {
+      "type": "learn",
+      "title": "Estimated against actual: when the planner guesses wrong",
+      "body": [
+        "The planner picks a plan from its **estimates**, which come from table statistics. When the statistics are stale, it plans for a world that does not exist.",
+        "",
+        "Last night an import added 48,000 orders with `status = 'imported'`. The statistics still say almost no rows have that status, so the planner expects **1** row and chooses a nested loop: for each order, look up its customer by primary key. Fine for 1 row; for 48,210 it does 48,210 index lookups (`loops=48210`).",
+        "",
+        "Read the inner node carefully: `actual time=0.194..0.195 rows=1 loops=48210` means 0.195 ms **each time**, times 48,210 loops: about 9.4 seconds. Per-loop numbers are the most common misreading of a plan.",
+        "",
+        "After `ANALYZE orders;` the estimate is 48,190, and the planner switches to a hash join: read the customers once, build a hash table, stream the orders through it."
+      ],
+      "pgplan": {
+        "query": "EXPLAIN (ANALYZE, BUFFERS)\nSELECT o.id, c.email\nFROM orders o JOIN customers c ON c.id = o.customer_id\nWHERE o.status = 'imported';",
+        "text": [
+          "Nested Loop  (cost=0.85..16.90 rows=1 width=40) (actual time=0.052..9531.774 rows=48210 loops=1)",
+          "  Buffers: shared hit=193842 read=51206",
+          "  ->  Index Scan using ix_orders_status on orders o  (cost=0.43..8.45 rows=1 width=16) (actual time=0.031..112.406 rows=48210 loops=1)",
+          "        Index Cond: (status = 'imported'::text)",
+          "        Buffers: shared hit=1204 read=8822",
+          "  ->  Index Scan using customers_pkey on customers c  (cost=0.42..8.44 rows=1 width=32) (actual time=0.194..0.195 rows=1 loops=48210)",
+          "        Index Cond: (id = o.customer_id)",
+          "        Buffers: shared hit=192638 read=42384",
+          "Planning Time: 0.311 ms",
+          "Execution Time: 9538.020 ms"
+        ],
+        "after": [
+          "Hash Join  (cost=2958.00..8197.17 rows=48190 width=40) (actual time=24.310..71.904 rows=48210 loops=1)",
+          "  Hash Cond: (o.customer_id = c.id)",
+          "  Buffers: shared hit=1754 read=7776",
+          "  ->  Bitmap Heap Scan on orders o  (cost=915.91..5114.53 rows=48190 width=16) (actual time=6.102..32.733 rows=48210 loops=1)",
+          "        Recheck Cond: (status = 'imported'::text)",
+          "        Heap Blocks: exact=8411",
+          "        Buffers: shared hit=1046 read=7776",
+          "        ->  Bitmap Index Scan on ix_orders_status  (cost=0.00..903.86 rows=48190 width=0) (actual time=4.981..4.981 rows=48210 loops=1)",
+          "              Index Cond: (status = 'imported'::text)",
+          "              Buffers: shared hit=2 read=409",
+          "  ->  Hash  (cost=1708.00..1708.00 rows=100000 width=32) (actual time=17.712..17.713 rows=100000 loops=1)",
+          "        Buckets: 131072  Batches: 1  Memory Usage: 7178kB",
+          "        Buffers: shared hit=708",
+          "        ->  Seq Scan on customers c  (cost=0.00..1708.00 rows=100000 width=32) (actual time=0.010..6.120 rows=100000 loops=1)",
+          "              Buffers: shared hit=708",
+          "Planning Time: 0.402 ms",
+          "Execution Time: 73.511 ms"
+        ],
+        "labels": [
+          "Stale statistics",
+          "After ANALYZE orders"
+        ]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "A plan node reads `(cost=0.42..8.44 rows=1 width=32) (actual time=0.194..0.195 rows=1 loops=48210)`. How long did this node take in total?",
+      "options": [
+        "About 9.4 seconds",
+        "About 0.2 milliseconds",
+        "About 8.44 milliseconds",
+        "It cannot be known from the plan"
+      ],
+      "answer": 0,
+      "explain": "Actual time is per loop: 0.195 ms times 48,210 loops is about 9,400 ms. The cost numbers are planner units, never milliseconds."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each PostgreSQL plan node to what it does.",
+      "pairs": [
+        [
+          "`Seq Scan on orders`",
+          "reads every page of the table"
+        ],
+        [
+          "`Index Scan using ix on orders`",
+          "walks the index, fetching each matching row from the table"
+        ],
+        [
+          "`Index Only Scan using ix on orders`",
+          "answers from the index alone (if the visibility map allows)"
+        ],
+        [
+          "`Bitmap Heap Scan` over a `Bitmap Index Scan`",
+          "collects matching row locations first, then reads the pages in order"
+        ],
+        [
+          "`Hash Join`",
+          "builds a hash table from one input and probes it with the other"
+        ],
+        [
+          "`Nested Loop`",
+          "for every row of the outer input, runs the inner node again"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Healthy, or worth a closer look?",
+      "buckets": [
+        "Usually fine",
+        "Look closer"
+      ],
+      "items": [
+        [
+          "`Seq Scan` on a 200-row lookup table",
+          0
+        ],
+        [
+          "`rows=1` estimated, `rows=480000` actual on a join input",
+          1
+        ],
+        [
+          "`Sort Method: external merge  Disk: 812344kB`",
+          1
+        ],
+        [
+          "`Index Scan ... (actual ... rows=20 loops=1)` under a `Limit 20`",
+          0
+        ],
+        [
+          "`Rows Removed by Filter: 4999988` on a query that returns 12 rows",
+          1
+        ],
+        [
+          "`Buffers: shared hit=24`",
+          0
+        ]
+      ],
+      "explain": "Small tables are cheapest to scan. Big estimate gaps mean stale statistics or correlated columns; an external merge sort spilled to disk (raise `work_mem` for that query, or give it an index in the right order); huge filtered-out counts mean a missing index."
+    },
+    {
+      "type": "order",
+      "prompt": "A report got slow after a big import. Put the investigation in order.",
+      "lines": [
+        "Run EXPLAIN (ANALYZE, BUFFERS) on the report query",
+        "Find the node where estimated and actual rows differ most",
+        "Run ANALYZE on the tables that node reads",
+        "Run EXPLAIN (ANALYZE, BUFFERS) again and compare the plan",
+        "If the estimate is still far off, look at the WHERE columns (correlated columns, extended statistics)"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The same fix, proven in SQLite",
+      "prompt": [
+        "The *before* plan above came from the customer order history. Reproduce the fix on the SQLite copy of the table:",
+        "",
+        "1. Create an index **`ix_orders_customer_placed`** on `orders (customer_id, placed_at)`.",
+        "2. Return customer **42**'s **20 newest** orders: **id**, **placed_at**, **total_cents**, newest first.",
+        "",
+        "Use the **▤ Query plan** button: with the index, SQLite searches it and needs no temp B-tree for the sort.",
+        "",
+        "Table: `orders(id, customer_id, placed_at, total_cents)` (30,000 rows)."
+      ],
+      "starter": "-- 1. the index\n\n-- 2. the query\n",
+      "solution": [
+        "CREATE INDEX ix_orders_customer_placed ON orders (customer_id, placed_at);",
+        "",
+        "SELECT id, placed_at, total_cents",
+        "FROM orders",
+        "WHERE customer_id = 42",
+        "ORDER BY placed_at DESC",
+        "LIMIT 20;"
+      ],
+      "setup": [
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER NOT NULL, placed_at TEXT NOT NULL, total_cents INTEGER NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30000) INSERT INTO orders SELECT i, (i * 7919) % 500 + 1, datetime('2026-01-01', '+' || (i * 15) || ' minutes'), (i * 37) % 9000 + 500 FROM n;"
+      ],
+      "check": "ordered",
+      "plan": true,
+      "require": [
+        {
+          "pattern": "(?i)create\\s+index\\s+ix_orders_customer_placed\\s+on\\s+orders\\s*\\(\\s*customer_id\\s*,\\s*placed_at",
+          "message": "Creates the index on (customer_id, placed_at)"
+        }
+      ],
+      "hints": [
+        "Equality column first, then the sort column: `(customer_id, placed_at)`.",
+        "An ascending index serves `ORDER BY placed_at DESC` too: the database walks it backwards."
+      ],
+      "explain": "Same answer, and the plan changes from a scan plus sort to one index search. In PostgreSQL you would build it with `CREATE INDEX CONCURRENTLY` on the live table."
+    }
+  ]
+}

@@ -1,0 +1,371 @@
+{
+  "title": "Locks, version columns and deadlocks",
+  "summary": "SELECT ... FOR UPDATE when you must read first, optimistic concurrency with a version column, deadlocks, and retrying the right errors.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "When you must read first: SELECT ... FOR UPDATE",
+      "body": [
+        "Sometimes one UPDATE cannot hold the whole decision: the app must read the event, check the customer's limit in another table, call a fraud check, then write. Then **lock the row as you read it**, so nobody else can change it until you commit:",
+        "",
+        "```sql fragment",
+        "BEGIN;",
+        "SELECT seats_left FROM events WHERE id = 5 FOR UPDATE;   -- PostgreSQL, MySQL, Oracle",
+        "-- ... checks in the app ...",
+        "UPDATE events SET seats_left = seats_left - 1 WHERE id = 5;",
+        "INSERT INTO orders (event_id, customer, qty, placed_at) VALUES (5, @customer, 1, now());",
+        "COMMIT;",
+        "```",
+        "",
+        "This is **pessimistic** locking: assume a conflict and block it. A second checkout's `FOR UPDATE` on the same row waits until the first commits, then reads the new value.",
+        "",
+        "- SQL Server has no `FOR UPDATE` on a plain SELECT; it uses a table hint: `SELECT seats_left FROM events WITH (UPDLOCK, ROWLOCK) WHERE id = 5;` inside the transaction.",
+        "- SQLite locks the whole database for writing; `BEGIN IMMEDIATE` takes that write lock at the start instead of at the first write.",
+        "- Keep the transaction **short**. Never hold a row lock across an HTTP call to a slow service or a user's think time: every other checkout for that event queues behind it."
+      ],
+      "txtimeline": {
+        "title": "FOR UPDATE: the second reader waits",
+        "isolation": "READ COMMITTED (PostgreSQL)",
+        "a": "Checkout A",
+        "b": "Checkout B",
+        "db": "events.seats_left (committed)",
+        "rows": [
+          {
+            "a": "BEGIN;\nSELECT seats_left FROM events\nWHERE id = 5 FOR UPDATE;\n-- 1",
+            "db": "1",
+            "note": "A reads 1 and locks the row."
+          },
+          {
+            "b": "BEGIN;\nSELECT seats_left FROM events\nWHERE id = 5 FOR UPDATE;",
+            "mark": "wait",
+            "wait": "b",
+            "note": "B asks for the same lock and waits. A plain SELECT would not wait; FOR UPDATE does."
+          },
+          {
+            "a": "UPDATE events SET seats_left = 0 WHERE id = 5;\nINSERT INTO orders ...;\nCOMMIT;",
+            "db": "0",
+            "note": "A sells the seat and commits."
+          },
+          {
+            "b": "-- 0",
+            "resume": "b",
+            "mark": "good",
+            "note": "B's SELECT returns now, with the committed 0. The app says \"sold out\"."
+          },
+          {
+            "b": "ROLLBACK;",
+            "note": "Nothing to do."
+          }
+        ],
+        "verdict": "Correct, at the cost of B waiting. The longer A holds the lock, the longer the queue."
+      }
+    },
+    {
+      "type": "blanks",
+      "prompt": "A worker takes the next unprocessed email job in PostgreSQL. Several workers run at once, and none may wait for another or take the same job.",
+      "code": [
+        "BEGIN;",
+        "SELECT id, payload FROM email_jobs",
+        "WHERE sent_at IS NULL",
+        "ORDER BY id",
+        "LIMIT 1",
+        "FOR __1__ __2__;",
+        "-- send it, then:",
+        "UPDATE email_jobs SET sent_at = now() WHERE id = $1;",
+        "COMMIT;"
+      ],
+      "blanks": [
+        "UPDATE",
+        "SKIP LOCKED"
+      ],
+      "bank": [
+        "SHARE",
+        "NOWAIT",
+        "READ ONLY"
+      ],
+      "explain": "`FOR UPDATE SKIP LOCKED` (PostgreSQL 9.5+, MySQL 8.0+) skips rows another worker already locked, so each worker gets a different job and nobody queues. `NOWAIT` would fail immediately instead of skipping. SQL Server's equivalent hint is `WITH (UPDLOCK, READPAST, ROWLOCK)`."
+    },
+    {
+      "type": "learn",
+      "title": "Optimistic concurrency: a version column",
+      "body": [
+        "Pessimistic locks are wrong for edits that take a human minutes: Esme opens her booking, goes for coffee, then saves. Instead, **detect** the conflict at save time. Every row carries a `version` that changes on every update:",
+        "",
+        "```sql",
+        "-- 1. load (the app keeps version = 5)",
+        "SELECT seat, note, version FROM bookings WHERE id = 12;",
+        "",
+        "-- 2. save: only if nobody changed it since",
+        "UPDATE bookings",
+        "SET note = 'aisle seat', version = version + 1",
+        "WHERE id = 12 AND version = 5;",
+        "```",
+        "",
+        "1 row changed: saved. **0 rows**: someone saved first. Do not overwrite: tell the user (HTTP `409 Conflict`, or `412 Precondition Failed` when the client sent the version as an `If-Match` ETag), reload, and let them redo the edit.",
+        "",
+        "No lock is held between load and save, so nobody waits. The engines can maintain the version for you: SQL Server `rowversion` columns change automatically on every update, and PostgreSQL has the hidden system column `xmin`. EF Core uses either as a concurrency token (next topic, *EF Core in ASP.NET Core*)."
+      ],
+      "txtimeline": {
+        "title": "Two editors, one booking",
+        "isolation": "no locks held between load and save",
+        "a": "Esme (web)",
+        "b": "Support agent",
+        "db": "bookings #12",
+        "rows": [
+          {
+            "a": "SELECT note, version FROM bookings WHERE id = 12;\n-- 'window please', 5",
+            "db": "version 5",
+            "note": "Esme opens the edit form. The page keeps version 5."
+          },
+          {
+            "b": "SELECT note, version FROM bookings WHERE id = 12;\n-- 'window please', 5",
+            "note": "Support opens the same booking."
+          },
+          {
+            "b": "UPDATE bookings SET seat = 'C14', version = version + 1\nWHERE id = 12 AND version = 5;\n-- UPDATE 1",
+            "db": "version 6, seat C14",
+            "note": "Support moves her to C14 first. Version becomes 6."
+          },
+          {
+            "a": "UPDATE bookings SET note = 'aisle seat', version = version + 1\nWHERE id = 12 AND version = 5;\n-- UPDATE 0",
+            "mark": "good",
+            "note": "Esme saves with the version she loaded. 0 rows: the app knows her form is stale."
+          },
+          {
+            "a": "-- 409 Conflict: \"This booking changed. Reload?\"",
+            "note": "She reloads, sees C14, and decides again. Nothing was silently overwritten."
+          }
+        ],
+        "verdict": "The conflict is detected, not prevented: that is the trade for never blocking anyone."
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Booking 12 is at version 5. Two saves arrive in this order. What does the last line return (`note`, `version`)?",
+      "code": [
+        "UPDATE bookings SET note = 'aisle', version = version + 1 WHERE id = 12 AND version = 5;",
+        "UPDATE bookings SET note = 'front row', version = version + 1 WHERE id = 12 AND version = 5;",
+        "SELECT note, version FROM bookings WHERE id = 12;"
+      ],
+      "setup": [
+        "CREATE TABLE bookings (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, customer TEXT NOT NULL, seat TEXT, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, version INTEGER NOT NULL);",
+        "INSERT INTO bookings VALUES (11,1,'ana@mail.test','B4','','confirmed',1),(12,3,'esme@mail.test','C11','window please','held',5),(13,3,'farid@mail.test','C12','','held',2),(14,4,'greta@mail.test','A1','','confirmed',3);"
+      ],
+      "answer": "aisle | 6",
+      "explain": "The first save matches version 5 and bumps it to 6. The second save still says `version = 5`, matches nothing and changes nothing: its form was stale."
+    },
+    {
+      "type": "code",
+      "title": "Two saves, one stale",
+      "prompt": [
+        "Two saves reach the API in this order. Write **both** optimistic UPDATEs, each bumping `version` by 1:",
+        "",
+        "1. Farid set the **note** of booking **13** to `step-free access`. His form loaded **version 2**.",
+        "2. Esme set the **note** of booking **12** to `aisle seat`. Her form loaded **version 4**, but the booking has been saved since.",
+        "",
+        "The tests check the `bookings` table afterwards: Farid's change must land, Esme's must not.",
+        "",
+        "Table: `bookings(id, event_id, customer, seat, note, status, version)`."
+      ],
+      "starter": "-- Farid: booking 13, loaded version 2\n\n-- Esme: booking 12, loaded version 4\n",
+      "solution": [
+        "UPDATE bookings SET note = 'step-free access', version = version + 1",
+        "WHERE id = 13 AND version = 2;",
+        "",
+        "UPDATE bookings SET note = 'aisle seat', version = version + 1",
+        "WHERE id = 12 AND version = 4;"
+      ],
+      "setup": [
+        "CREATE TABLE bookings (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, customer TEXT NOT NULL, seat TEXT, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, version INTEGER NOT NULL);",
+        "INSERT INTO bookings VALUES (11,1,'ana@mail.test','B4','','confirmed',1),(12,3,'esme@mail.test','C11','window please','held',5),(13,3,'farid@mail.test','C12','','held',2),(14,4,'greta@mail.test','A1','','confirmed',3);"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT id, note, version FROM bookings ORDER BY id",
+      "require": [
+        {
+          "pattern": "(?i)version\\s*=\\s*version\\s*\\+\\s*1",
+          "message": "Bumps the version"
+        }
+      ],
+      "hints": [
+        "Each UPDATE checks the version the form loaded: `WHERE id = 13 AND version = 2`.",
+        "Esme's UPDATE is written the same way with her own id and version. It will match nothing, and that is the point."
+      ],
+      "explain": "Esme's statement ran and changed 0 rows. In the app that 0 becomes a 409 and a reload, never a silent overwrite."
+    },
+    {
+      "type": "learn",
+      "title": "Deadlocks, and retrying the right errors",
+      "body": [
+        "Transaction A locks seat 1 then wants seat 2; transaction B locks seat 2 then wants seat 1. Each waits for the other, forever. The database spots the cycle and **kills one** of them:",
+        "",
+        "```text",
+        "PostgreSQL:  ERROR:  deadlock detected               (SQLSTATE 40P01)",
+        "             DETAIL:  Process 4121 waits for ShareLock on transaction 99812; blocked by process 4188.",
+        "SQL Server:  Msg 1205: Transaction (Process ID 57) was deadlocked on lock resources with another",
+        "             process and has been chosen as the deadlock victim. Rerun the transaction.",
+        "```",
+        "",
+        "- **Prevent:** take locks in the **same order** everywhere (sort the seat ids, `SELECT ... WHERE id IN (...) ORDER BY id FOR UPDATE`), keep transactions short, and index the columns your UPDATEs search by so they lock fewer rows.",
+        "- **Survive:** a deadlock victim, and a serialization failure (`40001`), lost nothing: its transaction was rolled back. Run the **whole transaction** again, a few times, with a short random back-off. Do not retry other errors: a unique violation (`23505`, SQL Server 2627/2601) is a real conflict to report, and a syntax error will fail forever.",
+        "- Make the retried work **idempotent** (an idempotency key on the order), so a retry after a timeout cannot charge twice."
+      ],
+      "txtimeline": {
+        "title": "A deadlock: opposite lock order",
+        "isolation": "any level",
+        "a": "Booking A (seats 1, 2)",
+        "b": "Booking B (seats 2, 1)",
+        "db": "locks held",
+        "rows": [
+          {
+            "a": "BEGIN;\nUPDATE seats SET held_by = 'A' WHERE id = 1;",
+            "db": "A: seat 1",
+            "note": "A locks seat 1."
+          },
+          {
+            "b": "BEGIN;\nUPDATE seats SET held_by = 'B' WHERE id = 2;",
+            "db": "A: seat 1, B: seat 2",
+            "note": "B locks seat 2."
+          },
+          {
+            "a": "UPDATE seats SET held_by = 'A' WHERE id = 2;",
+            "mark": "wait",
+            "wait": "a",
+            "note": "A wants seat 2 and waits for B."
+          },
+          {
+            "b": "UPDATE seats SET held_by = 'B' WHERE id = 1;",
+            "mark": "wait",
+            "wait": "b",
+            "note": "B wants seat 1 and waits for A. Neither can ever continue."
+          },
+          {
+            "b": "ERROR: deadlock detected (40P01)\n-- B is rolled back",
+            "resume": "b",
+            "mark": "bad",
+            "db": "A: seat 1",
+            "note": "After `deadlock_timeout` (1 second by default) PostgreSQL checks for cycles and cancels one transaction. Its locks are released."
+          },
+          {
+            "a": "-- UPDATE 1",
+            "resume": "a",
+            "mark": "good",
+            "db": "A: seats 1, 2",
+            "note": "A gets seat 2 and carries on."
+          },
+          {
+            "a": "COMMIT;",
+            "b": "-- app retries the whole booking",
+            "db": "none",
+            "note": "B's app catches 40P01 and runs its transaction again from BEGIN."
+          }
+        ],
+        "verdict": "Had both locked seats in id order, B would simply have waited behind A."
+      }
+    },
+    {
+      "type": "sort",
+      "prompt": "The checkout catches an exception from the database. Retry the whole transaction, or report the error?",
+      "buckets": [
+        "Retry the transaction",
+        "Do not retry"
+      ],
+      "items": [
+        [
+          "PostgreSQL `40P01 deadlock_detected`",
+          0
+        ],
+        [
+          "PostgreSQL `40001 could not serialize access due to concurrent update`",
+          0
+        ],
+        [
+          "SQL Server error 1205 (chosen as the deadlock victim)",
+          0
+        ],
+        [
+          "PostgreSQL `23505 duplicate key value violates unique constraint`",
+          1
+        ],
+        [
+          "PostgreSQL `42703 column \"seat_no\" does not exist`",
+          1
+        ],
+        [
+          "SQL Server error 547 (FOREIGN KEY constraint conflict)",
+          1
+        ]
+      ],
+      "explain": "Deadlocks and serialization failures are about timing: the same transaction will very likely succeed a moment later. Constraint violations and schema errors are about the data or the code: retrying gives the same answer."
+    },
+    {
+      "type": "order",
+      "prompt": "Put the retry loop for a booking transaction in order.",
+      "lines": [
+        "Begin a transaction",
+        "Lock the seats in ascending id order and do the work",
+        "Commit, and stop if it succeeded",
+        "If the error is 40001 or 40P01, roll back and wait a short random back-off",
+        "Try again from the beginning, at most 3 times, then give up with a 503"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "This shows up in the API log at peak time. What is the best first change?",
+      "code": [
+        "2026-11-21T19:02:11Z ERR checkout failed order=5531 event=5",
+        "Npgsql.PostgresException (0x80004005): 40P01: deadlock detected",
+        "DETAIL: Process 4121 waits for ShareLock on transaction 99812; blocked by process 4188.",
+        "Process 4188 waits for ShareLock on transaction 99807; blocked by process 4121.",
+        "   at SeatService.HoldAsync(Int32[] seatIds, ...) SeatService.cs:line 48"
+      ],
+      "options": [
+        "Lock the seats in a fixed order (sort `seatIds` first), and retry the transaction on 40P01",
+        "Raise `deadlock_timeout` so PostgreSQL waits longer before cancelling",
+        "Switch the checkout to READ UNCOMMITTED",
+        "Catch the exception and return 200 so the customer does not see an error"
+      ],
+      "answer": 0,
+      "explain": "Two processes each wait for the other: classic opposite lock order. Sorting the ids makes every transaction lock in the same order, so they queue instead of deadlocking, and the retry covers the rare case that remains. `deadlock_timeout` only changes how long a real deadlock goes unnoticed, and PostgreSQL has no dirty-read level."
+    },
+    {
+      "type": "code",
+      "title": "Save and return the new version",
+      "prompt": [
+        "The API saves a seat change for booking **13** (the client sent `If-Match: \"2\"`, its loaded version) and must reply with the new ETag. Write one statement that moves booking 13 to seat **`C15`**, bumps `version`, applies only if the version is still **2**, and returns the booking's **id** and new **version**.",
+        "",
+        "The tests check the rows your statement returns (one row means saved; no row would mean 412).",
+        "",
+        "Table: `bookings(id, event_id, customer, seat, note, status, version)`."
+      ],
+      "starter": "-- UPDATE ... WHERE ... AND version = 2 RETURNING ...\n",
+      "solution": [
+        "UPDATE bookings",
+        "SET seat = 'C15', version = version + 1",
+        "WHERE id = 13 AND version = 2",
+        "RETURNING id, version;"
+      ],
+      "setup": [
+        "CREATE TABLE bookings (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, customer TEXT NOT NULL, seat TEXT, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, version INTEGER NOT NULL);",
+        "INSERT INTO bookings VALUES (11,1,'ana@mail.test','B4','','confirmed',1),(12,3,'esme@mail.test','C11','window please','held',5),(13,3,'farid@mail.test','C12','','held',2),(14,4,'greta@mail.test','A1','','confirmed',3);"
+      ],
+      "check": "rows",
+      "require": [
+        {
+          "pattern": "(?i)\\breturning\\b",
+          "message": "Returns the new version with RETURNING"
+        },
+        {
+          "pattern": "(?i)version\\s*=\\s*2",
+          "message": "Checks the loaded version"
+        }
+      ],
+      "hints": [
+        "Same optimistic UPDATE as before, for booking 13 and version 2.",
+        "Add `RETURNING id, version` at the end."
+      ],
+      "explain": "The client gets `ETag: \"3\"` for its next save, from the same statement that did the check."
+    }
+  ]
+}

@@ -1,0 +1,249 @@
+{
+  "title": "Senior's toolkit: transactions, locks and blocking",
+  "summary": "Isolation levels per transaction, row locks for queues, finding who blocks whom, and timeouts that stop a stuck transaction from taking the site down.",
+  "minutes": 9,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: transactions, locks and blocking",
+      "body": "When checkouts hang or deadlocks fill the log, these are what an experienced engineer reaches for, in PostgreSQL first, then SQL Server and SQLite.",
+      "toolkit": [
+        {
+          "cmd": "BEGIN ISOLATION LEVEL REPEATABLE READ;",
+          "what": "PostgreSQL: raise the isolation level for one transaction only, where it is needed, instead of for the whole database. Be ready to retry on `40001`.",
+          "flags": [
+            [
+              "READ COMMITTED",
+              "the default: each statement sees what was committed before it started"
+            ],
+            [
+              "REPEATABLE READ",
+              "one snapshot for the whole transaction; lost updates fail with 40001"
+            ],
+            [
+              "SERIALIZABLE",
+              "as if transactions ran one at a time; catches write skew; retry on 40001"
+            ]
+          ],
+          "example": "BEGIN ISOLATION LEVEL SERIALIZABLE;\n-- check on-call doctors, then update\nCOMMIT;",
+          "lang": "sql"
+        },
+        {
+          "cmd": "SELECT ... FOR UPDATE SKIP LOCKED",
+          "what": "Lock the rows you read until commit; skip rows another worker has locked. The standard way to build a job queue on a table (PostgreSQL 9.5+, MySQL 8.0+).",
+          "flags": [
+            [
+              "FOR UPDATE",
+              "lock for writing; others wait"
+            ],
+            [
+              "NOWAIT",
+              "fail at once instead of waiting"
+            ],
+            [
+              "SKIP LOCKED",
+              "leave locked rows out of the result"
+            ],
+            [
+              "FOR NO KEY UPDATE",
+              "a weaker lock that does not block inserts referencing the row"
+            ]
+          ],
+          "example": "SELECT id FROM email_jobs WHERE sent_at IS NULL\nORDER BY id LIMIT 10\nFOR UPDATE SKIP LOCKED;",
+          "lang": "sql"
+        },
+        {
+          "cmd": "SELECT pid, pg_blocking_pids(pid), wait_event_type, state, query FROM pg_stat_activity",
+          "what": "PostgreSQL: who is waiting, and on which process. `idle in transaction` with an old `xact_start` is the classic culprit: an app that opened a transaction and never finished it.",
+          "flags": [
+            [
+              "pg_blocking_pids(pid)",
+              "the pids holding the locks this one waits for"
+            ],
+            [
+              "state = 'idle in transaction'",
+              "a transaction left open, holding its locks"
+            ],
+            [
+              "now() - xact_start",
+              "how long the transaction has been open"
+            ],
+            [
+              "pg_cancel_backend(pid) / pg_terminate_backend(pid)",
+              "cancel its query / end its session"
+            ]
+          ],
+          "example": "SELECT pid, pg_blocking_pids(pid) AS blocked_by, state, now() - xact_start AS open_for, left(query, 60)\nFROM pg_stat_activity\nWHERE cardinality(pg_blocking_pids(pid)) > 0 OR state = 'idle in transaction';",
+          "lang": "sql"
+        },
+        {
+          "cmd": "SET lock_timeout = '3s';",
+          "what": "PostgreSQL: give up waiting for a lock after 3 seconds instead of queueing forever. Pair it with `statement_timeout` for slow queries and `idle_in_transaction_session_timeout` for abandoned transactions.",
+          "flags": [
+            [
+              "lock_timeout",
+              "max wait for a lock (error 55P03)"
+            ],
+            [
+              "statement_timeout",
+              "max run time of one statement (error 57014)"
+            ],
+            [
+              "idle_in_transaction_session_timeout",
+              "end sessions that sit in an open transaction"
+            ]
+          ],
+          "example": "ALTER ROLE checkout_app SET lock_timeout = '3s';\nALTER ROLE checkout_app SET idle_in_transaction_session_timeout = '30s';",
+          "lang": "sql"
+        },
+        {
+          "cmd": "log_lock_waits = on",
+          "what": "PostgreSQL setting: log every lock wait longer than `deadlock_timeout` (1s by default), with who held the lock. Turns \"the site was slow at 19:02\" into evidence.",
+          "flags": [
+            [
+              "deadlock_timeout",
+              "how long to wait before checking for a deadlock; also the log threshold"
+            ],
+            [
+              "log_lock_waits",
+              "off by default"
+            ]
+          ],
+          "example": "ALTER SYSTEM SET log_lock_waits = on;\nSELECT pg_reload_conf();",
+          "lang": "sql"
+        },
+        {
+          "cmd": "SELECT session_id, blocking_session_id, wait_type, wait_time FROM sys.dm_exec_requests",
+          "what": "SQL Server: the live view of blocking. Follow `blocking_session_id` to the head of the chain. Deadlock graphs are kept in the built-in `system_health` Extended Events session.",
+          "flags": [
+            [
+              "blocking_session_id <> 0",
+              "requests that are waiting on another session"
+            ],
+            [
+              "wait_type LCK_M_*",
+              "waiting for a lock"
+            ],
+            [
+              "sys.dm_tran_locks",
+              "every lock held or requested"
+            ]
+          ],
+          "example": "SELECT session_id, blocking_session_id, wait_type, wait_time, command\nFROM sys.dm_exec_requests\nWHERE blocking_session_id <> 0;",
+          "lang": "sql"
+        },
+        {
+          "cmd": "ALTER DATABASE Tickets SET READ_COMMITTED_SNAPSHOT ON;",
+          "what": "SQL Server: make READ COMMITTED read row versions instead of waiting for writers, so reports stop blocking checkouts (and the other way round). Already on in Azure SQL Database. It needs a moment with no other connections.",
+          "flags": [
+            [
+              "READ_COMMITTED_SNAPSHOT ON",
+              "readers see the last committed version, no shared locks"
+            ],
+            [
+              "ALLOW_SNAPSHOT_ISOLATION ON",
+              "enables the separate SNAPSHOT level (update conflicts raise error 3960)"
+            ]
+          ],
+          "example": "ALTER DATABASE Tickets SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;",
+          "lang": "sql"
+        },
+        {
+          "cmd": "PRAGMA busy_timeout = 5000;",
+          "what": "SQLite: wait up to 5 seconds for the write lock instead of failing at once with `database is locked`. With `journal_mode = WAL`, readers and the single writer no longer block each other.",
+          "flags": [
+            [
+              "busy_timeout",
+              "milliseconds to retry when the database is locked"
+            ],
+            [
+              "journal_mode = WAL",
+              "write-ahead log: readers keep reading during a write"
+            ],
+            [
+              "BEGIN IMMEDIATE",
+              "take the write lock at the start of the transaction"
+            ]
+          ],
+          "example": "PRAGMA journal_mode = WAL;\nPRAGMA busy_timeout = 5000;",
+          "lang": "sql"
+        }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Checkouts for one event hang for minutes, then time out. `pg_stat_activity` shows this. What do you do first?",
+      "code": [
+        "  pid  | blocked_by |        state        |  open_for  | query",
+        "-------+------------+---------------------+------------+-------------------------------------------",
+        " 31877 | {}         | idle in transaction | 00:14:02   | SELECT seats_left FROM events WHERE id = 5 FOR UPDATE",
+        " 32010 | {31877}    | active              | 00:02:41   | SELECT seats_left FROM events WHERE id = 5 FOR UPDATE",
+        " 32044 | {31877}    | active              | 00:02:38   | SELECT seats_left FROM events WHERE id = 5 FOR UPDATE"
+      ],
+      "options": [
+        "End session 31877 with `pg_terminate_backend(31877)`, then find the code path that opens a transaction and never commits, and set `idle_in_transaction_session_timeout`",
+        "Restart PostgreSQL",
+        "Kill sessions 32010 and 32044, they are the ones running",
+        "Add an index on `events (id)`"
+      ],
+      "answer": 0,
+      "explain": "Session 31877 locked the row 14 minutes ago and has been idle ever since: everyone else queues behind it. Ending it releases the lock now; the timeout and the bug fix (usually an exception path that skips commit or dispose) stop it happening again."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Stop the checkout role from ever waiting more than 3 seconds for a lock in PostgreSQL.",
+      "code": "ALTER ROLE checkout_app SET __1__ = '3s';",
+      "blanks": [
+        "lock_timeout"
+      ],
+      "bank": [
+        "deadlock_timeout",
+        "statement_timeout",
+        "busy_timeout"
+      ],
+      "explain": "`lock_timeout` limits waiting for locks. `deadlock_timeout` only says when to check for deadlocks, `statement_timeout` limits total run time, and `busy_timeout` is SQLite."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each error to its meaning.",
+      "pairs": [
+        [
+          "PostgreSQL `40001`",
+          "serialization failure: retry the transaction"
+        ],
+        [
+          "PostgreSQL `40P01`",
+          "deadlock detected: this transaction was rolled back"
+        ],
+        [
+          "PostgreSQL `55P03`",
+          "lock not available (lock_timeout or NOWAIT)"
+        ],
+        [
+          "SQL Server `1205`",
+          "chosen as the deadlock victim"
+        ],
+        [
+          "SQLite `database is locked`",
+          "another connection holds the write lock (SQLITE_BUSY)"
+        ]
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Users report checkouts hanging. Put the investigation in order.",
+      "lines": [
+        "Find waiting sessions and what blocks them (pg_stat_activity with pg_blocking_pids)",
+        "Look at the head blocker: its state, how long its transaction has been open, its last query",
+        "Release the blockage (cancel or terminate the head blocker)",
+        "Find and fix the code path that held the lock too long",
+        "Add timeouts (lock_timeout, idle_in_transaction_session_timeout) and log_lock_waits so it fails fast and leaves evidence"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Push the check into the write (`UPDATE ... WHERE seats_left >= 1`), keep transactions short and lock rows in a fixed order, retry only 40001, 40P01 and 1205, and put timeouts on every application role so one stuck transaction fails fast instead of taking the site down."
+    }
+  ]
+}

@@ -23,7 +23,26 @@
         "```",
         "",
         "Joins show one line per table, in the order they're visited. The **first** table is the outer loop; for each of its rows, the next table is searched."
-      ]
+      ],
+      "sqlplan": {
+        "setup": [
+          "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+          "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;",
+          "CREATE INDEX rides_rider ON rides (rider_id);"
+        ],
+        "query": "SELECT id, started, minutes FROM rides WHERE rider_id = 42 ORDER BY started",
+        "index": [
+          "DROP INDEX rides_rider;",
+          "CREATE INDEX rides_rider_started ON rides (rider_id, started);"
+        ],
+        "labels": [
+          "Index on (rider_id)",
+          "Index on (rider_id, started)"
+        ],
+        "note": "With `started` as the second key, the matching index entries are already in date order, so the extra sort step disappears."
+      }
     },
     {
       "type": "match",
@@ -98,7 +117,8 @@
       "hints": [
         "`DROP INDEX rides_rider;`",
         "Then `CREATE INDEX rides_rider_started ON rides (rider_id, started);`"
-      ]
+      ],
+      "plan": true
     },
     {
       "type": "predict",
@@ -143,7 +163,22 @@
         "Read it as a **nested loop**: find rider 42's 40 rides via the index; for each, look up its station by primary key. 40 + 40 lookups, not 20,000.",
         "",
         "When the inner table has no usable index, you'll see `SCAN` on the inner line, which means *scan the inner table once per outer row*, or SQLite building an `AUTOMATIC COVERING INDEX` to rescue you. Both say: add an index on the join column."
-      ]
+      ],
+      "sqlplan": {
+        "setup": [
+          "CREATE TABLE stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, district TEXT NOT NULL);",
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40) INSERT INTO stations SELECT i, 'Station ' || i, CASE i % 4 WHEN 0 THEN 'Docklands' WHEN 1 THEN 'Old Town' WHEN 2 THEN 'Northside' ELSE 'Harbourside' END FROM n;",
+          "CREATE TABLE rides (id INTEGER PRIMARY KEY, rider_id INTEGER NOT NULL, station_id INTEGER NOT NULL REFERENCES stations(id), started TEXT NOT NULL, minutes INTEGER NOT NULL, fare_cents INTEGER NOT NULL);",
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO rides SELECT i, (i * 7919) % 500 + 1, (i * 31) % 40 + 1, datetime('2026-01-01', '+' || ((i * 7) % 300) || ' days', '+' || ((i * 13) % 1440) || ' minutes'), (i * 37) % 55 + 2, ((i * 37) % 55 + 2) * 15 FROM n;"
+        ],
+        "query": "SELECT r.id, s.name FROM rides AS r JOIN stations AS s ON s.id = r.station_id WHERE r.rider_id = 42",
+        "index": "CREATE INDEX rides_rider ON rides (rider_id);",
+        "labels": [
+          "No index on rider_id",
+          "With rides_rider"
+        ],
+        "note": "The tree shows the nested loop: the outer line runs once, the inner line runs once per outer row. `stations` is always found by its primary key."
+      }
     },
     {
       "type": "sort",
@@ -208,7 +243,8 @@
       "hints": [
         "An index is sorted, so equal values sit next to each other: exactly what GROUP BY needs.",
         "Index the grouped column. The plan becomes `SCAN rides USING COVERING INDEX rides_station`."
-      ]
+      ],
+      "plan": true
     },
     {
       "type": "code",
@@ -245,7 +281,8 @@
       ],
       "hints": [
         "A plain join with `WHERE r.rider_id = 42`."
-      ]
+      ],
+      "plan": true
     }
   ]
 }

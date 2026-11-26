@@ -206,6 +206,7 @@ app.MapPost("/api/pki", (PkiLab.Request req) => Results.Json(PkiLab.Run(req), js
 
 // LINQ in motion: run a query with every stage tapped, return the order items flowed through it.
 app.MapPost("/api/linqviz", async (LinqViz.Request req) => Results.Json(await LinqViz.Run(runner, req), json));
+SqlViz.Map(app, json);  // SQL visuals: rows through a query, EXPLAIN QUERY PLAN before/after (SqlViz.cs)
 
 // Regular expressions: the regex lab and graded "regex" steps, run by System.Text.RegularExpressions with a match timeout.
 RegexLab.Map(app, content);

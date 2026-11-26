@@ -61,6 +61,7 @@ public static class Validator
                 {
                     foreach (var issue in Pacing.CheckStep(lesson, step, where))
                         if (issue.Error) Error(issue.Where, issue.Message); else Warn(issue.Where, issue.Message);
+                    foreach (var msg in SqlViz.Check(step)) Error(where, msg);   // sqlflow / sqlplan / pgplan / txtimeline visuals
                     if (step["build"] is { } build)
                     {
                         if (type != "code") throw new("\"build\" only works on code steps");

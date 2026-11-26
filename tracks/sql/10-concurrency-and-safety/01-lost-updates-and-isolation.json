@@ -1,0 +1,356 @@
+{
+  "title": "Lost updates and isolation levels",
+  "summary": "Two checkouts, one seat: why read-then-write loses updates, what isolation levels promise, and the one-statement fix.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two checkouts, one seat",
+      "body": [
+        "Lighthouse Tickets sells seats for concerts around Port Avalon. Friday night, the *Night Ferry* show at Dockside Arena (2,500 seats) sold **2,600** tickets. Nothing crashed. Every request returned 200. The code looked like this:",
+        "",
+        "```csharp fragment",
+        "var left = await db.QuerySingleAsync<int>(\"SELECT seats_left FROM events WHERE id = @id\", new { id });",
+        "if (left < qty) return Results.Conflict(\"Sold out\");",
+        "await db.ExecuteAsync(\"UPDATE events SET seats_left = @left WHERE id = @id\", new { left = left - qty, id });",
+        "```",
+        "",
+        "Read, decide in the app, write back the computed value. Run two of those at the same time and the second write silently replaces the first: a **lost update**. Each request is correct on its own; together they are wrong. Step through it below.",
+        "",
+        "Wrapping the code in `BEGIN ... COMMIT` does **not** fix it. Under READ COMMITTED, the default in PostgreSQL and SQL Server, both transactions are allowed to read the same committed value."
+      ],
+      "txtimeline": {
+        "title": "Lost update: read, compute in the app, write back",
+        "isolation": "READ COMMITTED (PostgreSQL and SQL Server default)",
+        "a": "Checkout A",
+        "b": "Checkout B",
+        "db": "events.seats_left (committed)",
+        "rows": [
+          {
+            "a": "BEGIN;\nSELECT seats_left FROM events WHERE id = 5;\n-- 1",
+            "db": "1",
+            "note": "A reads: 1 seat left. Enough for its order of 1."
+          },
+          {
+            "b": "BEGIN;\nSELECT seats_left FROM events WHERE id = 5;\n-- 1",
+            "note": "B reads the same committed row: also 1. Readers do not block each other."
+          },
+          {
+            "a": "-- app computes 1 - 1 = 0\nUPDATE events SET seats_left = 0 WHERE id = 5;",
+            "note": "A writes the value it computed. It now holds a row lock until it commits."
+          },
+          {
+            "b": "-- app computes 1 - 1 = 0\nUPDATE events SET seats_left = 0 WHERE id = 5;",
+            "mark": "wait",
+            "wait": "b",
+            "note": "B tries to write the same row and has to wait for A's lock."
+          },
+          {
+            "a": "COMMIT;",
+            "db": "0",
+            "note": "A commits. Its lock is released."
+          },
+          {
+            "b": "-- lock granted: UPDATE 1",
+            "resume": "b",
+            "note": "B's UPDATE goes ahead. It sets 0, the value it computed from an old read. It does not know A already took the seat."
+          },
+          {
+            "b": "COMMIT;",
+            "db": "0",
+            "mark": "bad",
+            "note": "Both checkouts succeeded."
+          }
+        ],
+        "verdict": "Two tickets sold for one seat, and the table says 0 left, so nothing looks wrong."
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "Event 4 has `seats_left = 64`. Twenty checkouts for 1 ticket each run at the same moment, each doing *read, subtract 1 in the app, write back*. After they all finish, what can `seats_left` be?",
+      "options": [
+        "Anything from 44 to 63, depending on how the requests overlapped",
+        "Always 44",
+        "Always 63",
+        "An error, because the database detects the conflict"
+      ],
+      "answer": 0,
+      "explain": "Every write that was computed from a stale read overwrites the others. If all twenty read 64 first, the result is 63 and nineteen sales vanished from the count. READ COMMITTED detects nothing: each statement on its own is valid."
+    },
+    {
+      "type": "learn",
+      "title": "Isolation levels: what each one promises",
+      "body": [
+        "An **isolation level** says which effects of other, concurrent transactions yours may see. The SQL standard defines four by the anomalies they rule out:",
+        "",
+        "| Level | Dirty read | Non-repeatable read | Phantom read |",
+        "|---|---|---|---|",
+        "| READ UNCOMMITTED | possible | possible | possible |",
+        "| READ COMMITTED | prevented | possible | possible |",
+        "| REPEATABLE READ | prevented | prevented | possible |",
+        "| SERIALIZABLE | prevented | prevented | prevented |",
+        "",
+        "- **Dirty read**: you see another transaction's change before it commits (and maybe it rolls back).",
+        "- **Non-repeatable read**: you read a row twice in one transaction and get different values, because someone committed in between.",
+        "- **Phantom read**: you run the same `WHERE` twice and new rows have appeared.",
+        "",
+        "Real engines differ from the table, and you need to know yours:",
+        "",
+        "- **PostgreSQL** defaults to READ COMMITTED. READ UNCOMMITTED behaves as READ COMMITTED (no dirty reads, ever). REPEATABLE READ is a snapshot, so phantoms cannot happen either, and a lost update fails with `ERROR: could not serialize access due to concurrent update` (SQLSTATE `40001`).",
+        "- **SQL Server** defaults to READ COMMITTED with locks (readers wait for writers), or row versions when `READ_COMMITTED_SNAPSHOT` is on, which is the default in Azure SQL Database. `WITH (NOLOCK)` is READ UNCOMMITTED: dirty reads.",
+        "- **MySQL (InnoDB)** defaults to REPEATABLE READ.",
+        "- **SQLite** is SERIALIZABLE: one writer at a time for the whole database.",
+        "",
+        "Step through a dirty read below. It is the reason `NOLOCK` on a report is not a free speed-up."
+      ],
+      "txtimeline": {
+        "title": "Dirty read with WITH (NOLOCK)",
+        "isolation": "READ UNCOMMITTED (SQL Server)",
+        "a": "Refund job",
+        "b": "Finance report",
+        "db": "accounts.balance (committed)",
+        "rows": [
+          {
+            "a": "BEGIN TRAN;\nUPDATE accounts SET balance = balance - 500\nWHERE id = 1;",
+            "db": "800",
+            "note": "The refund job subtracts 500 but has not committed."
+          },
+          {
+            "b": "SELECT balance FROM accounts WITH (NOLOCK)\nWHERE id = 1;\n-- 300",
+            "mark": "bad",
+            "note": "The report reads the uncommitted 300."
+          },
+          {
+            "a": "-- payment provider says no\nROLLBACK;",
+            "db": "800",
+            "note": "The refund is rolled back. The balance was never 300."
+          }
+        ],
+        "verdict": "The report printed a number that never existed."
+      }
+    },
+    {
+      "type": "sort",
+      "prompt": "In the **SQL standard**, which isolation level is the lowest one that prevents each anomaly?",
+      "buckets": [
+        "READ COMMITTED",
+        "REPEATABLE READ",
+        "SERIALIZABLE"
+      ],
+      "items": [
+        [
+          "A report reads a refund that is later rolled back (dirty read)",
+          0
+        ],
+        [
+          "A transaction reads a price twice and gets 40, then 55 (non-repeatable read)",
+          1
+        ],
+        [
+          "`COUNT(*) WHERE event_id = 5` returns 3, then 4, inside one transaction (phantom)",
+          2
+        ],
+        [
+          "Two doctors each check \"someone else is on call\", then both go off call (write skew)",
+          2
+        ]
+      ],
+      "explain": "Write skew is the subtle one: each transaction reads rows the other then changes, but they write different rows, so no row-level conflict is visible. Only SERIALIZABLE (in PostgreSQL, serializable snapshot isolation) catches it."
+    },
+    {
+      "type": "learn",
+      "title": "The fix that needs no locks of your own",
+      "body": [
+        "Do the check and the change in **one statement**, and let the database do the arithmetic on the current value:",
+        "",
+        "```sql",
+        "UPDATE events",
+        "SET seats_left = seats_left - 1",
+        "WHERE id = 5 AND seats_left >= 1;",
+        "```",
+        "",
+        "Then look at how many rows it changed: **1** means the seat is yours, **0** means sold out. Every driver reports it (`ExecuteNonQuery()` returns it, `cursor.rowcount` in Python).",
+        "",
+        "Why it is safe: an UPDATE locks the row it changes. A second UPDATE on the same row waits, and once the first commits, it checks its `WHERE` again against the **new** value (PostgreSQL re-evaluates the condition on the updated row; SQL Server reads the row under an update lock). With 0 seats left, the condition is false and nothing changes.",
+        "",
+        "Belt and braces: also make the impossible state impossible with `CHECK (seats_left >= 0)`. Then even a buggy code path fails loudly instead of overselling."
+      ],
+      "txtimeline": {
+        "title": "One atomic UPDATE",
+        "isolation": "READ COMMITTED",
+        "a": "Checkout A",
+        "b": "Checkout B",
+        "db": "events.seats_left (committed)",
+        "rows": [
+          {
+            "a": "BEGIN;\nUPDATE events SET seats_left = seats_left - 1\nWHERE id = 5 AND seats_left >= 1;\n-- UPDATE 1",
+            "db": "1",
+            "note": "A's UPDATE finds 1 seat, takes it, and locks the row."
+          },
+          {
+            "b": "BEGIN;\nUPDATE events SET seats_left = seats_left - 1\nWHERE id = 5 AND seats_left >= 1;",
+            "mark": "wait",
+            "wait": "b",
+            "note": "B's UPDATE needs the same row and waits."
+          },
+          {
+            "a": "COMMIT;",
+            "db": "0",
+            "note": "A commits: 0 seats left."
+          },
+          {
+            "b": "-- UPDATE 0",
+            "resume": "b",
+            "mark": "good",
+            "note": "B gets the lock, re-checks `seats_left >= 1` against the committed 0, and changes nothing. The app sees 0 rows and answers \"sold out\"."
+          },
+          {
+            "b": "COMMIT;",
+            "db": "0",
+            "note": "B commits nothing."
+          }
+        ],
+        "verdict": "One seat, one ticket. No app-side read, no race."
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Event 2 has one seat left. Two checkouts run this, one after the other. What does the last line return (`seats_left`, then how many rows the last UPDATE changed)?",
+      "code": [
+        "UPDATE events SET seats_left = seats_left - 1 WHERE id = 2 AND seats_left >= 1;",
+        "UPDATE events SET seats_left = seats_left - 1 WHERE id = 2 AND seats_left >= 1;",
+        "SELECT seats_left, changes() FROM events WHERE id = 2;"
+      ],
+      "setup": [
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, name TEXT NOT NULL, venue TEXT NOT NULL, starts_at TEXT NOT NULL, capacity INTEGER NOT NULL, seats_left INTEGER NOT NULL, price_cents INTEGER NOT NULL);",
+        "INSERT INTO events VALUES (1,'The Gannets','Pier Hall','2026-12-04 20:00',400,37,4500),(2,'Low Tide Quartet','Chapel Rooms','2026-12-05 19:30',120,1,3000),(3,'Saltmarsh','Pier Hall','2026-12-11 20:00',400,1,5200),(4,'Foghorn Choir','Chapel Rooms','2026-12-12 18:00',120,64,1800),(5,'Night Ferry','Dockside Arena','2026-12-19 21:00',2500,0,6500);",
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL REFERENCES events(id), customer TEXT NOT NULL, qty INTEGER NOT NULL, placed_at TEXT NOT NULL);",
+        "INSERT INTO orders VALUES (1,1,'ana@mail.test',2,'2026-11-20 09:01:12'),(2,2,'ben@mail.test',1,'2026-11-20 09:02:40'),(3,3,'chloe@mail.test',4,'2026-11-20 09:05:03'),(4,1,'dmitri@mail.test',1,'2026-11-20 09:07:55');"
+      ],
+      "answer": "0 | 0",
+      "explain": "The first UPDATE takes the last seat. The second finds `seats_left >= 1` false and changes 0 rows, which is exactly what the app checks. In SQLite, `changes()` is the row count of the most recent INSERT, UPDATE or DELETE."
+    },
+    {
+      "type": "code",
+      "title": "Sell two seats, safely",
+      "prompt": [
+        "A customer orders **2** tickets for event **3** (*Saltmarsh*). Write the single `UPDATE` the checkout should run: take 2 seats **only if at least 2 are left**. If there are not enough, it must change nothing.",
+        "",
+        "The tests look at the `events` table afterwards. (Event 3 has 1 seat left, so the right answer changes nothing at all: a plain `seats_left - 2` would leave -1.)",
+        "",
+        "Tables: `events(id, name, venue, starts_at, capacity, seats_left, price_cents)`, `orders(id, event_id, customer, qty, placed_at)`."
+      ],
+      "starter": "-- One UPDATE that sells 2 seats for event 3 only if 2 are left\n",
+      "solution": [
+        "UPDATE events",
+        "SET seats_left = seats_left - 2",
+        "WHERE id = 3 AND seats_left >= 2;"
+      ],
+      "setup": [
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, name TEXT NOT NULL, venue TEXT NOT NULL, starts_at TEXT NOT NULL, capacity INTEGER NOT NULL, seats_left INTEGER NOT NULL, price_cents INTEGER NOT NULL);",
+        "INSERT INTO events VALUES (1,'The Gannets','Pier Hall','2026-12-04 20:00',400,37,4500),(2,'Low Tide Quartet','Chapel Rooms','2026-12-05 19:30',120,1,3000),(3,'Saltmarsh','Pier Hall','2026-12-11 20:00',400,1,5200),(4,'Foghorn Choir','Chapel Rooms','2026-12-12 18:00',120,64,1800),(5,'Night Ferry','Dockside Arena','2026-12-19 21:00',2500,0,6500);",
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL REFERENCES events(id), customer TEXT NOT NULL, qty INTEGER NOT NULL, placed_at TEXT NOT NULL);",
+        "INSERT INTO orders VALUES (1,1,'ana@mail.test',2,'2026-11-20 09:01:12'),(2,2,'ben@mail.test',1,'2026-11-20 09:02:40'),(3,3,'chloe@mail.test',4,'2026-11-20 09:05:03'),(4,1,'dmitri@mail.test',1,'2026-11-20 09:07:55');"
+      ],
+      "check": "state",
+      "stateQuery": "SELECT id, seats_left FROM events ORDER BY id",
+      "require": [
+        {
+          "pattern": "(?i)seats_left\\s*-\\s*2",
+          "message": "Subtracts in the database (seats_left - 2)"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "(?i)\\bselect\\b",
+          "message": "No separate SELECT: check and change in one statement"
+        }
+      ],
+      "hints": [
+        "Put the check in the WHERE clause, next to `id = 3`.",
+        "`WHERE id = 3 AND seats_left >= 2`"
+      ],
+      "explain": "The guard lives in the same statement as the change, so no other checkout can slip in between them."
+    },
+    {
+      "type": "learn",
+      "title": "RETURNING: know what you changed",
+      "body": [
+        "The app often needs the new value too (to show \"3 seats left\"). Reading it with a second SELECT reopens the race. `RETURNING` hands back the changed rows from the same statement:",
+        "",
+        "```sql",
+        "UPDATE events",
+        "SET seats_left = seats_left - 1",
+        "WHERE id = 1 AND seats_left >= 1",
+        "RETURNING id, seats_left;",
+        "```",
+        "",
+        "One row back: sold, and here is the new count. No rows back: sold out. `RETURNING` works in PostgreSQL, SQLite 3.35+ and MariaDB (on INSERT and DELETE); SQL Server spells it `OUTPUT inserted.seats_left`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each database to how it hands back the rows an UPDATE changed.",
+      "pairs": [
+        [
+          "PostgreSQL",
+          "`UPDATE ... RETURNING seats_left`"
+        ],
+        [
+          "SQL Server",
+          "`UPDATE ... OUTPUT inserted.seats_left WHERE ...`"
+        ],
+        [
+          "SQLite 3.35+",
+          "`UPDATE ... RETURNING seats_left` (same as PostgreSQL)"
+        ],
+        [
+          "Any driver, no RETURNING",
+          "the affected-row count, e.g. `ExecuteNonQuery()`"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Sell one, and say how many are left",
+      "prompt": [
+        "Write the checkout statement for **1** ticket to event **1** (*The Gannets*): take a seat only if one is left, and return the event's **id** and its new **seats_left** in the same statement.",
+        "",
+        "The tests check the rows your statement returns.",
+        "",
+        "Tables: `events(id, name, venue, starts_at, capacity, seats_left, price_cents)`, `orders(id, event_id, customer, qty, placed_at)`."
+      ],
+      "starter": "-- One UPDATE ... RETURNING\n",
+      "solution": [
+        "UPDATE events",
+        "SET seats_left = seats_left - 1",
+        "WHERE id = 1 AND seats_left >= 1",
+        "RETURNING id, seats_left;"
+      ],
+      "setup": [
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, name TEXT NOT NULL, venue TEXT NOT NULL, starts_at TEXT NOT NULL, capacity INTEGER NOT NULL, seats_left INTEGER NOT NULL, price_cents INTEGER NOT NULL);",
+        "INSERT INTO events VALUES (1,'The Gannets','Pier Hall','2026-12-04 20:00',400,37,4500),(2,'Low Tide Quartet','Chapel Rooms','2026-12-05 19:30',120,1,3000),(3,'Saltmarsh','Pier Hall','2026-12-11 20:00',400,1,5200),(4,'Foghorn Choir','Chapel Rooms','2026-12-12 18:00',120,64,1800),(5,'Night Ferry','Dockside Arena','2026-12-19 21:00',2500,0,6500);",
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL REFERENCES events(id), customer TEXT NOT NULL, qty INTEGER NOT NULL, placed_at TEXT NOT NULL);",
+        "INSERT INTO orders VALUES (1,1,'ana@mail.test',2,'2026-11-20 09:01:12'),(2,2,'ben@mail.test',1,'2026-11-20 09:02:40'),(3,3,'chloe@mail.test',4,'2026-11-20 09:05:03'),(4,1,'dmitri@mail.test',1,'2026-11-20 09:07:55');"
+      ],
+      "check": "rows",
+      "require": [
+        {
+          "pattern": "(?i)\\breturning\\b",
+          "message": "Uses RETURNING"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "(?i)^\\s*select\\b|;\\s*select\\b",
+          "message": "No separate SELECT"
+        }
+      ],
+      "hints": [
+        "Start from the safe UPDATE you just wrote, for event 1 and 1 seat.",
+        "End it with `RETURNING id, seats_left`."
+      ],
+      "explain": "One round trip, no race, and the app gets both the answer (a row or no row) and the new count."
+    }
+  ]
+}

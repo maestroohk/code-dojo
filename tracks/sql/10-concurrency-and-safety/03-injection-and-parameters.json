@@ -1,0 +1,222 @@
+{
+  "title": "SQL injection and parameters",
+  "summary": "How string-built SQL lets a visitor write your query, how parameters stop it, and what parameters cannot do.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Text glued into SQL becomes SQL",
+      "body": [
+        "An old admin page at Lighthouse Tickets logs staff in like this:",
+        "",
+        "```csharp fragment",
+        "var sql = \"SELECT id, username FROM users WHERE username = '\" + username +",
+        "          \"' AND password_hash = '\" + Hash(password) + \"'\";",
+        "```",
+        "",
+        "With `ana` in the box the database receives what the developer imagined. But the box accepts any text, and the database cannot tell which part of the string the developer wrote and which part the visitor typed. Type `admin' --` and the query becomes:",
+        "",
+        "```sql",
+        "SELECT id, username FROM users WHERE username = 'admin' --' AND password_hash = '...'",
+        "```",
+        "",
+        "The quote closes the string early, and `--` turns the password check into a comment. The visitor is now logged in as admin without a password. That is **SQL injection**: the visitor gets to write part of your query. With `UNION SELECT` they can read any table; with `; DROP TABLE` (where the driver allows several statements) they can change data. It has been on the OWASP Top 10 for as long as the list has existed."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "This is the exact text the old page sent after someone typed `admin' --` as the username. What does it return?",
+      "code": "SELECT id, username FROM users WHERE username = 'admin' --' AND password_hash = 'whatever-they-typed'",
+      "setup": [
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL);",
+        "INSERT INTO users VALUES (1,'admin','pbkdf2-sha256$600000$q8Ty$J3f0Lw2','admin'),(2,'ana','pbkdf2-sha256$600000$Lm2x$9pQe7Rk','customer'),(3,'ben','pbkdf2-sha256$600000$Zr4c$0sYb2Nd','customer'),(4,'box-office','pbkdf2-sha256$600000$Hq7v$Ue81kXa','staff');"
+      ],
+      "answer": "1 | admin",
+      "explain": "Everything after `--` is a comment, so the only condition left is `username = 'admin'`. The password was never checked."
+    },
+    {
+      "type": "code",
+      "title": "Prove the bug before you fix it",
+      "prompt": [
+        "Before fixing the page, you write a security test that shows the hole. The page pastes the username box between the quotes of this query:",
+        "",
+        "```sql",
+        "SELECT id, username FROM users WHERE username = '<username box>' AND password_hash = '5f4dcc3b5aa7';",
+        "```",
+        "",
+        "The editor holds the query as it is sent for the username `ana`. Change **only the text between the first pair of quotes** so that the query returns **every user**, whatever the password is. (In a real test this string is what you type into the form.)",
+        "",
+        "Table: `users(id, username, password_hash, role)` (4 users)."
+      ],
+      "starter": "SELECT id, username FROM users WHERE username = 'ana' AND password_hash = '5f4dcc3b5aa7';\n",
+      "solution": "SELECT id, username FROM users WHERE username = '' OR 1=1 --' AND password_hash = '5f4dcc3b5aa7';",
+      "setup": [
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL);",
+        "INSERT INTO users VALUES (1,'admin','pbkdf2-sha256$600000$q8Ty$J3f0Lw2','admin'),(2,'ana','pbkdf2-sha256$600000$Lm2x$9pQe7Rk','customer'),(3,'ben','pbkdf2-sha256$600000$Zr4c$0sYb2Nd','customer'),(4,'box-office','pbkdf2-sha256$600000$Hq7v$Ue81kXa','staff');"
+      ],
+      "check": "rows",
+      "require": [
+        {
+          "pattern": "^\\s*SELECT id, username FROM users WHERE username = '",
+          "message": "The start of the query is unchanged (only the username part is yours)"
+        }
+      ],
+      "hints": [
+        "Close the quote, add a condition that is always true, then comment out the rest.",
+        "`' OR 1=1 --` as the username."
+      ],
+      "explain": "Every row matches `1=1`, and the password check is commented out. Many login pages then take the first row, which is usually the admin. This string, and the one from the previous step, belong in the test suite as a regression test once the page is fixed."
+    },
+    {
+      "type": "learn",
+      "title": "Parameters: the value never becomes code",
+      "body": [
+        "The fix is not escaping quotes by hand. It is **parameters**: send the SQL text and the values separately. The database parses the statement first, with a placeholder where the value goes, then binds the value as data. Whatever the visitor typed is compared as a string, never parsed:",
+        "",
+        "```csharp fragment",
+        "// ADO.NET (Microsoft.Data.Sqlite here; Npgsql and SqlClient look the same)",
+        "using var cmd = conn.CreateCommand();",
+        "cmd.CommandText = \"SELECT id, username FROM users WHERE username = $name\";",
+        "cmd.Parameters.AddWithValue(\"$name\", username);",
+        "",
+        "// Dapper",
+        "var user = await conn.QuerySingleOrDefaultAsync<User>(",
+        "    \"SELECT id, username FROM users WHERE username = @name\", new { name = username });",
+        "",
+        "// EF Core: the interpolated value becomes a parameter, not text",
+        "var users = db.Users.FromSql($\"SELECT * FROM users WHERE username = {username}\");",
+        "```",
+        "",
+        "```python fragment",
+        "cur.execute(\"SELECT id, username FROM users WHERE username = ?\", (username,))   # sqlite3",
+        "cur.execute(\"SELECT id, username FROM users WHERE username = %s\", (username,))  # psycopg",
+        "```",
+        "",
+        "Now `admin' --` is just a strange username that nobody has. A bonus: the database can reuse the plan for the same statement text. And do not check passwords in SQL at all: load the hash by username and verify it in code with a slow password hash."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the safe version of the login lookup in C#.",
+      "code": [
+        "using var cmd = conn.CreateCommand();",
+        "cmd.CommandText = \"SELECT id, password_hash FROM users WHERE username = __1__\";",
+        "cmd.Parameters.__2__(\"$name\", username);"
+      ],
+      "blanks": [
+        "$name",
+        "AddWithValue"
+      ],
+      "bank": [
+        "'\" + username + \"'",
+        "Replace",
+        "Format"
+      ],
+      "explain": "The SQL text is a constant; the username travels separately as a parameter value."
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe from injection, or not? (`name` comes from the request.)",
+      "buckets": [
+        "Safe: the value is a parameter",
+        "Injectable"
+      ],
+      "items": [
+        [
+          "`db.Users.FromSql($\"SELECT * FROM users WHERE username = {name}\")`",
+          0
+        ],
+        [
+          "`db.Users.FromSqlRaw(\"SELECT * FROM users WHERE username = {0}\", name)`",
+          0
+        ],
+        [
+          "`conn.Query<User>(\"... WHERE username = @name\", new { name })`",
+          0
+        ],
+        [
+          "`db.Users.FromSqlRaw(\"SELECT * FROM users WHERE username = '\" + name + \"'\")`",
+          1
+        ],
+        [
+          "`db.Database.ExecuteSqlRaw($\"DELETE FROM carts WHERE owner = '{name}'\")`",
+          1
+        ],
+        [
+          "`cur.execute(f\"SELECT * FROM users WHERE username = '{name}'\")`",
+          1
+        ]
+      ],
+      "explain": "EF Core turns the holes of an interpolated string passed to `FromSql` / `ExecuteSql` into parameters, and `{0}` placeholders in the *Raw* methods too. But an interpolated string handed to a *Raw* method is formatted into plain text first, and a Python f-string is just a string: both paste the value into the SQL."
+    },
+    {
+      "type": "learn",
+      "title": "What parameters cannot do",
+      "body": [
+        "A parameter stands for a **value**. It cannot stand for a column name, a table name, a keyword or a sort direction:",
+        "",
+        "```sql fragment",
+        "-- does NOT work: this sorts by the constant text 'price', i.e. not at all",
+        "SELECT * FROM events ORDER BY @sortColumn",
+        "```",
+        "",
+        "For anything structural, map the request to an **allow-list** in code, and never paste the request text itself:",
+        "",
+        "```csharp fragment",
+        "var orderBy = sort switch",
+        "{",
+        "    \"date\"  => \"starts_at\",",
+        "    \"price\" => \"price_cents\",",
+        "    _       => \"id\",            // anything else: a safe default",
+        "};",
+        "var dir = desc ? \"DESC\" : \"ASC\";",
+        "var sql = $\"SELECT id, name FROM events ORDER BY {orderBy} {dir} LIMIT @take\";",
+        "```",
+        "",
+        "Two more traps: `LIKE @pattern` is safe, but a user's `%` and `_` still act as wildcards, so escape them if they should not. And an `IN (...)` list needs one parameter per item (or `= ANY(@ids)` with an array in PostgreSQL, or a table-valued parameter in SQL Server), not a comma-joined string.",
+        "",
+        "Defence in depth: the app's database login should have only the rights it needs, so a missed hole cannot drop tables or read the payments schema."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An endpoint takes `?sort=` from the query string to order a list. Which implementation is right?",
+      "options": [
+        "Map `sort` to a known column name with a switch (unknown values fall back to a default) and build the ORDER BY from that",
+        "Pass `sort` as a parameter: `ORDER BY @sort`",
+        "Strip quotes and semicolons from `sort`, then paste it in",
+        "Paste it in, since ORDER BY cannot be used to read data"
+      ],
+      "answer": 0,
+      "explain": "Identifiers cannot be parameters, so an allow-list is the only safe way. Filtering characters misses things (`CASE WHEN (SELECT ...)` needs no quotes or semicolons), and injected ORDER BY expressions can leak data one bit at a time."
+    },
+    {
+      "type": "code",
+      "title": "Incident: who tried, and did it work?",
+      "prompt": [
+        "After the old admin page was found, security asks what happened in the night. The login audit table stores exactly what was typed in the username box.",
+        "",
+        "Return every attempt whose **username_input contains a single quote** (`'`): **id**, **at**, **ip**, **username_input**, **outcome**, oldest first.",
+        "",
+        "Table: `login_audit(id, at, ip, username_input, outcome)`. `outcome` is `ok`, `bad_password` or `error`."
+      ],
+      "starter": "-- Inputs that contain a quote character\n",
+      "solution": [
+        "SELECT id, at, ip, username_input, outcome",
+        "FROM login_audit",
+        "WHERE username_input LIKE '%''%'",
+        "ORDER BY at;"
+      ],
+      "setup": [
+        "CREATE TABLE login_audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL, ip TEXT NOT NULL, username_input TEXT NOT NULL, outcome TEXT NOT NULL);",
+        "INSERT INTO login_audit VALUES (1,'2026-11-22 02:14:03','203.0.113.40','ana','ok'),(2,'2026-11-22 02:15:41','198.51.100.7','admin','bad_password'),(3,'2026-11-22 02:15:52','198.51.100.7','admin''','error'),(4,'2026-11-22 02:16:10','198.51.100.7','admin'' --','ok'),(5,'2026-11-22 02:16:31','198.51.100.7',''' OR 1=1 --','ok'),(6,'2026-11-22 02:20:00','203.0.113.9','ben','ok'),(7,'2026-11-22 02:21:13','203.0.113.9','ben','bad_password'),(8,'2026-11-22 02:30:45','192.0.2.66','O''Brien','bad_password'),(9,'2026-11-22 02:31:02','198.51.100.7','x'' UNION SELECT id, password_hash FROM users --','error');"
+      ],
+      "check": "ordered",
+      "hints": [
+        "Inside a SQL string, a single quote is written as two: `''`.",
+        "`WHERE username_input LIKE '%''%'` (or `instr(username_input, '''') > 0`)."
+      ],
+      "explain": "Read the result like an investigator: one IP probed with `admin'` (an error means the quote broke the query, so the page is injectable), then logged in twice as `ok` without a password, then tried a UNION to read the hashes. Rows 4 and 5 are a breach: rotate the admin credentials and every staff password. O'Brien is a real person with a quote in their name, which is exactly why quote-filtering is not the fix: parameters are."
+    }
+  ]
+}

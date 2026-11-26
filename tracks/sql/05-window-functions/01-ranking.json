@@ -34,7 +34,29 @@
         "- `DENSE_RANK()` gives ties the same number and **doesn't skip**.",
         "",
         "Window functions work in SQLite 3.25+, PostgreSQL, SQL Server, MySQL 8+ and Oracle."
-      ]
+      ],
+      "sqlflow": {
+        "setup": [
+          "CREATE TABLE tournament (handle TEXT PRIMARY KEY, region TEXT, points INTEGER);",
+          "INSERT INTO tournament VALUES ('nyx','EU',980),('grimtide','SA',870),('lumen','AS',980),('kestrel','EU',760),('oakshade','NA',870),('vantablack','NA',1020),('pebble','AF',640),('zephyr','EU',870),('mirth','AS',700),('quill','NA',760);"
+        ],
+        "from": "tournament",
+        "select": [
+          "handle",
+          "points"
+        ],
+        "window": {
+          "fn": "RANK()",
+          "as": "position",
+          "orderBy": [
+            "points DESC"
+          ]
+        },
+        "orderBy": [
+          "position",
+          "handle"
+        ]
+      }
     },
     {
       "type": "predict",
@@ -211,16 +233,33 @@
     },
     {
       "type": "code",
-      "title": "Golf: the podium",
+      "mode": "fix",
+      "title": "Review: the podium without a correlated count",
       "prompt": [
-        "**Query golf, par 95.** Return the **handle** of every player whose `RANK()` by points is **3 or better**.",
+        "The prize page lists every player whose rank by points is **3 or better** (ties share a rank, as with `RANK()`). The code in production is:",
         "",
-        "The tests fail above 130 characters.",
+        "```sql",
+        "SELECT t.handle",
+        "FROM tournament AS t",
+        "WHERE (SELECT COUNT(*) FROM tournament AS u WHERE u.points > t.points) < 3;",
+        "```",
+        "",
+        "It is correct (a player's rank is one more than the number of players above them), but the subquery runs once per player: with 10 players that is fine, with 2 million it reads the table 2 million times, and the next reader has to work out why `< 3` means \"top 3\".",
+        "",
+        "Rewrite it with `RANK() OVER (ORDER BY points DESC)` in a CTE or subquery, then keep rank **3 or better**. Return just **handle**.",
         "",
         "Tables: `tournament(handle, region, points)`."
       ],
-      "starter": "",
-      "solution": "SELECT handle FROM(SELECT handle,RANK()OVER(ORDER BY points DESC)r FROM tournament)WHERE r<4",
+      "starter": "SELECT t.handle\nFROM tournament AS t\nWHERE (SELECT COUNT(*) FROM tournament AS u WHERE u.points > t.points) < 3;\n",
+      "solution": [
+        "WITH ranked AS (",
+        "    SELECT handle, RANK() OVER (ORDER BY points DESC) AS position",
+        "    FROM tournament",
+        ")",
+        "SELECT handle",
+        "FROM ranked",
+        "WHERE position <= 3;"
+      ],
       "setup": [
         "CREATE TABLE tournament (handle TEXT PRIMARY KEY, region TEXT, points INTEGER);",
         "INSERT INTO tournament VALUES ('nyx','EU',980),('grimtide','SA',870),('lumen','AS',980),('kestrel','EU',760),('oakshade','NA',870),('vantablack','NA',1020),('pebble','AF',640),('zephyr','EU',870),('mirth','AS',700),('quill','NA',760);"
@@ -228,20 +267,21 @@
       "check": "rows",
       "require": [
         {
-          "pattern": "(?i)\\brank\\s*\\(",
-          "message": "Uses RANK()"
+          "pattern": "(?i)\\brank\\s*\\(\\s*\\)\\s*over",
+          "message": "Uses RANK() OVER"
         }
       ],
       "forbid": [
         {
-          "pattern": "^[\\s\\S]{131,}",
-          "message": "Under 130 characters (par is 95)"
+          "pattern": "(?i)count\\s*\\(",
+          "message": "No correlated COUNT(*)"
         }
       ],
       "hints": [
-        "A derived table in FROM is shorter than a CTE.",
-        "SQLite lets you drop `AS` before an alias and doesn't need an alias for a derived table."
-      ]
+        "A window function cannot go in WHERE directly: compute it in a CTE first.",
+        "`WITH ranked AS (SELECT handle, RANK() OVER (ORDER BY points DESC) AS position FROM tournament) SELECT handle FROM ranked WHERE position <= 3`"
+      ],
+      "explain": "One pass over the table and a sort, instead of a count per row, and the code now says \"rank 3 or better\". It returns three players: vantablack first, nyx and lumen tied second, and nobody third, because RANK skips after a tie (the three players on 870 share rank 4). With DENSE_RANK they would be third and win a prize: pick the ranking function on purpose."
     }
   ]
 }
