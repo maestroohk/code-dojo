@@ -31,7 +31,7 @@ kafka-get-offsets.sh     --topic t [--time -1|-2]
 kafka-log-dirs.sh        --describe
 ```
 
-Kafka 4.x renamed some console-tool options: `--reader-property` (producer) and `--formatter-property` (consumer) replace `--property`, and `--command-property` replaces `--producer-property` / `--consumer-property`. The old names still work but print a deprecation warning; you will meet both in runbooks.
+Kafka 4.2 renamed some console-tool options (KIP-1147): `--reader-property` (producer) and `--formatter-property` (consumer) replace `--property`, and `--command-property` replaces `--producer-property` / `--consumer-property`. The old names still work but are deprecated and due to be removed in Kafka 5.0; you will meet both in runbooks.
 
 Each command starts a small Java program, so it takes a second or two. That is normal.
 
