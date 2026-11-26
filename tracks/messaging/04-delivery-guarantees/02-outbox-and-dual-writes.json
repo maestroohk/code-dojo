@@ -1,0 +1,432 @@
+{
+  "title": "The dual write and the transactional outbox",
+  "summary": "Why \"save, then publish\" loses events, and how an outbox table in the same transaction fixes it.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The dual write",
+      "body": [
+        "`orders-api` saves an order and tells the world about it:",
+        "",
+        "```csharp",
+        "db.Orders.Add(order);",
+        "await db.SaveChangesAsync();                                  // write 1: the database",
+        "await producer.ProduceAsync(\"orders\", new Message<string, string> { Key = order.Id, Value = json });  // write 2: the broker",
+        "```",
+        "",
+        "Two systems, two writes, no transaction spanning both. Every way it can go wrong does, at scale:",
+        "",
+        "| What fails | Result |",
+        "|---|---|",
+        "| Broker down or the pod dies after `SaveChangesAsync` | order exists, **no event**: nobody ships it |",
+        "| Publish first, then the database write fails | **ghost event**: shipping ships an order that does not exist |",
+        "| Two requests interleave | events can reach the broker in a different order than the commits |",
+        "",
+        "Distributed transactions (XA / 2PC) are not the answer: Kafka and RabbitMQ do not take part in them, and where",
+        "they exist they couple your uptime to every participant. The fix is to make it **one** write."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`orders-api` saves the order, then publishes `OrderPlaced`. The broker is unreachable for 30 seconds; the code logs the exception and still returns `201 Created`. What is the state afterwards?",
+      "options": [
+        "The orders exist in the database but no events were published, so downstream services never hear about them",
+        "The orders were rolled back automatically",
+        "The broker client buffered the events and will deliver them",
+        "Nothing is wrong: the events will be republished on the next request"
+      ],
+      "answer": 0,
+      "explain": [
+        "The database transaction committed before the publish was attempted. Some clients buffer briefly (librdkafka keeps",
+        "messages in memory until `message.timeout.ms`), but a pod restart loses that buffer too. \"Log and carry on\" turns a",
+        "broker blip into silent data loss."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The transactional outbox",
+      "body": [
+        "Write the event into an **outbox table in the same database transaction** as the business change. A separate",
+        "**relay** publishes outbox rows later and marks them sent.",
+        "",
+        "```text",
+        "orders-api                          one DB transaction",
+        "  ├─ INSERT INTO orders ...          ┐",
+        "  └─ INSERT INTO outbox (id, type,   ┘ both or neither",
+        "        aggregate_id, payload)",
+        "",
+        "relay (loop)                         broker",
+        "  SELECT unpublished ORDER BY id ──► publish (wait for confirm / acks=all)",
+        "  UPDATE outbox SET published_at ◄── confirmed",
+        "```",
+        "",
+        "```sql",
+        "SELECT id, type, aggregate_id, payload",
+        "FROM outbox",
+        "WHERE published_at IS NULL",
+        "ORDER BY id",
+        "LIMIT 100",
+        "FOR UPDATE SKIP LOCKED;         -- PostgreSQL / MySQL 8; SQL Server: WITH (UPDLOCK, READPAST)",
+        "```",
+        "",
+        "- **Polling relay**: simple, costs a query every interval and adds up to one interval of latency.",
+        "- **CDC relay**: a tool such as Debezium reads the database log (PostgreSQL WAL, MySQL binlog) and publishes",
+        "  outbox inserts; low latency, no polling, but one more system to run.",
+        "- The relay is **at-least-once**: it can crash after publishing and before marking the row. Publish with the",
+        "  outbox `id` as the message id so consumers can dedup.",
+        "- **Ordering**: publish in `id` order and stop at the first failure, or a later event for the same order overtakes",
+        "  an earlier one. Use the aggregate id (order id) as the Kafka key so per-order order survives partitioning.",
+        "- **Cleanup**: delete published rows older than a few days, or the table grows forever."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put one iteration of the polling relay in order.",
+      "lines": [
+        "Read up to 100 unpublished rows ordered by id (FOR UPDATE SKIP LOCKED)",
+        "Publish each row's payload with the outbox id as the message id",
+        "Wait for the broker to confirm (publisher confirm / acks=all)",
+        "Set published_at on the confirmed rows and commit",
+        "If the batch was empty, sleep briefly before the next iteration"
+      ],
+      "explain": [
+        "Marking a row as published before the broker confirmed it brings the lost-event bug back. Marking it after means a",
+        "crash in between republishes it: a duplicate, which the message id makes harmless."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "The relay crashes after publishing row 1 but before marking it. Then it restarts and runs normally. What does this print?",
+      "code": [
+        "var outbox = new List<(int Id, string Payload, bool Published)> { (1, \"o-1\", false), (2, \"o-2\", false) };",
+        "var sent = new List<string>();",
+        "void RelayOnce(bool crashBeforeMark)",
+        "{",
+        "    for (int i = 0; i < outbox.Count; i++)",
+        "    {",
+        "        if (outbox[i].Published) continue;",
+        "        sent.Add($\"{outbox[i].Id}:{outbox[i].Payload}\");",
+        "        if (crashBeforeMark) return;",
+        "        outbox[i] = outbox[i] with { Published = true };",
+        "    }",
+        "}",
+        "RelayOnce(crashBeforeMark: true);",
+        "RelayOnce(crashBeforeMark: false);",
+        "Console.WriteLine(string.Join(\",\", sent));"
+      ],
+      "answer": "1:o-1,1:o-1,2:o-2",
+      "explain": [
+        "Row 1 is published twice, with the same id both times. The outbox turns \"maybe lost\" into \"maybe duplicated\", and",
+        "the consumer's inbox (next lesson) turns \"maybe duplicated\" into \"processed once\"."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the relay's query so several relay instances can run without blocking each other or publishing the same rows.",
+      "code": [
+        "SELECT id, type, aggregate_id, payload",
+        "FROM outbox",
+        "WHERE published_at IS __1__",
+        "ORDER BY __2__",
+        "LIMIT 100",
+        "FOR UPDATE __3__ LOCKED;"
+      ],
+      "blanks": [
+        "NULL",
+        "id",
+        "SKIP"
+      ],
+      "bank": [
+        "NOT NULL",
+        "created_at DESC",
+        "NOWAIT"
+      ],
+      "explain": [
+        "`SKIP LOCKED` makes a second relay take the next unlocked rows instead of waiting. `NOWAIT` would make it fail",
+        "immediately instead. Ordering by `id` (a sequence) is the commit order you want to preserve; `created_at` can tie."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each outbox design choice to why you would make it.",
+      "pairs": [
+        [
+          "Polling relay",
+          "Simplest to run; latency is the poll interval"
+        ],
+        [
+          "CDC relay (Debezium on the WAL / binlog)",
+          "Low latency without polling queries, at the cost of another system"
+        ],
+        [
+          "`FOR UPDATE SKIP LOCKED`",
+          "Several relay instances take different rows without blocking"
+        ],
+        [
+          "Outbox id as the message id",
+          "Consumers can drop a republished copy"
+        ],
+        [
+          "Delete rows published more than 7 days ago",
+          "Keeps the outbox table and its index small"
+        ]
+      ],
+      "explain": [
+        "All five show up in a real outbox review. The one teams forget is cleanup: an outbox with 400 million rows makes",
+        "the relay's query slow, and the relay lag climbs."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: finding lost and duplicate messages",
+      "body": [
+        "**Kafka**",
+        "- `kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic payments-charged --from-beginning --property print.key=true --property print.partition=true --property print.offset=true --property print.headers=true`",
+        "  : the same key or message-id header at two offsets is a duplicate; a missing one is a loss.",
+        "- `kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing`",
+        "  : CURRENT-OFFSET is what a restart will resume from; everything after it will be delivered again.",
+        "- `kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic payments-requested --reset-offsets --to-datetime 2026-11-26T14:00:00.000 --dry-run`",
+        "  then `--execute` : replay after a fix; the group must have no active members, and the handler must be idempotent.",
+        "",
+        "**RabbitMQ**",
+        "- `rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers`",
+        "  : a large unacked count is work in flight; if that consumer dies, all of it is redelivered.",
+        "- `rabbitmqctl list_consumers queue_name prefetch_count ack_required`",
+        "  : `ack_required false` means autoAck, which is at-most-once.",
+        "- `curl -u guest:guest -X POST http://rabbit:15672/api/queues/%2F/billing/get -H 'content-type: application/json' -d '{\"count\":5,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}'`",
+        "  : peek at messages while debugging (they go back marked redelivered, so never on a busy production queue).",
+        "",
+        "**The outbox**",
+        "- `SELECT count(*), min(created_at) FROM outbox WHERE published_at IS NULL;`",
+        "  : relay lag; alert when the oldest unpublished row is older than a minute.",
+        "",
+        "**Client settings**",
+        "- Kafka producer: `Acks = Acks.All`, `EnableIdempotence = true` (not the default in Confluent.Kafka), `MaxInFlight` 5 or less keeps ordering with idempotence.",
+        "- Kafka consumer: `EnableAutoOffsetStore = false` plus `StoreOffset` after the work; `IsolationLevel = IsolationLevel.ReadCommitted` when reading transactional output.",
+        "- RabbitMQ: `autoAck: false`, `CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true)`, `BasicProperties.MessageId` set from the outbox id."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Fix the dual write",
+      "prompt": [
+        "**Symptom.** Shipping found 212 orders from last night with no `OrderPlaced` event. The API log at that time:",
+        "",
+        "```text",
+        "02:14:09 ERR orders-api PlaceOrder o-5521 saved, publish failed:",
+        "         BrokerUnreachableException: None of the specified endpoints were reachable",
+        "```",
+        "",
+        "`PlaceOrder` saves the order, commits, then publishes directly. Change it to the **transactional outbox**: add the",
+        "event to the same transaction as the order, and do not publish from the request at all (a relay does that). Keep",
+        "the signature; `broker` becomes unused.",
+        "",
+        "The tests give you these types (already defined):",
+        "",
+        "```csharp",
+        "class Tx       { List<string> Orders; List<(string Type, string Payload)> Outbox; }",
+        "class Database { Tx Begin(); void Commit(Tx tx);   // all or nothing; throws InvalidOperationException on a failed commit",
+        "                 List<string> Orders; List<OutboxRow> Outbox; }   // OutboxRow(long Id, string Type, string Payload)",
+        "class Broker   { void Publish(string type, string payload); }    // throws while the broker is down",
+        "```",
+        "",
+        "The event type is `\"OrderPlaced\"` and its payload is the order id."
+      ],
+      "starter": [
+        "void PlaceOrder(Database db, Broker broker, string orderId)",
+        "{",
+        "    var tx = db.Begin();",
+        "    tx.Orders.Add(orderId);",
+        "    db.Commit(tx);",
+        "    broker.Publish(\"OrderPlaced\", orderId);",
+        "}"
+      ],
+      "solution": [
+        "void PlaceOrder(Database db, Broker broker, string orderId)",
+        "{",
+        "    var tx = db.Begin();",
+        "    tx.Orders.Add(orderId);",
+        "    tx.Outbox.Add((\"OrderPlaced\", orderId));",
+        "    db.Commit(tx);",
+        "}"
+      ],
+      "hints": [
+        "`Tx` has an `Outbox` list next to `Orders`. What belongs there?",
+        "Add `(\"OrderPlaced\", orderId)` to `tx.Outbox` before `db.Commit(tx)`, and delete the `broker.Publish` line."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoDb = new Database();",
+        "var dojoBroker = new Broker { Down = true };",
+        "var dojoThrew = false;",
+        "try { PlaceOrder(dojoDb, dojoBroker, \"o-1\"); } catch { dojoThrew = true; }",
+        "Dojo.Check(\"broker down: PlaceOrder still succeeds\", !dojoThrew, \"PlaceOrder threw while the broker was down\");",
+        "Dojo.Eq(\"the order is saved\", new List<string> { \"o-1\" }, dojoDb.Orders);",
+        "Dojo.Eq(\"the event waits in the outbox\", new List<string> { \"OrderPlaced:o-1\" }, dojoDb.Outbox.Select(r => r.Type + \":\" + r.Payload).ToList());",
+        "Dojo.Eq(\"nothing is published from the request\", 0, dojoBroker.Sent.Count);",
+        "dojoDb.FailNextCommit = true;",
+        "Dojo.Throws<InvalidOperationException>(\"a failed commit is reported to the caller\", () => PlaceOrder(dojoDb, dojoBroker, \"o-2\"));",
+        "Dojo.Check(\"a failed commit leaves neither the order nor the event\", !dojoDb.Orders.Contains(\"o-2\") && dojoDb.Outbox.All(r => r.Payload != \"o-2\"), \"found o-2 in Orders or Outbox\");",
+        "dojoBroker.Down = false;",
+        "PlaceOrder(dojoDb, dojoBroker, \"o-3\");",
+        "Dojo.Eq(\"outbox ids follow commit order\", new List<long> { 1, 2 }, dojoDb.Outbox.Select(r => r.Id).ToList());",
+        "",
+        "class Tx",
+        "{",
+        "    public List<string> Orders { get; } = new();",
+        "    public List<(string Type, string Payload)> Outbox { get; } = new();",
+        "}",
+        "",
+        "record OutboxRow(long Id, string Type, string Payload);",
+        "",
+        "class Database",
+        "{",
+        "    public List<string> Orders { get; } = new();",
+        "    public List<OutboxRow> Outbox { get; } = new();",
+        "    public bool FailNextCommit { get; set; }",
+        "    long dojoNextId = 1;",
+        "    public Tx Begin() => new Tx();",
+        "    public void Commit(Tx tx)",
+        "    {",
+        "        if (FailNextCommit) { FailNextCommit = false; throw new InvalidOperationException(\"deadlock victim: transaction rolled back\"); }",
+        "        Orders.AddRange(tx.Orders);",
+        "        foreach (var (type, payload) in tx.Outbox) Outbox.Add(new OutboxRow(dojoNextId++, type, payload));",
+        "    }",
+        "}",
+        "",
+        "class Broker",
+        "{",
+        "    public bool Down { get; set; }",
+        "    public List<string> Sent { get; } = new();",
+        "    public void Publish(string type, string payload)",
+        "    {",
+        "        if (Down) throw new InvalidOperationException(\"BrokerUnreachableException: None of the specified endpoints were reachable\");",
+        "        Sent.Add(type + \":\" + payload);",
+        "    }",
+        "}"
+      ],
+      "forbid": [
+        {
+          "pattern": "broker\\.Publish",
+          "message": "Does not publish from inside the request"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Build the outbox relay",
+      "prompt": [
+        "Now the relay. Write a class `OutboxRelay`:",
+        "",
+        "- `OutboxRelay(List<OutboxMessage> table, Func<OutboxMessage, bool> publish)`: `publish` returns `true` when the",
+        "  broker **confirmed** the message, `false` when it failed.",
+        "- `int RunOnce(int batchSize, long now)`: take the unpublished rows (`PublishedAt == null`) in `Id` order, at most",
+        "  `batchSize`; publish them one by one; set `PublishedAt = now` on each confirmed row. On the **first** failure stop",
+        "  the batch (a later event for the same order must not overtake it). Return how many were published.",
+        "- `int Cleanup(long now, long keepMinutes)`: delete rows published `keepMinutes` or more ago",
+        "  (`now - PublishedAt >= keepMinutes`). Never delete an unpublished row. Return how many were deleted.",
+        "",
+        "`OutboxMessage` is defined by the tests (times are minutes):",
+        "",
+        "```csharp",
+        "class OutboxMessage",
+        "{",
+        "    public long Id { get; init; }",
+        "    public string AggregateId { get; init; }",
+        "    public string Payload { get; init; }",
+        "    public long CreatedAt { get; init; }",
+        "    public long? PublishedAt { get; set; }   // null = not published yet",
+        "}",
+        "```"
+      ],
+      "starter": [
+        "class OutboxRelay",
+        "{",
+        "    public OutboxRelay(List<OutboxMessage> table, Func<OutboxMessage, bool> publish)",
+        "    {",
+        "    }",
+        "",
+        "    public int RunOnce(int batchSize, long now) => 0;",
+        "",
+        "    public int Cleanup(long now, long keepMinutes) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class OutboxRelay",
+        "{",
+        "    readonly List<OutboxMessage> table;",
+        "    readonly Func<OutboxMessage, bool> publish;",
+        "",
+        "    public OutboxRelay(List<OutboxMessage> table, Func<OutboxMessage, bool> publish)",
+        "    {",
+        "        this.table = table;",
+        "        this.publish = publish;",
+        "    }",
+        "",
+        "    public int RunOnce(int batchSize, long now)",
+        "    {",
+        "        var batch = table.Where(m => m.PublishedAt == null).OrderBy(m => m.Id).Take(batchSize).ToList();",
+        "        int published = 0;",
+        "        foreach (var m in batch)",
+        "        {",
+        "            if (!publish(m)) break;      // keep order: never skip past a failed row",
+        "            m.PublishedAt = now;         // only after the broker confirmed",
+        "            published++;",
+        "        }",
+        "        return published;",
+        "    }",
+        "",
+        "    public int Cleanup(long now, long keepMinutes) =>",
+        "        table.RemoveAll(m => m.PublishedAt is long at && now - at >= keepMinutes);",
+        "}"
+      ],
+      "hints": [
+        "`table.Where(m => m.PublishedAt == null).OrderBy(m => m.Id).Take(batchSize).ToList()`",
+        "In the loop: `if (!publish(m)) break;` then stamp the row and count it.",
+        "`table.RemoveAll(m => m.PublishedAt is long at && now - at >= keepMinutes)` returns the number removed."
+      ],
+      "template": [
+        "var dojoTable = new List<OutboxMessage>",
+        "{",
+        "    new() { Id = 3, AggregateId = \"o-2\", Payload = \"OrderPlaced o-2\", CreatedAt = 1 },",
+        "    new() { Id = 1, AggregateId = \"o-1\", Payload = \"OrderPlaced o-1\", CreatedAt = 0 },",
+        "    new() { Id = 2, AggregateId = \"o-1\", Payload = \"OrderPaid o-1\", CreatedAt = 0 },",
+        "    new() { Id = 4, AggregateId = \"o-1\", Payload = \"OrderShipped o-1\", CreatedAt = 2 },",
+        "};",
+        "var dojoSent = new List<string>();",
+        "var dojoFailOn = \"\";",
+        "var dojoRelay = new OutboxRelay(dojoTable, m => { if (m.Payload == dojoFailOn) return false; dojoSent.Add(m.Payload); return true; });",
+        "Dojo.Eq(\"a batch of 2 publishes the two oldest rows\", 2, dojoRelay.RunOnce(2, 10));",
+        "Dojo.Eq(\"rows go out in id order\", new List<string> { \"OrderPlaced o-1\", \"OrderPaid o-1\" }, dojoSent);",
+        "Dojo.Eq(\"published rows are stamped with the time\", 10L, dojoTable.Single(m => m.Id == 1).PublishedAt ?? -1L);",
+        "dojoFailOn = \"OrderPlaced o-2\";",
+        "Dojo.Eq(\"a failed publish stops the batch\", 0, dojoRelay.RunOnce(10, 11));",
+        "Dojo.Check(\"o-1's OrderShipped did not overtake the failed row\", !dojoSent.Contains(\"OrderShipped o-1\"), \"row 4 was published while row 3 was failing\");",
+        "Dojo.Check(\"the failed row stays unpublished\", dojoTable.Single(m => m.Id == 3).PublishedAt == null, \"row 3 was marked published\");",
+        "dojoFailOn = \"\";",
+        "Dojo.Eq(\"the next run catches up\", 2, dojoRelay.RunOnce(10, 12));",
+        "Dojo.Eq(\"everything in order\", new List<string> { \"OrderPlaced o-1\", \"OrderPaid o-1\", \"OrderPlaced o-2\", \"OrderShipped o-1\" }, dojoSent);",
+        "Dojo.Eq(\"nothing left to publish\", 0, dojoRelay.RunOnce(10, 13));",
+        "Dojo.Eq(\"cleanup keeps rows published less than 60 minutes ago\", 0, dojoRelay.Cleanup(69, 60));",
+        "Dojo.Eq(\"cleanup removes rows published 60 minutes ago\", 2, dojoRelay.Cleanup(70, 60));",
+        "Dojo.Eq(\"rows left\", new List<long> { 3, 4 }, dojoTable.Select(m => m.Id).OrderBy(x => x).ToList());",
+        "dojoTable.Add(new OutboxMessage { Id = 5, AggregateId = \"o-3\", Payload = \"OrderPlaced o-3\", CreatedAt = 0 });",
+        "Dojo.Eq(\"cleanup removes the old published rows only\", 2, dojoRelay.Cleanup(1000, 60));",
+        "Dojo.Eq(\"the unpublished row survives cleanup\", new List<long> { 5 }, dojoTable.Select(m => m.Id).ToList());",
+        "{{CODE}}",
+        "",
+        "class OutboxMessage",
+        "{",
+        "    public long Id { get; init; }",
+        "    public string AggregateId { get; init; } = \"\";",
+        "    public string Payload { get; init; } = \"\";",
+        "    public long CreatedAt { get; init; }",
+        "    public long? PublishedAt { get; set; }",
+        "}"
+      ]
+    }
+  ]
+}

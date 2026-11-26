@@ -1,0 +1,321 @@
+{
+  "title": "Running the dead-letter queue",
+  "summary": "Triage, redrive and replay with real tools, alerts that fire on DLQ depth and growth, and a redrive you can rate-limit.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A DLQ is an inbox for people",
+      "body": [
+        "Dead letters are not a bin; they are **work waiting for a decision**. Every DLQ needs an owner and a runbook:",
+        "",
+        "```text",
+        "  alert ──> look ──> triage by reason ──> fix the cause ──> redrive a small batch ──> redrive the rest",
+        "             │         (x-death reason,     (deploy,            (watch errors)         (rate-limited)",
+        "             │          exception type,      dependency back)",
+        "             │          producer version)",
+        "             └─> messages that can never succeed: agree with the owner, archive, then delete",
+        "```",
+        "",
+        "Redriving **before** the fix only dead-letters everything again (and with a delivery limit, burns attempts).",
+        "Peek without consuming, group by reason, and redrive in batches so a wrong fix fails small."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** `orders.dead` holds 6,012 messages. 5,990 fail with `JsonException` and were produced by",
+        "orders-api 3.4, deployed at 14:02; 22 say `customer not found`. What do you do first?"
+      ],
+      "code": [
+        "$ curl -s -u ops:*** -X POST http://rabbit:15672/api/queues/%2F/orders.dead/get \\",
+        "    -H 'content-type: application/json' -d '{\"count\":500,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}' \\",
+        "    | jq -r '.[].properties.headers[\"x-exception-type\"]' | sort | uniq -c",
+        "    489 System.Text.Json.JsonException",
+        "     11 CustomerNotFoundException"
+      ],
+      "options": [
+        "Stop the source: roll back or fix orders-api 3.4. Then make the 5,990 processable (a consumer that accepts the format, or a transform during redrive), and hand the 22 to the customer team.",
+        "Redrive all 6,012 messages to `orders` now so customers are not kept waiting.",
+        "Purge the DLQ; the producer can resend.",
+        "Raise the delivery limit to 100 so the messages get more attempts."
+      ],
+      "answer": 0,
+      "explain": [
+        "The messages are fine to keep; the producer is still writing bad ones. Redriving now just sends 5,990 messages",
+        "through the same failure. More attempts do not fix a permanent error, and purging loses orders that may be",
+        "repairable."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: redrive and replay",
+      "body": [
+        "**RabbitMQ**",
+        "",
+        "```bash",
+        "rabbitmqctl list_queues name messages consumers | grep -E 'dead|parking'     # how big, and does anyone read it?",
+        "curl -s -u ops:*** -X POST http://rabbit:15672/api/queues/%2F/orders.dead/get \\",
+        "  -H 'content-type: application/json' -d '{\"count\":10,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}'",
+        "                                                                            # peek: messages go back, nothing lost",
+        "rabbitmq-plugins enable rabbitmq_shovel rabbitmq_shovel_management           # once per cluster",
+        "rabbitmqctl set_parameter shovel drain-orders-dead \\",
+        "  '{\"src-protocol\":\"amqp091\",\"src-uri\":\"amqp://\",\"src-queue\":\"orders.dead\",",
+        "    \"dest-protocol\":\"amqp091\",\"dest-uri\":\"amqp://\",\"dest-queue\":\"orders\",",
+        "    \"src-delete-after\":\"queue-length\"}'                                     # move what is there now, then stop",
+        "rabbitmqctl shovel_status                                                    # is it running, how far?",
+        "rabbitmqctl purge_queue orders.dead                                          # only after sign-off: no undo",
+        "```",
+        "",
+        "**Kafka** (the group must have **no active members** to reset; always `--dry-run` first)",
+        "",
+        "```bash",
+        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing",
+        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders:3 \\",
+        "  --reset-offsets --shift-by 1 --execute                                     # skip one poison record on partition 3",
+        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders \\",
+        "  --reset-offsets --to-datetime 2026-11-20T09:00:00.000 --dry-run            # replay from a point in time",
+        "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic orders.dlt --from-beginning \\",
+        "  --property print.key=true --property print.headers=true --max-messages 10  # read the DLT",
+        "```",
+        "",
+        "**Cloud:** SQS `aws sqs start-message-move-task --source-arn <dlq-arn>` moves a DLQ back to its source queue;",
+        "Service Bus: a receiver with `SubQueue = SubQueue.DeadLetter`, or Service Bus Explorer in the portal.",
+        "",
+        "Practise in **Labs → Live network labs → 24 Live RabbitMQ lab** (a dead-letter pile-up to drain with a shovel)",
+        "and **25 Live Kafka lab** (replay and shift-by)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You fixed the billing bug and want to replay the last hour. The reset fails. What do you do?",
+      "code": [
+        "$ kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders \\",
+        "    --reset-offsets --to-datetime 2026-11-20T09:00:00.000 --execute",
+        "",
+        "Error: Assignments can only be reset if the group 'billing' is inactive, but the current state is Stable."
+      ],
+      "options": [
+        "Scale billing to zero so the group has no active members, rerun with `--dry-run` to check the new offsets, then `--execute`, then start the consumers again",
+        "Add `--force` to the command",
+        "Delete the consumer group and let it start again",
+        "Use `--to-latest` instead, which works on a stable group"
+      ],
+      "answer": 0,
+      "explain": [
+        "Kafka refuses to move offsets under running consumers, because they would commit over your reset. There is no",
+        "`--force`. Deleting the group loses every committed offset, and `--to-latest` skips data instead of replaying",
+        "it. `--to-earliest` would replay all retained history, not just the last hour: prefer `--to-datetime`."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the DLQ runbook in order.",
+      "lines": [
+        "Read the alert: is the DLQ still growing, and since when?",
+        "Peek at a sample without consuming it and group it by reason and exception",
+        "Fix the cause, or confirm the failing dependency is healthy again",
+        "Redrive a small batch and watch the consumer's error rate",
+        "Redrive the rest in rate-limited batches",
+        "Agree with the owner what to do with messages that can never succeed, then write the postmortem"
+      ],
+      "explain": "Look, understand, fix, then move messages: in that order. Every step before the redrive is read-only, so you cannot make it worse while you investigate."
+    },
+    {
+      "type": "learn",
+      "title": "Alerting on dead letters",
+      "body": [
+        "A DLQ nobody watches is a slow data-loss bug. Alert on what needs a person:",
+        "",
+        "- **Presence** for low-volume, high-value queues (payments, orders): more than 0 for 10 minutes.",
+        "- **Growth** for noisy queues: the dead-letter rate, or the ratio of dead-lettered to processed messages.",
+        "- **Age** of the oldest message, when there is a promise (\"refunds within 24 h\").",
+        "",
+        "Per-queue RabbitMQ metrics come from the Prometheus endpoint on port 15692 (`/metrics/detailed` or",
+        "`/metrics/per-object`). For Kafka, alert on the DLT's log-end offset increasing.",
+        "",
+        "```yaml",
+        "- alert: OrdersDeadLettersPresent",
+        "  expr: max(rabbitmq_detailed_queue_messages{queue=\"orders.dead\"}) > 0",
+        "  for: 10m",
+        "  labels: { severity: ticket }",
+        "  annotations:",
+        "    runbook_url: https://wiki.shop.example/runbooks/orders-dlq",
+        "- alert: OrdersDeadLettersGrowing",
+        "  expr: deriv(rabbitmq_detailed_queue_messages{queue=\"orders.dead\"}[15m]) > 0.5",
+        "  for: 15m",
+        "  labels: { severity: page }",
+        "```",
+        "",
+        "`for:` keeps one stray message from paging anyone; every alert links its runbook."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Write the shovel that moves the messages **currently** in `orders.dead` back to `orders`, then stops.",
+      "code": [
+        "rabbitmqctl set_parameter shovel drain-orders-dead \\",
+        "  '{\"src-protocol\":\"amqp091\",\"src-uri\":\"amqp://\",\"__1__\":\"orders.dead\",",
+        "    \"dest-protocol\":\"amqp091\",\"dest-uri\":\"amqp://\",\"dest-queue\":\"__2__\",",
+        "    \"src-delete-after\":\"__3__\"}'"
+      ],
+      "blanks": [
+        "src-queue",
+        "orders",
+        "queue-length"
+      ],
+      "bank": [
+        "src-exchange",
+        "orders.dead",
+        "never",
+        "dest-exchange"
+      ],
+      "explain": "`src-delete-after: queue-length` makes the shovel move as many messages as the queue held when it started and then delete itself, so messages that are dead-lettered again during the redrive are not looped forever."
+    },
+    {
+      "type": "predict",
+      "prompt": "An alert checks the DLQ depth once a minute and fires when it has been above 0 for 3 samples in a row. What does this print?",
+      "code": [
+        "int[] depth = { 0, 3, 3, 4, 0, 5, 6, 7, 9 };",
+        "var forSamples = 3;",
+        "var run = 0;",
+        "for (var m = 0; m < depth.Length; m++)",
+        "{",
+        "    run = depth[m] > 0 ? run + 1 : 0;",
+        "    if (run == forSamples) Console.WriteLine($\"minute {m}: FIRING\");",
+        "}"
+      ],
+      "answer": [
+        "minute 3: FIRING",
+        "minute 7: FIRING"
+      ],
+      "explain": "The drop to 0 at minute 4 resets the run, so the alert fires again only after three more samples above 0."
+    },
+    {
+      "type": "code",
+      "title": "An alert rule with a \"for\" duration",
+      "prompt": [
+        "Write `List<string> Evaluate(int[] samples, int threshold, int forSamples)` for one sample per minute",
+        "(`forSamples` is at least 1):",
+        "",
+        "- the condition is `sample > threshold`;",
+        "- the alert **fires** at the minute the condition has been true for `forSamples` samples in a row: log",
+        "  `\"m{minute} firing {sample}\"`;",
+        "- while firing, nothing more is logged until the condition is false; then log `\"m{minute} resolved\"` and start",
+        "  counting again.",
+        "",
+        "`Evaluate([0, 3, 3, 4, 0, 5, 6, 7, 9], 0, 3)` → `[\"m3 firing 4\", \"m4 resolved\", \"m7 firing 7\"]`."
+      ],
+      "starter": [
+        "List<string> Evaluate(int[] samples, int threshold, int forSamples)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Evaluate(int[] samples, int threshold, int forSamples)",
+        "{",
+        "    var log = new List<string>();",
+        "    var run = 0;",
+        "    var firing = false;",
+        "    for (var m = 0; m < samples.Length; m++)",
+        "    {",
+        "        if (samples[m] > threshold)",
+        "        {",
+        "            run++;",
+        "            if (!firing && run >= forSamples)",
+        "            {",
+        "                firing = true;",
+        "                log.Add($\"m{m} firing {samples[m]}\");",
+        "            }",
+        "        }",
+        "        else",
+        "        {",
+        "            run = 0;",
+        "            if (firing)",
+        "            {",
+        "                firing = false;",
+        "                log.Add($\"m{m} resolved\");",
+        "            }",
+        "        }",
+        "    }",
+        "    return log;",
+        "}"
+      ],
+      "hints": [
+        "Track a run length and a `firing` flag.",
+        "Fire only on the transition `!firing && run >= forSamples`; resolve only on the transition back."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the example\", new List<string> { \"m3 firing 4\", \"m4 resolved\", \"m7 firing 7\" }, Evaluate(new[] { 0, 3, 3, 4, 0, 5, 6, 7, 9 }, 0, 3));",
+        "Dojo.Eq(\"a threshold above 0\", new List<string> { \"m2 firing 70\", \"m3 resolved\", \"m5 firing 90\" }, Evaluate(new[] { 10, 60, 70, 40, 80, 90, 95 }, 50, 2));",
+        "Dojo.Eq(\"for 1 sample: fire at once\", new List<string> { \"m1 firing 1\", \"m2 resolved\" }, Evaluate(new[] { 0, 1, 0 }, 0, 1));",
+        "Dojo.Eq(\"equal to the threshold is not above it\", new List<string>(), Evaluate(new[] { 50, 50, 50 }, 50, 1));",
+        "Dojo.Eq(\"never long enough\", new List<string>(), Evaluate(new[] { 1, 1, 0, 1, 1, 0 }, 0, 3));",
+        "Dojo.Eq(\"no samples\", new List<string>(), Evaluate(new int[0], 0, 1));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A rate-limited redrive",
+      "prompt": [
+        "Write the core of a redrive tool. The type `record DeadLetter(string Id, string Exception, int Deaths)` is",
+        "provided.",
+        "",
+        "`string Redrive(List<DeadLetter> dlq, string exceptionType, int batchSize, int maxBatches, List<string> target)`:",
+        "",
+        "- candidates are the dead letters whose `Exception` equals `exceptionType` and that have died **fewer than 3**",
+        "  times (more means redriving has already failed: a person must look);",
+        "- move at most `batchSize × maxBatches` candidates, in DLQ order: remove them from `dlq` and append their `Id`",
+        "  to `target`;",
+        "- return `\"moved {moved} in {batches} batch(es); {left} left in the DLQ, {human} need a human\"`, where",
+        "  `batches` is `moved / batchSize` rounded up, `left` is what remains in `dlq`, and `human` counts the",
+        "  remaining dead letters of `exceptionType` with 3 or more deaths."
+      ],
+      "starter": [
+        "string Redrive(List<DeadLetter> dlq, string exceptionType, int batchSize, int maxBatches, List<string> target)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Redrive(List<DeadLetter> dlq, string exceptionType, int batchSize, int maxBatches, List<string> target)",
+        "{",
+        "    var moving = dlq.Where(d => d.Exception == exceptionType && d.Deaths < 3).Take(batchSize * maxBatches).ToList();",
+        "    foreach (var d in moving)",
+        "    {",
+        "        dlq.Remove(d);",
+        "        target.Add(d.Id);",
+        "    }",
+        "    var batches = (moving.Count + batchSize - 1) / batchSize;",
+        "    var human = dlq.Count(d => d.Exception == exceptionType && d.Deaths >= 3);",
+        "    return $\"moved {moving.Count} in {batches} batch(es); {dlq.Count} left in the DLQ, {human} need a human\";",
+        "}"
+      ],
+      "hints": [
+        "`dlq.Where(...).Take(batchSize * maxBatches).ToList()` picks the messages; then remove each one.",
+        "Round up with `(moved + batchSize - 1) / batchSize`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoDlq = new List<DeadLetter>",
+        "{",
+        "    new(\"p1\", \"JsonException\", 1), new(\"p2\", \"TimeoutException\", 1), new(\"p3\", \"JsonException\", 1),",
+        "    new(\"p4\", \"JsonException\", 4), new(\"p5\", \"JsonException\", 2), new(\"p6\", \"JsonException\", 1),",
+        "    new(\"p7\", \"TimeoutException\", 1),",
+        "};",
+        "var dojoTarget = new List<string>();",
+        "Dojo.Eq(\"one batch of two\", \"moved 2 in 1 batch(es); 5 left in the DLQ, 1 need a human\", Redrive(dojoDlq, \"JsonException\", 2, 1, dojoTarget));",
+        "Dojo.Eq(\"moved in DLQ order\", new List<string> { \"p1\", \"p3\" }, dojoTarget);",
+        "Dojo.Eq(\"the rest of the JSON failures\", \"moved 2 in 1 batch(es); 3 left in the DLQ, 1 need a human\", Redrive(dojoDlq, \"JsonException\", 2, 5, dojoTarget));",
+        "Dojo.Eq(\"p4 stays: it already died 4 times\", new List<string> { \"p2\", \"p4\", \"p7\" }, dojoDlq.Select(d => d.Id).ToList());",
+        "Dojo.Eq(\"batches of one\", \"moved 2 in 2 batch(es); 1 left in the DLQ, 0 need a human\", Redrive(dojoDlq, \"TimeoutException\", 1, 10, dojoTarget));",
+        "Dojo.Eq(\"nothing to move\", \"moved 0 in 0 batch(es); 1 left in the DLQ, 0 need a human\", Redrive(dojoDlq, \"TimeoutException\", 5, 5, dojoTarget));",
+        "Dojo.Eq(\"target received everything moved\", 6, dojoTarget.Count);",
+        "record DeadLetter(string Id, string Exception, int Deaths);"
+      ]
+    }
+  ]
+}

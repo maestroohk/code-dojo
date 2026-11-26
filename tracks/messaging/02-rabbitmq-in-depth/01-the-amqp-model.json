@@ -1,0 +1,250 @@
+{
+  "title": "The AMQP model",
+  "summary": "Connections, channels, exchanges, bindings, queues and routing keys: how a message finds its queue in RabbitMQ, declared with the RabbitMQ.Client 7 async API.",
+  "minutes": 11,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Publishers never write to queues",
+      "body": [
+        "RabbitMQ speaks **AMQP 0-9-1**. A publisher sends a message to an **exchange** with a **routing key**. The",
+        "exchange looks at its **bindings** and copies the message into every queue whose binding matches. Consumers",
+        "read from **queues**.",
+        "",
+        "```text",
+        " orders-api ══ TCP connection (one per process) ════════════════╗  RabbitMQ, vhost \"/\"",
+        "   ├─ channel 1: publishes                                       ║",
+        "   └─ channel 2: consumes                                        ║",
+        "                                                                 ║",
+        " publish(exchange: \"orders\", routingKey: \"order.eu.created\")     ║",
+        "        │                                                        ║",
+        "        v                                                        ║",
+        "  [ exchange \"orders\" (topic) ] ─ binding \"order.*.created\" ─> [ queue \"billing\" ] ──> billing consumer",
+        "                                └ binding \"order.#\" ─────────> [ queue \"audit\" ]   ──> audit consumer",
+        "```",
+        "",
+        "- A **connection** is a real TCP (+TLS) connection: expensive, long-lived, one per process.",
+        "- A **channel** is a lightweight session multiplexed inside it. Use one per concurrent publisher or consumer;",
+        "  do not publish from many threads on one channel at once.",
+        "- A **vhost** is a namespace with its own exchanges, queues and permissions.",
+        "",
+        "Because publishers only know the exchange, you can add a queue (a new subscriber) without touching them."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each AMQP term to what it is.",
+      "pairs": [
+        [
+          "Exchange",
+          "Receives publishes and routes copies to queues by its type and bindings"
+        ],
+        [
+          "Binding",
+          "A rule \"queue Q wants messages from exchange X whose key matches K\""
+        ],
+        [
+          "Routing key",
+          "A dot-separated label the publisher puts on each message"
+        ],
+        [
+          "Queue",
+          "Stores messages in order until a consumer acknowledges them"
+        ],
+        [
+          "Channel",
+          "A lightweight session inside one TCP connection"
+        ]
+      ],
+      "explain": "Exchanges route, queues store. A message that matches no binding is not stored anywhere: more on that next lesson."
+    },
+    {
+      "type": "learn",
+      "title": "Declaring topology with RabbitMQ.Client 7",
+      "body": [
+        "RabbitMQ.Client 7 is **async-only**. Declarations are idempotent: declaring something that already exists with",
+        "the same settings is a no-op, so every service declares what it needs at startup.",
+        "",
+        "```csharp",
+        "var factory = new ConnectionFactory { HostName = \"localhost\", ClientProvidedName = \"orders-api\" };",
+        "await using var connection = await factory.CreateConnectionAsync();",
+        "await using var channel = await connection.CreateChannelAsync();",
+        "",
+        "await channel.ExchangeDeclareAsync(\"orders\", ExchangeType.Topic, durable: true);",
+        "await channel.QueueDeclareAsync(\"billing\", durable: true, exclusive: false, autoDelete: false,",
+        "    arguments: new Dictionary<string, object?> { [\"x-queue-type\"] = \"quorum\" });",
+        "await channel.QueueBindAsync(\"billing\", \"orders\", \"order.*.created\");",
+        "```",
+        "",
+        "- `durable: true` means the **exchange or queue definition** survives a broker restart. The **messages** survive",
+        "  only if they are persistent too (`Persistent = true`), or the queue is a quorum queue.",
+        "- Declaring an existing queue with **different** arguments fails with `PRECONDITION_FAILED` and closes the",
+        "  channel. That is why settings you want to change later belong in **policies** (lesson 4).",
+        "",
+        "> **Older code:** RabbitMQ.Client 6.x was synchronous: `factory.CreateConnection()`, `connection.CreateModel()`",
+        "> (an `IModel`), `channel.QueueDeclare(...)`, `EventingBasicConsumer` with `Received`. You will still find it;",
+        "> write new code against 7.x."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the startup code of a service that declares its topology.",
+      "lines": [
+        "var factory = new ConnectionFactory { HostName = \"localhost\", ClientProvidedName = \"billing\" };",
+        "await using var connection = await factory.CreateConnectionAsync();",
+        "await using var channel = await connection.CreateChannelAsync();",
+        "await channel.ExchangeDeclareAsync(\"orders\", ExchangeType.Topic, durable: true);",
+        "await channel.QueueDeclareAsync(\"billing\", durable: true, exclusive: false, autoDelete: false);",
+        "await channel.QueueBindAsync(\"billing\", \"orders\", \"order.*.created\");"
+      ],
+      "also": [
+        [
+          "var factory = new ConnectionFactory { HostName = \"localhost\", ClientProvidedName = \"billing\" };",
+          "await using var connection = await factory.CreateConnectionAsync();",
+          "await using var channel = await connection.CreateChannelAsync();",
+          "await channel.QueueDeclareAsync(\"billing\", durable: true, exclusive: false, autoDelete: false);",
+          "await channel.ExchangeDeclareAsync(\"orders\", ExchangeType.Topic, durable: true);",
+          "await channel.QueueBindAsync(\"billing\", \"orders\", \"order.*.created\");"
+        ]
+      ],
+      "explain": "Connection, then channel, then declarations. The exchange and the queue can be declared in either order, but both must exist before the binding that joins them."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A script publishes with an **empty exchange name**. Where does the message go?",
+      "code": [
+        "await channel.BasicPublishAsync(exchange: \"\", routingKey: \"billing\", mandatory: false,",
+        "    basicProperties: new BasicProperties { Persistent = true }, body: body);"
+      ],
+      "options": [
+        "Straight into the queue named `billing`: the default exchange binds every queue by its own name",
+        "To every queue, like a fanout exchange",
+        "Nowhere: an empty exchange name is an error",
+        "To the `amq.topic` exchange"
+      ],
+      "answer": 0,
+      "explain": "The default exchange (`\"\"`) is a direct exchange that every queue is automatically bound to with its own name. Handy for scripts and work queues; for events, publish to a named exchange so subscribers can bind."
+    },
+    {
+      "type": "learn",
+      "title": "Exchange types",
+      "body": [
+        "| Type | Routes to the queues whose binding... | Typical use |",
+        "|---|---|---|",
+        "| **direct** | key **equals** the routing key | commands to a named worker queue |",
+        "| **topic** | pattern matches the key: words split by `.`, `*` = **exactly one** word, `#` = **zero or more** words | events by category: `order.eu.created` |",
+        "| **fanout** | (all bound queues; the key is ignored) | broadcast to every subscriber |",
+        "| **headers** | arguments match the message **headers** (`x-match: all` or `any`) | routing on several attributes |",
+        "",
+        "```text",
+        "routing key  order.eu.created",
+        "order.*.created   ✓   (* = eu)",
+        "order.#           ✓   (# = eu.created)",
+        "#.created         ✓",
+        "order.*           ✗   (* is exactly one word, two are left)",
+        "```",
+        "",
+        "A topic binding without wildcards behaves like direct; a binding of `#` behaves like fanout.",
+        "",
+        "> **See it:** open **Labs → Messaging builder → RabbitMQ** and play *First binding*, *The wildcard that never",
+        "> matches* and *Everyone gets a copy*."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "A message is published with routing key `order.eu.created` to a topic exchange. Which binding keys match it?",
+      "buckets": [
+        "Matches",
+        "Does not match"
+      ],
+      "items": [
+        [
+          "`order.*.created`",
+          0
+        ],
+        [
+          "`order.#`",
+          0
+        ],
+        [
+          "`#.created`",
+          0
+        ],
+        [
+          "`*.eu.*`",
+          0
+        ],
+        [
+          "`#`",
+          0
+        ],
+        [
+          "`order.*`",
+          1
+        ],
+        [
+          "`order.eu.*.created`",
+          1
+        ],
+        [
+          "`order.created`",
+          1
+        ]
+      ],
+      "explain": "`*` must consume exactly one word and `#` any number, including zero. Count the words on both sides."
+    },
+    {
+      "type": "code",
+      "title": "Direct, fanout and the default exchange",
+      "prompt": [
+        "Write `List<string> Route(string exchange, string type, string routingKey, (string Queue, string Key)[] bindings, string[] queues)`",
+        "returning the queues that receive the message:",
+        "",
+        "- `exchange == \"\"` (the default exchange): `[routingKey]` if a queue with that name exists in `queues`, else",
+        "  empty. `type` and `bindings` are ignored.",
+        "- `\"direct\"`: the queues whose binding key **equals** the routing key (case-sensitive).",
+        "- `\"fanout\"`: every bound queue, whatever the key.",
+        "- any other type throws `ArgumentException`.",
+        "",
+        "Each queue appears **once** (a queue bound twice gets one copy), in the order of its first binding."
+      ],
+      "starter": [
+        "List<string> Route(string exchange, string type, string routingKey, (string Queue, string Key)[] bindings, string[] queues)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Route(string exchange, string type, string routingKey, (string Queue, string Key)[] bindings, string[] queues)",
+        "{",
+        "    if (exchange == \"\")",
+        "        return queues.Contains(routingKey) ? new List<string> { routingKey } : new List<string>();",
+        "    return type switch",
+        "    {",
+        "        \"direct\" => bindings.Where(b => b.Key == routingKey).Select(b => b.Queue).Distinct().ToList(),",
+        "        \"fanout\" => bindings.Select(b => b.Queue).Distinct().ToList(),",
+        "        _ => throw new ArgumentException($\"unsupported exchange type '{type}'\", nameof(type)),",
+        "    };",
+        "}"
+      ],
+      "hints": [
+        "Handle `exchange == \"\"` first.",
+        "`bindings.Where(b => b.Key == routingKey).Select(b => b.Queue).Distinct().ToList()` keeps first-binding order."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoB = new (string, string)[] { (\"billing\", \"order.created\"), (\"audit\", \"order.created\"), (\"billing\", \"order.created\"), (\"refunds\", \"order.refunded\") };",
+        "var dojoQ = new[] { \"billing\", \"audit\", \"refunds\" };",
+        "Dojo.Eq(\"direct: both bound queues get order.created\", new List<string> { \"billing\", \"audit\" }, Route(\"orders\", \"direct\", \"order.created\", dojoB, dojoQ));",
+        "Dojo.Eq(\"direct: refunds only\", new List<string> { \"refunds\" }, Route(\"orders\", \"direct\", \"order.refunded\", dojoB, dojoQ));",
+        "Dojo.Eq(\"direct: no binding, no queue\", new List<string>(), Route(\"orders\", \"direct\", \"order.shipped\", dojoB, dojoQ));",
+        "Dojo.Eq(\"direct keys are case-sensitive\", new List<string>(), Route(\"orders\", \"direct\", \"Order.Created\", dojoB, dojoQ));",
+        "Dojo.Eq(\"fanout ignores the key\", new List<string> { \"billing\", \"audit\", \"refunds\" }, Route(\"broadcast\", \"fanout\", \"anything\", dojoB, dojoQ));",
+        "Dojo.Eq(\"default exchange routes by queue name\", new List<string> { \"refunds\" }, Route(\"\", \"direct\", \"refunds\", dojoB, dojoQ));",
+        "Dojo.Eq(\"default exchange, unknown queue\", new List<string>(), Route(\"\", \"direct\", \"nope\", dojoB, dojoQ));",
+        "Dojo.Throws<ArgumentException>(\"unknown exchange type\", () => Route(\"orders\", \"x-random\", \"k\", dojoB, dojoQ));"
+      ]
+    }
+  ]
+}

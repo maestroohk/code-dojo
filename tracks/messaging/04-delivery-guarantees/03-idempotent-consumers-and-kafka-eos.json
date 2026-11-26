@@ -1,0 +1,298 @@
+{
+  "title": "Idempotent consumers, dedup keys and Kafka exactly-once",
+  "summary": "The inbox table, choosing a dedup key, broker-side dedup, natural idempotency, and what Kafka transactions really guarantee.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The inbox: dedup in the same transaction",
+      "body": [
+        "At-least-once means your handler **will** see repeats. An **idempotent consumer** records what it processed, in the",
+        "**same database transaction** as the side effect:",
+        "",
+        "```sql",
+        "BEGIN;",
+        "INSERT INTO processed_messages (consumer, message_id, processed_at)",
+        "VALUES ('billing', 'm-42', now())",
+        "ON CONFLICT DO NOTHING;              -- 0 rows inserted → already processed: ROLLBACK and ack",
+        "INSERT INTO ledger (order_id, cents) VALUES ('o-7', 1299);",
+        "COMMIT;                              -- then ack the message",
+        "```",
+        "",
+        "```text",
+        "deliver m-42 ─► BEGIN ─► insert key ─conflict─► rollback, ack (duplicate)",
+        "                            │ok",
+        "                            ▼",
+        "                     side effect ─► COMMIT ─► ack",
+        "                     crash here? nothing committed → the redelivery processes it cleanly",
+        "```",
+        "",
+        "Why the same transaction: \"check the table, then do the work, then insert the key\" in separate steps leaves two",
+        "gaps. A crash after the work and before the insert reprocesses; two consumers that both check before either inserts",
+        "both process. The **unique key** (primary key on `consumer, message_id`) closes both.",
+        "",
+        "Key it per consumer: `billing` and `loyalty` both handle `m-42`, each exactly once. Delete old rows on a schedule",
+        "longer than any redelivery or replay window you support."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The checkout page posts `PayOrder` when the button is clicked. A double click sends two commands with **different** message ids for order `o-7`. The billing inbox dedups on message id. What happens, and what is the fix?",
+      "options": [
+        "Both are charged; dedup on a business key as well (`charge:o-7`, or an idempotency key the client generates once per checkout)",
+        "Only one is charged, because the inbox sees the same order",
+        "The broker drops the second one",
+        "Both are charged; the fix is to ack faster"
+      ],
+      "answer": 0,
+      "explain": [
+        "A message id dedups **redeliveries** of one message. It cannot tell that two different messages mean the same",
+        "business action. That needs a business key: the order id for \"charge this order once\", or an idempotency key",
+        "created by the client once per user intent and carried through every retry."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Is the effect naturally idempotent (safe to run twice), or does it need a dedup key?",
+      "buckets": [
+        "Naturally idempotent",
+        "Needs a dedup key"
+      ],
+      "items": [
+        [
+          "`UPDATE stock SET qty = 7 WHERE sku = 'A1'`",
+          0
+        ],
+        [
+          "`UPDATE stock SET qty = qty - 1 WHERE sku = 'A1'`",
+          1
+        ],
+        [
+          "`INSERT ... ON CONFLICT (order_id) DO UPDATE SET status = 'paid'`",
+          0
+        ],
+        [
+          "Charge the card at the payment provider",
+          1
+        ],
+        [
+          "Send the order confirmation email",
+          1
+        ],
+        [
+          "Set the order status to `Shipped` only if it is `Paid`",
+          0
+        ],
+        [
+          "Append a row to the ledger",
+          1
+        ]
+      ],
+      "explain": [
+        "**Set, do not increment**: an absolute value or an upsert lands in the same state however often it runs. A guarded",
+        "state transition is idempotent too. Increments, appends and anything that leaves your database (cards, emails, HTTP",
+        "calls) need a key: an inbox row, or an idempotency key the external API honours."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Broker-side dedup, and its limits",
+      "body": [
+        "Some brokers drop duplicates for you, within limits:",
+        "",
+        "| Mechanism | What it drops | Limit |",
+        "|---|---|---|",
+        "| Kafka idempotent producer (`EnableIdempotence = true`) | a producer's **retried** batch, per partition | one producer session; a restarted producer has a new id |",
+        "| Azure Service Bus duplicate detection | a send with a `MessageId` seen within the history window | enabled when the queue or topic is created; window 10 minutes by default, up to 7 days |",
+        "| Amazon SQS FIFO `MessageDeduplicationId` | a send with the same id within **5 minutes** | FIFO queues only; or content-based dedup (SHA-256 of the body) |",
+        "| RabbitMQ | nothing built in | dedup in the consumer |",
+        "",
+        "All of these protect the **send** side. None of them knows that your consumer already charged the card before it",
+        "crashed. The inbox is still your job."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each mechanism to the duplicates it removes.",
+      "pairs": [
+        [
+          "Kafka `EnableIdempotence = true`",
+          "Producer retries of the same batch into a partition"
+        ],
+        [
+          "Service Bus duplicate detection",
+          "A resend with the same MessageId inside the history window"
+        ],
+        [
+          "SQS FIFO `MessageDeduplicationId`",
+          "A resend with the same id within 5 minutes"
+        ],
+        [
+          "Inbox table with a unique key",
+          "Redeliveries to your consumer, for as long as you keep the rows"
+        ],
+        [
+          "Idempotency key sent to the payment API",
+          "A retried charge after a timeout"
+        ]
+      ],
+      "explain": "Each layer covers one hop. A senior review asks of every hop: \"what happens when this is retried?\""
+    },
+    {
+      "type": "learn",
+      "title": "Kafka transactions: exactly-once inside Kafka",
+      "body": [
+        "For **read from Kafka, process, write to Kafka** pipelines, Kafka can commit the output records **and** the input",
+        "offsets in one atomic transaction:",
+        "",
+        "```csharp",
+        "var pc = new ProducerConfig { BootstrapServers = \"kafka:9092\", TransactionalId = \"fraud-scorer-0\", EnableIdempotence = true };",
+        "using var producer = new ProducerBuilder<string, string>(pc).Build();",
+        "producer.InitTransactions(TimeSpan.FromSeconds(30));    // fences an older instance with the same TransactionalId",
+        "var cc = new ConsumerConfig { BootstrapServers = \"kafka:9092\", GroupId = \"fraud-scorer\",",
+        "    EnableAutoCommit = false, IsolationLevel = IsolationLevel.ReadCommitted };",
+        "// ... consumer.Subscribe(\"payments-requested\");",
+        "var cr = consumer.Consume(ct);",
+        "producer.BeginTransaction();",
+        "try",
+        "{",
+        "    producer.Produce(\"payments-scored\", new Message<string, string> { Key = cr.Message.Key, Value = Score(cr.Message.Value) });",
+        "    producer.SendOffsetsToTransaction(",
+        "        new[] { new TopicPartitionOffset(cr.TopicPartition, cr.Offset + 1) },",
+        "        consumer.ConsumerGroupMetadata, TimeSpan.FromSeconds(30));",
+        "    producer.CommitTransaction();",
+        "}",
+        "catch (KafkaException)",
+        "{",
+        "    producer.AbortTransaction();   // then rewind the consumer to its committed offsets and retry",
+        "}",
+        "```",
+        "",
+        "(Real code commits a transaction per batch, not per record.) Aborted records stay in the log with an abort marker;",
+        "consumers with `IsolationLevel.ReadCommitted` skip them, consumers left on the default `read_uncommitted` see them.",
+        "",
+        "What \"exactly-once\" covers: Kafka in, Kafka out, read_committed downstream. It does **not** cover the database row",
+        "you wrote, the email you sent or the card you charged inside `Score`: those need the inbox and idempotency keys."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which of these does Kafka's exactly-once (transactions plus `read_committed` consumers) guarantee? Select all that apply.",
+      "options": [
+        "The output records and the consumed input offsets are committed atomically: both or neither",
+        "Consumers with `IsolationLevel.ReadCommitted` never see records from aborted transactions",
+        "An HTTP call to the payment provider inside the handler runs exactly once",
+        "A consumer on the default isolation level never sees duplicates",
+        "A database row written by the handler is rolled back when the transaction aborts"
+      ],
+      "answer": [
+        0,
+        1
+      ],
+      "explain": [
+        "The guarantee stops at Kafka's edge. Anything outside the transaction (a database, an HTTP API) is still",
+        "at-least-once, and the default `read_uncommitted` consumer happily reads aborted records."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the read-process-write loop and the setting downstream consumers need.",
+      "code": [
+        "var cr = consumer.Consume(ct);",
+        "producer.__1__();",
+        "producer.Produce(\"payments-scored\", new Message<string, string> { Key = cr.Message.Key, Value = Score(cr.Message.Value) });",
+        "producer.__2__(",
+        "    new[] { new TopicPartitionOffset(cr.TopicPartition, cr.Offset + 1) },",
+        "    consumer.ConsumerGroupMetadata, TimeSpan.FromSeconds(30));",
+        "producer.CommitTransaction();",
+        "",
+        "// every consumer of payments-scored:",
+        "var downstream = new ConsumerConfig { GroupId = \"ledger\", IsolationLevel = IsolationLevel.__3__ };"
+      ],
+      "blanks": [
+        "BeginTransaction",
+        "SendOffsetsToTransaction",
+        "ReadCommitted"
+      ],
+      "bank": [
+        "Flush",
+        "Commit",
+        "ReadUncommitted"
+      ],
+      "explain": [
+        "The offset sent is `cr.Offset + 1`: Kafka offsets you commit are always \"the next record to read\". Calling",
+        "`consumer.Commit` instead of `SendOffsetsToTransaction` would commit outside the transaction and break atomicity."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Write the inbox",
+      "prompt": [
+        "Write a class `Inbox` that makes a billing handler safe under at-least-once delivery. Everything one call does is a",
+        "single **transaction**: either all of it is recorded, or none of it.",
+        "",
+        "- `string Handle(string consumer, string messageId, string orderId, int cents, bool failBeforeCommit = false)`",
+        "  1. if `(consumer, messageId)` was processed before → `\"duplicate message\"` (nothing changes);",
+        "  2. if `failBeforeCommit` → the transaction rolls back: record nothing, return `\"rolled back\"`;",
+        "  3. record `(consumer, messageId)` as processed; then if this consumer already charged `orderId`",
+        "     (a double click with a new message id) → `\"already charged\"`;",
+        "  4. otherwise add `\"{consumer} {orderId} {cents}\"` to `Ledger`, remember the order as charged for this consumer,",
+        "     and return `\"charged {cents}\"`.",
+        "- `List<string> Ledger` (get-only), `int ProcessedRows` (how many processed-message rows exist).",
+        "",
+        "Keys are **per consumer**: `billing` and `loyalty` each process `m-1` once."
+      ],
+      "starter": [
+        "class Inbox",
+        "{",
+        "    public List<string> Ledger { get; } = new();",
+        "    public int ProcessedRows => 0;",
+        "",
+        "    public string Handle(string consumer, string messageId, string orderId, int cents, bool failBeforeCommit = false)",
+        "    {",
+        "        return \"\";",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class Inbox",
+        "{",
+        "    readonly HashSet<(string Consumer, string MessageId)> processed = new();",
+        "    readonly HashSet<(string Consumer, string OrderId)> charged = new();",
+        "    public List<string> Ledger { get; } = new();",
+        "    public int ProcessedRows => processed.Count;",
+        "",
+        "    public string Handle(string consumer, string messageId, string orderId, int cents, bool failBeforeCommit = false)",
+        "    {",
+        "        if (processed.Contains((consumer, messageId))) return \"duplicate message\";",
+        "        if (failBeforeCommit) return \"rolled back\";          // nothing was committed",
+        "        processed.Add((consumer, messageId));                  // same transaction as the ledger row",
+        "        if (!charged.Add((consumer, orderId))) return \"already charged\";",
+        "        Ledger.Add($\"{consumer} {orderId} {cents}\");",
+        "        return $\"charged {cents}\";",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Two `HashSet<(string, string)>`: one for processed messages, one for charged orders, both keyed with the consumer.",
+        "Check the message first, then bail out on `failBeforeCommit` before changing anything.",
+        "`HashSet.Add` returns `false` when the key is already there: `if (!charged.Add((consumer, orderId))) return \"already charged\";`"
+      ],
+      "template": [
+        "var dojoIn = new Inbox();",
+        "Dojo.Eq(\"first delivery charges\", \"charged 1299\", dojoIn.Handle(\"billing\", \"m-1\", \"o-7\", 1299));",
+        "Dojo.Eq(\"redelivery of the same message\", \"duplicate message\", dojoIn.Handle(\"billing\", \"m-1\", \"o-7\", 1299));",
+        "Dojo.Eq(\"double click: new message id, same order\", \"already charged\", dojoIn.Handle(\"billing\", \"m-2\", \"o-7\", 1299));",
+        "Dojo.Eq(\"the ledger has one charge\", new List<string> { \"billing o-7 1299\" }, dojoIn.Ledger);",
+        "Dojo.Eq(\"crash before commit\", \"rolled back\", dojoIn.Handle(\"billing\", \"m-3\", \"o-8\", 500, failBeforeCommit: true));",
+        "Dojo.Eq(\"nothing kept from the rolled back attempt\", 1, dojoIn.Ledger.Count);",
+        "Dojo.Eq(\"the redelivery after the crash is processed\", \"charged 500\", dojoIn.Handle(\"billing\", \"m-3\", \"o-8\", 500));",
+        "Dojo.Eq(\"another consumer has its own rows\", \"charged 1299\", dojoIn.Handle(\"loyalty\", \"m-1\", \"o-7\", 1299));",
+        "Dojo.Eq(\"processed rows: billing m-1, m-2, m-3 and loyalty m-1\", 4, dojoIn.ProcessedRows);",
+        "Dojo.Eq(\"final ledger\", new List<string> { \"billing o-7 1299\", \"billing o-8 500\", \"loyalty o-7 1299\" }, dojoIn.Ledger);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

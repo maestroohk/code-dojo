@@ -1,0 +1,270 @@
+{
+  "title": "Work queue or event log: the first question",
+  "summary": "Before naming a product, decide the shape: a queue that deletes work when it is done, or a log that keeps events for many readers.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two shapes",
+      "body": [
+        "Most \"RabbitMQ or Kafka?\" debates are really \"queue or log?\". Decide that first.",
+        "",
+        "```text",
+        "WORK QUEUE  (RabbitMQ classic / quorum queue, Amazon SQS, Azure Service Bus queue)",
+        "",
+        "producer ─► [ m5 m4 m3 m2 m1 ] ─► worker A  (m1, unacked)",
+        "                               ─► worker B  (m2, unacked)",
+        "                               ─► worker C  (m3, unacked)",
+        "  ack m1 → m1 is DELETED.  Any free worker takes the next message.",
+        "  One slow job holds up one worker, not the queue.  Retry and dead-letter per message.",
+        "",
+        "EVENT LOG  (Kafka topic, Azure Event Hubs, Amazon Kinesis, RabbitMQ stream)",
+        "",
+        "P0 | 0 | 1 | 2 | 3 | 4 | 5 |   ◄─ group billing at offset 4",
+        "                               ◄─ group search  at offset 1   (every group reads everything)",
+        "P1 | 0 | 1 | 2 | 3 |           ◄─ billing at 3, search at 0",
+        "  Nothing is deleted on read; retention (time, size) or compaction decides.",
+        "  Order and parallelism are per partition: one consumer per partition per group.",
+        "```",
+        "",
+        "- Queue: **tasks** (\"resize this image\"), done once by someone, then forgotten.",
+        "- Log: **facts** (\"order 7 was placed\"), kept, read by many, replayable.",
+        "",
+        "> **See it:** open **Labs → Messaging builder → RabbitMQ** and play *Drain the backlog*, then",
+        "> **Labs → Messaging builder → Kafka** and play *More consumers than partitions*."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Queue or log? Sort each requirement by the shape it needs.",
+      "buckets": [
+        "Work queue",
+        "Event log"
+      ],
+      "items": [
+        [
+          "Resize 10,000 uploaded images; each job done once by any worker",
+          0
+        ],
+        [
+          "Build a new search index from the last 30 days of product changes",
+          1
+        ],
+        [
+          "Five teams each want every order event, at their own pace",
+          1
+        ],
+        [
+          "A job takes 20 minutes and must be retried on its own if it fails",
+          0
+        ],
+        [
+          "Retry an email in 30 seconds, then park it after 5 attempts",
+          0
+        ],
+        [
+          "One million clickstream events per second, kept for 7 days",
+          1
+        ]
+      ],
+      "explain": [
+        "Replay, many independent readers and long retention point to a log. Individual retries, long jobs and \"done means",
+        "gone\" point to a queue. Plenty of systems need both, and that is fine: two workloads, two shapes."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The `pdf-render` team put render jobs on a Kafka topic with 6 partitions. Most jobs take a second, some take 10 minutes. Small jobs now wait up to 12 minutes, adding pods beyond 6 changes nothing, and the logs show frequent rebalances. Why?",
+      "options": [
+        "A slow record blocks every record behind it in its partition, parallelism is capped at 6 per group, and a 10-minute job exceeds `max.poll.interval.ms` (5 minutes by default), so the consumer is kicked out and the partition rebalances",
+        "Kafka is too slow for PDF rendering",
+        "The producer needs `acks=all`",
+        "The consumer should commit more often"
+      ],
+      "answer": 0,
+      "explain": [
+        "Kafka commits an **offset**, not individual messages, so a partition is processed in order: one slow job is",
+        "head-of-line blocking for everything behind it. That is the \"Kafka as a task queue\" anti-pattern; a work queue",
+        "(RabbitMQ, SQS, Service Bus) lets any free worker take the next job."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The decision criteria",
+      "body": [
+        "Ask these in a design review, in roughly this order:",
+        "",
+        "1. **Work queue or event stream?** Tasks done once, or facts kept for many readers.",
+        "2. **Replay?** Will anyone need to re-read last week (a new service, a bug fix, a backfill)? That needs a log.",
+        "3. **Fan-out count.** Two subscribers is easy anywhere; twenty independent teams is what logs are built for.",
+        "4. **Ordering.** Usually per entity (per order, per account), never global. Kafka: per partition, by key. Queues:",
+        "   per queue with one consumer, or Service Bus sessions, SQS FIFO message groups.",
+        "5. **Throughput and retention.** Thousands per second for minutes, or hundreds of thousands per second for weeks.",
+        "6. **Routing flexibility.** RabbitMQ exchanges route on keys and headers; a log routes by topic and key only.",
+        "7. **Ops burden.** Who patches, monitors and upgrades it at 3 a.m.? A managed service moves that cost to the bill.",
+        "8. **Team skills.** The broker the team already runs well beats a theoretically better one nobody knows.",
+        "9. **Cost.** Instance hours and disks, or per-request and per-throughput-unit cloud pricing.",
+        "",
+        "The lines are blurring, carefully: **RabbitMQ streams** (a log type in RabbitMQ, with offsets and retention) give",
+        "RabbitMQ shops replay, and Kafka **share groups** (KIP-932, \"queues for Kafka\") add per-record acknowledgement and",
+        "more consumers than partitions. Share groups are newer and still maturing across brokers and client libraries, so",
+        "check your exact Kafka version and that your client (Confluent.Kafka follows librdkafka) supports them before you",
+        "design around them."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to what it means for the design.",
+      "pairs": [
+        [
+          "Ack",
+          "Tells a queue the message can be deleted"
+        ],
+        [
+          "Offset",
+          "A group's position in a partition; rewind it to replay"
+        ],
+        [
+          "Retention",
+          "How long a log keeps records, read or not"
+        ],
+        [
+          "Competing consumers",
+          "Any free worker takes the next message from one queue"
+        ],
+        [
+          "Consumer group",
+          "Consumers sharing a topic's partitions; each group gets every record"
+        ],
+        [
+          "Compaction",
+          "Keeps only the latest record per key"
+        ]
+      ],
+      "explain": [
+        "If a requirement is phrased in the right-hand language (\"rewind\", \"every team gets every record\", \"latest value per",
+        "key\"), you have found your shape."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A 12,000-message backlog, 50 ms per message, 8 workers. What does this print?",
+      "code": [
+        "int backlog = 12000, msPerMessage = 50, partitions = 4, workers = 8;",
+        "int kafkaWorkers = Math.Min(workers, partitions);     // one consumer per partition per group",
+        "Console.WriteLine(backlog * msPerMessage / kafkaWorkers / 1000);   // seconds to drain with Kafka",
+        "Console.WriteLine(backlog * msPerMessage / workers / 1000);        // seconds with competing consumers on a queue"
+      ],
+      "answer": [
+        "150",
+        "75"
+      ],
+      "explain": [
+        "With 4 partitions only 4 of the 8 workers get work, so the topic drains in 150 s; a queue uses all 8 and drains in",
+        "75 s. More partitions fix it for Kafka, but adding partitions later changes which partition each key maps to, so size",
+        "them up front."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The team scaled `render` from 6 to 10 pods and throughput did not move. What does this output tell you?",
+      "code": [
+        "$ kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group render --members",
+        "GROUP   CONSUMER-ID                                    HOST         CLIENT-ID   #PARTITIONS",
+        "render  render-1-0b6f3c2e-4b1a-4f7e-9c0d-1e2f3a4b5c6d  /10.1.0.11   render-1    1",
+        "render  render-2-1c7a4d3f-5c2b-4a8f-8d1e-2f3a4b5c6d7e  /10.1.0.12   render-2    1",
+        "render  render-3-2d8b5e4a-6d3c-4b9a-9e2f-3a4b5c6d7e8f  /10.1.0.13   render-3    1",
+        "render  render-4-3e9c6f5b-7e4d-4c0b-8f3a-4b5c6d7e8f9a  /10.1.0.14   render-4    1",
+        "render  render-5-4f0d7a6c-8f5e-4d1c-9a4b-5c6d7e8f9a0b  /10.1.0.15   render-5    1",
+        "render  render-6-5a1e8b7d-9a6f-4e2d-8b5c-6d7e8f9a0b1c  /10.1.0.16   render-6    1",
+        "render  render-7-6b2f9c8e-0b7a-4f3e-9c6d-7e8f9a0b1c2d  /10.1.0.17   render-7    0",
+        "render  render-8-7c3a0d9f-1c8b-4a4f-8d7e-8f9a0b1c2d3e  /10.1.0.18   render-8    0",
+        "render  render-9-8d4b1e0a-2d9c-4b5a-9e8f-9a0b1c2d3e4f  /10.1.0.19   render-9    0",
+        "render  render-10-9e5c2f1b-3e0d-4c6b-8f9a-0b1c2d3e4f5a /10.1.0.20   render-10   0"
+      ],
+      "options": [
+        "The topic has 6 partitions: the group gives each partition to one member, so 4 pods have nothing assigned and sit idle",
+        "4 pods failed to connect to the broker",
+        "The group is rebalancing and will spread the load in a minute",
+        "The 4 pods are standby replicas that take over writes"
+      ],
+      "answer": 0,
+      "explain": [
+        "`#PARTITIONS 0` is the tell. Within one group a partition has exactly one owner (with the classic protocol and with",
+        "the newer `group.protocol=consumer`, KIP-848, alike). Fix it with more partitions, planned with the key mapping in",
+        "mind, or by moving this workload to a queue."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Queue or log, with reasons",
+      "prompt": [
+        "Turn the first question into code a design-review bot can run. The tests define",
+        "",
+        "```csharp",
+        "record Req(bool Replay, int Subscribers, int RetentionDays, bool PerMessageRetry, bool LongJobs, bool Routing);",
+        "```",
+        "",
+        "Write `(string Shape, List<string> Reasons) Classify(Req r)`.",
+        "",
+        "**Log reasons**, in this order: `Replay` → `\"replay needs a log\"`; `Subscribers >= 3` → `\"{n} independent subscribers\"`;",
+        "`RetentionDays > 1` → `\"keeps data {n} days\"`.",
+        "",
+        "**Queue reasons**, in this order: `PerMessageRetry` → `\"per-message retry and dead-lettering\"`; `LongJobs` →",
+        "`\"long jobs would block a partition\"`; `Routing` → `\"routing by key or header\"`.",
+        "",
+        "- more log reasons → `(\"log\", log reasons)`; more queue reasons → `(\"queue\", queue reasons)`;",
+        "- a tie with at least one reason → `(\"either\", log reasons then queue reasons)`;",
+        "- no reasons at all → `(\"either\", [\"no strong signal: pick what the team runs well\"])`."
+      ],
+      "starter": [
+        "(string Shape, List<string> Reasons) Classify(Req r)",
+        "{",
+        "    return (\"either\", new List<string>());",
+        "}"
+      ],
+      "solution": [
+        "(string Shape, List<string> Reasons) Classify(Req r)",
+        "{",
+        "    var log = new List<string>();",
+        "    if (r.Replay) log.Add(\"replay needs a log\");",
+        "    if (r.Subscribers >= 3) log.Add($\"{r.Subscribers} independent subscribers\");",
+        "    if (r.RetentionDays > 1) log.Add($\"keeps data {r.RetentionDays} days\");",
+        "",
+        "    var queue = new List<string>();",
+        "    if (r.PerMessageRetry) queue.Add(\"per-message retry and dead-lettering\");",
+        "    if (r.LongJobs) queue.Add(\"long jobs would block a partition\");",
+        "    if (r.Routing) queue.Add(\"routing by key or header\");",
+        "",
+        "    if (log.Count > queue.Count) return (\"log\", log);",
+        "    if (queue.Count > log.Count) return (\"queue\", queue);",
+        "    if (log.Count == 0) return (\"either\", new List<string> { \"no strong signal: pick what the team runs well\" });",
+        "    return (\"either\", log.Concat(queue).ToList());",
+        "}"
+      ],
+      "hints": [
+        "Build two lists with `if` statements, then compare their counts.",
+        "`log.Concat(queue).ToList()` for the tie."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoA = Classify(new Req(Replay: true, Subscribers: 5, RetentionDays: 30, PerMessageRetry: false, LongJobs: false, Routing: false));",
+        "Dojo.Eq(\"clickstream: shape\", \"log\", dojoA.Shape);",
+        "Dojo.Eq(\"clickstream: reasons\", new List<string> { \"replay needs a log\", \"5 independent subscribers\", \"keeps data 30 days\" }, dojoA.Reasons);",
+        "var dojoB = Classify(new Req(false, 1, 0, true, true, false));",
+        "Dojo.Eq(\"render jobs: shape\", \"queue\", dojoB.Shape);",
+        "Dojo.Eq(\"render jobs: reasons\", new List<string> { \"per-message retry and dead-lettering\", \"long jobs would block a partition\" }, dojoB.Reasons);",
+        "var dojoC = Classify(new Req(true, 2, 1, false, false, true));",
+        "Dojo.Eq(\"one each: either\", \"either\", dojoC.Shape);",
+        "Dojo.Eq(\"one each: log reasons first\", new List<string> { \"replay needs a log\", \"routing by key or header\" }, dojoC.Reasons);",
+        "var dojoD = Classify(new Req(false, 2, 1, false, false, false));",
+        "Dojo.Eq(\"nothing stands out\", \"either\", dojoD.Shape);",
+        "Dojo.Eq(\"nothing stands out: the advice\", new List<string> { \"no strong signal: pick what the team runs well\" }, dojoD.Reasons);",
+        "Dojo.Eq(\"3 subscribers is the threshold\", \"log\", Classify(new Req(false, 3, 0, false, false, false)).Shape);",
+        "",
+        "record Req(bool Replay, int Subscribers, int RetentionDays, bool PerMessageRetry, bool LongJobs, bool Routing);"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,404 @@
+{
+  "title": "Reliability, TTL and dead-lettering",
+  "summary": "Quorum queues, persistent messages and publisher confirms survive a restart; TTL, delivery limits and dead-letter exchanges stop poison messages.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Surviving a broker restart",
+      "body": [
+        "A message survives a crash only if **every** link holds:",
+        "",
+        "1. The **queue** survives: durable, and in production a **quorum queue** (replicated with Raft).",
+        "2. The **message** survives: `Persistent = true` (quorum queues persist every message anyway).",
+        "3. The **publisher knows** the broker has it: **publisher confirms**.",
+        "4. The **consumer** acks only after the work is done.",
+        "",
+        "| | classic | quorum | stream |",
+        "|---|---|---|---|",
+        "| Replicated | no (classic mirrored queues were **removed in 4.0**) | yes, Raft over 3 or 5 nodes | yes |",
+        "| Durable | durable or transient | always | always |",
+        "| Reading | destructive: ack removes | destructive | non-destructive, from an offset (`x-stream-offset`) |",
+        "| Poison handling | none built in | **delivery limit** (default 20 since 4.0) | n/a |",
+        "| Use for | exclusive, temporary and reply queues | business messages you cannot lose | replay and large fan-out, Kafka-like |",
+        "",
+        "> **See it:** **Labs → Messaging builder → RabbitMQ**, challenge *Survive a broker restart*."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which setup keeps a **confirmed** order when one node of a three-node cluster dies, and survives a full restart?",
+      "options": [
+        "Quorum queue, `Persistent = true`, publisher confirms, manual acks",
+        "Durable classic queue, transient messages, publisher confirms",
+        "Quorum queue, publisher confirms, `autoAck: true`",
+        "Transient classic queue, persistent messages, manual acks"
+      ],
+      "answer": 0,
+      "explain": [
+        "Transient messages in a classic queue are lost on restart, and a classic queue lives on one node. Auto-ack",
+        "loses whatever a consumer had in flight. A transient queue disappears with its messages, however persistent",
+        "they were."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Publisher confirms in RabbitMQ.Client 7",
+      "body": [
+        "Without confirms, `BasicPublishAsync` returns as soon as the bytes are written to the socket. With them, the",
+        "broker acks each message once it has taken responsibility for it (for a quorum queue: written to a majority).",
+        "",
+        "```csharp",
+        "await using var channel = await connection.CreateChannelAsync(",
+        "    new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true));",
+        "",
+        "var props = new BasicProperties { Persistent = true, MessageId = orderId, ContentType = \"application/json\" };",
+        "try",
+        "{",
+        "    await channel.BasicPublishAsync(\"orders\", \"order.eu.created\", mandatory: true, basicProperties: props, body: body);",
+        "    // completes when the broker confirms",
+        "}",
+        "catch (PublishException ex)",
+        "{",
+        "    // nacked by the broker, or returned as unroutable (mandatory): retry, park, or fail the request",
+        "    logger.LogError(ex, \"Publish of {OrderId} was not confirmed\", orderId);",
+        "    throw;",
+        "}",
+        "```",
+        "",
+        "Underneath, each publish gets a sequence number and the broker answers `basic.ack` or `basic.nack`, often with",
+        "`multiple = true` (\"everything up to 42\"). The 7.x client tracks that for you. Awaiting every publish one by",
+        "one costs a round-trip each; for batches, start several publishes and await them together, keeping a bound on",
+        "how many are in flight.",
+        "",
+        "> **Older code:** 6.x used `channel.ConfirmSelect()` and `WaitForConfirmsOrDie(timeout)`."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make the payments publisher safe: the broker must confirm, the queue must be replicated, and the message must be written to disk.",
+      "code": [
+        "await using var channel = await connection.CreateChannelAsync(",
+        "    new CreateChannelOptions(publisherConfirmationsEnabled: __1__, publisherConfirmationTrackingEnabled: true));",
+        "await channel.QueueDeclareAsync(\"payments\", durable: true, exclusive: false, autoDelete: false,",
+        "    arguments: new Dictionary<string, object?> { [\"x-queue-type\"] = \"__2__\" });",
+        "var props = new BasicProperties { __3__ = true, MessageId = paymentId };"
+      ],
+      "blanks": [
+        "true",
+        "quorum",
+        "Persistent"
+      ],
+      "bank": [
+        "false",
+        "classic",
+        "Durable",
+        "mirrored"
+      ],
+      "explain": "Confirms on the channel, a quorum queue for replication, and `Persistent` on the message. \"mirrored\" is the old HA mode that RabbitMQ 4 no longer has."
+    },
+    {
+      "type": "learn",
+      "title": "TTL and dead-letter exchanges",
+      "body": [
+        "A queue can send messages it gives up on to a **dead-letter exchange** (DLX) instead of dropping them:",
+        "",
+        "```text",
+        "orders ──(rejected | expired | maxlen | delivery_limit)──> orders.dlx (fanout) ──> orders.dead",
+        "```",
+        "",
+        "| Reason in `x-death` | Trigger |",
+        "|---|---|",
+        "| `rejected` | `BasicNackAsync` / `BasicRejectAsync` with `requeue: false` |",
+        "| `expired` | message TTL ran out: queue argument `x-message-ttl`, or per message `Expiration = \"60000\"` |",
+        "| `maxlen` | `x-max-length` reached with `x-overflow: drop-head` |",
+        "| `delivery_limit` | a quorum queue returned the message more times than its delivery limit |",
+        "",
+        "Each dead-lettering adds an entry to the `x-death` header (queue, reason, count, time), so the message carries",
+        "its history. Set it all with a **policy**, which you can change later without redeclaring the queue:",
+        "",
+        "```bash",
+        "rabbitmqctl set_policy DLX \"^orders$\" \\",
+        "  '{\"dead-letter-exchange\":\"orders.dlx\",\"delivery-limit\":5}' --apply-to queues",
+        "```",
+        "",
+        "A quorum queue with **no DLX** simply drops a message that reaches its delivery limit. Message TTL plus a DLX",
+        "is also the classic way to build a **delayed retry** (module 6).",
+        "",
+        "> **See it:** **Labs → Messaging builder → RabbitMQ**, challenges *The poison loop* and *Retry later, not now*."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each `x-death` reason to what caused it.",
+      "pairs": [
+        [
+          "`rejected`",
+          "The consumer nacked with `requeue: false`"
+        ],
+        [
+          "`expired`",
+          "The message sat longer than its TTL"
+        ],
+        [
+          "`maxlen`",
+          "The queue was full and dropped its oldest message"
+        ],
+        [
+          "`delivery_limit`",
+          "A quorum queue gave up after too many returns"
+        ]
+      ],
+      "explain": "When you triage a dead-letter queue, the reason tells you where to look: the consumer's code, the consumer's speed, the queue's size, or a poison message."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: RabbitMQ",
+      "body": [
+        "```bash",
+        "rabbitmqctl list_queues name type messages_ready messages_unacknowledged consumers   # where are the messages?",
+        "rabbitmqctl list_exchanges name type                                                 # what can I publish to?",
+        "rabbitmqctl list_bindings source_name destination_name routing_key                   # why did it not route?",
+        "rabbitmqctl list_consumers queue_name prefetch_count ack_required                    # who is greedy or on auto-ack?",
+        "rabbitmqctl set_policy DLX \"^orders$\" '{\"dead-letter-exchange\":\"orders.dlx\",\"delivery-limit\":5}' --apply-to queues",
+        "rabbitmqctl list_policies                                                            # which policy really applies?",
+        "rabbitmq-diagnostics check_running && rabbitmq-diagnostics check_local_alarms        # health check for probes",
+        "rabbitmq-diagnostics memory_breakdown                                                # what is eating memory?",
+        "rabbitmq-diagnostics listeners                                                       # which ports are open (5672, 15672, 15692)?",
+        "rabbitmq-queues quorum_status orders                                                 # Raft members, leader, lag",
+        "curl -s -u guest:guest http://rabbit:15672/api/queues/%2F/orders | jq '.messages_ready'",
+        "curl -s -u guest:guest -X POST http://rabbit:15672/api/queues/%2F/orders/get \\",
+        "  -H 'content-type: application/json' -d '{\"count\":5,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}'   # peek",
+        "rabbitmqadmin list queues                                                            # the same from a script",
+        "curl -s http://rabbit:15692/metrics                                                  # Prometheus metrics",
+        "```",
+        "",
+        "Client settings you reach for:",
+        "",
+        "- `BasicQosAsync(0, n, false)`: prefetch, the first knob when consumers are greedy or slow.",
+        "- `CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true)` and",
+        "  `mandatory: true`: the publisher knows it was stored and routed.",
+        "- `ClientProvidedName = \"orders-api\"`: names the connection in the management UI and `list_connections`.",
+        "- `AutomaticRecoveryEnabled` / `TopologyRecoveryEnabled` (on by default): reconnect and redeclare after a blip.",
+        "- `RequestedHeartbeat`: detects dead TCP connections (default 60 s).",
+        "- `ConsumerDispatchConcurrency`: handlers in parallel per channel (default 1, which keeps order).",
+        "",
+        "Practise on a real broker in **Labs → Live network labs → 24 Live RabbitMQ lab**."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** A customer's order never got billed. The consumer logs show the same message failing again",
+        "and again with a timeout against the tax service, then nothing more. What happened?"
+      ],
+      "code": [
+        "09:14:02.118 WRN billing-consumer MessageId=ord-5521 Redelivered=True x-delivery-count=19 TimeoutException: tax-svc",
+        "09:14:02.161 WRN billing-consumer MessageId=ord-5521 Redelivered=True x-delivery-count=20 TimeoutException: tax-svc",
+        "(no further lines for ord-5521)",
+        "",
+        "$ rabbitmqctl list_queues name type messages",
+        "billing  quorum  0",
+        "$ rabbitmqctl list_policies",
+        "Listing policies for vhost \"/\" ..."
+      ],
+      "options": [
+        "The quorum queue's delivery limit (20 by default since RabbitMQ 4.0) was reached and, with no dead-letter exchange configured, the message was dropped. Add a DLX policy, and back off instead of requeueing immediately.",
+        "`consumer_timeout` closed the channel and the message is still unacked somewhere.",
+        "The queue's TTL expired the message.",
+        "Another consumer received it and is still processing it."
+      ],
+      "answer": 0,
+      "explain": [
+        "`x-delivery-count=20` and no more lines is the signature of the delivery limit. Without a DLX the quorum queue",
+        "discards the message: the data loss is a configuration choice nobody made on purpose. The fix has two parts:",
+        "a DLX so nothing is lost, and a real retry delay (module 6) so a slow tax service gets time to recover."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Review a queue setup",
+      "prompt": [
+        "Write the checklist a reviewer runs over a queue declaration:",
+        "`List<string> Risks(string queueType, bool durable, bool persistent, bool confirms, bool autoAck)`.",
+        "",
+        "Add these lines, in this order:",
+        "",
+        "- `\"quorum\"`: if not `durable` → `\"quorum queues must be durable\"` (the declare fails). `persistent` does not",
+        "  matter: quorum queues persist every message.",
+        "- `\"classic\"`: if not `durable` → `\"queue is lost on restart\"`; otherwise, if not `persistent` →",
+        "  `\"messages are lost on restart\"`. Always → `\"not replicated: a node loss takes the queue down\"`.",
+        "- any other type throws `ArgumentException` (`\"mirrored\"` included: removed in RabbitMQ 4.0).",
+        "- not `confirms` → `\"no publisher confirms: the publisher cannot know the broker has it\"`",
+        "- `autoAck` → `\"autoAck: a consumer crash loses in-flight messages\"`"
+      ],
+      "starter": [
+        "List<string> Risks(string queueType, bool durable, bool persistent, bool confirms, bool autoAck)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Risks(string queueType, bool durable, bool persistent, bool confirms, bool autoAck)",
+        "{",
+        "    var risks = new List<string>();",
+        "    switch (queueType)",
+        "    {",
+        "        case \"quorum\":",
+        "            if (!durable) risks.Add(\"quorum queues must be durable\");",
+        "            break;",
+        "        case \"classic\":",
+        "            if (!durable) risks.Add(\"queue is lost on restart\");",
+        "            else if (!persistent) risks.Add(\"messages are lost on restart\");",
+        "            risks.Add(\"not replicated: a node loss takes the queue down\");",
+        "            break;",
+        "        default:",
+        "            throw new ArgumentException($\"unknown queue type '{queueType}'\", nameof(queueType));",
+        "    }",
+        "    if (!confirms) risks.Add(\"no publisher confirms: the publisher cannot know the broker has it\");",
+        "    if (autoAck) risks.Add(\"autoAck: a consumer crash loses in-flight messages\");",
+        "    return risks;",
+        "}"
+      ],
+      "hints": [
+        "A `switch` on the queue type for the first part, then two independent `if`s."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the safe setup\", new List<string>(), Risks(\"quorum\", true, true, true, false));",
+        "Dojo.Eq(\"quorum ignores the persistent flag\", new List<string>(), Risks(\"quorum\", true, false, true, false));",
+        "Dojo.Eq(\"a durable classic queue\", new List<string> { \"not replicated: a node loss takes the queue down\" }, Risks(\"classic\", true, true, true, false));",
+        "Dojo.Eq(\"transient messages\", new List<string> { \"messages are lost on restart\", \"not replicated: a node loss takes the queue down\" }, Risks(\"classic\", true, false, true, false));",
+        "Dojo.Eq(\"everything wrong\", new List<string> { \"queue is lost on restart\", \"not replicated: a node loss takes the queue down\", \"no publisher confirms: the publisher cannot know the broker has it\", \"autoAck: a consumer crash loses in-flight messages\" }, Risks(\"classic\", false, true, false, true));",
+        "Dojo.Eq(\"non-durable quorum\", new List<string> { \"quorum queues must be durable\" }, Risks(\"quorum\", false, false, true, false));",
+        "Dojo.Throws<ArgumentException>(\"mirrored queues no longer exist\", () => Risks(\"mirrored\", true, true, true, false));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Quorum queue: delivery limit and TTL",
+      "prompt": [
+        "Model one quorum queue with a dead-letter exchange and a single consumer. Write a class `QuorumQueue`:",
+        "",
+        "- `QuorumQueue(int deliveryLimit, long ttlMs)`: `ttlMs <= 0` means no TTL.",
+        "- `void Publish(string id, long nowMs)`: adds to the end; the message's age counts from `nowMs`.",
+        "- `string? Deliver(long nowMs)`: first, while the **head** message is at least `ttlMs` old, dead-letter it as",
+        "  `\"{id}: expired\"`. Then hand out the head as `\"{id} #{n}\"` (`n` = this message's delivery number, from 1), or",
+        "  return `null` if the queue is empty.",
+        "- `void Ack(string id)`: done; removes it.",
+        "- `void Nack(string id, bool requeue)`: without `requeue` → `\"{id}: rejected\"`. With `requeue` the message is",
+        "  returned: if it has now been returned **more than `deliveryLimit` times**, dead-letter it as",
+        "  `\"{id}: delivery_limit\"`, otherwise put it back at the **front**. A requeued message keeps its age.",
+        "- `Ack` or `Nack` of an id that is not delivered throws `InvalidOperationException`.",
+        "- `List<string> DeadLetters` (get-only), in the order they were dead-lettered.",
+        "",
+        "With `deliveryLimit = 2` a poison message is delivered 3 times, then dead-lettered."
+      ],
+      "starter": [
+        "class QuorumQueue",
+        "{",
+        "    public QuorumQueue(int deliveryLimit, long ttlMs) { }",
+        "",
+        "    public List<string> DeadLetters { get; } = new();",
+        "",
+        "    public void Publish(string id, long nowMs) { }",
+        "    public string? Deliver(long nowMs) => null;",
+        "    public void Ack(string id) { }",
+        "    public void Nack(string id, bool requeue) { }",
+        "}"
+      ],
+      "solution": [
+        "class QuorumQueue",
+        "{",
+        "    class Message",
+        "    {",
+        "        public string Id = \"\";",
+        "        public long PublishedAt;",
+        "        public int Returns;",
+        "    }",
+        "",
+        "    readonly int deliveryLimit;",
+        "    readonly long ttlMs;",
+        "    readonly List<Message> ready = new();",
+        "    readonly Dictionary<string, Message> delivered = new();",
+        "",
+        "    public QuorumQueue(int deliveryLimit, long ttlMs)",
+        "    {",
+        "        this.deliveryLimit = deliveryLimit;",
+        "        this.ttlMs = ttlMs;",
+        "    }",
+        "",
+        "    public List<string> DeadLetters { get; } = new();",
+        "",
+        "    public void Publish(string id, long nowMs) => ready.Add(new Message { Id = id, PublishedAt = nowMs });",
+        "",
+        "    public string? Deliver(long nowMs)",
+        "    {",
+        "        while (ttlMs > 0 && ready.Count > 0 && nowMs - ready[0].PublishedAt >= ttlMs)",
+        "        {",
+        "            DeadLetters.Add($\"{ready[0].Id}: expired\");",
+        "            ready.RemoveAt(0);",
+        "        }",
+        "        if (ready.Count == 0) return null;",
+        "        var m = ready[0];",
+        "        ready.RemoveAt(0);",
+        "        delivered[m.Id] = m;",
+        "        return $\"{m.Id} #{m.Returns + 1}\";",
+        "    }",
+        "",
+        "    public void Ack(string id) => Take(id);",
+        "",
+        "    public void Nack(string id, bool requeue)",
+        "    {",
+        "        var m = Take(id);",
+        "        if (!requeue) { DeadLetters.Add($\"{id}: rejected\"); return; }",
+        "        m.Returns++;",
+        "        if (m.Returns > deliveryLimit) DeadLetters.Add($\"{id}: delivery_limit\");",
+        "        else ready.Insert(0, m);",
+        "    }",
+        "",
+        "    Message Take(string id)",
+        "    {",
+        "        if (!delivered.Remove(id, out var m)) throw new InvalidOperationException($\"'{id}' is not delivered\");",
+        "        return m;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Store per message its id, publish time and a return counter.",
+        "`Deliver`: expire from the head in a `while` loop first, then take the head into a delivered dictionary.",
+        "`Nack` with requeue: increment returns, then compare with `deliveryLimit`."
+      ],
+      "template": [
+        "var dojoP = new QuorumQueue(2, 0);",
+        "dojoP.Publish(\"A\", 0);",
+        "Dojo.Eq(\"first delivery\", \"A #1\", dojoP.Deliver(0));",
+        "dojoP.Nack(\"A\", requeue: true);",
+        "Dojo.Eq(\"second delivery\", \"A #2\", dojoP.Deliver(1));",
+        "dojoP.Nack(\"A\", requeue: true);",
+        "Dojo.Eq(\"third delivery\", \"A #3\", dojoP.Deliver(2));",
+        "dojoP.Nack(\"A\", requeue: true);",
+        "Dojo.Eq(\"returned more than the limit: gone\", (string?)null, dojoP.Deliver(3));",
+        "Dojo.Eq(\"dead-lettered with delivery_limit\", new List<string> { \"A: delivery_limit\" }, dojoP.DeadLetters);",
+        "var dojoT = new QuorumQueue(20, 1000);",
+        "dojoT.Publish(\"B\", 0);",
+        "dojoT.Publish(\"C\", 500);",
+        "Dojo.Eq(\"B expired, C is delivered\", \"C #1\", dojoT.Deliver(1200));",
+        "dojoT.Ack(\"C\");",
+        "Dojo.Eq(\"empty after the ack\", (string?)null, dojoT.Deliver(1300));",
+        "dojoT.Publish(\"D\", 2000);",
+        "Dojo.Eq(\"D is fresh\", \"D #1\", dojoT.Deliver(2100));",
+        "dojoT.Nack(\"D\", requeue: false);",
+        "dojoT.Publish(\"E\", 3000);",
+        "Dojo.Eq(\"E just under its TTL\", \"E #1\", dojoT.Deliver(3999));",
+        "dojoT.Nack(\"E\", requeue: true);",
+        "Dojo.Eq(\"a requeued message keeps its age\", (string?)null, dojoT.Deliver(4000));",
+        "Dojo.Eq(\"the dead letters and their reasons\", new List<string> { \"B: expired\", \"D: rejected\", \"E: expired\" }, dojoT.DeadLetters);",
+        "Dojo.Throws<InvalidOperationException>(\"ack something never delivered\", () => dojoT.Ack(\"Z\"));",
+        "Dojo.Throws<InvalidOperationException>(\"ack twice\", () => { dojoT.Publish(\"F\", 5000); dojoT.Deliver(5000); dojoT.Ack(\"F\"); dojoT.Ack(\"F\"); });",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

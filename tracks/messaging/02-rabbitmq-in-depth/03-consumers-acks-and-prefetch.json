@@ -1,0 +1,418 @@
+{
+  "title": "Consumers, acks and prefetch",
+  "summary": "Manual acks, nack and reject, requeue and the redelivered flag, prefetch and competing consumers: how RabbitMQ hands out messages and gets them back.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The life of a delivery",
+      "body": [
+        "A queue holds **ready** messages. When it delivers one to a consumer, the message becomes **unacked**: still",
+        "in the queue, invisible to others, waiting for the consumer's verdict.",
+        "",
+        "```text",
+        "  ready ──deliver (delivery tag 1, 2, 3 ... per channel)──> unacked ──┬─ ack ───────────────────> removed",
+        "    ^                                                                ├─ nack/reject requeue=true ─┐",
+        "    │                                                                ├─ nack/reject requeue=false ──> dead-letter exchange (or dropped)",
+        "    │                                                                └─ channel or connection closes ┐",
+        "    └──────────────────────────── back to the queue, Redelivered = true ─────────────────────────────┘",
+        "```",
+        "",
+        "- With **`autoAck: true`** the broker forgets the message the moment it sends it: *at most once*. A consumer",
+        "  crash loses everything it had received.",
+        "- With manual acks, a crash or a closed channel requeues the unacked messages: *at least once*, so duplicates",
+        "  are possible and consumers must be idempotent.",
+        "- A delivery not acked within `consumer_timeout` (30 minutes by default) closes the channel and requeues it.",
+        "",
+        "> **See it:** **Labs → Messaging builder → RabbitMQ**, challenge *Auto-ack ate my order*."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A consumer runs with `autoAck: true` and a prefetch of 20. It has received 20 messages and finished 3 when the pod is killed. What happens to the other 17?",
+      "options": [
+        "They are lost: the broker removed them when it delivered them",
+        "They are requeued with `Redelivered = true`",
+        "They go to the dead-letter exchange",
+        "They stay unacked until the consumer comes back"
+      ],
+      "answer": 0,
+      "explain": "Auto-ack is fire-and-forget delivery. Use it only for data you can afford to lose (metrics samples); business messages need manual acks after the work is done."
+    },
+    {
+      "type": "learn",
+      "title": "A consumer with RabbitMQ.Client 7",
+      "body": [
+        "```csharp",
+        "await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 20, global: false);",
+        "var consumer = new AsyncEventingBasicConsumer(channel);",
+        "consumer.ReceivedAsync += async (_, ea) =>",
+        "{",
+        "    try",
+        "    {",
+        "        var order = JsonSerializer.Deserialize<Order>(ea.Body.Span)!;",
+        "        await billing.ChargeAsync(order, ea.BasicProperties.MessageId);",
+        "        await channel.BasicAckAsync(ea.DeliveryTag, multiple: false);",
+        "    }",
+        "    catch (JsonException)",
+        "    {",
+        "        await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);  // poison: to the DLX",
+        "    }",
+        "    catch (TimeoutException) when (!ea.Redelivered)",
+        "    {",
+        "        await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: true);   // one quick second chance",
+        "    }",
+        "};",
+        "await channel.BasicConsumeAsync(\"billing\", autoAck: false, consumer: consumer);",
+        "```",
+        "",
+        "- Ack or nack on the **same channel** that received the message; delivery tags are per channel.",
+        "- `multiple: true` acks every tag up to this one in one frame. `BasicRejectAsync` is nack for one message.",
+        "- `Redelivered` means \"**may** have been delivered before\", not a count. Quorum queues add an",
+        "  `x-delivery-count` header when you need the number.",
+        "- An exception that escapes the handler leaves the message **unacked** until the channel closes. Every path",
+        "  must end in an ack or a nack.",
+        "",
+        "> **Older code:** 6.x used `EventingBasicConsumer` with a synchronous `Received` event and `channel.BasicAck(...)`."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "A worker runs report jobs that take minutes each. Each worker should hold **one job at a time**, a broken message must go to the dead-letter exchange, and a worker crash must not lose a job. Fill the gaps.",
+      "code": [
+        "await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: __1__, global: false);",
+        "consumer.ReceivedAsync += async (_, ea) =>",
+        "{",
+        "    if (!TryParse(ea.Body, out var job))",
+        "    {",
+        "        await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: __2__);",
+        "        return;",
+        "    }",
+        "    await RunReportAsync(job);",
+        "    await channel.BasicAckAsync(ea.DeliveryTag, multiple: false);",
+        "};",
+        "await channel.BasicConsumeAsync(\"reports\", autoAck: __3__, consumer: consumer);"
+      ],
+      "blanks": [
+        "1",
+        "false",
+        "false"
+      ],
+      "bank": [
+        "0",
+        "true",
+        "100"
+      ],
+      "explain": "Prefetch 1 for long jobs, so a busy worker does not sit on jobs another could start. `requeue: false` sends the poison message to the DLX instead of straight back to the queue. `autoAck: false` keeps the job in the queue until it is done."
+    },
+    {
+      "type": "learn",
+      "title": "Prefetch: how many unacked messages per consumer",
+      "body": [
+        "`BasicQosAsync(0, prefetchCount, false)` caps how many **unacked** messages each consumer on the channel may",
+        "hold. The queue hands messages round-robin to consumers that have a free slot.",
+        "",
+        "- **Prefetch 0 means unlimited**: the first consumer to connect gets the whole backlog, the others get nothing,",
+        "  and its memory fills up (*One greedy consumer*).",
+        "- **Too low** for fast messages: every message waits for an ack round-trip, throughput drops.",
+        "- Rule of thumb: 10 to 50 for short handlers, **1** for long jobs, then measure.",
+        "",
+        "Step through two consumers with prefetch 2: `fast` acks everything it holds each round, `slow` never does.",
+        "The slow consumer keeps its two messages; the fast one takes all the rest.",
+        "",
+        "> **See it:** **Labs → Messaging builder → RabbitMQ**, challenge *One greedy consumer*."
+      ],
+      "trace": {
+        "code": [
+          "var ready = new Queue<string>(new[] { \"m1\", \"m2\", \"m3\", \"m4\", \"m5\", \"m6\" });",
+          "var prefetch = 2;",
+          "var names = new[] { \"fast\", \"slow\" };",
+          "var unacked = new Dictionary<string, List<string>> { [\"fast\"] = new(), [\"slow\"] = new() };",
+          "for (var round = 1; round <= 3; round++)",
+          "{",
+          "    var gave = true;",
+          "    while (gave)",
+          "    {",
+          "        gave = false;",
+          "        foreach (var c in names)",
+          "            if (ready.Count > 0 && unacked[c].Count < prefetch) { unacked[c].Add(ready.Dequeue()); gave = true; }",
+          "    }",
+          "    Console.WriteLine($\"round {round}: fast [{string.Join(\",\", unacked[\"fast\"])}] slow [{string.Join(\",\", unacked[\"slow\"])}]\");",
+          "    unacked[\"fast\"].Clear();",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Three report workers run, but only `worker-a` is busy (100 % CPU, 3 GB of memory and",
+        "climbing); the other two are idle. What is the cause and the fix?"
+      ],
+      "code": [
+        "$ rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers",
+        "name      messages_ready  messages_unacknowledged  consumers",
+        "reports   0               4800                     3",
+        "",
+        "$ rabbitmqctl list_consumers queue_name consumer_tag ack_required prefetch_count",
+        "queue_name  consumer_tag  ack_required  prefetch_count",
+        "reports     worker-a      true          0",
+        "reports     worker-b      true          0",
+        "reports     worker-c      true          0"
+      ],
+      "options": [
+        "Prefetch 0 means unlimited: worker-a connected first and took all 4,800 messages. Call `BasicQosAsync(0, 1, false)` before consuming and restart the workers.",
+        "`ack_required = true` means acknowledgements are switched off; set it to false.",
+        "Three consumers on one queue is too many; give each worker its own queue.",
+        "worker-b and worker-c use the wrong routing key."
+      ],
+      "answer": 0,
+      "explain": [
+        "`messages_unacknowledged = 4800` with `messages_ready = 0` says every message is in flight, and",
+        "`prefetch_count = 0` says nothing limited it. Once the greedy worker restarts, its unacked messages are",
+        "requeued and spread over all three."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "What should the consumer do with each delivery?",
+      "buckets": [
+        "`BasicAckAsync`",
+        "`BasicNackAsync(requeue: true)`",
+        "`BasicNackAsync(requeue: false)` → DLX"
+      ],
+      "items": [
+        [
+          "Saved to the database and published the follow-up event",
+          0
+        ],
+        [
+          "Already processed this `MessageId` (found in the inbox table)",
+          0
+        ],
+        [
+          "The body is not valid JSON",
+          2
+        ],
+        [
+          "The service is shutting down and has not started the work",
+          1
+        ],
+        [
+          "SQL deadlock victim, `Redelivered = false`",
+          1
+        ],
+        [
+          "The same message hit a deadlock again, `Redelivered = true`",
+          2
+        ],
+        [
+          "`ValidationException`: quantity must be at least 1",
+          2
+        ]
+      ],
+      "explain": "Ack what is done (including duplicates you skip). Requeue only when another try right now has a real chance. Anything that will fail again goes to the DLX, or it loops forever (lesson 4 and module 6)."
+    },
+    {
+      "type": "code",
+      "title": "Ack, requeue or dead-letter?",
+      "prompt": [
+        "Write `string Decide(string outcome, bool redelivered)` returning `\"ack\"`, `\"requeue\"` or `\"dead-letter\"`:",
+        "",
+        "| `outcome` | decision |",
+        "|---|---|",
+        "| `\"ok\"`, `\"duplicate\"` | `\"ack\"` |",
+        "| `\"permanent\"` | `\"dead-letter\"` |",
+        "| `\"transient\"` | `\"requeue\"` the first time, `\"dead-letter\"` when `redelivered` |",
+        "| `\"shutdown\"` | `\"requeue\"` (the work never started; not the message's fault) |",
+        "",
+        "Any other outcome throws `ArgumentException`."
+      ],
+      "starter": [
+        "string Decide(string outcome, bool redelivered)",
+        "{",
+        "    return \"ack\";",
+        "}"
+      ],
+      "solution": [
+        "string Decide(string outcome, bool redelivered) => outcome switch",
+        "{",
+        "    \"ok\" or \"duplicate\" => \"ack\",",
+        "    \"permanent\" => \"dead-letter\",",
+        "    \"transient\" => redelivered ? \"dead-letter\" : \"requeue\",",
+        "    \"shutdown\" => \"requeue\",",
+        "    _ => throw new ArgumentException($\"unknown outcome '{outcome}'\", nameof(outcome)),",
+        "};"
+      ],
+      "hints": [
+        "A `switch` expression with `\"ok\" or \"duplicate\" => \"ack\"` reads well."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"ok is acked\", \"ack\", Decide(\"ok\", false));",
+        "Dojo.Eq(\"a duplicate is acked, not retried\", \"ack\", Decide(\"duplicate\", true));",
+        "Dojo.Eq(\"permanent goes to the DLX\", \"dead-letter\", Decide(\"permanent\", false));",
+        "Dojo.Eq(\"transient, first delivery: requeue\", \"requeue\", Decide(\"transient\", false));",
+        "Dojo.Eq(\"transient, redelivered: dead-letter\", \"dead-letter\", Decide(\"transient\", true));",
+        "Dojo.Eq(\"shutdown always requeues\", \"requeue\", Decide(\"shutdown\", true));",
+        "Dojo.Throws<ArgumentException>(\"unknown outcome\", () => Decide(\"maybe\", false));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A queue with prefetch, acks and requeue",
+      "prompt": [
+        "Model a RabbitMQ queue and its consumers. Write a class `BrokerQueue`:",
+        "",
+        "- `BrokerQueue(int prefetch)`: the per-consumer limit of unacked messages; `0` means unlimited.",
+        "- `void Publish(string message)`: adds to the end of the ready list.",
+        "- `void AddConsumer(string name)`: consumers are served in the order they were added.",
+        "- `List<string> Dispatch()`: hands out ready messages one at a time, round-robin over the consumers that have",
+        "  a free slot (each pass starts with the first consumer), until nothing is ready or nobody has room. Each",
+        "  delivery gets the consumer's next **delivery tag** (`1`, `2`, ... per consumer) and is reported as",
+        "  `\"{consumer} #{tag} {message}\"`, plus `\" (redelivered)\"` if it was delivered before.",
+        "- `void Ack(string consumer, ulong tag, bool multiple = false)`: removes that unacked delivery; with",
+        "  `multiple`, every unacked delivery of that consumer with a tag up to `tag`. A tag that is not unacked (or an",
+        "  unknown consumer) throws `InvalidOperationException`, like the broker's `PRECONDITION_FAILED - unknown delivery tag`.",
+        "- `void Nack(string consumer, ulong tag, bool requeue)`: `requeue` puts the message back at the **front** of",
+        "  the ready list, marked redelivered; otherwise it goes to `DeadLetters`. Unknown tags throw as for `Ack`.",
+        "- `void Disconnect(string consumer)`: removes the consumer; its unacked messages go back to the front of the",
+        "  ready list in tag order, marked redelivered.",
+        "- `int Ready`, `int Unacked`, `List<string> DeadLetters` (get-only)."
+      ],
+      "starter": [
+        "class BrokerQueue",
+        "{",
+        "    public BrokerQueue(int prefetch) { }",
+        "",
+        "    public int Ready => 0;",
+        "    public int Unacked => 0;",
+        "    public List<string> DeadLetters { get; } = new();",
+        "",
+        "    public void Publish(string message) { }",
+        "    public void AddConsumer(string name) { }",
+        "    public List<string> Dispatch() => new();",
+        "    public void Ack(string consumer, ulong tag, bool multiple = false) { }",
+        "    public void Nack(string consumer, ulong tag, bool requeue) { }",
+        "    public void Disconnect(string consumer) { }",
+        "}"
+      ],
+      "solution": [
+        "class BrokerQueue",
+        "{",
+        "    class Consumer",
+        "    {",
+        "        public ulong NextTag;",
+        "        public List<(ulong Tag, string Message)> Unacked = new();",
+        "    }",
+        "",
+        "    readonly int prefetch;",
+        "    readonly List<(string Message, bool Redelivered)> ready = new();",
+        "    readonly List<string> order = new();",
+        "    readonly Dictionary<string, Consumer> consumers = new();",
+        "",
+        "    public BrokerQueue(int prefetch) => this.prefetch = prefetch;",
+        "",
+        "    public int Ready => ready.Count;",
+        "    public int Unacked => consumers.Values.Sum(c => c.Unacked.Count);",
+        "    public List<string> DeadLetters { get; } = new();",
+        "",
+        "    public void Publish(string message) => ready.Add((message, false));",
+        "",
+        "    public void AddConsumer(string name)",
+        "    {",
+        "        consumers[name] = new Consumer();",
+        "        order.Add(name);",
+        "    }",
+        "",
+        "    public List<string> Dispatch()",
+        "    {",
+        "        var log = new List<string>();",
+        "        var gave = true;",
+        "        while (gave)",
+        "        {",
+        "            gave = false;",
+        "            foreach (var name in order)",
+        "            {",
+        "                var c = consumers[name];",
+        "                if (ready.Count == 0 || (prefetch > 0 && c.Unacked.Count >= prefetch)) continue;",
+        "                var (message, redelivered) = ready[0];",
+        "                ready.RemoveAt(0);",
+        "                var tag = ++c.NextTag;",
+        "                c.Unacked.Add((tag, message));",
+        "                log.Add($\"{name} #{tag} {message}\" + (redelivered ? \" (redelivered)\" : \"\"));",
+        "                gave = true;",
+        "            }",
+        "        }",
+        "        return log;",
+        "    }",
+        "",
+        "    public void Ack(string consumer, ulong tag, bool multiple = false)",
+        "    {",
+        "        var c = Find(consumer);",
+        "        var removed = c.Unacked.RemoveAll(u => multiple ? u.Tag <= tag : u.Tag == tag);",
+        "        if (removed == 0) throw new InvalidOperationException($\"PRECONDITION_FAILED - unknown delivery tag {tag}\");",
+        "    }",
+        "",
+        "    public void Nack(string consumer, ulong tag, bool requeue)",
+        "    {",
+        "        var c = Find(consumer);",
+        "        var i = c.Unacked.FindIndex(u => u.Tag == tag);",
+        "        if (i < 0) throw new InvalidOperationException($\"PRECONDITION_FAILED - unknown delivery tag {tag}\");",
+        "        var message = c.Unacked[i].Message;",
+        "        c.Unacked.RemoveAt(i);",
+        "        if (requeue) ready.Insert(0, (message, true));",
+        "        else DeadLetters.Add(message);",
+        "    }",
+        "",
+        "    public void Disconnect(string consumer)",
+        "    {",
+        "        var c = Find(consumer);",
+        "        ready.InsertRange(0, c.Unacked.OrderBy(u => u.Tag).Select(u => (u.Message, true)));",
+        "        consumers.Remove(consumer);",
+        "        order.Remove(consumer);",
+        "    }",
+        "",
+        "    Consumer Find(string name) =>",
+        "        consumers.TryGetValue(name, out var c) ? c : throw new InvalidOperationException($\"unknown consumer '{name}'\");",
+        "}"
+      ],
+      "hints": [
+        "Keep the ready list as `List<(string Message, bool Redelivered)>` so requeues can go to index 0.",
+        "Per consumer: a tag counter and a list of `(ulong Tag, string Message)` unacked deliveries.",
+        "`Dispatch`: repeat passes over the consumers while at least one message was handed out in the pass."
+      ],
+      "template": [
+        "var dojoQ = new BrokerQueue(2);",
+        "foreach (var dojoM in new[] { \"m1\", \"m2\", \"m3\", \"m4\", \"m5\" }) dojoQ.Publish(dojoM);",
+        "dojoQ.AddConsumer(\"c1\");",
+        "dojoQ.AddConsumer(\"c2\");",
+        "Dojo.Eq(\"round-robin up to prefetch 2\", new List<string> { \"c1 #1 m1\", \"c2 #1 m2\", \"c1 #2 m3\", \"c2 #2 m4\" }, dojoQ.Dispatch());",
+        "Dojo.Eq(\"one message still ready\", 1, dojoQ.Ready);",
+        "Dojo.Eq(\"four unacked\", 4, dojoQ.Unacked);",
+        "dojoQ.Ack(\"c1\", 2, multiple: true);",
+        "Dojo.Eq(\"multiple ack frees both of c1's slots\", 2, dojoQ.Unacked);",
+        "Dojo.Eq(\"c1 gets the last one\", new List<string> { \"c1 #3 m5\" }, dojoQ.Dispatch());",
+        "dojoQ.Nack(\"c2\", 1, requeue: true);",
+        "Dojo.Eq(\"requeued message comes back first, marked\", new List<string> { \"c1 #4 m2 (redelivered)\" }, dojoQ.Dispatch());",
+        "dojoQ.Nack(\"c2\", 2, requeue: false);",
+        "Dojo.Eq(\"nack without requeue dead-letters\", new List<string> { \"m4\" }, dojoQ.DeadLetters);",
+        "dojoQ.Disconnect(\"c1\");",
+        "Dojo.Eq(\"a disconnect requeues unacked in tag order\", 2, dojoQ.Ready);",
+        "Dojo.Eq(\"the other consumer gets them\", new List<string> { \"c2 #3 m5 (redelivered)\", \"c2 #4 m2 (redelivered)\" }, dojoQ.Dispatch());",
+        "Dojo.Throws<InvalidOperationException>(\"ack an unknown tag\", () => dojoQ.Ack(\"c2\", 99));",
+        "dojoQ.Ack(\"c2\", 3);",
+        "Dojo.Throws<InvalidOperationException>(\"ack the same tag twice\", () => dojoQ.Ack(\"c2\", 3));",
+        "Dojo.Throws<InvalidOperationException>(\"ack for a gone consumer\", () => dojoQ.Ack(\"c1\", 1));",
+        "var dojoG = new BrokerQueue(0);",
+        "foreach (var dojoM in new[] { \"r1\", \"r2\", \"r3\", \"r4\", \"r5\" }) dojoG.Publish(dojoM);",
+        "dojoG.AddConsumer(\"early\");",
+        "Dojo.Eq(\"prefetch 0: the first consumer takes everything\", 5, dojoG.Dispatch().Count);",
+        "dojoG.AddConsumer(\"late\");",
+        "Dojo.Eq(\"the late consumer gets nothing\", 0, dojoG.Dispatch().Count);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

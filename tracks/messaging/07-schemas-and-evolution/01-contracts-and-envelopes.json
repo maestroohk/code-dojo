@@ -1,0 +1,365 @@
+{
+  "title": "Message contracts and envelopes",
+  "summary": "What a message promises: the envelope (id, type, version, correlation, time), CloudEvents as the standard, and where metadata lives in RabbitMQ and Kafka.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A message is a contract",
+      "body": [
+        "The broker does not care what is in a message: Kafka stores bytes, RabbitMQ routes bytes. The **contract** lives",
+        "between the teams: the shape of the data, what each field means, and the metadata every consumer can rely on.",
+        "",
+        "Split every message into an **envelope** (facts about the message) and **data** (facts about the business event):",
+        "",
+        "```text",
+        "┌─ envelope ───────────────────────────────────────────────────────────┐",
+        "│ id            e-91                    unique per message: dedup key  │",
+        "│ type          shop.order.placed.v2    picks the handler and schema   │",
+        "│ source        /orders-api             who produced it                │",
+        "│ time          2026-11-26T14:05:12Z    when it HAPPENED (not received)│",
+        "│ correlationid c-77                    the business flow it belongs to│",
+        "│ causationid   e-90                    the message that caused this   │",
+        "│ ┌─ data ───────────────────────────────────────────────────────────┐ │",
+        "│ │ { \"orderId\": \"o-7\", \"totalCents\": 1299, \"currency\": \"EUR\" }      │ │",
+        "│ └──────────────────────────────────────────────────────────────────┘ │",
+        "└──────────────────────────────────────────────────────────────────────┘",
+        "```",
+        "",
+        "Why bother: a consumer can dedup, route, trace and pick a deserializer **without parsing the data**, and you can",
+        "change the data's shape while the envelope stays stable.",
+        "",
+        "> **Try it:** in **Labs → Live network labs → 25 Live Kafka lab**, produce a v1 and a v2 payload to the same topic",
+        "> with `kafka-console-producer.sh --property parse.key=true --property key.separator=:` and read them back. The",
+        "> broker accepts both without a word: nothing but your contract and your registry stops a breaking change."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each envelope attribute to the job it does.",
+      "pairs": [
+        [
+          "`id`",
+          "Lets a consumer drop a redelivered copy"
+        ],
+        [
+          "`type`",
+          "Selects the handler and the schema without reading the data"
+        ],
+        [
+          "`correlationid`",
+          "Ties together every message of one checkout across services"
+        ],
+        [
+          "`causationid`",
+          "Points at the message that triggered this one"
+        ],
+        [
+          "`time`",
+          "When the business event happened, for ordering and late-data decisions"
+        ],
+        [
+          "`source`",
+          "Which service or system produced it"
+        ]
+      ],
+      "explain": [
+        "Correlation and causation ids are what make a distributed trace readable in an incident: \"show me every message of",
+        "checkout `c-77`, in causal order\"."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why do teams put `type`, `id` and the schema version in **headers** (Kafka headers, AMQP properties) and not only inside the JSON body?",
+      "options": [
+        "Routers, filters and consumers can dedup, route or skip a message without deserializing the body, and the body's format can change underneath",
+        "Headers are encrypted and the body is not",
+        "Kafka indexes headers so you can query them",
+        "Headers are never sent over the network"
+      ],
+      "answer": 0,
+      "explain": [
+        "A consumer that only handles `shop.order.placed.v2` can skip a `shop.order.cancelled.v1` by looking at one",
+        "header. RabbitMQ headers exchanges can route on them. Kafka does not index headers: you still read every record,",
+        "you just avoid parsing it."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "CloudEvents and where metadata lives",
+      "body": [
+        "**CloudEvents 1.0** (a CNCF standard) names these attributes so every team and tool agrees: required `specversion`",
+        "(`\"1.0\"`), `id`, `source`, `type`; optional `time`, `subject`, `datacontenttype`, `dataschema`; extensions you add",
+        "(`correlationid`) must be **lowercase letters and digits only**. Azure Event Grid, Knative and many SDKs speak it.",
+        "",
+        "- **Structured mode**: the whole event, envelope plus `data`, is one JSON document in the body.",
+        "- **Binary mode**: the body is just the data; attributes travel as headers (`ce_type` in Kafka, `ce-type` in HTTP).",
+        "",
+        "Setting the envelope with the real clients:",
+        "",
+        "```csharp",
+        "// RabbitMQ.Client 7.x",
+        "var props = new BasicProperties",
+        "{",
+        "    Persistent = true,",
+        "    MessageId = evt.Id,                    // dedup key",
+        "    CorrelationId = correlationId,",
+        "    Type = \"shop.order.placed.v2\",",
+        "    ContentType = \"application/json\",",
+        "    Timestamp = new AmqpTimestamp(occurredAt.ToUnixTimeSeconds()),",
+        "    Headers = new Dictionary<string, object?> { [\"ce_source\"] = \"/orders-api\" }",
+        "};",
+        "await channel.BasicPublishAsync(\"orders\", \"order.eu.placed\", mandatory: true, basicProperties: props, body: body);",
+        "",
+        "// Confluent.Kafka 2.x",
+        "var msg = new Message<string, string>",
+        "{",
+        "    Key = orderId, Value = json,",
+        "    Headers = new Headers",
+        "    {",
+        "        { \"ce_id\", Encoding.UTF8.GetBytes(evt.Id) },",
+        "        { \"ce_type\", Encoding.UTF8.GetBytes(\"shop.order.placed.v2\") },",
+        "        { \"ce_specversion\", Encoding.UTF8.GetBytes(\"1.0\") },",
+        "    }",
+        "};",
+        "await producer.ProduceAsync(\"orders\", msg);",
+        "```"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete this structured-mode CloudEvent.",
+      "code": [
+        "{",
+        "  \"specversion\": \"__1__\",",
+        "  \"__2__\": \"e-91\",",
+        "  \"__3__\": \"/orders-api\",",
+        "  \"type\": \"shop.order.placed.v2\",",
+        "  \"time\": \"2026-11-26T14:05:12Z\",",
+        "  \"correlationid\": \"c-77\",",
+        "  \"datacontenttype\": \"application/json\",",
+        "  \"data\": { \"orderId\": \"o-7\", \"totalCents\": 1299 }",
+        "}"
+      ],
+      "blanks": [
+        "1.0",
+        "id",
+        "source"
+      ],
+      "bank": [
+        "2.0",
+        "key",
+        "origin"
+      ],
+      "explain": [
+        "`specversion`, `id`, `source` and `type` are the four required attributes. `id` must be unique **per source**, so",
+        "`source` plus `id` identifies an event globally."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A consumer reads the envelope to pick its handler. What does this print?",
+      "code": [
+        "using System.Text.Json;",
+        "",
+        "var json = \"{\\\"specversion\\\":\\\"1.0\\\",\\\"id\\\":\\\"e-91\\\",\\\"source\\\":\\\"/orders-api\\\",\\\"type\\\":\\\"shop.order.placed.v2\\\",\\\"data\\\":{\\\"orderId\\\":\\\"o-7\\\"}}\";",
+        "using var doc = JsonDocument.Parse(json);",
+        "var type = doc.RootElement.GetProperty(\"type\").GetString()!;",
+        "var dot = type.LastIndexOf('.');",
+        "Console.WriteLine($\"{type[..dot]} v{type[(dot + 2)..]}\");",
+        "Console.WriteLine(doc.RootElement.TryGetProperty(\"time\", out _));"
+      ],
+      "answer": [
+        "shop.order.placed v2",
+        "False"
+      ],
+      "explain": [
+        "`type[..dot]` is everything before the last dot, and `dot + 2` skips the `.v`. `time` is optional in CloudEvents,",
+        "so a consumer must cope with it missing, which is the first taste of a **tolerant reader**."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Envelope or data? Sort each piece of information.",
+      "buckets": [
+        "Envelope (headers / attributes)",
+        "Data (the business payload)"
+      ],
+      "items": [
+        [
+          "The message id",
+          0
+        ],
+        [
+          "The order total",
+          1
+        ],
+        [
+          "The correlation id of the checkout",
+          0
+        ],
+        [
+          "The customer's delivery address",
+          1
+        ],
+        [
+          "The schema version",
+          0
+        ],
+        [
+          "The W3C `traceparent` for distributed tracing",
+          0
+        ],
+        [
+          "The ordered SKUs and quantities",
+          1
+        ]
+      ],
+      "explain": [
+        "A useful test: would a router, a dedup filter or a tracing tool need it without understanding the business? Then",
+        "it is envelope."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Wrap the event",
+      "prompt": [
+        "Write `string Wrap(string id, string source, string type, string correlationId, string dataJson, DateTimeOffset occurredAt)`",
+        "that returns a **structured-mode CloudEvent** as compact JSON, with the properties in exactly this order:",
+        "",
+        "`specversion` (`\"1.0\"`), `id`, `source`, `type`, `time`, `correlationid`, `datacontenttype` (`\"application/json\"`), `data`.",
+        "",
+        "- `time` is `occurredAt` converted to UTC, formatted `yyyy-MM-ddTHH:mm:ssZ` (for example `2026-11-26T14:05:12Z`).",
+        "- `data` is the parsed `dataJson` embedded as JSON (an object, not a string).",
+        "",
+        "```text",
+        "Wrap(\"e-91\", \"/orders-api\", \"shop.order.placed.v2\", \"c-77\", \"{\\\"orderId\\\":\\\"o-7\\\"}\", 2026-11-26 15:05:12 +01:00)",
+        "→ {\"specversion\":\"1.0\",\"id\":\"e-91\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\",\"time\":\"2026-11-26T14:05:12Z\",",
+        "   \"correlationid\":\"c-77\",\"datacontenttype\":\"application/json\",\"data\":{\"orderId\":\"o-7\"}}",
+        "```"
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "string Wrap(string id, string source, string type, string correlationId, string dataJson, DateTimeOffset occurredAt)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "string Wrap(string id, string source, string type, string correlationId, string dataJson, DateTimeOffset occurredAt)",
+        "{",
+        "    using var data = JsonDocument.Parse(dataJson);",
+        "    return JsonSerializer.Serialize(new",
+        "    {",
+        "        specversion = \"1.0\",",
+        "        id,",
+        "        source,",
+        "        type,",
+        "        time = occurredAt.UtcDateTime.ToString(\"yyyy-MM-dd'T'HH:mm:ss'Z'\"),",
+        "        correlationid = correlationId,",
+        "        datacontenttype = \"application/json\",",
+        "        data = data.RootElement",
+        "    });",
+        "}"
+      ],
+      "hints": [
+        "An anonymous object serializes its properties in declaration order: `new { specversion = \"1.0\", id, source, ... }`.",
+        "`JsonDocument.Parse(dataJson).RootElement` serializes as the JSON it holds.",
+        "`occurredAt.UtcDateTime.ToString(\"yyyy-MM-dd'T'HH:mm:ss'Z'\")`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"an order event\", \"\"\"{\"specversion\":\"1.0\",\"id\":\"e-91\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\",\"time\":\"2026-11-26T14:05:12Z\",\"correlationid\":\"c-77\",\"datacontenttype\":\"application/json\",\"data\":{\"orderId\":\"o-7\",\"totalCents\":1299}}\"\"\",",
+        "    Wrap(\"e-91\", \"/orders-api\", \"shop.order.placed.v2\", \"c-77\", \"\"\"{\"orderId\":\"o-7\",\"totalCents\":1299}\"\"\", new DateTimeOffset(2026, 11, 26, 15, 5, 12, TimeSpan.FromHours(1))));",
+        "Dojo.Eq(\"time is converted to UTC\", \"\"\"{\"specversion\":\"1.0\",\"id\":\"e-92\",\"source\":\"/billing\",\"type\":\"shop.payment.charged.v1\",\"time\":\"2026-11-27T01:30:00Z\",\"correlationid\":\"c-78\",\"datacontenttype\":\"application/json\",\"data\":{\"chargeId\":\"ch_1\"}}\"\"\",",
+        "    Wrap(\"e-92\", \"/billing\", \"shop.payment.charged.v1\", \"c-78\", \"\"\"{\"chargeId\":\"ch_1\"}\"\"\", new DateTimeOffset(2026, 11, 26, 20, 30, 0, TimeSpan.FromHours(-5))));",
+        "Dojo.Check(\"data is embedded as an object, not a string\", Wrap(\"e\", \"/s\", \"t.v1\", \"c\", \"{\\\"a\\\":1}\", DateTimeOffset.UnixEpoch).EndsWith(\"\\\"data\\\":{\\\"a\\\":1}}\"), \"data should be JSON, not an escaped string\");"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Validate incoming envelopes",
+      "prompt": [
+        "The platform team wants a gate in front of the shared `events` topic. Write `string Validate(string json)` that",
+        "returns `\"ok\"` or the **first** problem, checking in this order:",
+        "",
+        "1. not valid JSON, or not a JSON object → `\"not a JSON object\"`",
+        "2. each of `specversion`, `id`, `source`, `type` (in that order) missing, not a string, or empty → `\"missing {name}\"`",
+        "3. `specversion` other than `\"1.0\"` → `\"unsupported specversion {value}\"`",
+        "4. any top-level attribute name except `data` and `data_base64` that is not only lowercase letters and digits",
+        "   → `\"bad attribute name {name}\"` (CloudEvents forbids `correlationId`)",
+        "5. `type` not ending in `.v` plus digits (the team's versioning convention) → `\"type has no version: {type}\"`",
+        "6. `time` present but not a string that parses as a date and time → `\"time is not a timestamp\"`"
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "using System.Text.RegularExpressions;",
+        "",
+        "string Validate(string json)",
+        "{",
+        "    return \"ok\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "using System.Text.RegularExpressions;",
+        "",
+        "string Validate(string json)",
+        "{",
+        "    JsonDocument doc;",
+        "    try { doc = JsonDocument.Parse(json); }",
+        "    catch (JsonException) { return \"not a JSON object\"; }",
+        "    using (doc)",
+        "    {",
+        "        var root = doc.RootElement;",
+        "        if (root.ValueKind != JsonValueKind.Object) return \"not a JSON object\";",
+        "        foreach (var name in new[] { \"specversion\", \"id\", \"source\", \"type\" })",
+        "        {",
+        "            if (!root.TryGetProperty(name, out var v) || v.ValueKind != JsonValueKind.String || v.GetString() == \"\")",
+        "                return $\"missing {name}\";",
+        "        }",
+        "        var spec = root.GetProperty(\"specversion\").GetString();",
+        "        if (spec != \"1.0\") return $\"unsupported specversion {spec}\";",
+        "        foreach (var p in root.EnumerateObject())",
+        "        {",
+        "            if (p.Name is \"data\" or \"data_base64\") continue;",
+        "            if (!Regex.IsMatch(p.Name, \"^[a-z0-9]+$\")) return $\"bad attribute name {p.Name}\";",
+        "        }",
+        "        var type = root.GetProperty(\"type\").GetString()!;",
+        "        if (!Regex.IsMatch(type, @\"\\.v[0-9]+$\")) return $\"type has no version: {type}\";",
+        "        if (root.TryGetProperty(\"time\", out var t) &&",
+        "            (t.ValueKind != JsonValueKind.String ||",
+        "             !DateTimeOffset.TryParse(t.GetString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _)))",
+        "            return \"time is not a timestamp\";",
+        "        return \"ok\";",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Parse inside `try { ... } catch (JsonException)`, then check `RootElement.ValueKind == JsonValueKind.Object`.",
+        "`Regex.IsMatch(p.Name, \"^[a-z0-9]+$\")` for attribute names, `Regex.IsMatch(type, @\"\\.v[0-9]+$\")` for the version.",
+        "`DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out _)` checks the time."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a valid event\", \"ok\", Validate(\"\"\"{\"specversion\":\"1.0\",\"id\":\"e-1\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\",\"time\":\"2026-11-26T14:05:12Z\",\"correlationid\":\"c-1\",\"data\":{\"orderId\":\"o-7\"}}\"\"\"));",
+        "Dojo.Eq(\"time is optional\", \"ok\", Validate(\"\"\"{\"specversion\":\"1.0\",\"id\":\"e-1\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\"}\"\"\"));",
+        "Dojo.Eq(\"not JSON\", \"not a JSON object\", Validate(\"order placed\"));",
+        "Dojo.Eq(\"a JSON array\", \"not a JSON object\", Validate(\"[1,2]\"));",
+        "Dojo.Eq(\"missing id\", \"missing id\", Validate(\"\"\"{\"specversion\":\"1.0\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\"}\"\"\"));",
+        "Dojo.Eq(\"empty source\", \"missing source\", Validate(\"\"\"{\"specversion\":\"1.0\",\"id\":\"e-1\",\"source\":\"\",\"type\":\"shop.order.placed.v2\"}\"\"\"));",
+        "Dojo.Eq(\"id as a number\", \"missing id\", Validate(\"\"\"{\"specversion\":\"1.0\",\"id\":7,\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\"}\"\"\"));",
+        "Dojo.Eq(\"required attributes are checked in order\", \"missing specversion\", Validate(\"\"\"{\"type\":\"x\"}\"\"\"));",
+        "Dojo.Eq(\"old spec version\", \"unsupported specversion 0.3\", Validate(\"\"\"{\"specversion\":\"0.3\",\"id\":\"e-1\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\"}\"\"\"));",
+        "Dojo.Eq(\"camelCase extension\", \"bad attribute name correlationId\", Validate(\"\"\"{\"specversion\":\"1.0\",\"id\":\"e-1\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\",\"correlationId\":\"c-1\"}\"\"\"));",
+        "Dojo.Eq(\"data's own field names are not checked\", \"ok\", Validate(\"\"\"{\"specversion\":\"1.0\",\"id\":\"e-1\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v2\",\"data\":{\"orderId\":\"o-7\"}}\"\"\"));",
+        "Dojo.Eq(\"unversioned type\", \"type has no version: shop.order.placed\", Validate(\"\"\"{\"specversion\":\"1.0\",\"id\":\"e-1\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed\"}\"\"\"));",
+        "Dojo.Eq(\"bad time\", \"time is not a timestamp\", Validate(\"\"\"{\"specversion\":\"1.0\",\"id\":\"e-1\",\"source\":\"/orders-api\",\"type\":\"shop.order.placed.v1\",\"time\":\"yesterday\"}\"\"\"));"
+      ]
+    }
+  ]
+}

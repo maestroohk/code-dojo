@@ -1,0 +1,316 @@
+{
+  "title": "Where ordering holds, and where it breaks",
+  "summary": "Kafka orders per partition, RabbitMQ per queue with one consumer; competing consumers, requeues and producer retries reorder, and the cloud brokers have their own ordering keys.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ordering is local, never global",
+      "body": [
+        "No broker gives you a global order across a whole busy topic: that would allow one consumer at a time. What you get is",
+        "**order inside a lane**:",
+        "",
+        "```text",
+        "Kafka: order per PARTITION                     RabbitMQ: order per QUEUE ... until two consumers share it",
+        "P0 | A1:created | A1:paid | A1:shipped |        queue billing: [ A1:created | A1:paid | A1:shipped ]",
+        "P1 | B7:created | B7:paid |                              |                    |",
+        "     (A1 and B7 have no order between them)         consumer c1 gets A1:created (slow: 30 ms)",
+        "                                                    consumer c2 gets A1:paid    (fast: 5 ms)  -> done FIRST",
+        "```",
+        "",
+        "- **Kafka** keeps records of one partition in order, and one partition has one consumer per group. So \"all events of",
+        "  order A1 in order\" means \"all events of A1 **on the same partition**\", which is what the record **key** gives you.",
+        "- **RabbitMQ** delivers a queue's messages in order, but with **competing consumers** they are *processed* in parallel",
+        "  and finish in any order. A `basic.nack` with `requeue: true` (or a consumer crash) puts a message back while later",
+        "  messages are already being processed, so it is redelivered **after** them (with `Redelivered = true`).",
+        "- For strict per-queue order in RabbitMQ use **one** consumer: `x-single-active-consumer: true` on the queue lets",
+        "  several consumers stand by while only one receives, with failover. A **stream** (`x-queue-type: stream`) is",
+        "  RabbitMQ's log with offsets, ordered like a Kafka partition.",
+        "",
+        "> **See it:** in **Labs â†’ Messaging builder â†’ RabbitMQ**, play *Drain the backlog* and watch the completion order with",
+        "> two consumers."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`order-events` has 12 partitions and every record is keyed by `orderId`. What ordering can a consumer rely on?",
+      "options": [
+        "Events of the same order arrive in the order they were written; events of different orders have no defined order",
+        "All events arrive in exactly the order they were produced",
+        "Events are ordered by timestamp across all partitions",
+        "No ordering at all, because there are 12 partitions"
+      ],
+      "answer": 0,
+      "explain": [
+        "The key picks the partition, and a partition is ordered. Two different orders usually sit on different partitions and",
+        "are consumed by different members, so their relative order is undefined. Design for \"ordered per entity\", never",
+        "\"ordered globally\"."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Two competing consumers with prefetch 1 take messages from one queue. `m1` takes 30 ms, the others 5 ms. Each message goes to the consumer that is free first. In what order do they **finish**?",
+      "code": [
+        "var durations = new Dictionary<string, int> { [\"m1\"] = 30, [\"m2\"] = 5, [\"m3\"] = 5, [\"m4\"] = 5 };",
+        "var freeAt = new[] { 0, 0 };",
+        "var done = new List<(int At, string Msg)>();",
+        "foreach (var m in new[] { \"m1\", \"m2\", \"m3\", \"m4\" })",
+        "{",
+        "    var c = freeAt[0] <= freeAt[1] ? 0 : 1;",
+        "    freeAt[c] += durations[m];",
+        "    done.Add((freeAt[c], m));",
+        "}",
+        "foreach (var d in done.OrderBy(d => d.At)) Console.Write(d.Msg + \" \");"
+      ],
+      "answer": "m2 m3 m4 m1",
+      "explain": [
+        "Consumer 0 is busy with `m1` for 30 ms while consumer 1 finishes `m2`, `m3` and `m4` at 5, 10 and 15 ms. If `m1` was",
+        "`A1:created` and `m2` was `A1:paid`, the payment was processed before the order existed. Competing consumers buy",
+        "throughput by giving up order."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Competing consumers: completion order",
+      "prompt": [
+        "Write `List<string> CompletionOrder(string[] messages, int[] durations, int consumers)` that shows what competing",
+        "consumers do to order.",
+        "",
+        "- Messages leave the queue in order; `durations[i]` is how long `messages[i]` takes.",
+        "- Prefetch is 1: each message goes to the consumer that becomes free **earliest** (on a tie, the lowest consumer",
+        "  index); it finishes at that consumer's free time + its duration.",
+        "- Return the messages in the order they **finish** (on equal finish times, queue order first)."
+      ],
+      "starter": [
+        "List<string> CompletionOrder(string[] messages, int[] durations, int consumers)",
+        "{",
+        "    return messages.ToList();",
+        "}"
+      ],
+      "solution": [
+        "List<string> CompletionOrder(string[] messages, int[] durations, int consumers)",
+        "{",
+        "    var freeAt = new long[consumers];",
+        "    var done = new List<(long At, int Pos, string Msg)>();",
+        "    for (var i = 0; i < messages.Length; i++)",
+        "    {",
+        "        var c = 0;",
+        "        for (var k = 1; k < consumers; k++)",
+        "            if (freeAt[k] < freeAt[c]) c = k;",
+        "        freeAt[c] += durations[i];",
+        "        done.Add((freeAt[c], i, messages[i]));",
+        "    }",
+        "    return done.OrderBy(d => d.At).ThenBy(d => d.Pos).Select(d => d.Msg).ToList();",
+        "}"
+      ],
+      "hints": [
+        "Keep an array `freeAt` with one entry per consumer; pick the index with the smallest value (first one on a tie).",
+        "Record `(finishTime, queuePosition, message)` and sort by finish time, then position."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoMsgs = new[] { \"A1:created\", \"A1:paid\", \"A1:shipped\", \"B7:created\" };",
+        "Dojo.Eq(\"two consumers: A1:paid finishes before A1:created\",",
+        "    new List<string> { \"A1:paid\", \"A1:shipped\", \"B7:created\", \"A1:created\" },",
+        "    CompletionOrder(dojoMsgs, new[] { 30, 5, 5, 5 }, 2));",
+        "Dojo.Eq(\"one consumer keeps the queue order\",",
+        "    new List<string> { \"A1:created\", \"A1:paid\", \"A1:shipped\", \"B7:created\" },",
+        "    CompletionOrder(dojoMsgs, new[] { 30, 5, 5, 5 }, 1));",
+        "Dojo.Eq(\"equal finish times keep queue order\",",
+        "    new List<string> { \"m0\", \"m1\", \"m2\", \"m3\" },",
+        "    CompletionOrder(new[] { \"m0\", \"m1\", \"m2\", \"m3\" }, new[] { 10, 10, 10, 1 }, 3));",
+        "Dojo.Eq(\"three consumers, one slow message\",",
+        "    new List<string> { \"m1\", \"m2\", \"m0\" },",
+        "    CompletionOrder(new[] { \"m0\", \"m1\", \"m2\" }, new[] { 5, 1, 1 }, 3));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The producer can reorder too: retries in flight",
+      "body": [
+        "A producer keeps several requests **in flight** per broker connection. If batch 1 fails and batch 2 succeeds, the",
+        "retry of batch 1 lands **after** batch 2:",
+        "",
+        "```text",
+        "in flight:  [seq 0: A1:created]  [seq 1: A1:paid]  [seq 2: A1:shipped]",
+        "            timeout -> retry      written            written",
+        "log:        | A1:paid | A1:shipped | A1:created |          without idempotence",
+        "log:        | A1:created | A1:paid | A1:shipped |          with idempotence: seq 1 and 2 are",
+        "                                                           rejected (OUT_OF_ORDER_SEQUENCE) and resent after seq 0",
+        "```",
+        "",
+        "| Setting | Order on retry | Throughput |",
+        "|---|---|---|",
+        "| `enable.idempotence=true`, `max.in.flight.requests.per.connection <= 5` | **kept** (the leader checks sequence numbers) | good |",
+        "| idempotence off, `max.in.flight = 1` | kept | poor: one request at a time per broker |",
+        "| idempotence off, `max.in.flight > 1` | **can reorder** | good |",
+        "",
+        "The Java client defaults to idempotence on with 5 in flight. **librdkafka defaults `max.in.flight` to 1000000 and",
+        "idempotence to off**, so a Confluent.Kafka producer with default settings can reorder records of one key on a retry.",
+        "`EnableIdempotence = true` caps in-flight requests at 5 and keeps order."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Does the order of one entity's messages survive?",
+      "buckets": [
+        "Order kept",
+        "Order can break"
+      ],
+      "items": [
+        [
+          "Kafka, keyed by order id, idempotent producer, one consumer per partition",
+          0
+        ],
+        [
+          "RabbitMQ queue with three competing consumers",
+          1
+        ],
+        [
+          "RabbitMQ queue with one consumer that nacks a message with `requeue: true`",
+          1
+        ],
+        [
+          "RabbitMQ queue with `x-single-active-consumer: true`, handled one at a time",
+          0
+        ],
+        [
+          "Confluent.Kafka producer with default settings and a retried batch",
+          1
+        ],
+        [
+          "SQS FIFO queue, same `MessageGroupId`",
+          0
+        ],
+        [
+          "SQS standard queue",
+          1
+        ],
+        [
+          "Service Bus queue with sessions, same `SessionId`",
+          0
+        ]
+      ],
+      "explain": [
+        "Order survives only when one lane (partition, queue, session, message group) is handled by one consumer at a time,",
+        "**and** nothing puts a message back behind later ones (requeue, retry without sequence numbers)."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Ordering keys in the cloud brokers",
+      "body": [
+        "Every managed broker has the same idea under a different name: **a key that defines the ordered lane**.",
+        "",
+        "| Service | Ordered lane | How you set it | What to know |",
+        "|---|---|---|---|",
+        "| Kafka / Amazon MSK / Confluent Cloud | partition | record key | per partition, one consumer per group |",
+        "| Azure Event Hubs | partition | `PartitionKey` | Kafka-compatible endpoint too; consumer groups with checkpoints |",
+        "| Azure Service Bus | **session** | `SessionId` on the message, a session-enabled queue or subscription | one receiver holds a session lock at a time; `ServiceBusSessionProcessor` with `MaxConcurrentSessions` processes many sessions in parallel |",
+        "| Amazon SQS FIFO | **message group** | `MessageGroupId` | while a message of a group is in flight, the rest of the group waits; `MessageDeduplicationId` dedups within 5 minutes |",
+        "| Google Cloud Pub/Sub | **ordering key** | `ordering_key` + message ordering enabled on the subscription | a failed message holds back the rest of its key |",
+        "| RabbitMQ | queue | one queue + single active consumer, or a stream | competing consumers give up order |",
+        "",
+        "The shared trade-off is **head-of-line blocking**: one message that keeps failing stops its whole lane, so every one",
+        "of these needs a delivery limit (`MaxDeliveryCount`, `maxReceiveCount` in the redrive policy, dead-letter topics,",
+        "the quorum queue `delivery-limit`) that moves it aside."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each service to the field that defines its ordered lane.",
+      "pairs": [
+        [
+          "Azure Service Bus",
+          "`SessionId`"
+        ],
+        [
+          "Amazon SQS FIFO",
+          "`MessageGroupId`"
+        ],
+        [
+          "Google Cloud Pub/Sub",
+          "ordering key"
+        ],
+        [
+          "Azure Event Hubs",
+          "`PartitionKey`"
+        ],
+        [
+          "RabbitMQ",
+          "`x-single-active-consumer` on one queue"
+        ]
+      ],
+      "explain": [
+        "Same idea everywhere: pick the entity whose events must stay in order (order, account, device) and use its id as the",
+        "lane key. Lanes are independent, so many lanes give parallelism and one lane gives order."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Retries in flight: with and without idempotence",
+      "prompt": [
+        "Simulate what the leader's log looks like when batches are retried.",
+        "",
+        "Write `List<string> BrokerLog(List<(int Seq, string Value, bool FailsFirst)> batches, int maxInFlight, bool idempotent)`.",
+        "Sequence numbers start at 0 and have no gaps.",
+        "",
+        "- The producer works in **rounds**. Each round it sends the first `maxInFlight` pending batches, in sequence order.",
+        "- For each batch sent, in order:",
+        "  - if `FailsFirst` and this is its first attempt, it fails (a timeout) and stays pending;",
+        "  - else, if `idempotent` and its sequence is not the next one the leader expects, it is rejected",
+        "    (`OUT_OF_ORDER_SEQUENCE`) and stays pending;",
+        "  - else the leader appends its value; the next expected sequence becomes `Seq + 1`.",
+        "- Pending batches are always kept in sequence order. Repeat until nothing is pending; return the log."
+      ],
+      "starter": [
+        "List<string> BrokerLog(List<(int Seq, string Value, bool FailsFirst)> batches, int maxInFlight, bool idempotent)",
+        "{",
+        "    return batches.Select(b => b.Value).ToList();",
+        "}"
+      ],
+      "solution": [
+        "List<string> BrokerLog(List<(int Seq, string Value, bool FailsFirst)> batches, int maxInFlight, bool idempotent)",
+        "{",
+        "    var pending = batches.OrderBy(b => b.Seq).ToList();",
+        "    var failedOnce = new HashSet<int>();",
+        "    var log = new List<string>();",
+        "    var expected = 0;",
+        "    while (pending.Count > 0)",
+        "    {",
+        "        var retry = new List<(int Seq, string Value, bool FailsFirst)>();",
+        "        var sent = Math.Min(maxInFlight, pending.Count);",
+        "        foreach (var b in pending.GetRange(0, sent))",
+        "        {",
+        "            if (b.FailsFirst && failedOnce.Add(b.Seq)) { retry.Add(b); continue; }",
+        "            if (idempotent && b.Seq != expected) { retry.Add(b); continue; }",
+        "            log.Add(b.Value);",
+        "            expected = b.Seq + 1;",
+        "        }",
+        "        retry.AddRange(pending.GetRange(sent, pending.Count - sent));",
+        "        pending = retry.OrderBy(b => b.Seq).ToList();",
+        "    }",
+        "    return log;",
+        "}"
+      ],
+      "hints": [
+        "Loop while anything is pending; each round send the first `Math.Min(maxInFlight, pending.Count)` batches and collect the ones to retry.",
+        "`failedOnce.Add(seq)` is true only the first time: use it to fail each `FailsFirst` batch exactly once.",
+        "Next round: the retries plus the batches that were not sent, sorted by `Seq` again."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoB = new List<(int Seq, string Value, bool FailsFirst)> { (0, \"A1:created\", true), (1, \"A1:paid\", false), (2, \"A1:shipped\", false) };",
+        "Dojo.Eq(\"5 in flight, no idempotence: the retry lands last\", new List<string> { \"A1:paid\", \"A1:shipped\", \"A1:created\" }, BrokerLog(dojoB, 5, false));",
+        "Dojo.Eq(\"5 in flight, idempotent: order kept\", new List<string> { \"A1:created\", \"A1:paid\", \"A1:shipped\" }, BrokerLog(dojoB, 5, true));",
+        "Dojo.Eq(\"1 in flight, no idempotence: order kept (slowly)\", new List<string> { \"A1:created\", \"A1:paid\", \"A1:shipped\" }, BrokerLog(dojoB, 1, false));",
+        "var dojoTwo = new List<(int Seq, string Value, bool FailsFirst)> { (0, \"a\", false), (1, \"b\", true), (2, \"c\", true), (3, \"d\", false) };",
+        "Dojo.Eq(\"two failures, no idempotence\", new List<string> { \"a\", \"d\", \"b\", \"c\" }, BrokerLog(dojoTwo, 5, false));",
+        "Dojo.Eq(\"two failures, idempotent\", new List<string> { \"a\", \"b\", \"c\", \"d\" }, BrokerLog(dojoTwo, 5, true));",
+        "Dojo.Eq(\"two in flight, no idempotence\", new List<string> { \"A1:paid\", \"A1:created\", \"A1:shipped\" }, BrokerLog(dojoB, 2, false));",
+        "Dojo.Eq(\"nothing to send\", new List<string>(), BrokerLog(new List<(int Seq, string Value, bool FailsFirst)>(), 5, true));"
+      ]
+    }
+  ]
+}

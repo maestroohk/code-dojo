@@ -1,0 +1,430 @@
+{
+  "title": "Per-key order at scale",
+  "summary": "Detect out-of-order and duplicate events with versions, process keys in parallel inside one consumer without breaking their order, commit only what is safe, and know how Service Bus sessions and SQS FIFO groups do the same.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Versions catch what ordering cannot",
+      "body": [
+        "Even with a good key, events arrive out of order in real systems: a producer retry without idempotence, a replay, two",
+        "producers for one entity, a requeue, a migration that re-sends history. The robust fix is in the **data**: every event",
+        "carries the entity's **version** (or a per-entity sequence number) and the consumer remembers the last version it",
+        "applied per key.",
+        "",
+        "- `version <= last`: **stale or duplicate**, skip it (and count it in a metric).",
+        "- `version == last + 1`: apply it.",
+        "- `version > last + 1`: a **gap**. If events are full snapshots (\"status is now delivered\") you can apply and move on;",
+        "  if they are deltas (\"add 5 to stock\") you must wait for the missing one, park the event, or reload state from the",
+        "  source.",
+        "",
+        "Store the last version **in the same transaction** as the state it protects (a `version` column with",
+        "`UPDATE ... WHERE id = @id AND version = @expected`), so the check and the write cannot race.",
+        "",
+        "Step through the program: the late `v2` cannot overwrite `delivered`."
+      ],
+      "trace": {
+        "code": [
+          "var lastVersion = new Dictionary<string, long>();",
+          "var events = new (string Key, long Version, string Status)[] { (\"A1\", 1, \"packed\"), (\"A1\", 3, \"delivered\"), (\"A1\", 2, \"shipped\") };",
+          "foreach (var e in events)",
+          "{",
+          "    var last = lastVersion.GetValueOrDefault(e.Key);",
+          "    if (e.Version <= last)",
+          "    {",
+          "        Console.WriteLine($\"{e.Key} v{e.Version} is stale, skipped\");",
+          "        continue;",
+          "    }",
+          "    lastVersion[e.Key] = e.Version;",
+          "    Console.WriteLine($\"{e.Key} -> {e.Status} (v{e.Version})\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "One key's events arrive with these versions. What does this print?",
+      "code": [
+        "long last = 0;",
+        "var applied = 0;",
+        "var gaps = 0;",
+        "foreach (var v in new long[] { 1, 2, 2, 4, 3, 5 })",
+        "{",
+        "    if (v <= last) continue;",
+        "    if (v > last + 1) gaps++;",
+        "    last = v;",
+        "    applied++;",
+        "}",
+        "Console.WriteLine($\"applied {applied}, gaps {gaps}, last v{last}\");"
+      ],
+      "answer": "applied 4, gaps 1, last v5",
+      "explain": [
+        "The duplicate `2` is skipped, `4` opens a gap and is applied, so the late `3` is now stale and skipped too. For",
+        "snapshot events that is correct. For delta events `3` is lost: those need the gap handled (wait or reload), which the",
+        "boss of this module asks for."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A version gate",
+      "prompt": [
+        "Write a class `VersionGate` that a consumer calls before applying an event.",
+        "",
+        "- `string Apply(string key, long version)`, versions start at 1 for every key:",
+        "  - `version <= last` → `\"stale (have v{last})\"`, nothing changes;",
+        "  - `version == last + 1` → remember it, return `\"applied\"`;",
+        "  - `version > last + 1` → `\"gap (expected v{last + 1})\"`, nothing changes (the caller parks the event).",
+        "- `long Version(string key)`: the last applied version (0 for an unknown key)."
+      ],
+      "starter": [
+        "class VersionGate",
+        "{",
+        "    public string Apply(string key, long version) => \"\";",
+        "",
+        "    public long Version(string key) => 0;",
+        "}"
+      ],
+      "solution": [
+        "class VersionGate",
+        "{",
+        "    readonly Dictionary<string, long> last = new();",
+        "",
+        "    public string Apply(string key, long version)",
+        "    {",
+        "        var current = last.GetValueOrDefault(key);",
+        "        if (version <= current) return $\"stale (have v{current})\";",
+        "        if (version > current + 1) return $\"gap (expected v{current + 1})\";",
+        "        last[key] = version;",
+        "        return \"applied\";",
+        "    }",
+        "",
+        "    public long Version(string key) => last.GetValueOrDefault(key);",
+        "}"
+      ],
+      "hints": [
+        "`last.GetValueOrDefault(key)` is 0 for a key you have not seen.",
+        "Check stale first, then gap, then apply."
+      ],
+      "template": [
+        "var dojoG = new VersionGate();",
+        "Dojo.Eq(\"v1 of a new key\", \"applied\", dojoG.Apply(\"A1\", 1));",
+        "Dojo.Eq(\"v2 follows\", \"applied\", dojoG.Apply(\"A1\", 2));",
+        "Dojo.Eq(\"a duplicate is stale\", \"stale (have v2)\", dojoG.Apply(\"A1\", 2));",
+        "Dojo.Eq(\"an old replay is stale\", \"stale (have v2)\", dojoG.Apply(\"A1\", 1));",
+        "Dojo.Eq(\"a gap is reported, not applied\", \"gap (expected v3)\", dojoG.Apply(\"A1\", 4));",
+        "Dojo.Eq(\"still at v2\", 2L, dojoG.Version(\"A1\"));",
+        "Dojo.Eq(\"keys are independent\", \"applied\", dojoG.Apply(\"B7\", 1));",
+        "Dojo.Eq(\"a key that starts with a gap\", \"gap (expected v1)\", dojoG.Apply(\"C4\", 2));",
+        "Dojo.Eq(\"unknown key is at v0\", 0L, dojoG.Version(\"zz\"));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Parallel inside one consumer, ordered per key",
+      "body": [
+        "One partition, one consumer: with a 20 ms database call per record that is 50 records per second, whatever the",
+        "partition count. To go faster **without breaking per-key order**, dispatch inside the consumer by key:",
+        "",
+        "```text",
+        "          consume loop (one thread, offset order)",
+        "orders-0:  100 A1 | 101 B7 | 102 A1 | 103 C4 | 104 B7 | 105 D2",
+        "                      | worker = stableHash(key) % 2",
+        "             +--------+------------------+",
+        "             v                           v",
+        "   worker 0: 101 B7, 103 C4, 104 B7     worker 1: 100 A1, 102 A1, 105 D2",
+        "   (one key always on one worker, so its events stay in order)",
+        "",
+        "   done: 101 103 104 ......  in flight: 100  ->  safe to commit: 100  (not 105!)",
+        "```",
+        "",
+        "- Same key, same worker: per-key order holds; different keys run in parallel.",
+        "- **Commit only below the lowest offset still in flight.** If 101 to 104 are done but 100 is not, committing 105",
+        "  and then crashing loses 100. Track in-flight offsets per partition and commit the smallest one.",
+        "- Use **bounded** queues per worker (`Channel.CreateBounded<T>(capacity)`) so a slow worker slows the consume loop",
+        "  instead of filling memory; stop dispatching for partitions you lose in the revoke handler.",
+        "- In .NET the building blocks are `System.Threading.Channels` and `Task`s; in Java the Confluent Parallel Consumer",
+        "  library does exactly this.",
+        "",
+        "```csharp",
+        "var workers = Enumerable.Range(0, 8).Select(_ => Channel.CreateBounded<ConsumeResult<string, string>>(100)).ToArray();",
+        "foreach (var ch in workers)",
+        "    _ = Task.Run(async () =>",
+        "    {",
+        "        await foreach (var cr in ch.Reader.ReadAllAsync(ct)) { await HandleAsync(cr); tracker.Done(cr.Offset.Value); }",
+        "    });",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A teammate speeds up the consumer with `Parallel.ForEach(batch, Handle)` over every 500 records consumed, then stores the offset of the last record. Which problems does this introduce?",
+      "options": [
+        "Events of the same key can be handled concurrently or out of order",
+        "A crash after storing the last offset can lose records that were still running",
+        "It makes each record be handled twice",
+        "Kafka rejects offsets stored from more than one thread"
+      ],
+      "answer": [
+        0,
+        1
+      ],
+      "explain": [
+        "`Parallel.ForEach` knows nothing about keys, so `A1:paid` can run before or alongside `A1:created`. And storing the",
+        "batch's last offset claims records as done that may still be running or may have failed. Dispatch by key and commit the",
+        "lowest in-flight offset instead."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the consume loop of a key-dispatching consumer (one partition).",
+      "lines": [
+        "var cr = consumer.Consume(ct);",
+        "tracker.Started(cr.Offset.Value);",
+        "var w = (int)(Fnv1a(cr.Message.Key) % (uint)workers.Length);",
+        "await workers[w].Writer.WriteAsync(cr, ct);"
+      ],
+      "also": [
+        [
+          "var cr = consumer.Consume(ct);",
+          "var w = (int)(Fnv1a(cr.Message.Key) % (uint)workers.Length);",
+          "tracker.Started(cr.Offset.Value);",
+          "await workers[w].Writer.WriteAsync(cr, ct);"
+        ]
+      ],
+      "explain": [
+        "The offset must be marked as started **before** the record reaches a worker, otherwise a fast worker could report",
+        "it done before the tracker knows it exists, and the commit position would jump past it."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Track the safe commit position",
+      "prompt": [
+        "Write a class `OffsetTracker` for one partition whose records are processed in parallel.",
+        "",
+        "- `void Started(long offset)`: the record was handed to a worker.",
+        "- `void Done(long offset)`: the worker finished it (offsets finish in any order).",
+        "- `long? Committable`: the offset to commit, meaning \"everything below this is done\":",
+        "  - `null` while nothing has finished yet;",
+        "  - the **smallest offset still in flight**, if any;",
+        "  - otherwise the highest finished offset + 1."
+      ],
+      "starter": [
+        "class OffsetTracker",
+        "{",
+        "    public void Started(long offset) { }",
+        "",
+        "    public void Done(long offset) { }",
+        "",
+        "    public long? Committable => null;",
+        "}"
+      ],
+      "solution": [
+        "class OffsetTracker",
+        "{",
+        "    readonly SortedSet<long> inFlight = new();",
+        "    long? maxDone;",
+        "",
+        "    public void Started(long offset) => inFlight.Add(offset);",
+        "",
+        "    public void Done(long offset)",
+        "    {",
+        "        inFlight.Remove(offset);",
+        "        if (maxDone is null || offset > maxDone) maxDone = offset;",
+        "    }",
+        "",
+        "    public long? Committable",
+        "    {",
+        "        get",
+        "        {",
+        "            if (maxDone is null) return null;",
+        "            return inFlight.Count > 0 ? inFlight.Min : maxDone + 1;",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `SortedSet<long>` of in-flight offsets gives you `Min` directly.",
+        "Remember the highest finished offset; it matters only when nothing is in flight."
+      ],
+      "template": [
+        "var dojoT = new OffsetTracker();",
+        "foreach (var o in new long[] { 10, 11, 12, 13 }) dojoT.Started(o);",
+        "Dojo.Eq(\"nothing finished yet\", (long?)null, dojoT.Committable);",
+        "dojoT.Done(12);",
+        "Dojo.Eq(\"12 is done but 10 is not: commit 10\", (long?)10, dojoT.Committable);",
+        "dojoT.Done(10);",
+        "Dojo.Eq(\"10 done: commit 11\", (long?)11, dojoT.Committable);",
+        "dojoT.Done(11);",
+        "Dojo.Eq(\"10, 11, 12 done: commit 13\", (long?)13, dojoT.Committable);",
+        "dojoT.Done(13);",
+        "Dojo.Eq(\"all done: commit 14\", (long?)14, dojoT.Committable);",
+        "dojoT.Started(14);",
+        "Dojo.Eq(\"a new record in flight holds the position\", (long?)14, dojoT.Committable);",
+        "dojoT.Done(14);",
+        "Dojo.Eq(\"and moves on when it is done\", (long?)15, dojoT.Committable);",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Sessions and message groups do this for you",
+      "body": [
+        "The managed brokers move key-based dispatch into the broker:",
+        "",
+        "```csharp",
+        "// Azure Service Bus: a session-enabled queue; one receiver owns a session at a time",
+        "await using var client = new ServiceBusClient(\"sb-shop.servicebus.windows.net\", new DefaultAzureCredential());",
+        "await client.CreateSender(\"shipments\").SendMessageAsync(new ServiceBusMessage(json) { SessionId = orderId, MessageId = eventId });",
+        "",
+        "var processor = client.CreateSessionProcessor(\"shipments\", new ServiceBusSessionProcessorOptions",
+        "{",
+        "    MaxConcurrentSessions = 16,      // 16 orders in parallel, each one in order",
+        "    AutoCompleteMessages = false,",
+        "});",
+        "processor.ProcessMessageAsync += async args => { await HandleAsync(args.Message); await args.CompleteMessageAsync(args.Message); };",
+        "processor.ProcessErrorAsync += args => { logger.LogError(args.Exception, \"session error\"); return Task.CompletedTask; };",
+        "await processor.StartProcessingAsync();",
+        "```",
+        "",
+        "```csharp",
+        "// Amazon SQS FIFO: order per MessageGroupId, dedup per MessageDeduplicationId (5-minute window)",
+        "await sqs.SendMessageAsync(new SendMessageRequest",
+        "{",
+        "    QueueUrl = shipmentsFifoUrl, MessageBody = json, MessageGroupId = orderId, MessageDeduplicationId = eventId,",
+        "});",
+        "```",
+        "",
+        "- While a message of a group (or session) is being processed, the **rest of that group waits**; other groups flow.",
+        "  Parallelism = the number of active groups, so a single group id for everything means one message at a time.",
+        "- A message that keeps failing blocks its group until the **max delivery count** (`MaxDeliveryCount` on Service Bus,",
+        "  `maxReceiveCount` in the SQS redrive policy) moves it to the dead-letter queue.",
+        "- SQS FIFO throughput is limited per queue (300 API calls per second per action, more with batching and high",
+        "  throughput mode), so pick group ids with many distinct values."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A team moves to SQS FIFO and sets `MessageGroupId = \"shipments\"` on every message \"to be safe\". Twenty consumers poll the queue. What happens?",
+      "options": [
+        "Only one message is processed at a time across all twenty consumers, because one group is delivered strictly in order",
+        "Twenty messages are processed in parallel, in order",
+        "SQS rejects the messages because the group id is not unique",
+        "Ordering is lost because there are twenty consumers"
+      ],
+      "answer": 0,
+      "explain": [
+        "FIFO order is per group, so one group means a single lane: the other nineteen consumers get nothing while a message of",
+        "the group is in flight. Use the entity id (`orderId`) as the group id: per-order order, many lanes in parallel."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Simulate a key-dispatching consumer",
+      "prompt": [
+        "Put the lesson together: dispatch one partition's records to workers by key and watch the commit position.",
+        "",
+        "Write `List<string> Simulate(List<(long Offset, string Key, int Cost)> records, int workers)`. `Fnv1a` is given.",
+        "",
+        "- A record goes to worker `Fnv1a(key) % workers`. All records are dispatched at time 0, in offset order.",
+        "- Each worker handles its records one after another, in offset order: a record finishes at the worker's previous",
+        "  finish time + its `Cost` (the first one at `0 + Cost`).",
+        "- Go through the completions in order of finish time (equal times: lower offset first). After each one, the commit",
+        "  position is the smallest offset not yet finished, or the last offset + 1 once everything is finished.",
+        "- Return one line per completion: `\"t={finish} {key}@{offset} w{worker} commit {position}\"`."
+      ],
+      "starter": [
+        "// a stable 32-bit FNV-1a hash, given: never use string.GetHashCode() for routing",
+        "uint Fnv1a(string s)",
+        "{",
+        "    var h = 2166136261u;",
+        "    foreach (var b in Encoding.UTF8.GetBytes(s))",
+        "    {",
+        "        h ^= b;",
+        "        h *= 16777619u;",
+        "    }",
+        "    return h;",
+        "}",
+        "",
+        "List<string> Simulate(List<(long Offset, string Key, int Cost)> records, int workers)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "// a stable 32-bit FNV-1a hash, given: never use string.GetHashCode() for routing",
+        "uint Fnv1a(string s)",
+        "{",
+        "    var h = 2166136261u;",
+        "    foreach (var b in Encoding.UTF8.GetBytes(s))",
+        "    {",
+        "        h ^= b;",
+        "        h *= 16777619u;",
+        "    }",
+        "    return h;",
+        "}",
+        "",
+        "List<string> Simulate(List<(long Offset, string Key, int Cost)> records, int workers)",
+        "{",
+        "    var freeAt = new long[workers];",
+        "    var done = new List<(long At, long Offset, string Key, int Worker)>();",
+        "    foreach (var r in records.OrderBy(r => r.Offset))",
+        "    {",
+        "        var w = (int)(Fnv1a(r.Key) % (uint)workers);",
+        "        freeAt[w] += r.Cost;",
+        "        done.Add((freeAt[w], r.Offset, r.Key, w));",
+        "    }",
+        "    var pending = new SortedSet<long>(records.Select(r => r.Offset));",
+        "    var last = records.Count == 0 ? 0 : records.Max(r => r.Offset);",
+        "    var lines = new List<string>();",
+        "    foreach (var d in done.OrderBy(d => d.At).ThenBy(d => d.Offset))",
+        "    {",
+        "        pending.Remove(d.Offset);",
+        "        var position = pending.Count > 0 ? pending.Min : last + 1;",
+        "        lines.Add($\"t={d.At} {d.Key}@{d.Offset} w{d.Worker} commit {position}\");",
+        "    }",
+        "    return lines;",
+        "}"
+      ],
+      "hints": [
+        "First pass: compute each record's worker and finish time with a `long[] freeAt` per worker.",
+        "Second pass: sort by `(finish, offset)`, remove each from a `SortedSet` of pending offsets and read `Min`.",
+        "`Fnv1a(key) % (uint)workers` is a `uint`: cast it to `int` for the worker index."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRecs = new List<(long Offset, string Key, int Cost)> { (100, \"A1\", 30), (101, \"B7\", 5), (102, \"A1\", 5), (103, \"C4\", 10), (104, \"B7\", 5), (105, \"D2\", 5) };",
+        "Dojo.Eq(\"two workers: the slow A1@100 holds the commit position\", new List<string>",
+        "{",
+        "    \"t=5 B7@101 w0 commit 100\",",
+        "    \"t=15 C4@103 w0 commit 100\",",
+        "    \"t=20 B7@104 w0 commit 100\",",
+        "    \"t=30 A1@100 w1 commit 102\",",
+        "    \"t=35 A1@102 w1 commit 105\",",
+        "    \"t=40 D2@105 w1 commit 106\",",
+        "}, Simulate(dojoRecs, 2));",
+        "Dojo.Eq(\"three workers: most keys hash to one worker (skew)\", new List<string>",
+        "{",
+        "    \"t=5 D2@105 w1 commit 100\",",
+        "    \"t=30 A1@100 w2 commit 101\",",
+        "    \"t=35 B7@101 w2 commit 102\",",
+        "    \"t=40 A1@102 w2 commit 103\",",
+        "    \"t=50 C4@103 w2 commit 104\",",
+        "    \"t=55 B7@104 w2 commit 106\",",
+        "}, Simulate(dojoRecs, 3));",
+        "Dojo.Eq(\"one worker is plain sequential processing\", new List<string>",
+        "{",
+        "    \"t=30 A1@100 w0 commit 101\",",
+        "    \"t=35 B7@101 w0 commit 102\",",
+        "    \"t=40 A1@102 w0 commit 103\",",
+        "    \"t=50 C4@103 w0 commit 104\",",
+        "    \"t=55 B7@104 w0 commit 105\",",
+        "    \"t=60 D2@105 w0 commit 106\",",
+        "}, Simulate(dojoRecs, 1));",
+        "Dojo.Eq(\"no records\", new List<string>(), Simulate(new List<(long Offset, string Key, int Cost)>(), 2));"
+      ]
+    }
+  ]
+}

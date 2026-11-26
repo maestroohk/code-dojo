@@ -1,0 +1,421 @@
+{
+  "title": "Safe changes, tolerant readers and upcasting",
+  "summary": "Which changes are safe, how a tolerant reader survives the rest, how versioned event types and upcasters handle breaking changes, and the deploy order that keeps traffic flowing.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Safe and breaking changes",
+      "body": [
+        "| Change | Verdict | Why |",
+        "|---|---|---|",
+        "| Add an optional field **with a default** | safe | old data reads with the default; old readers ignore it |",
+        "| Remove a field that **has** a default | safe | readers that still want it use the default |",
+        "| Rename a field | **breaking** | to a schema it is a remove plus an add (Avro `aliases` help readers only) |",
+        "| Change a type (`int` → `string`) | **breaking** | except promotions such as Avro `int` → `long` |",
+        "| Make an optional field required | **breaking** | old data has no value |",
+        "| Change the **meaning** (euros → cents, same name and type) | **breaking** | and no checker will catch it |",
+        "",
+        "**Protobuf** is matched by field **number**, not name:",
+        "",
+        "```text",
+        "message OrderPlaced {",
+        "  reserved 4;            // coupon was removed: nobody may reuse 4",
+        "  reserved \"coupon\";     // ...or the old name, for JSON mapping",
+        "  string order_id = 1;",
+        "  int64 total_cents = 2;",
+        "  string currency = 3;",
+        "  string gift_note = 5;  // new fields get NEW numbers",
+        "}",
+        "```",
+        "",
+        "Reusing a number makes old bytes decode into the wrong field, silently. Renaming is wire-safe in binary but breaks",
+        "the JSON mapping (`order_id` becomes `orderId` in JSON)."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe or breaking for existing consumers?",
+      "buckets": [
+        "Safe",
+        "Breaking"
+      ],
+      "items": [
+        [
+          "Add `giftWrap` (boolean, default `false`)",
+          0
+        ],
+        [
+          "Remove `coupon`, which has a default of `null`",
+          0
+        ],
+        [
+          "Rename `total` to `amount`",
+          1
+        ],
+        [
+          "Change `totalCents` from int to string",
+          1
+        ],
+        [
+          "Drop the default from `currency` so it is required",
+          1
+        ],
+        [
+          "Send `total` in cents instead of euros, same name and type",
+          1
+        ],
+        [
+          "Protobuf: delete field 4 and add `reserved 4;`",
+          0
+        ],
+        [
+          "Protobuf: give field number 4 to a new `gift_note`",
+          1
+        ]
+      ],
+      "explain": [
+        "The unit change is the nastiest: every schema check passes, every consumer deserializes happily, and the invoices",
+        "are off by a factor of 100. Contract tests that assert **values** catch what schema checks cannot."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Tolerant readers and versioned event types",
+      "body": [
+        "A **tolerant reader** reads only the fields it needs, ignores unknown ones, defaults missing optional ones, and maps",
+        "unknown enum values to a fallback instead of throwing. Producers can then add fields without a coordinated deploy.",
+        "",
+        "- `System.Text.Json` ignores unknown properties by default. `JsonUnmappedMemberHandling.Disallow` (.NET 8+) makes it",
+        "  strict: right for validating a public API request, wrong for an event consumer.",
+        "- `JsonStringEnumConverter` throws on an unknown enum string; read the value as a string and map unknowns yourself.",
+        "",
+        "When a change **is** breaking, do not mutate the contract in place. Version it:",
+        "",
+        "- a new type name (`shop.order.placed.v2`) or a new topic (`orders.v2`);",
+        "- during the migration the producer publishes both, or consumers **upcast**: convert an old version to the newest",
+        "  one on read, so the handler only ever sees the latest shape. Event-sourced systems do this all the time, because",
+        "  stored events are never rewritten."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Ten minutes after `orders-api` 3.4 shipped, `shipping-worker` started dead-lettering every message with this log line. What is the cause?",
+      "code": [
+        "fail: Shipping.OrderPlacedHandler[0]",
+        "      System.Text.Json.JsonException: The JSON property 'giftWrap' could not be mapped to any .NET member",
+        "      contained in type 'Shipping.Contracts.OrderPlaced'.",
+        "         at System.Text.Json.ThrowHelper.ThrowJsonException_UnmappedJsonProperty(Type type, String unmappedPropertyName)"
+      ],
+      "options": [
+        "The consumer is a strict reader (unmapped members disallowed): the producer added a field, which should be a safe change",
+        "The producer sent invalid JSON",
+        "The schema registry is down",
+        "Kafka truncated the message"
+      ],
+      "answer": 0,
+      "explain": [
+        "Adding a field is the textbook safe change, and only a strict reader turns it into an outage. Fix the reader",
+        "(drop `UnmappedMemberHandling = Disallow`, or read with `JsonDocument`), replay the dead-lettered messages, and add a",
+        "contract test that feeds the consumer a message with an extra field."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Make the reader tolerant",
+      "prompt": [
+        "**Symptom.** Since the producer started sending `giftWrap`, and some older producers never send `currency`, the",
+        "reader below throws on most messages and shipping has 14,000 dead letters.",
+        "",
+        "Fix `OrderPlaced Read(string json)` so it is a **tolerant reader**:",
+        "",
+        "- `orderId` and `totalCents` are required: throw `JsonException` if either is missing;",
+        "- unknown properties are ignored;",
+        "- `currency` is optional and defaults to `\"EUR\"`;",
+        "- `channel` is optional; anything other than `\"web\"` or `\"app\"` (including missing) becomes `\"other\"`.",
+        "",
+        "The tests define `record OrderPlaced(string OrderId, int TotalCents, string Currency, string Channel);`"
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "OrderPlaced Read(string json)",
+        "{",
+        "    using var doc = JsonDocument.Parse(json);",
+        "    string? orderId = null, currency = null, channel = null;",
+        "    int total = 0;",
+        "    foreach (var p in doc.RootElement.EnumerateObject())",
+        "    {",
+        "        switch (p.Name)",
+        "        {",
+        "            case \"orderId\": orderId = p.Value.GetString(); break;",
+        "            case \"totalCents\": total = p.Value.GetInt32(); break;",
+        "            case \"currency\": currency = p.Value.GetString(); break;",
+        "            case \"channel\": channel = p.Value.GetString(); break;",
+        "            default: throw new JsonException($\"The JSON property '{p.Name}' could not be mapped to any member of OrderPlaced.\");",
+        "        }",
+        "    }",
+        "    if (orderId is null || currency is null || channel is null) throw new JsonException(\"missing required property\");",
+        "    if (channel is not (\"web\" or \"app\")) throw new JsonException($\"unknown channel '{channel}'\");",
+        "    return new OrderPlaced(orderId, total, currency, channel);",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "OrderPlaced Read(string json)",
+        "{",
+        "    using var doc = JsonDocument.Parse(json);",
+        "    var root = doc.RootElement;",
+        "    if (!root.TryGetProperty(\"orderId\", out var id) || id.GetString() is not string orderId)",
+        "        throw new JsonException(\"missing required property orderId\");",
+        "    if (!root.TryGetProperty(\"totalCents\", out var total))",
+        "        throw new JsonException(\"missing required property totalCents\");",
+        "    var currency = root.TryGetProperty(\"currency\", out var c) ? c.GetString() ?? \"EUR\" : \"EUR\";",
+        "    var channel = root.TryGetProperty(\"channel\", out var ch) ? ch.GetString() : null;",
+        "    if (channel is not (\"web\" or \"app\")) channel = \"other\";",
+        "    return new OrderPlaced(orderId, total.GetInt32(), currency, channel);",
+        "}"
+      ],
+      "hints": [
+        "Stop looping over every property: ask for the ones you need with `TryGetProperty`.",
+        "`root.TryGetProperty(\"currency\", out var c) ? c.GetString() ?? \"EUR\" : \"EUR\"`",
+        "Keep throwing for the two required fields; everything else gets a default."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a complete message\", new OrderPlaced(\"o-1\", 1299, \"SEK\", \"web\"), Read(\"\"\"{\"orderId\":\"o-1\",\"totalCents\":1299,\"currency\":\"SEK\",\"channel\":\"web\"}\"\"\"));",
+        "Dojo.Eq(\"a new field is ignored\", new OrderPlaced(\"o-2\", 500, \"EUR\", \"app\"), Read(\"\"\"{\"orderId\":\"o-2\",\"totalCents\":500,\"currency\":\"EUR\",\"channel\":\"app\",\"giftWrap\":true}\"\"\"));",
+        "Dojo.Eq(\"missing currency defaults to EUR\", new OrderPlaced(\"o-3\", 700, \"EUR\", \"web\"), Read(\"\"\"{\"orderId\":\"o-3\",\"totalCents\":700,\"channel\":\"web\"}\"\"\"));",
+        "Dojo.Eq(\"an unknown channel becomes other\", new OrderPlaced(\"o-4\", 100, \"EUR\", \"other\"), Read(\"\"\"{\"orderId\":\"o-4\",\"totalCents\":100,\"currency\":\"EUR\",\"channel\":\"kiosk\"}\"\"\"));",
+        "Dojo.Eq(\"a missing channel becomes other\", new OrderPlaced(\"o-5\", 100, \"EUR\", \"other\"), Read(\"\"\"{\"orderId\":\"o-5\",\"totalCents\":100}\"\"\"));",
+        "Dojo.Throws<JsonException>(\"missing orderId still fails\", () => Read(\"\"\"{\"totalCents\":100}\"\"\"));",
+        "Dojo.Throws<JsonException>(\"missing totalCents still fails\", () => Read(\"\"\"{\"orderId\":\"o-6\"}\"\"\"));",
+        "",
+        "record OrderPlaced(string OrderId, int TotalCents, string Currency, string Channel);"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Deploy order",
+      "body": [
+        "Who deploys first depends on the change:",
+        "",
+        "```text",
+        "additive change (add optional field with a default)",
+        "  tolerant consumers ─► any order works",
+        "  registry in BACKWARD mode ─► consumers first is the textbook order",
+        "",
+        "breaking change (rename, type change, unit change): expand, migrate, contract",
+        "  1  define shop.order.placed.v2 next to v1            (expand)",
+        "  2  consumers learn v2 and upcast v1 → v2 ─► deploy",
+        "  3  producer publishes v2 (or both v1 and v2)",
+        "  4  watch v1 traffic reach zero, every consumer group caught up",
+        "  5  stop publishing v1, delete the v1 path              (contract)",
+        "```",
+        "",
+        "The question a reviewer asks: \"if the producer goes out first and the consumer deploy is rolled back, what happens",
+        "to the messages in between?\" With expand / migrate / contract the answer is \"nothing\"."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the rollout of a breaking change (`total` in euros becomes `totalCents`) in order.",
+      "lines": [
+        "Define `shop.order.placed.v2` with `totalCents`, next to v1",
+        "Teach every consumer to read v2 and upcast v1 to v2",
+        "Deploy the consumers",
+        "Make the producer publish v2 (or both versions)",
+        "Wait until v1 traffic is zero and every consumer group has caught up",
+        "Stop publishing v1 and delete the v1 code path"
+      ],
+      "explain": [
+        "Consumers before producers: at no moment does a message exist that nobody can read. The waiting step matters on",
+        "Kafka, where v1 records stay in the log until retention removes them, and a replay will hit them."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "An upcaster chain runs on an old event. What does this print?",
+      "code": [
+        "var e = new Dictionary<string, string> { [\"version\"] = \"1\", [\"total\"] = \"12.50\" };",
+        "var steps = new Dictionary<int, Func<Dictionary<string, string>, Dictionary<string, string>>>",
+        "{",
+        "    [1] = d => new(d) { [\"version\"] = \"2\", [\"totalCents\"] = ((int)(decimal.Parse(d[\"total\"]) * 100)).ToString() },",
+        "    [2] = d => new(d) { [\"version\"] = \"3\", [\"currency\"] = d.GetValueOrDefault(\"currency\", \"EUR\") },",
+        "};",
+        "var v = int.Parse(e[\"version\"]);",
+        "while (steps.TryGetValue(v, out var up)) { e = up(e); v++; }",
+        "Console.WriteLine($\"v{e[\"version\"]} totalCents={e[\"totalCents\"]} currency={e[\"currency\"]} total={e.ContainsKey(\"total\")}\");"
+      ],
+      "answer": "v3 totalCents=1250 currency=EUR total=True",
+      "explain": [
+        "Each step upgrades one version, so the chain works from any starting version. But the v1 step copied the old",
+        "dictionary and never removed `total`: a handler that still reads `total` would keep working by accident. Decide",
+        "explicitly what an upcaster removes."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An upcaster",
+      "prompt": [
+        "Events arrive as flat dictionaries of strings. Write `Dictionary<string, string> Upcast(Dictionary<string, string> e)`",
+        "that returns the event as **version 3**, without changing the input dictionary:",
+        "",
+        "- `version` is read from `e[\"version\"]`; a missing `version` means 1.",
+        "- **v1 → v2**: `total` (euros, like `\"12.50\"`, invariant culture) becomes `totalCents` (`\"1250\"`); `total` is removed.",
+        "- **v2 → v3**: `customer` is renamed to `customerId` (if present).",
+        "- The result has `version` = `\"3\"`; every other key is kept.",
+        "- A version below 1 or above 3 throws `NotSupportedException` with the message `\"unknown version {n}\"`: a consumer",
+        "  must not guess at a future format (park it instead)."
+      ],
+      "starter": [
+        "Dictionary<string, string> Upcast(Dictionary<string, string> e)",
+        "{",
+        "    return e;",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string> Upcast(Dictionary<string, string> e)",
+        "{",
+        "    var x = new Dictionary<string, string>(e);",
+        "    var version = x.TryGetValue(\"version\", out var v) ? int.Parse(v) : 1;",
+        "    if (version < 1 || version > 3) throw new NotSupportedException($\"unknown version {version}\");",
+        "    if (version == 1)",
+        "    {",
+        "        var euros = decimal.Parse(x[\"total\"], System.Globalization.CultureInfo.InvariantCulture);",
+        "        x.Remove(\"total\");",
+        "        x[\"totalCents\"] = ((int)Math.Round(euros * 100)).ToString(System.Globalization.CultureInfo.InvariantCulture);",
+        "        version = 2;",
+        "    }",
+        "    if (version == 2)",
+        "    {",
+        "        if (x.Remove(\"customer\", out var customer)) x[\"customerId\"] = customer;",
+        "        version = 3;",
+        "    }",
+        "    x[\"version\"] = \"3\";",
+        "    return x;",
+        "}"
+      ],
+      "hints": [
+        "Copy first: `var x = new Dictionary<string, string>(e);`",
+        "Run the steps in sequence: `if (version == 1) { ...; version = 2; }` then `if (version == 2) { ...; version = 3; }`.",
+        "`x.Remove(\"customer\", out var c)` removes and returns the value in one call."
+      ],
+      "template": [
+        "{{CODE}}",
+        "string DojoShow(Dictionary<string, string> d) => string.Join(\",\", d.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => $\"{k.Key}={k.Value}\"));",
+        "var dojoV1 = new Dictionary<string, string> { [\"version\"] = \"1\", [\"orderId\"] = \"o-1\", [\"total\"] = \"12.50\", [\"customer\"] = \"c-9\" };",
+        "Dojo.Eq(\"v1 becomes v3\", \"customerId=c-9,orderId=o-1,totalCents=1250,version=3\", DojoShow(Upcast(dojoV1)));",
+        "Dojo.Eq(\"the input is not changed\", \"customer=c-9,orderId=o-1,total=12.50,version=1\", DojoShow(dojoV1));",
+        "Dojo.Eq(\"no version means v1\", \"customerId=c-1,orderId=o-2,totalCents=300,version=3\", DojoShow(Upcast(new() { [\"orderId\"] = \"o-2\", [\"total\"] = \"3\", [\"customer\"] = \"c-1\" })));",
+        "Dojo.Eq(\"v2 only renames\", \"customerId=c-2,orderId=o-3,totalCents=500,version=3\", DojoShow(Upcast(new() { [\"version\"] = \"2\", [\"orderId\"] = \"o-3\", [\"totalCents\"] = \"500\", [\"customer\"] = \"c-2\" })));",
+        "Dojo.Eq(\"v3 is left alone\", \"currency=SEK,customerId=c-3,orderId=o-4,totalCents=800,version=3\", DojoShow(Upcast(new() { [\"version\"] = \"3\", [\"orderId\"] = \"o-4\", [\"totalCents\"] = \"800\", [\"customerId\"] = \"c-3\", [\"currency\"] = \"SEK\" })));",
+        "Dojo.Eq(\"rounding to whole cents\", \"orderId=o-5,totalCents=1000,version=3\", DojoShow(Upcast(new() { [\"version\"] = \"1\", [\"orderId\"] = \"o-5\", [\"total\"] = \"9.999\" })));",
+        "Dojo.Throws<NotSupportedException>(\"a future version is not guessed at\", () => Upcast(new() { [\"version\"] = \"4\", [\"orderId\"] = \"o-6\" }));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Read any version",
+      "prompt": [
+        "Put it together. Write `OrderV3 ReadAny(string json)` for the shipping consumer:",
+        "",
+        "1. parse the JSON object into a `Dictionary<string, string>`: string values as their text, any other value as its",
+        "   raw JSON text (`12.5`, `1`, `true`);",
+        "2. `Upcast` it to v3 (your upcaster is already in the editor);",
+        "3. return `new OrderV3(orderId, totalCents, customerId, currency)` as a **tolerant reader**: unknown keys are",
+        "   ignored, `currency` defaults to `\"EUR\"`, `customerId` defaults to `\"\"`.",
+        "",
+        "An unknown version keeps throwing `NotSupportedException` from `Upcast`.",
+        "",
+        "The tests define `record OrderV3(string OrderId, int TotalCents, string CustomerId, string Currency);`"
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "Dictionary<string, string> Upcast(Dictionary<string, string> e)",
+        "{",
+        "    var x = new Dictionary<string, string>(e);",
+        "    var version = x.TryGetValue(\"version\", out var v) ? int.Parse(v) : 1;",
+        "    if (version < 1 || version > 3) throw new NotSupportedException($\"unknown version {version}\");",
+        "    if (version == 1)",
+        "    {",
+        "        var euros = decimal.Parse(x[\"total\"], System.Globalization.CultureInfo.InvariantCulture);",
+        "        x.Remove(\"total\");",
+        "        x[\"totalCents\"] = ((int)Math.Round(euros * 100)).ToString(System.Globalization.CultureInfo.InvariantCulture);",
+        "        version = 2;",
+        "    }",
+        "    if (version == 2)",
+        "    {",
+        "        if (x.Remove(\"customer\", out var customer)) x[\"customerId\"] = customer;",
+        "        version = 3;",
+        "    }",
+        "    x[\"version\"] = \"3\";",
+        "    return x;",
+        "}",
+        "",
+        "",
+        "OrderV3 ReadAny(string json)",
+        "{",
+        "    return new OrderV3(\"\", 0, \"\", \"\");",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "Dictionary<string, string> Upcast(Dictionary<string, string> e)",
+        "{",
+        "    var x = new Dictionary<string, string>(e);",
+        "    var version = x.TryGetValue(\"version\", out var v) ? int.Parse(v) : 1;",
+        "    if (version < 1 || version > 3) throw new NotSupportedException($\"unknown version {version}\");",
+        "    if (version == 1)",
+        "    {",
+        "        var euros = decimal.Parse(x[\"total\"], System.Globalization.CultureInfo.InvariantCulture);",
+        "        x.Remove(\"total\");",
+        "        x[\"totalCents\"] = ((int)Math.Round(euros * 100)).ToString(System.Globalization.CultureInfo.InvariantCulture);",
+        "        version = 2;",
+        "    }",
+        "    if (version == 2)",
+        "    {",
+        "        if (x.Remove(\"customer\", out var customer)) x[\"customerId\"] = customer;",
+        "        version = 3;",
+        "    }",
+        "    x[\"version\"] = \"3\";",
+        "    return x;",
+        "}",
+        "",
+        "",
+        "OrderV3 ReadAny(string json)",
+        "{",
+        "    using var doc = JsonDocument.Parse(json);",
+        "    var fields = new Dictionary<string, string>();",
+        "    foreach (var p in doc.RootElement.EnumerateObject())",
+        "        fields[p.Name] = p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString()! : p.Value.GetRawText();",
+        "    var e = Upcast(fields);",
+        "    return new OrderV3(",
+        "        e[\"orderId\"],",
+        "        int.Parse(e[\"totalCents\"], System.Globalization.CultureInfo.InvariantCulture),",
+        "        e.GetValueOrDefault(\"customerId\", \"\"),",
+        "        e.GetValueOrDefault(\"currency\", \"EUR\"));",
+        "}"
+      ],
+      "hints": [
+        "`p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString()! : p.Value.GetRawText()`",
+        "After `Upcast`, read with `GetValueOrDefault(key, fallback)` for the optional fields."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a v1 message with an extra field\", new OrderV3(\"o-1\", 1250, \"c-9\", \"EUR\"), ReadAny(\"\"\"{\"version\":1,\"orderId\":\"o-1\",\"total\":12.5,\"customer\":\"c-9\",\"giftWrap\":true}\"\"\"));",
+        "Dojo.Eq(\"a v2 message\", new OrderV3(\"o-2\", 500, \"c-2\", \"EUR\"), ReadAny(\"\"\"{\"version\":2,\"orderId\":\"o-2\",\"totalCents\":500,\"customer\":\"c-2\"}\"\"\"));",
+        "Dojo.Eq(\"a v3 message with a currency\", new OrderV3(\"o-3\", 800, \"c-3\", \"SEK\"), ReadAny(\"\"\"{\"version\":3,\"orderId\":\"o-3\",\"totalCents\":800,\"customerId\":\"c-3\",\"currency\":\"SEK\"}\"\"\"));",
+        "Dojo.Eq(\"version as a string, no customer\", new OrderV3(\"o-4\", 300, \"\", \"EUR\"), ReadAny(\"\"\"{\"version\":\"1\",\"orderId\":\"o-4\",\"total\":\"3.00\"}\"\"\"));",
+        "Dojo.Throws<NotSupportedException>(\"a future version\", () => ReadAny(\"\"\"{\"version\":9,\"orderId\":\"o-9\",\"totalCents\":1}\"\"\"));",
+        "",
+        "record OrderV3(string OrderId, int TotalCents, string CustomerId, string Currency);"
+      ]
+    }
+  ]
+}

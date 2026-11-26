@@ -1,0 +1,421 @@
+{
+  "title": "Partitions are logs",
+  "summary": "Offsets, segments, time and size retention, log compaction and tombstones: what Kafka actually stores on disk.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A topic is a set of append-only logs",
+      "body": [
+        "A Kafka **topic** is split into **partitions**. Each partition is an **append-only log**: the producer adds",
+        "records at the end, every record gets the next **offset** (0, 1, 2, ...), and nothing is ever changed in place.",
+        "",
+        "```text",
+        "topic \"orders\" (3 partitions)",
+        "",
+        "P0 | 0 A1:created | 1 C4:created | 2 A1:paid    | 3 A1:shipped |   <- next write: offset 4 (log-end offset)",
+        "P1 | 0 B7:created | 1 B7:paid    |                                <- next write: offset 2",
+        "P2 | 0 D2:created | 1 E9:created | 2 D2:cancelled |             <- next write: offset 3",
+        "        ^                         ^",
+        "        billing group reads at 1   analytics group reads at 3",
+        "```",
+        "",
+        "- An offset only means something **inside one partition**: P0 offset 3 and P1 offset 3 are unrelated records.",
+        "- **Reading does not remove anything.** Each consumer group keeps its own position (its *committed offset*), so",
+        "  billing and analytics read the same records independently, and a new group can start from the beginning.",
+        "- The **log-end offset** (LEO) is the offset the next record will get. It equals the number of records ever written",
+        "  to the partition, not the number still stored.",
+        "- Records leave the log only through **retention** (old segments are deleted) or **compaction** (older values of a",
+        "  key are removed). Both come next.",
+        "",
+        "Why a log and not a queue? A log is sequential disk I/O (fast), it allows replay after a bug fix, and many",
+        "independent readers cost almost nothing extra.",
+        "",
+        "> **See it:** open **Labs → Messaging builder → Kafka** and play the challenge *Same key, same partition*."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The billing group has just read and committed `orders` P1 offset 5. What happens to that record?",
+      "options": [
+        "It stays in the log; other groups can still read it, and it leaves only through retention or compaction",
+        "It is deleted from P1, like an acknowledged RabbitMQ message",
+        "It is moved to a `__consumed` topic",
+        "It is hidden from every group until retention removes it"
+      ],
+      "answer": 0,
+      "explain": [
+        "A Kafka consumer only moves **its own group's** position (stored in the internal `__consumer_offsets` topic).",
+        "The data stays until the topic's `cleanup.policy` removes it. That is the big difference from a queue: replay and",
+        "many readers are free. Nobody on the broker side tracks \"who has read what\" per record."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A partition log",
+      "prompt": [
+        "Model one partition as a log.",
+        "",
+        "Write a class `PartitionLog`:",
+        "",
+        "- `long Append(string? key, string value)`: adds a record at the end and returns its offset (0 for the first record, then 1, 2, ...).",
+        "- `long LogEndOffset` (get-only): the offset the next record will get.",
+        "- `List<string> Read(long offset, int max)`: returns up to `max` records starting at `offset`, each formatted as",
+        "  `\"{offset}:{key}={value}\"` (a `null` key prints as nothing: `\"4:=hello\"`). Reading at or after the log end returns an",
+        "  empty list (the consumer simply waits). A negative offset throws `ArgumentOutOfRangeException`.",
+        "- Reading never removes records."
+      ],
+      "starter": [
+        "class PartitionLog",
+        "{",
+        "    public long LogEndOffset => 0;",
+        "",
+        "    public long Append(string? key, string value)",
+        "    {",
+        "        return 0;",
+        "    }",
+        "",
+        "    public List<string> Read(long offset, int max)",
+        "    {",
+        "        return new List<string>();",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class PartitionLog",
+        "{",
+        "    readonly List<(string? Key, string Value)> records = new();",
+        "",
+        "    public long LogEndOffset => records.Count;",
+        "",
+        "    public long Append(string? key, string value)",
+        "    {",
+        "        records.Add((key, value));",
+        "        return records.Count - 1;",
+        "    }",
+        "",
+        "    public List<string> Read(long offset, int max)",
+        "    {",
+        "        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));",
+        "        var result = new List<string>();",
+        "        for (var o = offset; o < records.Count && result.Count < max; o++)",
+        "            result.Add($\"{o}:{records[(int)o].Key}={records[(int)o].Value}\");",
+        "        return result;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `List<(string? Key, string Value)>` is enough: the index is the offset.",
+        "`LogEndOffset => records.Count`; `Read` loops from `offset` while `o < records.Count && result.Count < max`."
+      ],
+      "template": [
+        "var dojoLog = new PartitionLog();",
+        "Dojo.Eq(\"the first record gets offset 0\", 0L, dojoLog.Append(\"A1\", \"created\"));",
+        "Dojo.Eq(\"offsets keep counting\", 1L, dojoLog.Append(\"B7\", \"created\"));",
+        "dojoLog.Append(\"A1\", \"paid\");",
+        "dojoLog.Append(null, \"heartbeat\");",
+        "Dojo.Eq(\"log-end offset is the next offset to write\", 4L, dojoLog.LogEndOffset);",
+        "Dojo.Eq(\"read from the start\", new List<string> { \"0:A1=created\", \"1:B7=created\" }, dojoLog.Read(0, 2));",
+        "Dojo.Eq(\"read from the middle, null key prints empty\", new List<string> { \"2:A1=paid\", \"3:=heartbeat\" }, dojoLog.Read(2, 10));",
+        "Dojo.Eq(\"reading does not remove anything\", 4, dojoLog.Read(0, 10).Count);",
+        "Dojo.Eq(\"reading at the log end returns nothing yet\", new List<string>(), dojoLog.Read(4, 10));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"a negative offset is rejected\", () => dojoLog.Read(-1, 1));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Compaction: keep the latest value per key",
+      "body": [
+        "Some topics are not a history but a **table**: the latest address of each customer, the current price of each",
+        "product. For those, set `cleanup.policy=compact`:",
+        "",
+        "```text",
+        "before compaction                                after compaction (offsets never change)",
+        "| 0 cust-1:Leeds | 1 cust-2:York | 2 cust-1:Hull |    | 2 cust-1:Hull | 3 cust-3:Bath | 4 cust-2:null |",
+        "| 3 cust-3:Bath  | 4 cust-2:null |",
+        "```",
+        "",
+        "- The log cleaner keeps **at least the last record of every key**. Offsets stay as they were, so the log just has gaps.",
+        "- A record with a **null value** is a **tombstone**: \"this key is deleted\". It is kept for `delete.retention.ms`",
+        "  (default 1 day) so that slow consumers still see the delete, then it is removed too.",
+        "- Only closed segments are cleaned, and only once the dirty share passes `min.cleanable.dirty.ratio` (0.5 by default),",
+        "  so a compacted topic can still briefly show several values per key. Consumers must handle that.",
+        "- Kafka itself uses compaction for `__consumer_offsets` (the latest committed offset per group and partition).",
+        "- `cleanup.policy=compact,delete` does both: latest per key, and nothing older than `retention.ms`.",
+        "",
+        "```bash",
+        "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name customer-address \\",
+        "  --alter --add-config cleanup.policy=compact,delete.retention.ms=86400000",
+        "```",
+        "",
+        "> **See it:** in **Labs → Messaging builder → Kafka**, play *Latest value per key*."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which `cleanup.policy` fits each topic?",
+      "buckets": [
+        "delete (time/size retention)",
+        "compact (latest per key)"
+      ],
+      "items": [
+        [
+          "`orders` events: created, paid, shipped, kept 7 days",
+          0
+        ],
+        [
+          "`customer-address`: the current address of every customer",
+          1
+        ],
+        [
+          "`__consumer_offsets`: the latest committed offset per group and partition",
+          1
+        ],
+        [
+          "`page-views` click stream for analytics",
+          0
+        ],
+        [
+          "`product-price`: the current price per SKU, read on start-up to warm a cache",
+          1
+        ],
+        [
+          "`audit-log` that must keep every change for 90 days",
+          0
+        ]
+      ],
+      "explain": [
+        "Compaction suits topics where only the **current state per key** matters and a new reader should be able to",
+        "rebuild that state. Event histories, click streams and audits need every record: delete-by-retention."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Compact a log",
+      "prompt": [
+        "Write `List<Rec> Compact(List<Rec> log, long nowMs, long deleteRetentionMs)` that does what the log cleaner does",
+        "(simplified: the whole log is cleanable).",
+        "",
+        "The record type is given (do not declare it): `record Rec(long Offset, string Key, string? Value, long TimestampMs);`",
+        "",
+        "- keep only the **last** record of each key (the one with the highest offset), with its original offset;",
+        "- keep the result in offset order;",
+        "- a tombstone (`Value == null`) that is the last record of its key is kept **unless** it is old enough:",
+        "  remove it when `nowMs - TimestampMs >= deleteRetentionMs`."
+      ],
+      "starter": [
+        "List<Rec> Compact(List<Rec> log, long nowMs, long deleteRetentionMs)",
+        "{",
+        "    return log;",
+        "}"
+      ],
+      "solution": [
+        "List<Rec> Compact(List<Rec> log, long nowMs, long deleteRetentionMs)",
+        "{",
+        "    var last = new Dictionary<string, long>();",
+        "    foreach (var r in log) last[r.Key] = r.Offset;",
+        "    return log",
+        "        .Where(r => last[r.Key] == r.Offset)",
+        "        .Where(r => r.Value is not null || nowMs - r.TimestampMs < deleteRetentionMs)",
+        "        .ToList();",
+        "}"
+      ],
+      "hints": [
+        "First pass: a `Dictionary<string, long>` from key to its highest offset.",
+        "Second pass: keep `r` when `last[r.Key] == r.Offset`, then drop tombstones whose age is `>= deleteRetentionMs`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoLog = new List<Rec>",
+        "{",
+        "    new(0, \"cust-1\", \"addr=Leeds\", 1000),",
+        "    new(1, \"cust-2\", \"addr=York\", 2000),",
+        "    new(2, \"cust-1\", \"addr=Hull\", 3000),",
+        "    new(3, \"cust-3\", \"addr=Bath\", 4000),",
+        "    new(4, \"cust-2\", null, 5000),",
+        "};",
+        "Dojo.Eq(\"latest value per key, offsets kept, fresh tombstone kept\",",
+        "    new List<Rec> { new(2, \"cust-1\", \"addr=Hull\", 3000), new(3, \"cust-3\", \"addr=Bath\", 4000), new(4, \"cust-2\", null, 5000) },",
+        "    Compact(dojoLog, 6000, 86400000));",
+        "Dojo.Eq(\"an old tombstone is finally removed\",",
+        "    new List<Rec> { new(2, \"cust-1\", \"addr=Hull\", 3000), new(3, \"cust-3\", \"addr=Bath\", 4000) },",
+        "    Compact(dojoLog, 5000 + 86400000, 86400000));",
+        "Dojo.Eq(\"a key written again after its tombstone comes back\",",
+        "    new List<Rec> { new(1, \"k\", \"v2\", 20) },",
+        "    Compact(new List<Rec> { new(0, \"k\", null, 10), new(1, \"k\", \"v2\", 20) }, 30, 1000));",
+        "Dojo.Eq(\"an empty log stays empty\", new List<Rec>(), Compact(new List<Rec>(), 0, 1));",
+        "record Rec(long Offset, string Key, string? Value, long TimestampMs);"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Segments and retention",
+      "body": [
+        "On disk a partition is a folder of **segment** files, named after their first offset:",
+        "",
+        "```text",
+        "/var/lib/kafka/data/orders-0/",
+        "  00000000000000000000.log   .index  .timeindex    closed segment: offsets 0..41876",
+        "  00000000000000041877.log   .index  .timeindex    closed segment: offsets 41877..83990",
+        "  00000000000000083991.log   .index  .timeindex    ACTIVE segment: new records go here",
+        "```",
+        "",
+        "- The active segment **rolls** (closes, a new one starts) when it reaches `segment.bytes` (1 GiB default) or is",
+        "  older than `segment.ms` (7 days default).",
+        "- **Retention deletes whole closed segments**, oldest first, never the active one. A segment goes when its",
+        "  **newest** record is older than `retention.ms` (default 604800000 = 7 days), or while the partition is bigger than",
+        "  `retention.bytes` (default -1 = no size limit, and it is **per partition**, not per topic).",
+        "- So a record can live longer than `retention.ms`: it waits until its whole segment is old. A quiet topic with a big",
+        "  `segment.bytes` may keep data for weeks.",
+        "- When segments go, the **log start offset** moves forward. A consumer whose committed offset is now below it gets",
+        "  `OFFSET_OUT_OF_RANGE`, and `auto.offset.reset` decides where it restarts (the records in between are simply gone).",
+        "",
+        "```bash",
+        "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name orders \\",
+        "  --alter --add-config retention.ms=1209600000      # 14 days for this topic only",
+        "kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic orders --time -2   # log start offset per partition",
+        "```",
+        "",
+        "> **See it:** in **Labs → Messaging builder → Kafka**, play *Retention ate the backlog*."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Retention runs at hour 180 with `retention.ms` set to 168 hours. Each tuple is a segment's base offset and the hour of its newest record; the last segment is the active one. What does this print?",
+      "code": [
+        "var segments = new[] { (Base: 0L, Newest: 10), (Base: 1000L, Newest: 50), (Base: 2000L, Newest: 170), (Base: 3000L, Newest: 175) };",
+        "var now = 180;",
+        "var retentionHours = 168;",
+        "var logStart = 0L;",
+        "for (int i = 0; i < segments.Length - 1; i++)",
+        "{",
+        "    if (now - segments[i].Newest > retentionHours) logStart = segments[i + 1].Base;",
+        "    else break;",
+        "}",
+        "Console.WriteLine($\"log start offset: {logStart}\");"
+      ],
+      "answer": "log start offset: 1000",
+      "explain": [
+        "Only the first segment is entirely older than 168 hours (its newest record is 170 hours old), so it is deleted and",
+        "the log now starts at offset 1000. The second segment holds records from hour 50 and earlier, which is 130 hours ago:",
+        "kept. Retention works on whole segments, oldest first, and stops at the first one it must keep."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Segments and retention",
+      "prompt": [
+        "Grow the log into what a broker really keeps: segments and time retention.",
+        "",
+        "Write a class `SegmentedLog`:",
+        "",
+        "- `SegmentedLog(int segmentSize)`: a segment holds at most `segmentSize` records. When the last (active) segment is",
+        "  full, the **next** append starts a new segment.",
+        "- `long Append(string value, long timestampMs)`: appends and returns the offset (0, 1, 2, ...).",
+        "- `long LogStartOffset`: the offset of the oldest record still stored (the log-end offset when nothing was written).",
+        "- `long LogEndOffset`: the next offset to write.",
+        "- `int SegmentCount`.",
+        "- `int EnforceRetention(long nowMs, long retentionMs)`: deletes closed segments from the oldest while their **newest**",
+        "  record is older than retention (`nowMs - newestTimestamp > retentionMs`); stops at the first one that must stay;",
+        "  never deletes the active (last) segment. Returns how many segments it deleted.",
+        "- `List<string> Read(long offset, int max)`: up to `max` records from `offset` as `\"{offset}:{value}\"`. An offset",
+        "  below `LogStartOffset` or above `LogEndOffset` throws `ArgumentOutOfRangeException` (Kafka's `OFFSET_OUT_OF_RANGE`);",
+        "  reading exactly at `LogEndOffset` returns an empty list."
+      ],
+      "starter": [
+        "class SegmentedLog",
+        "{",
+        "    public SegmentedLog(int segmentSize) { }",
+        "",
+        "    public long LogStartOffset => 0;",
+        "    public long LogEndOffset => 0;",
+        "    public int SegmentCount => 0;",
+        "",
+        "    public long Append(string value, long timestampMs) => 0;",
+        "",
+        "    public int EnforceRetention(long nowMs, long retentionMs) => 0;",
+        "",
+        "    public List<string> Read(long offset, int max) => new();",
+        "}"
+      ],
+      "solution": [
+        "class SegmentedLog",
+        "{",
+        "    readonly int segmentSize;",
+        "    readonly List<List<(long Offset, string Value, long Ts)>> segments = new() { new() };",
+        "    long next;",
+        "",
+        "    public SegmentedLog(int segmentSize)",
+        "    {",
+        "        this.segmentSize = segmentSize;",
+        "    }",
+        "",
+        "    public long LogStartOffset => segments[0].Count > 0 ? segments[0][0].Offset : next;",
+        "    public long LogEndOffset => next;",
+        "    public int SegmentCount => segments.Count;",
+        "",
+        "    public long Append(string value, long timestampMs)",
+        "    {",
+        "        if (segments[^1].Count == segmentSize) segments.Add(new());",
+        "        segments[^1].Add((next, value, timestampMs));",
+        "        return next++;",
+        "    }",
+        "",
+        "    public int EnforceRetention(long nowMs, long retentionMs)",
+        "    {",
+        "        var deleted = 0;",
+        "        while (segments.Count > 1 && nowMs - segments[0][^1].Ts > retentionMs)",
+        "        {",
+        "            segments.RemoveAt(0);",
+        "            deleted++;",
+        "        }",
+        "        return deleted;",
+        "    }",
+        "",
+        "    public List<string> Read(long offset, int max)",
+        "    {",
+        "        if (offset < LogStartOffset || offset > LogEndOffset)",
+        "            throw new ArgumentOutOfRangeException(nameof(offset), \"OFFSET_OUT_OF_RANGE\");",
+        "        return segments.SelectMany(s => s)",
+        "            .Where(r => r.Offset >= offset)",
+        "            .Take(max)",
+        "            .Select(r => $\"{r.Offset}:{r.Value}\")",
+        "            .ToList();",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep a `List<List<...>>` of segments, starting with one empty segment; the last one is the active segment.",
+        "`Append`: if `segments[^1].Count == segmentSize`, add a new segment first.",
+        "Retention: `while (segments.Count > 1 && nowMs - segments[0][^1].Ts > retentionMs)` remove the first segment."
+      ],
+      "template": [
+        "var dojoS = new SegmentedLog(2);",
+        "Dojo.Eq(\"empty log: start = end = 0\", 0L, dojoS.LogStartOffset);",
+        "dojoS.Append(\"a\", 1000);",
+        "dojoS.Append(\"b\", 2000);",
+        "dojoS.Append(\"c\", 3000);",
+        "dojoS.Append(\"d\", 4000);",
+        "Dojo.Eq(\"offsets count up\", 4L, dojoS.Append(\"e\", 9000));",
+        "Dojo.Eq(\"three segments: [a,b] [c,d] [e]\", 3, dojoS.SegmentCount);",
+        "Dojo.Eq(\"first retention pass deletes only the expired segment\", 1, dojoS.EnforceRetention(6500, 4000));",
+        "Dojo.Eq(\"log start offset moved to 2\", 2L, dojoS.LogStartOffset);",
+        "Dojo.Eq(\"log end offset did not move\", 5L, dojoS.LogEndOffset);",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"a committed offset below the log start is out of range\", () => dojoS.Read(0, 10));",
+        "Dojo.Eq(\"reading from the log start\", new List<string> { \"2:c\", \"3:d\", \"4:e\" }, dojoS.Read(2, 10));",
+        "Dojo.Eq(\"reading at the log end is empty\", new List<string>(), dojoS.Read(5, 10));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"beyond the log end is out of range\", () => dojoS.Read(6, 1));",
+        "Dojo.Eq(\"much later: the active segment survives even when old\", 1, dojoS.EnforceRetention(100000, 4000));",
+        "Dojo.Eq(\"only the active segment is left\", 1, dojoS.SegmentCount);",
+        "Dojo.Eq(\"log start is now 4\", 4L, dojoS.LogStartOffset);",
+        "Dojo.Eq(\"the active segment still has room\", 5L, dojoS.Append(\"f\", 100001));",
+        "Dojo.Eq(\"still one segment\", 1, dojoS.SegmentCount);",
+        "Dojo.Eq(\"a full active segment rolls on the next append\", 6L, dojoS.Append(\"g\", 100002));",
+        "Dojo.Eq(\"two segments again\", 2, dojoS.SegmentCount);",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

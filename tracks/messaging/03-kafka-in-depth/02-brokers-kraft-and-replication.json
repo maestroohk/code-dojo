@@ -1,0 +1,402 @@
+{
+  "title": "Brokers, KRaft and replication",
+  "summary": "Leaders, followers, the ISR and the high watermark, and how acks and min.insync.replicas decide whether an acknowledged write survives a broker crash.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A cluster: brokers, controllers and replicas",
+      "body": [
+        "A Kafka cluster is a set of **brokers** (they store partitions and serve clients) plus a small **controller quorum**.",
+        "Since **Kafka 4.0 the cluster runs in KRaft mode only**: ZooKeeper is gone. Three (or five) controllers run Raft over",
+        "an internal metadata log (`__cluster_metadata`); the active controller decides which broker leads each partition and",
+        "pushes metadata changes to every broker.",
+        "",
+        "```text",
+        "                    controllers (Raft quorum, process.roles=controller)",
+        "                    [ C1 active ]  [ C2 ]  [ C3 ]",
+        "                          | metadata: leaders, ISR, configs",
+        "        +-----------------+-----------------+",
+        "        v                 v                 v",
+        "   broker 1           broker 2           broker 3",
+        "   orders-0 LEADER    orders-0 follower  orders-0 follower     replication factor 3",
+        "   orders-1 follower  orders-1 LEADER    orders-1 follower",
+        "   orders-2 follower  orders-2 follower  orders-2 LEADER",
+        "",
+        "producers write to the leader; followers FETCH from the leader, like consumers do",
+        "```",
+        "",
+        "- Every partition has **replication factor** copies (3 in production). One is the **leader**; the others are",
+        "  **followers** that keep fetching from it.",
+        "- The **ISR** (in-sync replicas) is the set of replicas that are caught up: a follower that has not caught up for",
+        "  `replica.lag.time.max.ms` (30 s default) is removed from the ISR, and added back once it catches up.",
+        "- If the leader dies, the controller elects a new leader **from the ISR**. With `unclean.leader.election.enable=false`",
+        "  (the default) an out-of-sync replica is never elected, so the partition goes offline rather than losing data.",
+        "- Leaders are spread over brokers so the load is spread too (`kafka-leader-election.sh --election-type preferred`",
+        "  moves leadership back to the preferred replica after a restart).",
+        "",
+        "Brokers are configured with `process.roles=broker`, controllers with `process.roles=controller`;",
+        "`process.roles=broker,controller` (combined mode) is for laptops and tests."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to what it means.",
+      "pairs": [
+        [
+          "Leader",
+          "The replica that handles produce requests for the partition"
+        ],
+        [
+          "Follower",
+          "Copies the leader's log by fetching from it"
+        ],
+        [
+          "ISR",
+          "The replicas that have caught up within `replica.lag.time.max.ms`"
+        ],
+        [
+          "High watermark",
+          "The offset every ISR member has reached; consumers read only below it"
+        ],
+        [
+          "Active controller",
+          "The Raft leader that owns cluster metadata and elects partition leaders"
+        ]
+      ],
+      "explain": [
+        "Two offsets matter per partition: the **log-end offset** (where the leader will write next) and the **high",
+        "watermark** (what the whole ISR has). Records between the two exist on the leader but are not yet *committed*,",
+        "so consumers do not see them."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The high watermark, acks and min.insync.replicas",
+      "body": [
+        "The **high watermark** (HW) is the lowest log-end offset across the ISR. A record below the HW is on every in-sync",
+        "replica, so it survives the loss of the leader. Step through the program below to see the HW move when a slow",
+        "follower drops out of the ISR.",
+        "",
+        "The producer's **`acks`** decides when the leader answers:",
+        "",
+        "| `acks` | the leader answers when | an acknowledged write can be lost when |",
+        "|---|---|---|",
+        "| `0` | never (fire and forget) | anything goes wrong |",
+        "| `1` | it wrote to its own log | the leader dies before followers fetched it |",
+        "| `all` (`-1`) | every ISR member has it | only if the ISR had shrunk to one and that disk dies |",
+        "",
+        "**`min.insync.replicas`** (topic or broker config) closes that last gap: with `acks=all`, the leader **refuses** the",
+        "write with `NOT_ENOUGH_REPLICAS` when the ISR is smaller than it. The production default is **RF 3 +",
+        "min.insync.replicas 2 + acks=all**: one broker can be down and writes still succeed, and every acknowledged write",
+        "is on at least two disks. `min.insync.replicas` has **no effect on acks=1**.",
+        "",
+        "Defaults: the Java producer uses `acks=all` since Kafka 3.0; librdkafka (Confluent.Kafka) also defaults to `acks=all`.",
+        "",
+        "> **See it:** in **Labs → Messaging builder → Kafka**, play *acks=1 lost an order*, then *Too strict to write*."
+      ],
+      "trace": {
+        "code": [
+          "var leo = new Dictionary<int, long> { [1] = 8, [2] = 8, [3] = 5 };",
+          "var isr = new List<int> { 1, 2, 3 };",
+          "long hw = long.MaxValue;",
+          "foreach (var b in isr) hw = Math.Min(hw, leo[b]);",
+          "Console.WriteLine($\"HW = {hw}: consumers can read offsets 0..{hw - 1}\");",
+          "isr.Remove(3);",
+          "hw = long.MaxValue;",
+          "foreach (var b in isr) hw = Math.Min(hw, leo[b]);",
+          "Console.WriteLine($\"broker 3 left the ISR: HW = {hw}\");"
+        ]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "A topic has **replication factor 3** and **`min.insync.replicas=3`**. Producers use `acks=all`. One broker is restarted for patching. What happens?",
+      "options": [
+        "Writes to every partition that has a replica on that broker fail with `NOT_ENOUGH_REPLICAS` until it is back in the ISR",
+        "Nothing: two replicas are still alive",
+        "The producer silently switches to `acks=1`",
+        "Kafka elects an out-of-sync replica so that writes continue"
+      ],
+      "answer": 0,
+      "explain": [
+        "`min.insync.replicas` equal to the replication factor means **no** broker may be down, so every rolling restart",
+        "becomes an outage for producers. Use `min.insync.replicas = RF - 1` (2 for RF 3): one broker of slack, and still two",
+        "copies of every acknowledged write."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The payments service logs `ProduceException: Broker: Not enough in-sync replicas` for every message. You run the command below. What is going on?",
+      "code": [
+        "$ kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic payments",
+        "Topic: payments  PartitionCount: 3  ReplicationFactor: 3  Configs: min.insync.replicas=2",
+        "    Topic: payments  Partition: 0  Leader: 1  Replicas: 1,2,3  Isr: 1",
+        "    Topic: payments  Partition: 1  Leader: 1  Replicas: 2,3,1  Isr: 1",
+        "    Topic: payments  Partition: 2  Leader: 1  Replicas: 3,1,2  Isr: 1"
+      ],
+      "options": [
+        "Brokers 2 and 3 are down or not keeping up, so the ISR is only broker 1; with `min.insync.replicas=2` the leader rejects `acks=all` writes. Fix brokers 2 and 3, do not lower the setting",
+        "The topic has too few partitions; add partitions with `--alter`",
+        "The producer must switch to `acks=1` to fix the error permanently",
+        "The consumer group is lagging, which blocks producers"
+      ],
+      "answer": 0,
+      "explain": [
+        "`Isr: 1` while `Replicas: 1,2,3` means two followers fell out of sync (dead broker, full disk, network, overload).",
+        "The error is Kafka **protecting** you: with one copy, an acknowledged payment could be lost. Next steps:",
+        "`kafka-topics.sh --describe --under-replicated-partitions`, `kafka-metadata-quorum.sh describe --status`,",
+        "broker logs and disk on brokers 2 and 3. Switching to `acks=1` or `min.insync.replicas=1` \"fixes\" it by accepting",
+        "writes that can vanish."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Can an **acknowledged** write be lost?",
+      "buckets": [
+        "Survives a broker failure",
+        "Can lose acknowledged writes"
+      ],
+      "items": [
+        [
+          "`acks=all`, RF 3, `min.insync.replicas=2`, the leader crashes",
+          0
+        ],
+        [
+          "`acks=1`, RF 3, the leader crashes right after answering",
+          1
+        ],
+        [
+          "`acks=0`, anything",
+          1
+        ],
+        [
+          "`acks=all`, `min.insync.replicas=1`, the ISR has shrunk to the leader, then its disk dies",
+          1
+        ],
+        [
+          "`acks=all`, RF 3, `min.insync.replicas=2`, one follower is restarted",
+          0
+        ],
+        [
+          "`unclean.leader.election.enable=true` and an out-of-sync replica becomes leader",
+          1
+        ]
+      ],
+      "explain": [
+        "Durability needs all three: `acks=all` (wait for the ISR), `min.insync.replicas >= 2` (the ISR may not shrink to",
+        "one copy) and clean leader election (never elect a replica that lacks committed records)."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Create a durable topic and a producer that uses it safely.",
+      "code": [
+        "kafka-topics.sh --bootstrap-server kafka:9092 --create --topic payments \\",
+        "  --partitions 6 --replication-factor __1__ --config min.insync.replicas=__2__",
+        "",
+        "var pc = new ProducerConfig",
+        "{",
+        "    BootstrapServers = \"kafka:9092\",",
+        "    Acks = Acks.__3__,",
+        "    EnableIdempotence = __4__,",
+        "};"
+      ],
+      "blanks": [
+        "3",
+        "2",
+        "All",
+        "true"
+      ],
+      "bank": [
+        "1",
+        "Leader",
+        "None",
+        "false"
+      ],
+      "explain": [
+        "RF 3 with `min.insync.replicas=2` tolerates one broker down. `Acks.All` waits for the ISR, and",
+        "`EnableIdempotence = true` must be set explicitly in Confluent.Kafka (librdkafka defaults it to false; the Java client",
+        "defaults it to true since 3.0). Idempotence requires `acks=all`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "High watermark and ISR shrink",
+      "prompt": [
+        "Write two methods the leader uses.",
+        "",
+        "- `long HighWatermark(Dictionary<int, long> logEndOffsets, List<int> isr)`: the smallest log-end offset among the",
+        "  brokers in the ISR (brokers outside the ISR do not count).",
+        "- `List<int> ShrinkIsr(List<int> isr, int leader, Dictionary<int, long> lastCaughtUpMs, long nowMs, long maxLagMs)`:",
+        "  returns the ISR after the leader's check, in the same order. A follower stays when",
+        "  `nowMs - lastCaughtUpMs[follower] <= maxLagMs`. The leader always stays (it may be missing from `lastCaughtUpMs`)."
+      ],
+      "starter": [
+        "long HighWatermark(Dictionary<int, long> logEndOffsets, List<int> isr)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "List<int> ShrinkIsr(List<int> isr, int leader, Dictionary<int, long> lastCaughtUpMs, long nowMs, long maxLagMs)",
+        "{",
+        "    return isr;",
+        "}"
+      ],
+      "solution": [
+        "long HighWatermark(Dictionary<int, long> logEndOffsets, List<int> isr)",
+        "{",
+        "    return isr.Min(b => logEndOffsets[b]);",
+        "}",
+        "",
+        "List<int> ShrinkIsr(List<int> isr, int leader, Dictionary<int, long> lastCaughtUpMs, long nowMs, long maxLagMs)",
+        "{",
+        "    return isr.Where(b => b == leader || nowMs - lastCaughtUpMs[b] <= maxLagMs).ToList();",
+        "}"
+      ],
+      "hints": [
+        "`isr.Min(b => logEndOffsets[b])`.",
+        "`isr.Where(b => b == leader || nowMs - lastCaughtUpMs[b] <= maxLagMs)`: the `b == leader` test comes first so the dictionary is never read for the leader."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoLeo = new Dictionary<int, long> { [1] = 8, [2] = 8, [3] = 5 };",
+        "Dojo.Eq(\"HW is the slowest ISR member\", 5L, HighWatermark(dojoLeo, new List<int> { 1, 2, 3 }));",
+        "Dojo.Eq(\"a replica outside the ISR does not hold the HW back\", 8L, HighWatermark(dojoLeo, new List<int> { 1, 2 }));",
+        "var dojoSeen = new Dictionary<int, long> { [2] = 95000, [3] = 60000 };",
+        "Dojo.Eq(\"a follower 40 s behind leaves the ISR\", new List<int> { 1, 2 }, ShrinkIsr(new List<int> { 1, 2, 3 }, 1, dojoSeen, 100000, 30000));",
+        "Dojo.Eq(\"exactly at the limit stays\", new List<int> { 1, 3 }, ShrinkIsr(new List<int> { 1, 3 }, 1, dojoSeen, 90000, 30000));",
+        "Dojo.Eq(\"the leader always stays\", new List<int> { 2 }, ShrinkIsr(new List<int> { 2, 3 }, 2, new Dictionary<int, long> { [3] = 0 }, 100000, 30000));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Durability simulation: acks, ISR and leader failover",
+      "prompt": [
+        "Simulate one partition and prove which writes survive a crash.",
+        "",
+        "Write a class `ReplicatedPartition`:",
+        "",
+        "- `ReplicatedPartition(int replicationFactor, int minInsync)`: brokers are numbered `1..replicationFactor`, all alive",
+        "  and in the ISR; broker 1 leads.",
+        "- `int Leader` (get): the leader, or `-1` when the partition is offline.",
+        "- `List<int> Isr` (get): the ISR in ascending order.",
+        "- `string Produce(string value, string acks)` with `acks` `\"0\"`, `\"1\"` or `\"all\"`:",
+        "  - offline → `\"LEADER_NOT_AVAILABLE\"`;",
+        "  - `acks == \"all\"` and the ISR has fewer than `minInsync` brokers → `\"NOT_ENOUGH_REPLICAS\"` (nothing written);",
+        "  - otherwise the leader appends. With `acks == \"all\"` every other ISR member copies the leader's whole log before the",
+        "    answer. Return `\"sent\"` for `\"0\"`, otherwise `\"ok offset {offset}\"`.",
+        "- `void Replicate()`: every ISR follower copies the leader's whole log (a fetch round).",
+        "- `long HighWatermark`: the smallest log length in the ISR (0 when offline).",
+        "- `void Crash(int broker)`: the broker dies and leaves the ISR at once (a simplification of",
+        "  `replica.lag.time.max.ms`). If it was the leader, the **lowest-numbered** remaining ISR member becomes leader",
+        "  (clean election), or `-1` if the ISR is empty; every remaining ISR follower then truncates its log to the new",
+        "  leader's length.",
+        "- `List<string> Committed()`: the leader's records below the high watermark (what consumers can read)."
+      ],
+      "starter": [
+        "class ReplicatedPartition",
+        "{",
+        "    public ReplicatedPartition(int replicationFactor, int minInsync) { }",
+        "",
+        "    public int Leader => 1;",
+        "    public List<int> Isr { get; } = new();",
+        "    public long HighWatermark => 0;",
+        "",
+        "    public string Produce(string value, string acks) => \"\";",
+        "    public void Replicate() { }",
+        "    public void Crash(int broker) { }",
+        "    public List<string> Committed() => new();",
+        "}"
+      ],
+      "solution": [
+        "class ReplicatedPartition",
+        "{",
+        "    readonly int minInsync;",
+        "    readonly Dictionary<int, List<string>> logs = new();",
+        "",
+        "    public ReplicatedPartition(int replicationFactor, int minInsync)",
+        "    {",
+        "        this.minInsync = minInsync;",
+        "        for (var b = 1; b <= replicationFactor; b++)",
+        "        {",
+        "            logs[b] = new List<string>();",
+        "            Isr.Add(b);",
+        "        }",
+        "    }",
+        "",
+        "    public int Leader { get; private set; } = 1;",
+        "    public List<int> Isr { get; } = new();",
+        "    public long HighWatermark => Leader == -1 ? 0 : Isr.Min(b => (long)logs[b].Count);",
+        "",
+        "    public string Produce(string value, string acks)",
+        "    {",
+        "        if (Leader == -1) return \"LEADER_NOT_AVAILABLE\";",
+        "        if (acks == \"all\" && Isr.Count < minInsync) return \"NOT_ENOUGH_REPLICAS\";",
+        "        logs[Leader].Add(value);",
+        "        var offset = logs[Leader].Count - 1;",
+        "        if (acks == \"all\") Replicate();",
+        "        return acks == \"0\" ? \"sent\" : $\"ok offset {offset}\";",
+        "    }",
+        "",
+        "    public void Replicate()",
+        "    {",
+        "        if (Leader == -1) return;",
+        "        foreach (var b in Isr)",
+        "            if (b != Leader) logs[b] = new List<string>(logs[Leader]);",
+        "    }",
+        "",
+        "    public void Crash(int broker)",
+        "    {",
+        "        Isr.Remove(broker);",
+        "        if (broker != Leader) return;",
+        "        Leader = Isr.Count > 0 ? Isr.Min() : -1;",
+        "        if (Leader == -1) return;",
+        "        var length = logs[Leader].Count;",
+        "        foreach (var b in Isr)",
+        "            if (logs[b].Count > length) logs[b] = logs[b].Take(length).ToList();",
+        "    }",
+        "",
+        "    public List<string> Committed() =>",
+        "        Leader == -1 ? new List<string>() : logs[Leader].Take((int)HighWatermark).ToList();",
+        "}"
+      ],
+      "hints": [
+        "Keep a `Dictionary<int, List<string>>` of logs, one per broker.",
+        "With `acks == \"all\"`, call `Replicate()` after the leader appends: every other ISR member copies the leader's log.",
+        "On a leader crash: `Leader = Isr.Count > 0 ? Isr.Min() : -1`, then cut longer follower logs to the new leader's length."
+      ],
+      "template": [
+        "var dojoP = new ReplicatedPartition(3, 2);",
+        "Dojo.Eq(\"broker 1 leads\", 1, dojoP.Leader);",
+        "Dojo.Eq(\"acks=1 is answered by the leader alone\", \"ok offset 0\", dojoP.Produce(\"order-1\", \"1\"));",
+        "Dojo.Eq(\"followers have not fetched yet: HW 0\", 0L, dojoP.HighWatermark);",
+        "dojoP.Crash(1);",
+        "Dojo.Eq(\"broker 2 takes over\", 2, dojoP.Leader);",
+        "Dojo.Eq(\"the ISR shrinks\", new List<int> { 2, 3 }, dojoP.Isr);",
+        "Dojo.Eq(\"the acknowledged order-1 is gone (acks=1 lost an order)\", new List<string>(), dojoP.Committed());",
+        "Dojo.Eq(\"acks=all waits for the ISR\", \"ok offset 0\", dojoP.Produce(\"order-2\", \"all\"));",
+        "Dojo.Eq(\"acks=all data is committed at once\", new List<string> { \"order-2\" }, dojoP.Committed());",
+        "dojoP.Crash(2);",
+        "Dojo.Eq(\"broker 3 takes over\", 3, dojoP.Leader);",
+        "Dojo.Eq(\"acks=all data survives the leader crash\", new List<string> { \"order-2\" }, dojoP.Committed());",
+        "Dojo.Eq(\"one replica left: acks=all is refused\", \"NOT_ENOUGH_REPLICAS\", dojoP.Produce(\"order-3\", \"all\"));",
+        "Dojo.Eq(\"min.insync.replicas does not apply to acks=1\", \"ok offset 1\", dojoP.Produce(\"order-4\", \"1\"));",
+        "dojoP.Crash(3);",
+        "Dojo.Eq(\"no ISR left: offline\", -1, dojoP.Leader);",
+        "Dojo.Eq(\"offline partition\", \"LEADER_NOT_AVAILABLE\", dojoP.Produce(\"order-5\", \"all\"));",
+        "Dojo.Eq(\"nothing is readable while offline\", new List<string>(), dojoP.Committed());",
+        "var dojoQ = new ReplicatedPartition(3, 2);",
+        "Dojo.Eq(\"acks=0 gets no answer\", \"sent\", dojoQ.Produce(\"x\", \"0\"));",
+        "Dojo.Eq(\"not committed before a fetch round\", 0L, dojoQ.HighWatermark);",
+        "dojoQ.Replicate();",
+        "Dojo.Eq(\"a fetch round moves the HW\", 1L, dojoQ.HighWatermark);",
+        "dojoQ.Crash(3);",
+        "Dojo.Eq(\"a follower crash does not change the leader\", 1, dojoQ.Leader);",
+        "Dojo.Eq(\"two left: acks=all still works\", \"ok offset 1\", dojoQ.Produce(\"y\", \"all\"));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}
