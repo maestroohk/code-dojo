@@ -1,139 +1,192 @@
 {
   "title": "Boss: it works on my machine",
-  "summary": "Diagnose connectivity tickets and plan an rsync deploy.",
+  "summary": "Fix an app that is down from its curl error, ship a site with checksums, and write a health check.",
   "minutes": 15,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "Support queue",
-      "body": "The deploy pipeline uses rsync over ssh, and three tickets are about connectivity. Model the tools to answer them."
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Triage the symptom",
-      "prompt": [
-        "Write `string Diagnose(string curlError, bool listensOnAllInterfaces)` mapping what `curl` reported to the layer to investigate:",
-        "",
-        "- contains `Could not resolve host` → `\"dns\"`",
-        "- contains `timed out` → `\"firewall\"`",
-        "- contains `Connection refused` → `\"bind\"` if not `listensOnAllInterfaces`, else `\"not running\"`",
-        "- starts with `HTTP 5` → `\"app\"`",
-        "- starts with `HTTP 2` or `HTTP 3` → `\"ok\"`",
-        "- anything else → `\"unknown\"`"
-      ],
-      "starter": [
-        "string Diagnose(string curlError, bool listensOnAllInterfaces)",
-        "{",
-        "    return \"unknown\";",
-        "}"
-      ],
-      "solution": [
-        "string Diagnose(string curlError, bool listensOnAllInterfaces)",
-        "{",
-        "    if (curlError.Contains(\"Could not resolve host\")) return \"dns\";",
-        "    if (curlError.Contains(\"timed out\")) return \"firewall\";",
-        "    if (curlError.Contains(\"Connection refused\")) return listensOnAllInterfaces ? \"not running\" : \"bind\";",
-        "    if (curlError.StartsWith(\"HTTP 5\")) return \"app\";",
-        "    if (curlError.StartsWith(\"HTTP 2\") || curlError.StartsWith(\"HTTP 3\")) return \"ok\";",
-        "    return \"unknown\";",
-        "}"
-      ],
-      "hints": [
-        "A chain of `if` statements in the listed order.",
-        "Refused with a loopback-only listener is a bind problem."
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"dns\", \"dns\", Diagnose(\"curl: (6) Could not resolve host: api.internal\", true));",
-        "Dojo.Eq(\"firewall\", \"firewall\", Diagnose(\"curl: (28) Failed to connect to 10.0.0.5 port 443 after 30001 ms: Connection timed out\", true));",
-        "Dojo.Eq(\"bind\", \"bind\", Diagnose(\"curl: (7) Failed to connect to 10.0.0.5 port 5000: Connection refused\", false));",
-        "Dojo.Eq(\"not running\", \"not running\", Diagnose(\"curl: (7) Failed to connect to 10.0.0.5 port 5000: Connection refused\", true));",
-        "Dojo.Eq(\"app\", \"app\", Diagnose(\"HTTP 502 Bad Gateway\", true));",
-        "Dojo.Eq(\"ok\", \"ok\", Diagnose(\"HTTP 200 OK\", true));"
+      "body": [
+        "Support queue. Three tickets about getting things from A to B: an app that is \"down\" (start from the curl error),",
+        "a site to ship and verify, and a health check the deploy pipeline can trust. The machine has no network, so the",
+        "services run on loopback and the \"server\" is a folder."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Plan an rsync",
+      "type": "terminal",
+      "title": "The orders app is down",
       "prompt": [
-        "Write `List<string> RsyncPlan(Dictionary<string, (long Size, long Mtime)> src, Dictionary<string, (long Size, long Mtime)> dst, bool delete)` returning what `rsync -a` (quick check mode) would do, sorted by path (ordinal):",
+        "Ticket: *\"`curl http://127.0.0.1:8080/healthz` fails, and the orders page shows an error.\"* The app lives in `~/app`",
+        "(`server.py`, its settings in `app.env`, its log in `app.log`, and `start.sh` / `stop.sh`).",
         "",
-        "- path only in `src`, or in both but size **or** mtime differ → `\"send <path>\"`,",
-        "- path only in `dst` → `\"delete <path>\"` only when `delete` is true,",
-        "- identical size and mtime → nothing."
+        "Start from the symptom: run the `curl`, read what it says, find the cause with `ss -tlnp` and the log, fix it, and",
+        "restart the app. Done means both of these answer **200**:",
+        "",
+        "- `curl -i http://127.0.0.1:8080/healthz`",
+        "- `curl -i http://127.0.0.1:8080/api/orders`"
       ],
-      "starter": [
-        "List<string> RsyncPlan(Dictionary<string, (long Size, long Mtime)> src, Dictionary<string, (long Size, long Mtime)> dst, bool delete)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "brokenapp.sh"
       ],
-      "solution": [
-        "List<string> RsyncPlan(Dictionary<string, (long Size, long Mtime)> src, Dictionary<string, (long Size, long Mtime)> dst, bool delete)",
-        "{",
-        "    var plan = new List<(string Path, string Line)>();",
-        "    foreach (var (path, meta) in src)",
-        "        if (!dst.TryGetValue(path, out var d) || d != meta) plan.Add((path, $\"send {path}\"));",
-        "    if (delete)",
-        "        foreach (var path in dst.Keys)",
-        "            if (!src.ContainsKey(path)) plan.Add((path, $\"delete {path}\"));",
-        "    return plan.OrderBy(p => p.Path, StringComparer.Ordinal).Select(p => p.Line).ToList();",
-        "}"
+      "checks": [
+        {
+          "name": "/healthz answers 200 on port 8080",
+          "cmd": "test \"$(curl -s -o /dev/null -w \"%{http_code}\" --max-time 3 http://127.0.0.1:8080/healthz)\" = 200",
+          "fail": "Nothing answers 200 on port 8080. `ss -tlnp` shows where the app listens; `app.env` decides it, and the app only reads it when it starts."
+        },
+        {
+          "name": "/api/orders answers 200",
+          "cmd": "test \"$(curl -s -o /dev/null -w \"%{http_code}\" --max-time 3 http://127.0.0.1:8080/api/orders)\" = 200",
+          "fail": "`/api/orders` does not answer 200. `tail ~/app/app.log` shows the error behind the 500."
+        },
+        {
+          "name": "only one copy of the app runs",
+          "cmd": "test \"$(pgrep -fc \"app/server.py\")\" = 1",
+          "fail": "There should be exactly one `server.py` running. Stop the old one (`~/app/stop.sh`) before starting again."
+        }
       ],
       "hints": [
-        "Tuples compare by value with `!=`.",
-        "Collect (path, line) pairs, then sort by path at the end."
+        "`curl` says it could not connect: nothing listens on 8080. `ss -tlnp` shows the app on `127.0.0.1:8081`, and `app.env` says `PORT=8081`.",
+        "`sed -i 's/^PORT=.*/PORT=8080/' ~/app/app.env`, then `~/app/stop.sh; ~/app/start.sh`. Now `/healthz` works but `/api/orders` gives 500: `tail ~/app/app.log`.",
+        "The log says `PermissionError` on `data/orders.json`. `ls -l ~/app/data` shows mode `000`: `chmod 644 ~/app/data/orders.json`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoSrc = new Dictionary<string, (long Size, long Mtime)> { [\"app.dll\"] = (900, 200), [\"appsettings.json\"] = (40, 100), [\"new.dll\"] = (10, 300) };",
-        "var dojoDst = new Dictionary<string, (long Size, long Mtime)> { [\"app.dll\"] = (880, 150), [\"appsettings.json\"] = (40, 100), [\"old.dll\"] = (5, 50) };",
-        "Dojo.Eq(\"no --delete\", new List<string> { \"send app.dll\", \"send new.dll\" }, RsyncPlan(dojoSrc, dojoDst, false));",
-        "Dojo.Eq(\"with --delete\", new List<string> { \"send app.dll\", \"send new.dll\", \"delete old.dll\" }, RsyncPlan(dojoSrc, dojoDst, true));"
+      "solution": [
+        "curl -i http://127.0.0.1:8080/healthz",
+        "ss -tlnp",
+        "cat ~/app/app.env",
+        "sed -i 's/^PORT=.*/PORT=8080/' ~/app/app.env",
+        "~/app/stop.sh; ~/app/start.sh; sleep 1",
+        "curl -i http://127.0.0.1:8080/api/orders",
+        "tail -n 3 ~/app/app.log",
+        "chmod 644 ~/app/data/orders.json",
+        "curl -i http://127.0.0.1:8080/api/orders"
+      ],
+      "explain": [
+        "Read the symptom literally. *Could not connect* (connection refused) means nothing listens on that address and port:",
+        "check `ss -tlnp`. *Could not resolve host* is DNS. A timeout is usually a firewall or a dead route. An HTTP **5xx** means the",
+        "network is fine and the app is broken: read its log. Each one points at a different layer, so the first curl",
+        "already halves the search."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Ping summary",
+      "type": "terminal",
+      "title": "Ship a folder and prove it arrived intact",
       "prompt": [
-        "After the deploy, a health job pings every host. Write `string PingSummary(List<double?> rtts)` where each entry is one reply's round-trip time in ms, or `null` for a lost packet. Return the same summary lines ping prints, joined by `\\n`:",
+        "Ship the built site in `~/site` to the web server. This machine has no network, so the server's web root is the",
+        "folder `~/remote/srv/www` (on a real job this is `scp` or `rsync -a --delete` to another host).",
         "",
-        "```text",
-        "4 packets transmitted, 3 received, 25% packet loss",
-        "rtt min/avg/max = 10.000/20.000/30.000 ms",
-        "```",
-        "",
-        "Loss is a whole percentage (rounded down). Times use 3 decimals. If nothing was received, return only the first line."
+        "1. Pack the site into `~/out/site.tar.gz`, **without** the `.cache` folder, with paths relative to the site (so that",
+        "   `index.html` is at the top of the archive, not under `home/learner/site/`).",
+        "2. Write `~/out/SHA256SUMS` with a checksum line for every file in the site except `.cache`, with relative paths.",
+        "3. Unpack it so that `~/remote/srv/www/index.html` exists, and make the web root hold **exactly** the site's files",
+        "   (the stale `old.html` has to go).",
+        "4. Verify on the \"server\" with `sha256sum -c`."
       ],
-      "starter": [
-        "string PingSummary(List<double?> rtts)",
-        "{",
-        "    return \"\";",
-        "}"
+      "setup": [
+        "ship.sh"
       ],
-      "solution": [
-        "string PingSummary(List<double?> rtts)",
-        "{",
-        "    var got = rtts.Where(r => r.HasValue).Select(r => r!.Value).ToList();",
-        "    int loss = (rtts.Count - got.Count) * 100 / rtts.Count;",
-        "    string first = $\"{rtts.Count} packets transmitted, {got.Count} received, {loss}% packet loss\";",
-        "    if (got.Count == 0) return first;",
-        "    return first + \"\\n\" + $\"rtt min/avg/max = {got.Min():F3}/{got.Average():F3}/{got.Max():F3} ms\";",
-        "}"
+      "checks": [
+        {
+          "name": "the archive has the site, relative, without .cache",
+          "cmd": "tar tzf ~/out/site.tar.gz 2>/dev/null | sed \"s#^\\./##\" | grep -qx index.html && ! tar tzf ~/out/site.tar.gz | grep -q \"\\.cache\"",
+          "fail": "`tar tzf ~/out/site.tar.gz` should list `index.html` (or `./index.html`) at the top and nothing from `.cache`. `tar czf ~/out/site.tar.gz -C ~/site --exclude=.cache .` does both."
+        },
+        {
+          "name": "the web root matches the site",
+          "cmd": "diff -r --exclude=.cache ~/site ~/remote/srv/www",
+          "fail": "The web root differs from the site (below): something is missing, extra (like `old.html`) or in the wrong folder."
+        },
+        {
+          "name": "SHA256SUMS covers the site",
+          "cmd": "test \"$(grep -c . ~/out/SHA256SUMS 2>/dev/null)\" = 4 && ! grep -q \"\\.cache\" ~/out/SHA256SUMS",
+          "fail": "`~/out/SHA256SUMS` should have one line for each of the 4 site files, without `.cache`."
+        },
+        {
+          "name": "the checksums verify on the server",
+          "cmd": "cd ~/remote/srv/www && sha256sum -c --quiet ~/out/SHA256SUMS",
+          "fail": "`sha256sum -c ~/out/SHA256SUMS`, run in `~/remote/srv/www`, does not pass. The paths in the file must be relative."
+        }
       ],
       "hints": [
-        "Integer division rounds down for you.",
-        "Format with `:F3`."
+        "`tar -C DIR` changes into DIR first, so `tar czf ~/out/site.tar.gz -C ~/site --exclude=.cache .` stores `./index.html`. Check with `tar tzf`.",
+        "Checksums with relative paths: `cd ~/site && find . -type f ! -path './.cache/*' -exec sha256sum {} + > ~/out/SHA256SUMS`.",
+        "Clear the web root, then unpack: `rm -rf ~/remote/srv/www/* && tar xzf ~/out/site.tar.gz -C ~/remote/srv/www`, then `cd ~/remote/srv/www && sha256sum -c ~/out/SHA256SUMS`."
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"some loss\", \"4 packets transmitted, 3 received, 25% packet loss\\nrtt min/avg/max = 10.000/20.000/30.000 ms\", PingSummary(new List<double?> { 10, null, 20, 30 }));",
-        "Dojo.Eq(\"rounding down\", \"3 packets transmitted, 2 received, 33% packet loss\\nrtt min/avg/max = 1.500/2.250/3.000 ms\", PingSummary(new List<double?> { 1.5, 3, null }));",
-        "Dojo.Eq(\"all lost\", \"2 packets transmitted, 0 received, 100% packet loss\", PingSummary(new List<double?> { null, null }));"
+      "solution": [
+        "tar czf ~/out/site.tar.gz -C ~/site --exclude=.cache .",
+        "tar tzf ~/out/site.tar.gz",
+        "cd ~/site && find . -type f ! -path './.cache/*' -exec sha256sum {} + > ~/out/SHA256SUMS",
+        "rm -rf ~/remote/srv/www/*",
+        "tar xzf ~/out/site.tar.gz -C ~/remote/srv/www",
+        "cd ~/remote/srv/www && sha256sum -c ~/out/SHA256SUMS"
+      ],
+      "explain": [
+        "With a real host: `rsync -av --delete --exclude=.cache ~/site/ web1:/srv/www/` does steps 1 and 3 in one go, and only",
+        "sends what changed. The trailing slash on `site/` means \"the contents of site\"; without it you get `/srv/www/site/`.",
+        "Add `-n` (dry run) first when `--delete` is involved. Checksums are how you prove a release artifact is the one you",
+        "built, which is the same idea behind signed container images."
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "A health check script with curl",
+      "prompt": [
+        "After every deploy a job checks the endpoints in `~/urls.txt`. Write `~/bin/healthcheck FILE` that, for each URL in FILE:",
+        "",
+        "- prints one line `CODE URL`, where CODE is the HTTP status (`curl -w '%{http_code}'` prints `000` when it cannot connect),",
+        "- gives each request at most 3 seconds,",
+        "",
+        "and then exits **0** if every code was 2xx, **1** otherwise. Make it executable and try `~/bin/healthcheck ~/urls.txt`."
+      ],
+      "setup": [
+        "health.sh"
+      ],
+      "checks": [
+        {
+          "name": "it prints CODE URL for each line",
+          "cmd": "diff <(~/bin/healthcheck ~/urls.txt 2>/dev/null) <(printf \"%s\\n\" \"200 http://127.0.0.1:8080/healthz\" \"503 http://127.0.0.1:8080/ready\" \"200 http://127.0.0.1:8080/api/orders\" \"000 http://127.0.0.1:9999/\")",
+          "fail": "The output does not match (diff below). One line per URL: the code, a space, the URL. A refused connection is `000`."
+        },
+        {
+          "name": "it exits 1 when something is unhealthy",
+          "cmd": "~/bin/healthcheck ~/urls.txt >/dev/null 2>&1; test $? = 1",
+          "fail": "With a 503 and a refused connection in the list, the script should exit 1."
+        },
+        {
+          "name": "it exits 0 when all is well",
+          "cmd": "f=$(mktemp); printf \"%s\\n\" http://127.0.0.1:8080/healthz http://127.0.0.1:8080/api/orders > \"$f\"; ~/bin/healthcheck \"$f\" >/dev/null 2>&1; rc=$?; rm -f \"$f\"; test $rc = 0",
+          "fail": "With only healthy URLs, the script should exit 0."
+        }
+      ],
+      "hints": [
+        "`curl -s -o /dev/null -w '%{http_code}' --max-time 3 URL` prints just the status. It exits non-zero when it cannot connect, so in a strict script add `|| true`.",
+        "Loop over the file: `while IFS= read -r url; do ... done < \"$1\"`. Remember failure in a variable: `ok=1` before, `ok=0` when a code does not start with 2.",
+        "`case $code in 2??) ;; *) ok=0 ;; esac`, and at the end `[ \"$ok\" = 1 ]`, so the script's exit code is that test's."
+      ],
+      "solution": [
+        "mkdir -p ~/bin",
+        "cat > ~/bin/healthcheck <<'EOF'",
+        "#!/bin/bash",
+        "# healthcheck FILE: prints \"CODE URL\" for every URL in FILE; exits 1 unless all are 2xx.",
+        "set -uo pipefail",
+        "ok=1",
+        "while IFS= read -r url; do",
+        "  [ -n \"$url\" ] || continue",
+        "  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \"$url\")",
+        "  echo \"$code $url\"",
+        "  case $code in 2??) ;; *) ok=0 ;; esac",
+        "done < \"$1\"",
+        "[ \"$ok\" = 1 ]",
+        "EOF",
+        "chmod +x ~/bin/healthcheck",
+        "~/bin/healthcheck ~/urls.txt; echo \"exit $?\""
+      ],
+      "explain": [
+        "`curl -f` alone turns HTTP errors into a non-zero exit, but hides the code; `-w '%{http_code}'` (and",
+        "`%{time_total}`, `%{remote_ip}`) tells you what happened. Always set `--max-time` (and `--connect-timeout`) in",
+        "scripts: without them a hanging server hangs your deploy. Kubernetes readiness probes and load balancer health",
+        "checks work the same way: a status code, a timeout, a threshold."
       ]
     }
   ]

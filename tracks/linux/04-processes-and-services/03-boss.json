@@ -1,150 +1,157 @@
 {
   "title": "Boss: the on-call shift",
-  "summary": "Find runaway process trees, read the journal, and predict when cron fires next.",
+  "summary": "Kill a whole process tree, filter a journal export with jq, and move cron schedules to systemd timers.",
   "minutes": 15,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "Pager duty",
-      "body": "Three tickets are waiting. You'll need your cron matcher from the last lesson for the final one."
+      "body": [
+        "Pager duty. Three tickets are waiting, each on a real machine: a batch job that will not die, an overnight crash to",
+        "read out of a journal export, and a set of cron schedules to move to systemd timers."
+      ]
     },
     {
-      "type": "code",
-      "mode": "write",
+      "type": "terminal",
       "title": "Kill the whole tree",
-      "prompt": "A worker forks children that fork grandchildren. Killing only the parent leaves orphans. Write `List<int> Tree(List<(int Pid, int Ppid)> procs, int root)` returning `root` and **all** its descendants, in the order you'd want to SIGTERM them: **children before parents** (deepest first). Among siblings, lower PID first.",
-      "starter": [
-        "List<int> Tree(List<(int Pid, int Ppid)> procs, int root)",
-        "{",
-        "    return new List<int>();",
-        "}"
-      ],
-      "solution": [
-        "List<int> Tree(List<(int Pid, int Ppid)> procs, int root)",
-        "{",
-        "    var order = new List<int>();",
-        "    Visit(root);",
-        "    return order;",
+      "prompt": [
+        "Page: *\"the nightly batch is stuck, kill it\"*. `batch-runner` started three `batch-child` processes, and each of those",
+        "started two `sleep` processes. Killing only the parent leaves the children running as orphans.",
         "",
-        "    void Visit(int pid)",
-        "    {",
-        "        foreach (var child in procs.Where(p => p.Ppid == pid).Select(p => p.Pid).OrderBy(p => p))",
-        "            Visit(child);",
-        "        order.Add(pid);",
-        "    }",
-        "}"
+        "Stop **the whole batch tree** (parent, children and grandchildren). Leave `batch-ui`, an unrelated program, running.",
+        "`ps -eo pid,ppid,pgid,sid,cmd --forest` or `pstree -p` shows how they hang together."
+      ],
+      "setup": [
+        "tree.sh"
+      ],
+      "checks": [
+        {
+          "name": "nothing from the batch job is left",
+          "cmd": "g=$(cat /opt/dojo/state/batch-pid); for i in 1 2 3 4 5 6; do pgrep -g \"$g\" >/dev/null || exit 0; sleep 0.5; done; pgrep -a -g \"$g\"; exit 1",
+          "fail": "Some processes of the batch job are still running (listed below). Killing the parent does not kill its children: signal the whole process group."
+        },
+        {
+          "name": "batch-ui still runs",
+          "cmd": "pgrep -x batch-ui >/dev/null",
+          "fail": "`batch-ui` was stopped too. It is in another process group; leave it alone."
+        }
       ],
       "hints": [
-        "A post-order walk: visit all children, then add yourself.",
-        "Sort each node's children by PID before visiting them."
+        "`ps -eo pid,ppid,pgid,cmd --forest` shows the tree. All the batch processes share one **PGID**: the PID of `batch-runner`, which started a new session.",
+        "A negative PID means \"the whole process group\": `kill -TERM -- -PGID`. `pkill -g PGID` does the same.",
+        "`kill -TERM -- -$(pgrep -x batch-runner)`, then check with `pgrep -a batch; pgrep -a sleep`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoP = new List<(int Pid, int Ppid)> { (1, 0), (900, 1), (910, 900), (905, 900), (911, 910), (950, 1) };",
-        "Dojo.Eq(\"tree under 900\", new List<int> { 905, 911, 910, 900 }, Tree(dojoP, 900));",
-        "Dojo.Eq(\"leaf alone\", new List<int> { 950 }, Tree(dojoP, 950));"
+      "solution": [
+        "ps -eo pid,ppid,pgid,sid,cmd --forest",
+        "kill -TERM -- -$(pgrep -x batch-runner)",
+        "sleep 1; ps -eo pid,pgid,cmd --forest"
+      ],
+      "explain": [
+        "Process groups exist for exactly this: a shell puts each pipeline or job in its own group, so Ctrl+C reaches every",
+        "process in it. `kill -- -PGID` does the same from outside. systemd goes further: each service runs in its own",
+        "**cgroup**, so `systemctl stop` finds every process of the service even if one escaped into a new group."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Filter the journal",
+      "type": "terminal",
+      "title": "Filter the journal with jq",
       "prompt": [
-        "Write `List<string> JournalFilter(List<string> lines, string unit, string minPriority)`. Each line is `\"<unit> <priority> <message>\"`, e.g. `\"orders-api err Unhandled exception\"`. Return the **messages** for that unit whose priority is `minPriority` or **more severe**, like `journalctl -u unit -p minPriority`.",
+        "The on-call notes say orders-api fell over overnight. You got the journal exported with `journalctl -o json`",
+        "into `~/incident/journal.json`: one JSON object per line, with fields like `_SYSTEMD_UNIT`, `PRIORITY` and",
+        "`MESSAGE`. Every value is a **string**; priorities go from `\"0\"` (emerg) to `\"7\"` (debug), `\"3\"` is err.",
         "",
-        "Severity order, most severe first: `emerg alert crit err warning notice info debug`."
+        "1. `~/answers/errors.txt`: the `MESSAGE` of every `orders-api.service` entry with priority **err or worse**, in",
+        "   order, one per line (what `journalctl -u orders-api -p err -o cat` would print).",
+        "2. `~/answers/units.txt`: for **all** units, how many entries of priority err or worse each has, as `count unit`",
+        "   lines, biggest first (`sort | uniq -c | sort -rn` gives this shape)."
       ],
-      "starter": [
-        "List<string> JournalFilter(List<string> lines, string unit, string minPriority)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "python3 \"$DOJO_FILES/journal.py\""
       ],
-      "solution": [
-        "List<string> JournalFilter(List<string> lines, string unit, string minPriority)",
-        "{",
-        "    var levels = new List<string> { \"emerg\", \"alert\", \"crit\", \"err\", \"warning\", \"notice\", \"info\", \"debug\" };",
-        "    int max = levels.IndexOf(minPriority);",
-        "    return lines.Select(l => l.Split(' ', 3))",
-        "        .Where(f => f[0] == unit && levels.IndexOf(f[1]) <= max)",
-        "        .Select(f => f[2])",
-        "        .ToList();",
-        "}"
+      "checks": [
+        {
+          "name": "errors.txt holds the orders-api errors",
+          "cmd": "diff ~/answers/errors.txt <(jq -r 'select(._SYSTEMD_UNIT == \"orders-api.service\" and (.PRIORITY | tonumber) <= 3) | .MESSAGE' ~/incident/journal.json)",
+          "fail": "The messages do not match. Filter on both the unit and the priority, and remember `PRIORITY` is a string: `(.PRIORITY | tonumber) <= 3`. `jq -r` prints raw text without quotes."
+        },
+        {
+          "name": "units.txt counts errors per unit",
+          "cmd": "diff <(awk '{print $1, $2}' ~/answers/units.txt 2>/dev/null) <(jq -r 'select((.PRIORITY | tonumber) <= 3) | ._SYSTEMD_UNIT' ~/incident/journal.json | sort | uniq -c | sort -rn | awk '{print $1, $2}')",
+          "fail": "The counts do not match. Select err-or-worse entries, print `._SYSTEMD_UNIT`, then `sort | uniq -c | sort -rn`."
+        }
       ],
       "hints": [
-        "Put the levels in a list; a smaller index is more severe.",
-        "`Split(' ', 3)` keeps the message whole."
+        "`head -n2 ~/incident/journal.json | jq .` shows the fields. `jq -r '.MESSAGE'` prints one message per line.",
+        "`select(...)` keeps only matching objects: `jq -r 'select(._SYSTEMD_UNIT == \"orders-api.service\") | .MESSAGE'`. Comparing the string `\"3\"` with a number does not work as you hope; use `tonumber`.",
+        "`jq -r 'select((.PRIORITY | tonumber) <= 3) | ._SYSTEMD_UNIT' ~/incident/journal.json | sort | uniq -c | sort -rn > ~/answers/units.txt`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoJ = new List<string> { \"orders-api info Started\", \"orders-api err Unhandled exception\", \"nginx err upstream timed out\", \"orders-api crit Out of memory\", \"orders-api warning Slow query\" };",
-        "Dojo.Eq(\"-p err\", new List<string> { \"Unhandled exception\", \"Out of memory\" }, JournalFilter(dojoJ, \"orders-api\", \"err\"));",
-        "Dojo.Eq(\"-p warning\", new List<string> { \"Unhandled exception\", \"Out of memory\", \"Slow query\" }, JournalFilter(dojoJ, \"orders-api\", \"warning\"));",
-        "Dojo.Eq(\"other unit\", new List<string> { \"upstream timed out\" }, JournalFilter(dojoJ, \"nginx\", \"debug\"));"
+      "solution": [
+        "mkdir -p ~/answers",
+        "head -n2 ~/incident/journal.json | jq .",
+        "jq -r 'select(._SYSTEMD_UNIT == \"orders-api.service\" and (.PRIORITY | tonumber) <= 3) | .MESSAGE' ~/incident/journal.json > ~/answers/errors.txt",
+        "jq -r 'select((.PRIORITY | tonumber) <= 3) | ._SYSTEMD_UNIT' ~/incident/journal.json | sort | uniq -c | sort -rn > ~/answers/units.txt"
+      ],
+      "explain": [
+        "On the server itself this is `journalctl -u orders-api -p err --since \"-12h\" -o cat`. The JSON output is for",
+        "everything else: shipping logs, counting per unit, or picking fields `journalctl` has no flag for. `-p err` means",
+        "\"err and more severe\", which is why the numbers go **down** as severity goes up."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "When does the backup run next?",
+      "type": "terminal",
+      "title": "Move cron schedules to timers",
       "prompt": [
-        "Someone asks \"when will the backup run next?\". Paste your `CronMatches` and write `DateTime NextRun(string expr, DateTime after)`: the first whole minute **strictly after** `after` that matches. Search at most one year ahead; you may assume a match exists.",
+        "The team is moving jobs from cron to systemd timers. Write the `OnCalendar=` value for each cron schedule into",
+        "`~/answers/calendar.txt`, **one per line, in this order** (just the value, without `OnCalendar=`):",
         "",
-        "Start from `after` with seconds dropped, plus one minute."
+        "1. `0 */6 * * *`: every six hours, on the hour.",
+        "2. `*/15 * * * *`: every 15 minutes.",
+        "3. `0 9 1 * *`: 09:00 on the first day of every month.",
+        "4. `30 2 * * 1-5`: 02:30 on weekdays.",
+        "",
+        "`systemd-analyze calendar 'EXPR'` prints how systemd reads an expression and when it fires next. It is the checker: a",
+        "line passes when systemd normalises it to the same schedule as the cron line."
       ],
-      "starter": [
-        "// paste CronMatches here",
-        "",
-        "DateTime NextRun(string expr, DateTime after)",
-        "{",
-        "    return after;",
-        "}"
+      "setup": [
+        "mkdir -p ~/answers"
       ],
-      "solution": [
-        "bool CronMatches(string expr, DateTime t)",
-        "{",
-        "    var f = expr.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
-        "    int dow = (int)t.DayOfWeek;",
-        "    return Field(f[0], t.Minute, 0) && Field(f[1], t.Hour, 0) && Field(f[2], t.Day, 1)",
-        "        && Field(f[3], t.Month, 1) && (Field(f[4], dow, 0) || (dow == 0 && Field(f[4], 7, 0)));",
-        "",
-        "    bool Field(string field, int value, int min)",
-        "    {",
-        "        foreach (var part in field.Split(','))",
-        "        {",
-        "            string range = part;",
-        "            int step = 1;",
-        "            int slash = part.IndexOf('/');",
-        "            if (slash >= 0) { range = part.Substring(0, slash); step = int.Parse(part.Substring(slash + 1)); }",
-        "            int lo, hi;",
-        "            if (range == \"*\") { lo = min; hi = int.MaxValue; }",
-        "            else if (range.Contains('-')) { var b = range.Split('-'); lo = int.Parse(b[0]); hi = int.Parse(b[1]); }",
-        "            else { lo = int.Parse(range); hi = slash >= 0 ? int.MaxValue : lo; }",
-        "            if (value >= lo && value <= hi && (value - lo) % step == 0) return true;",
-        "        }",
-        "        return false;",
-        "    }",
-        "}",
-        "",
-        "DateTime NextRun(string expr, DateTime after)",
-        "{",
-        "    var t = new DateTime(after.Year, after.Month, after.Day, after.Hour, after.Minute, 0).AddMinutes(1);",
-        "    var limit = t.AddYears(1);",
-        "    while (t < limit && !CronMatches(expr, t)) t = t.AddMinutes(1);",
-        "    return t;",
-        "}"
+      "checks": [
+        {
+          "name": "line 1 means \"0 */6 * * *\"",
+          "cmd": "want=\"*-*-* 00/6:00:00\"; got=\"$(sed -n '1p' ~/answers/calendar.txt 2>/dev/null)\"; test -n \"$got\" && test \"$(systemd-analyze calendar \"$got\" 2>/dev/null | sed -n 's/^Normalized form: //p')\" = \"$want\"",
+          "fail": "Line 1 of `~/answers/calendar.txt` does not normalise to `*-*-* 00/6:00:00`. Run `systemd-analyze calendar` on it."
+        },
+        {
+          "name": "line 2 means \"*/15 * * * *\"",
+          "cmd": "want=\"*-*-* *:00/15:00\"; got=\"$(sed -n '2p' ~/answers/calendar.txt 2>/dev/null)\"; test -n \"$got\" && test \"$(systemd-analyze calendar \"$got\" 2>/dev/null | sed -n 's/^Normalized form: //p')\" = \"$want\"",
+          "fail": "Line 2 of `~/answers/calendar.txt` does not normalise to `*-*-* *:00/15:00`. Run `systemd-analyze calendar` on it."
+        },
+        {
+          "name": "line 3 means \"0 9 1 * *\"",
+          "cmd": "want=\"*-*-01 09:00:00\"; got=\"$(sed -n '3p' ~/answers/calendar.txt 2>/dev/null)\"; test -n \"$got\" && test \"$(systemd-analyze calendar \"$got\" 2>/dev/null | sed -n 's/^Normalized form: //p')\" = \"$want\"",
+          "fail": "Line 3 of `~/answers/calendar.txt` does not normalise to `*-*-01 09:00:00`. Run `systemd-analyze calendar` on it."
+        },
+        {
+          "name": "line 4 means \"30 2 * * 1-5\"",
+          "cmd": "want=\"Mon..Fri *-*-* 02:30:00\"; got=\"$(sed -n '4p' ~/answers/calendar.txt 2>/dev/null)\"; test -n \"$got\" && test \"$(systemd-analyze calendar \"$got\" 2>/dev/null | sed -n 's/^Normalized form: //p')\" = \"$want\"",
+          "fail": "Line 4 of `~/answers/calendar.txt` does not normalise to `Mon..Fri *-*-* 02:30:00`. Run `systemd-analyze calendar` on it."
+        }
       ],
       "hints": [
-        "Truncate seconds by building a new `DateTime` from its parts.",
-        "Step a minute at a time: at most ~525,000 checks, which is fast enough."
+        "The format is `DayOfWeek Year-Month-Day Hour:Minute:Second`, and `*` means any. `a/b` means \"from a, every b\": `00/6` in the hour field is 0, 6, 12, 18.",
+        "Every 15 minutes is `*:0/15`. The first of the month at nine is `*-*-01 09:00`.",
+        "Weekdays are `Mon..Fri`. One way: `printf '%s\\n' '*-*-* 00/6:00' '*:0/15' '*-*-01 09:00' 'Mon..Fri 02:30' > ~/answers/calendar.txt`."
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"daily 03:00\", new DateTime(2031, 3, 11, 3, 0, 0), NextRun(\"0 3 * * *\", new DateTime(2031, 3, 10, 3, 0, 0)));",
-        "Dojo.Eq(\"every 15 from :07:30\", new DateTime(2031, 3, 10, 10, 15, 0), NextRun(\"*/15 * * * *\", new DateTime(2031, 3, 10, 10, 7, 30)));",
-        "Dojo.Eq(\"weekdays from Friday evening\", new DateTime(2031, 3, 17, 9, 0, 0), NextRun(\"0 9 * * 1-5\", new DateTime(2031, 3, 14, 18, 0, 0)));",
-        "Dojo.Eq(\"monthly\", new DateTime(2031, 4, 1, 2, 30, 0), NextRun(\"30 2 1 * *\", new DateTime(2031, 3, 1, 2, 30, 0)));"
+      "solution": [
+        "systemd-analyze calendar '*-*-* 00/6:00'",
+        "printf '%s\\n' '*-*-* 00/6:00' '*:0/15' '*-*-01 09:00' 'Mon..Fri 02:30' > ~/answers/calendar.txt",
+        "while read -r e; do systemd-analyze calendar \"$e\" | head -n3; done < ~/answers/calendar.txt"
+      ],
+      "explain": [
+        "`systemd-analyze calendar --iterations=5 EXPR` lists the next five runs: the fastest way to answer \"when does the",
+        "backup run next?\" without doing calendar maths in your head. For a timer that already exists, `systemctl",
+        "list-timers` shows the next and last run of every timer on the machine."
       ]
     }
   ]

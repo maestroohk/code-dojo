@@ -1,164 +1,208 @@
 {
   "title": "Boss: the deploy script review",
-  "summary": "Parse arguments, model set -e, and plan log cleanup like a production script would.",
+  "summary": "Finish a real log-rotation script: getopts, trap cleanup and a dry run, all checked by running it.",
   "minutes": 15,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "Code review",
-      "body": "A teammate's deploy script misbehaves. To review it properly you're going to model what bash actually does."
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Parse flags",
-      "prompt": [
-        "Write `(Dictionary<string, string> Flags, List<string> Args) ParseArgs(List<string> argv)` handling the common script convention:",
-        "",
-        "- `--name=value` and `--name value` set `Flags[name] = value`,",
-        "- a `--name` followed by nothing or by another `--flag` is a boolean: `Flags[name] = \"true\"`,",
-        "- `--` ends flag parsing: everything after it is a positional arg,",
-        "- anything else is a positional arg, in order."
-      ],
-      "starter": [
-        "(Dictionary<string, string> Flags, List<string> Args) ParseArgs(List<string> argv)",
-        "{",
-        "    return (new(), new());",
-        "}"
-      ],
-      "solution": [
-        "(Dictionary<string, string> Flags, List<string> Args) ParseArgs(List<string> argv)",
-        "{",
-        "    var flags = new Dictionary<string, string>();",
-        "    var args = new List<string>();",
-        "    for (int i = 0; i < argv.Count; i++)",
-        "    {",
-        "        string a = argv[i];",
-        "        if (a == \"--\") { args.AddRange(argv.Skip(i + 1)); break; }",
-        "        if (!a.StartsWith(\"--\")) { args.Add(a); continue; }",
-        "        string name = a.Substring(2);",
-        "        int eq = name.IndexOf('=');",
-        "        if (eq >= 0) flags[name.Substring(0, eq)] = name.Substring(eq + 1);",
-        "        else if (i + 1 < argv.Count && !argv[i + 1].StartsWith(\"--\")) flags[name] = argv[++i];",
-        "        else flags[name] = \"true\";",
-        "    }",
-        "    return (flags, args);",
-        "}"
-      ],
-      "hints": [
-        "Use an index loop, so `--name value` can consume the next item with `++i`.",
-        "Check for `--` before checking for `--name`."
-      ],
-      "template": [
-        "{{CODE}}",
-        "var (dojoF, dojoA) = ParseArgs(new List<string> { \"--env=prod\", \"--tag\", \"v1.2.0\", \"--dry-run\", \"--verbose\", \"api\", \"--\", \"--not-a-flag\" });",
-        "Dojo.Eq(\"--env=prod\", \"prod\", dojoF.GetValueOrDefault(\"env\"));",
-        "Dojo.Eq(\"--tag v1.2.0\", \"v1.2.0\", dojoF.GetValueOrDefault(\"tag\"));",
-        "Dojo.Eq(\"--dry-run before another flag is boolean\", \"true\", dojoF.GetValueOrDefault(\"dry-run\"));",
-        "Dojo.Eq(\"--verbose takes the next positional\", \"api\", dojoF.GetValueOrDefault(\"verbose\"));",
-        "Dojo.Eq(\"positionals after --\", new List<string> { \"--not-a-flag\" }, dojoA);"
+      "body": [
+        "Code review: the team's log-rotation script goes into cron next week. Finish its option parsing, make a teammate's",
+        "build script clean up after itself, and make the rotation itself work, with a dry run. Every check runs your script",
+        "for real."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "What does set -e actually do?",
+      "type": "terminal",
+      "title": "Parse options with getopts",
       "prompt": [
-        "Model a script. Each line is `(Cmd, Code)`: the command text and the exit code its **first** command would return. A line may be `\"cmd || fallback\"`, where the fallback always succeeds with code 0, unless the fallback is `exit N`. A command `exit N` ends the script with code N.",
+        "`~/bin/rotate-logs` is a script the team will run from cron. Its options are not parsed yet. Using `getopts`, make it:",
         "",
-        "Write `(List<string> Ran, int Exit) RunScript(List<(string Cmd, int Code)> lines, bool errexit)` returning the commands that ran (the part before `||`, then the fallback if it ran) and the script's exit code:",
+        "- accept `-n` (dry run) and `-k DAYS` (default `7`), then exactly **one** positional argument, `DIR`;",
+        "- print its settings exactly like `dir=/var/log/app keep=3 dry_run=1`;",
+        "- on an unknown option, a `-k` without a value, or a missing `DIR`: print a line containing `usage` to **stderr**",
+        "  and exit with code `2` (the convention for \"you called me wrong\").",
         "",
-        "- a failing command with no fallback stops the script with its code **only if** `errexit` (set -e); otherwise the script carries on,",
-        "- reaching the end gives exit code 0 (as if the last command succeeded; keep it simple)."
+        "Try it: `~/bin/rotate-logs -n -k 3 /var/log/app`."
       ],
-      "starter": [
-        "(List<string> Ran, int Exit) RunScript(List<(string Cmd, int Code)> lines, bool errexit)",
-        "{",
-        "    return (new List<string>(), 0);",
-        "}"
+      "setup": [
+        "getopts.sh"
       ],
-      "solution": [
-        "(List<string> Ran, int Exit) RunScript(List<(string Cmd, int Code)> lines, bool errexit)",
-        "{",
-        "    var ran = new List<string>();",
-        "    foreach (var (cmd, code) in lines)",
-        "    {",
-        "        string first = cmd;",
-        "        string? alt = null;",
-        "        int bar = cmd.IndexOf(\" || \");",
-        "        if (bar >= 0) { first = cmd.Substring(0, bar); alt = cmd.Substring(bar + 4); }",
-        "        ran.Add(first);",
-        "        if (first.StartsWith(\"exit \")) return (ran, int.Parse(first.Substring(5)));",
-        "        if (code == 0) continue;",
-        "        if (alt != null)",
-        "        {",
-        "            ran.Add(alt);",
-        "            if (alt.StartsWith(\"exit \")) return (ran, int.Parse(alt.Substring(5)));",
-        "            continue;",
-        "        }",
-        "        if (errexit) return (ran, code);",
-        "    }",
-        "    return (ran, 0);",
-        "}"
+      "checks": [
+        {
+          "name": "-n -k 3 DIR",
+          "cmd": "test \"$(~/bin/rotate-logs -n -k 3 /var/log/app 2>/dev/null)\" = \"dir=/var/log/app keep=3 dry_run=1\"",
+          "fail": "`rotate-logs -n -k 3 /var/log/app` should print `dir=/var/log/app keep=3 dry_run=1`."
+        },
+        {
+          "name": "defaults",
+          "cmd": "test \"$(~/bin/rotate-logs /srv/logs 2>/dev/null)\" = \"dir=/srv/logs keep=7 dry_run=0\"",
+          "fail": "`rotate-logs /srv/logs` should print `dir=/srv/logs keep=7 dry_run=0`."
+        },
+        {
+          "name": "an unknown option exits 2 with usage on stderr",
+          "cmd": "out=$(~/bin/rotate-logs -z /x 2>&1 >/dev/null); rc=$?; test $rc = 2 && grep -qi usage <<<\"$out\"",
+          "fail": "`rotate-logs -z /x` should print a usage line on stderr and exit 2."
+        },
+        {
+          "name": "-k without a value exits 2",
+          "cmd": "~/bin/rotate-logs /x -k >/dev/null 2>&1; a=$?; ~/bin/rotate-logs -k >/dev/null 2>&1; b=$?; test $a = 2 && test $b = 2",
+          "fail": "`rotate-logs -k` (no value) should exit 2. A leading `:` in the optstring (`\":nk:\"`) lets you handle it yourself."
+        },
+        {
+          "name": "a missing DIR exits 2",
+          "cmd": "~/bin/rotate-logs -n >/dev/null 2>&1; test $? = 2",
+          "fail": "`rotate-logs -n` (no DIR) should exit 2."
+        }
       ],
       "hints": [
-        "Split on `\" || \"` first.",
-        "Handle `exit N` both as a command and as a fallback."
+        "`while getopts \":nk:\" opt; do case $opt in n) dry_run=1 ;; k) keep=$OPTARG ;; *) usage ;; esac; done`. A colon after a letter means it takes a value.",
+        "After the loop, `shift $((OPTIND - 1))` drops the options, so `$1` is DIR. Then `[ $# -eq 1 ] || usage`.",
+        "`usage() { echo \"usage: rotate-logs [-n] [-k DAYS] DIR\" >&2; exit 2; }`. Note `/x -k`: getopts stops at the first non-option, so `-k` ends up as a second positional argument, which the `$# -eq 1` test rejects."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoScript = new List<(string Cmd, int Code)> { (\"cd /srv/app\", 1), (\"rm -rf build\", 0), (\"echo done\", 0) };",
-        "var dojoR1 = RunScript(dojoScript, false);",
-        "Dojo.Eq(\"without -e it carries on in the wrong dir\", new List<string> { \"cd /srv/app\", \"rm -rf build\", \"echo done\" }, dojoR1.Ran);",
-        "Dojo.Eq(\"without -e exit 0\", 0, dojoR1.Exit);",
-        "var dojoR2 = RunScript(dojoScript, true);",
-        "Dojo.Eq(\"with -e it stops\", new List<string> { \"cd /srv/app\" }, dojoR2.Ran);",
-        "Dojo.Eq(\"with -e exit code is the failure\", 1, dojoR2.Exit);",
-        "var dojoR3 = RunScript(new List<(string Cmd, int Code)> { (\"grep -q x f || true\", 1), (\"cd /srv || exit 3\", 2), (\"echo never\", 0) }, true);",
-        "Dojo.Eq(\"|| true and || exit N\", new List<string> { \"grep -q x f\", \"true\", \"cd /srv\", \"exit 3\" }, dojoR3.Ran);",
-        "Dojo.Eq(\"exit code from fallback\", 3, dojoR3.Exit);"
+      "solution": [
+        "cat > ~/bin/rotate-logs <<'EOF'",
+        "#!/bin/bash",
+        "# rotate-logs [-n] [-k DAYS] DIR",
+        "set -euo pipefail",
+        "usage() { echo \"usage: rotate-logs [-n] [-k DAYS] DIR\" >&2; exit 2; }",
+        "keep=7 dry_run=0",
+        "while getopts \":nk:\" opt; do",
+        "  case $opt in",
+        "    n) dry_run=1 ;;",
+        "    k) keep=$OPTARG ;;",
+        "    *) usage ;;",
+        "  esac",
+        "done",
+        "shift $((OPTIND - 1))",
+        "[ $# -eq 1 ] || usage",
+        "dir=$1",
+        "echo \"dir=$dir keep=$keep dry_run=$dry_run\"",
+        "EOF",
+        "~/bin/rotate-logs -n -k 3 /var/log/app; ~/bin/rotate-logs -z /x; echo \"exit $?\""
+      ],
+      "explain": "`getopts` is built into every POSIX shell and handles `-nk 3`, `-k3` and `--` for you. It only does short options; for `--long` ones, scripts either loop over `$@` with `case` or move to a real language. Exit code 2 for misuse is what `grep`, `ls` and most tools return, so callers can tell \"you called me wrong\" from \"it failed\"."
+    },
+    {
+      "type": "terminal",
+      "title": "Clean up with trap, even on failure",
+      "prompt": [
+        "Review comment on `~/bin/build-report`: *\"Every failed run leaves a `/tmp/build-report.NNN` folder behind, and a fixed",
+        "name in `/tmp` is unsafe on a shared machine.\"* Try `~/bin/build-report /no/file ~/out.txt; ls -d /tmp/build-report.*`.",
+        "",
+        "Fix it: create the scratch folder with `mktemp -d`, and remove it with a `trap ... EXIT`, so it goes away whether the",
+        "script succeeds, fails under `set -e`, or is interrupted. A good run must still write the counts to OUTPUT."
+      ],
+      "setup": [
+        "cleanup.sh"
+      ],
+      "checks": [
+        {
+          "name": "a good run still works",
+          "cmd": "rm -f ~/out.txt; ~/bin/build-report ~/data/orders.txt ~/out.txt && head -n1 ~/out.txt | grep -q \"3 mug\"",
+          "fail": "`build-report ~/data/orders.txt ~/out.txt` should write the counts, `3 mug` first."
+        },
+        {
+          "name": "a failed run leaves nothing in /tmp",
+          "cmd": "m=$(mktemp); sleep 0.1; ~/bin/build-report /no/such/file ~/out.txt >/dev/null 2>&1; rc=$?; left=$(find /tmp -mindepth 1 -maxdepth 1 -newer \"$m\" ! -path \"$m\"); rm -f \"$m\"; echo \"exit $rc, left behind: $left\"; test \"$rc\" -ne 0 && test -z \"$left\"",
+          "fail": "A failed run must exit non-zero and leave nothing new in `/tmp`. `trap 'rm -rf \"$work\"' EXIT` runs on every exit, including the one `set -e` causes."
+        },
+        {
+          "name": "a good run leaves nothing in /tmp",
+          "cmd": "m=$(mktemp); sleep 0.1; ~/bin/build-report ~/data/orders.txt ~/out.txt >/dev/null 2>&1; left=$(find /tmp -mindepth 1 -maxdepth 1 -newer \"$m\" ! -path \"$m\"); rm -f \"$m\"; test -z \"$left\"",
+          "fail": "A successful run left something in `/tmp`."
+        },
+        {
+          "name": "the scratch folder comes from mktemp",
+          "cmd": "grep -q \"mktemp -d\" ~/bin/build-report",
+          "fail": "Create the folder with `work=$(mktemp -d)`: a random, private name instead of a guessable one."
+        }
+      ],
+      "hints": [
+        "Replace `work=/tmp/build-report.$$` and `mkdir \"$work\"` with `work=$(mktemp -d)`.",
+        "Right after it: `trap 'rm -rf \"$work\"' EXIT`. Then the last `rm -rf` line is no longer needed.",
+        "With sed: `sed -i 's#^work=.*#work=$(mktemp -d)#; s#^mkdir \"$work\"#trap '\\''rm -rf \"$work\"'\\'' EXIT#; /^rm -rf/d' ~/bin/build-report`, or rewrite the file with a here-doc."
+      ],
+      "solution": [
+        "~/bin/build-report /no/file ~/out.txt; ls -d /tmp/build-report.*",
+        "cat > ~/bin/build-report <<'EOF'",
+        "#!/bin/bash",
+        "# build-report INPUT OUTPUT: counts how often each line of INPUT occurs, biggest first, into OUTPUT.",
+        "set -euo pipefail",
+        "work=$(mktemp -d)",
+        "trap 'rm -rf \"$work\"' EXIT",
+        "sort \"$1\" > \"$work/sorted\"",
+        "uniq -c \"$work/sorted\" | sort -rn > \"$work/counted\"",
+        "cp \"$work/counted\" \"$2\"",
+        "EOF",
+        "rm -rf /tmp/build-report.*",
+        "~/bin/build-report ~/data/orders.txt ~/out.txt && cat ~/out.txt"
+      ],
+      "explain": [
+        "`set -e` makes a script stop at the first failure, which is good, but every line after it is skipped, including",
+        "your cleanup. `trap ... EXIT` is the shell's `finally`. Note what `set -e` does **not** catch: a failing command in",
+        "an `if` condition, before `||` or `&&`, or inside `$(...)` that is part of another command. Check those by hand."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Log rotation plan",
+      "type": "terminal",
+      "title": "Rotate logs for real",
       "prompt": [
-        "The script's last job is cleaning `/var/log/app`. Write `List<string> RotationPlan(List<(string Name, int AgeDays)> files, int compressAfter, int deleteAfter)` that returns the commands it would run, sorted by file name (ordinal):",
+        "`~/bin/rotate-logs` now parses its options. Finish the job it describes in its `TODO`. In `DIR` only (not below it):",
         "",
-        "- `.log` files older than `deleteAfter` days → `rm <name>`,",
-        "- `.log` files older than `compressAfter` days (but not deleted) → `gzip <name>`,",
-        "- `.gz` files older than `deleteAfter` days → `rm <name>`,",
-        "- anything else is left alone. \"Older than\" means strictly greater."
+        "1. delete `.gz` files **older than 30 days**;",
+        "2. `gzip` the `.log` files **older than KEEP days** (`-k`, default 7);",
+        "3. with `-n`, **print** each command instead of running it (a line with `rm` and the file, or `gzip` and the file),",
+        "   and change nothing.",
+        "",
+        "Test it on `~/logs/app` (`ls -l --time-style=+%F ~/logs/app` shows the ages). The checks run it on a fresh copy",
+        "of that folder, so your test runs do not matter."
       ],
-      "starter": [
-        "List<string> RotationPlan(List<(string Name, int AgeDays)> files, int compressAfter, int deleteAfter)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "rotate.sh"
       ],
-      "solution": [
-        "List<string> RotationPlan(List<(string Name, int AgeDays)> files, int compressAfter, int deleteAfter)",
-        "{",
-        "    var plan = new List<string>();",
-        "    foreach (var (name, age) in files.OrderBy(f => f.Name, StringComparer.Ordinal))",
-        "    {",
-        "        bool log = name.EndsWith(\".log\"), gz = name.EndsWith(\".gz\");",
-        "        if ((log || gz) && age > deleteAfter) plan.Add($\"rm {name}\");",
-        "        else if (log && age > compressAfter) plan.Add($\"gzip {name}\");",
-        "    }",
-        "    return plan;",
-        "}"
+      "checks": [
+        {
+          "name": "a dry run lists the work",
+          "cmd": "d=$(mktemp -d); cp -a /opt/dojo/state/applogs/. \"$d\"/; out=$(~/bin/rotate-logs -n \"$d\" 2>&1); echo \"$out\"; grep -E \"gzip.*c\\.log\" <<<\"$out\" >/dev/null && grep -E \"gzip.*d\\.log\" <<<\"$out\" >/dev/null && grep -E \"rm.*f\\.log\\.gz\" <<<\"$out\" >/dev/null && ! grep -E \"(gzip|rm).*(a\\.log|b\\.log|e\\.log\\.gz|notes)\" <<<\"$out\" >/dev/null",
+          "fail": "With `-n` it should print a `gzip` line for `c.log` and `d.log` and an `rm` line for `f.log.gz`, and nothing for the other files."
+        },
+        {
+          "name": "a dry run changes nothing",
+          "cmd": "d=$(mktemp -d); cp -a /opt/dojo/state/applogs/. \"$d\"/; before=$(ls \"$d\"); ~/bin/rotate-logs -n \"$d\" >/dev/null 2>&1; test \"$(ls \"$d\")\" = \"$before\"",
+          "fail": "The dry run changed files. With `-n`, only print."
+        },
+        {
+          "name": "a real run rotates",
+          "cmd": "d=$(mktemp -d); cp -a /opt/dojo/state/applogs/. \"$d\"/; ~/bin/rotate-logs \"$d\" >/dev/null 2>&1; ls \"$d\" | tr \"\\n\" \" \"; test \"$(ls \"$d\" | tr \"\\n\" \" \")\" = \"a.log b.log c.log.gz d.log.gz e.log.gz notes.txt \"",
+          "fail": "After a real run the folder should hold `a.log b.log c.log.gz d.log.gz e.log.gz notes.txt` (shown first). Delete old `.gz` before compressing: `gzip` keeps the old file's date, so a fresh `d.log.gz` is \"40 days old\" too."
+        },
+        {
+          "name": "-k changes the age",
+          "cmd": "d=$(mktemp -d); cp -a /opt/dojo/state/applogs/. \"$d\"/; ~/bin/rotate-logs -k 2 \"$d\" >/dev/null 2>&1; test -f \"$d/b.log.gz\" && test -f \"$d/a.log\"",
+          "fail": "With `-k 2`, `b.log` (3 days old) should be compressed and `a.log` (1 day) kept."
+        }
       ],
       "hints": [
-        "Sort first, then decide per file.",
-        "Check the delete rule before the compress rule."
+        "`find \"$dir\" -maxdepth 1 -name '*.log' -mtime +\"$keep\"` lists what to compress. `-maxdepth 1` keeps it out of subfolders; `-mtime +7` means more than 7 whole days.",
+        "A tiny helper keeps dry runs honest: `run() { if [ \"$dry_run\" = 1 ]; then echo \"$*\"; else \"$@\"; fi; }`, then `run gzip -- \"$f\"`.",
+        "Loop safely over the names: `find \"$dir\" -maxdepth 1 -name '*.gz' -mtime +30 -print0 | while IFS= read -r -d '' f; do run rm -- \"$f\"; done`, then the same for `.log` with `gzip`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoFiles = new List<(string Name, int AgeDays)> { (\"app.log\", 0), (\"app-0301.log\", 3), (\"app-0201.log\", 40), (\"app-0215.log.gz\", 20), (\"app-0101.log.gz\", 70), (\"README\", 400) };",
-        "Dojo.Eq(\"plan\", new List<string> { \"rm app-0101.log.gz\", \"rm app-0201.log\", \"gzip app-0301.log\" }, RotationPlan(dojoFiles, 1, 30));"
+      "solution": [
+        "cat >> ~/bin/rotate-logs <<'EOF'",
+        "run() { if [ \"$dry_run\" = 1 ]; then echo \"$*\"; else \"$@\"; fi; }",
+        "find \"$dir\" -maxdepth 1 -type f -name '*.gz' -mtime +30 -print0 | while IFS= read -r -d '' f; do run rm -- \"$f\"; done",
+        "find \"$dir\" -maxdepth 1 -type f -name '*.log' -mtime +\"$keep\" -print0 | while IFS= read -r -d '' f; do run gzip -- \"$f\"; done",
+        "EOF",
+        "~/bin/rotate-logs -n ~/logs/app",
+        "~/bin/rotate-logs ~/logs/app && ls -l ~/logs/app"
+      ],
+      "explain": [
+        "On most servers `logrotate` does this job (with `compress`, `maxage`, `copytruncate` or a `postrotate` reload), and",
+        "`journald` rotates its own files. Scripts like this one still exist for app folders logrotate does not know about. The",
+        "habits that make them safe are the ones you used: a dry-run flag, NUL-separated names, `--` before file names,",
+        "strict mode and a clean exit code."
       ]
     }
   ]

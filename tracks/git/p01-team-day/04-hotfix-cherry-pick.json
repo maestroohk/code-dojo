@@ -17,7 +17,7 @@
         "",
         "You need **only** `f1x` on `release/3.1`, recorded so anyone can trace it back:",
         "",
-        "```text",
+        "```bash",
         "git switch release/3.1",
         "git pull --rebase",
         "git cherry-pick -x f1x",
@@ -95,52 +95,58 @@
       "explain": "A backwards-compatible bug fix bumps PATCH only."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Find fixes that still need backporting",
+      "type": "terminal",
+      "title": "Backport the missing fixes and tag 3.1.1",
       "prompt": [
-        "A release-manager script lists the commands to run. Write `ToBackport(mainCommits, releaseMessages)`:",
+        "In `~/shop`, fixes meant for production are marked `[backport]` in their subject on `main`. One of them was backported last week; the others were not. Your local `release/3.1` is behind the server.",
         "",
-        "- `mainCommits`: `(Hash, Subject)` pairs from `main`, oldest first.",
-        "- `releaseMessages`: full messages of commits already on the release branch.",
-        "- A main commit **needs** a backport if its subject starts with `fix` and contains `[backport]`, and no release message contains `(cherry picked from commit <its hash>)`.",
-        "",
-        "Return `git cherry-pick -x <hash>` for each, oldest first."
+        "1. Bring `release/3.1` up to date with the server first.",
+        "2. Find the `[backport]` fixes on `main` that `release/3.1` does **not** have yet. `git cherry -v release/3.1 main` marks commits whose change is already there with `-`, missing ones with `+`.",
+        "3. Cherry-pick each missing one with `-x`, oldest first. Nothing else from `main`.",
+        "4. Push `release/3.1`, then tag it `v3.1.1` (annotated, message `Release 3.1.1`) and push the tag."
       ],
-      "starter": [
-        "static List<string> ToBackport(List<(string Hash, string Subject)> mainCommits, List<string> releaseMessages)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "s4.sh"
       ],
-      "solution": [
-        "static List<string> ToBackport(List<(string Hash, string Subject)> mainCommits, List<string> releaseMessages)",
-        "{",
-        "    var picked = new HashSet<string>();",
-        "    var marker = \"(cherry picked from commit \";",
-        "    foreach (var m in releaseMessages)",
-        "    {",
-        "        var at = m.IndexOf(marker);",
-        "        if (at >= 0) picked.Add(m[(at + marker.Length)..].TrimEnd(')'));",
-        "    }",
-        "    return mainCommits.Where(c => c.Subject.StartsWith(\"fix\") && c.Subject.Contains(\"[backport]\") && !picked.Contains(c.Hash))",
-        "                      .Select(c => $\"git cherry-pick -x {c.Hash}\")",
-        "                      .ToList();",
-        "}"
+      "checks": [
+        {
+          "name": "both missing fixes are backported with -x",
+          "cmd": "cd /srv/git/shop.git && git log --format=%B release/3.1 | grep -qF \"(cherry picked from commit $(cat /opt/dojo/state/f1x))\" && git log --format=%B release/3.1 | grep -qF \"(cherry picked from commit $(cat /opt/dojo/state/empty))\"",
+          "fail": "The server's `release/3.1` should have `fix: apply VAT once` and `fix: guard against an empty basket`, each with its `(cherry picked from commit ...)` line."
+        },
+        {
+          "name": "nothing else came along",
+          "cmd": "cd /srv/git/shop.git && test \"$(git log --format=%s release/3.1 | grep -c 'round refunds')\" = 1 && ! git log --format=%s release/3.1 | grep -qE 'feat: gift cards|typo on the admin page'",
+          "fail": "The refund fix must not be applied twice (it was backported already), and features or non-backport fixes must stay off the release branch."
+        },
+        {
+          "name": "the server's history kept the docs commit",
+          "cmd": "cd /srv/git/shop.git && git log --format=%s release/3.1 | grep -qx 'docs: 3.1 release notes'",
+          "fail": "The server's `release/3.1` lost a commit. Update your local branch first (`git pull --rebase` on `release/3.1`), never force-push a release branch."
+        },
+        {
+          "name": "v3.1.1 is an annotated tag on the release tip",
+          "cmd": "cd /srv/git/shop.git && test \"$(git cat-file -t v3.1.1 2>/dev/null)\" = tag && test \"$(git rev-parse 'v3.1.1^{commit}')\" = \"$(git rev-parse release/3.1)\"",
+          "fail": "Push an annotated tag `v3.1.1` that points at the new tip of `release/3.1`: `git tag -a v3.1.1 -m \"Release 3.1.1\"` and `git push origin v3.1.1`."
+        }
       ],
       "hints": [
-        "First collect the hashes already picked: find `(cherry picked from commit ` in each release message and read up to `)`.",
-        "Then filter `mainCommits` and format the command."
+        "`git switch release/3.1` and `git pull --rebase` (or `git merge --ff-only origin/release/3.1`).",
+        "`git cherry -v release/3.1 main | grep backport` shows `+` for the two that are missing and `-` for the refund fix.",
+        "`git cherry-pick -x <vat hash> <basket hash>`, `git push`, `git tag -a v3.1.1 -m \"Release 3.1.1\"`, `git push origin v3.1.1`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoMain = new List<(string Hash, string Subject)> {",
-        "    (\"aaa1\", \"feat: percentage coupons\"), (\"bbb2\", \"fix: apply VAT once [backport]\"),",
-        "    (\"ccc3\", \"fix: crash on empty basket [backport]\"), (\"ddd4\", \"fix: typo in admin page\") };",
-        "var dojoRel = new List<string> { \"fix: apply VAT once [backport]\\n\\n(cherry picked from commit bbb2)\", \"Release 3.1.0\" };",
-        "Dojo.Eq(\"one still to pick\", new List<string> { \"git cherry-pick -x ccc3\" }, ToBackport(dojoMain, dojoRel));",
-        "Dojo.Eq(\"nothing picked yet\", new List<string> { \"git cherry-pick -x bbb2\", \"git cherry-pick -x ccc3\" }, ToBackport(dojoMain, new()));"
-      ]
+      "solution": [
+        "cd ~/shop",
+        "git switch release/3.1",
+        "git pull --rebase",
+        "git cherry -v release/3.1 main",
+        "git cherry-pick -x $(git cherry release/3.1 main | awk '$1 == \"+\" {print $2}' | while read c; do git log -1 --format='%H %s' \"$c\"; done | grep backport | cut -d' ' -f1)",
+        "git log --oneline -4",
+        "git push",
+        "git tag -a v3.1.1 -m \"Release 3.1.1\"",
+        "git push origin v3.1.1"
+      ],
+      "explain": "`git cherry` compares by **patch id** (the change itself), so it recognises a commit that was cherry-picked with a new hash. That is how release managers answer \"what is still missing on the release branch?\" without trusting memory or ticket comments. Pull before you pick: a stale release branch is how the same fix gets applied twice."
     }
   ]
 }

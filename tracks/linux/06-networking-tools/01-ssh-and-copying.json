@@ -1,6 +1,6 @@
 {
   "title": "SSH, keys and copying files",
-  "summary": "Log in with keys instead of passwords, configure hosts, and move files with scp and rsync.",
+  "summary": "Log in with keys instead of passwords, write an ssh config that ssh accepts, and move files with scp and rsync.",
   "minutes": 12,
   "kind": "lesson",
   "steps": [
@@ -10,7 +10,7 @@
       "body": [
         "`ssh user@host` opens an encrypted shell on another machine (port 22). Log in with a **key pair** rather than a password:",
         "",
-        "```text",
+        "```bash",
         "ssh-keygen -t ed25519 -C \"ana@laptop\"     # creates ~/.ssh/id_ed25519 (PRIVATE) and id_ed25519.pub (public)",
         "ssh-copy-id ana@web1.example.com          # appends the .pub to the server's ~/.ssh/authorized_keys",
         "ssh ana@web1.example.com                  # now logs in with the key",
@@ -112,7 +112,7 @@
       "type": "learn",
       "title": "Copying: scp and rsync",
       "body": [
-        "```text",
+        "```bash",
         "scp app.tar.gz web1:/tmp/                    # copy up",
         "scp web1:/var/log/api.log .                  # copy down",
         "scp -P 2222 -r dist/ deploy@host:/srv/www/   # capital -P for port, -r recursive",
@@ -160,54 +160,92 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Resolve an ssh config alias",
+      "type": "terminal",
+      "title": "Write an ~/.ssh/config that ssh accepts",
       "prompt": [
-        "Write `(string Host, string User, int Port) SshResolve(List<string> config, string alias, string localUser)` that resolves `ssh alias` from `~/.ssh/config` lines:",
+        "You will reach three servers every day. `~/.ssh/config` should make `ssh web1`, `ssh bastion` and `ssh db1` just work.",
+        "This machine has no network, but `ssh -G NAME` prints exactly the settings ssh **would** use, without connecting. Try",
+        "`ssh -G web1` now: ssh refuses the file.",
         "",
-        "- A `Host` line starts a block; it lists one or more patterns separated by spaces. Support exact names and `*` (matches everything).",
-        "- Inside matching blocks, read `HostName`, `User`, `Port` (keywords are case-insensitive). The **first** value found for each key wins.",
-        "- Defaults: host = the alias itself, user = `localUser`, port = 22. Ignore blank lines and `#` comments."
+        "1. Fix the permissions ssh insists on: `~/.ssh` `700`, `config` `600`, the private key `id_deploy` `600`.",
+        "2. `web1`: host `10.0.0.5`, user `deploy`, port `2222`, key `~/.ssh/id_deploy`, and offer **only** that key (`IdentitiesOnly yes`).",
+        "3. `bastion`: host `bastion.example.com`, user `ops`.",
+        "4. `db1`: host `10.0.1.20`, user `deploy`, reached **through** `bastion` (`ProxyJump`).",
+        "",
+        "Keep the `Host *` defaults, but check what `ssh -G web1 | grep '^user '` says about them."
       ],
-      "starter": [
-        "(string Host, string User, int Port) SshResolve(List<string> config, string alias, string localUser)",
-        "{",
-        "    return (alias, localUser, 22);",
-        "}"
+      "setup": [
+        "sshcfg.sh"
       ],
-      "solution": [
-        "(string Host, string User, int Port) SshResolve(List<string> config, string alias, string localUser)",
-        "{",
-        "    string? host = null, user = null;",
-        "    int? port = null;",
-        "    bool active = false;",
-        "    foreach (var raw in config)",
-        "    {",
-        "        var line = raw.Trim();",
-        "        if (line == \"\" || line.StartsWith(\"#\")) continue;",
-        "        var parts = line.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);",
-        "        string key = parts[0].ToLowerInvariant(), val = parts.Length > 1 ? parts[1].Trim() : \"\";",
-        "        if (key == \"host\") { active = val.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(p => p == \"*\" || p == alias); continue; }",
-        "        if (!active) continue;",
-        "        if (key == \"hostname\") host ??= val;",
-        "        if (key == \"user\") user ??= val;",
-        "        if (key == \"port\") port ??= int.Parse(val);",
-        "    }",
-        "    return (host ?? alias, user ?? localUser, port ?? 22);",
-        "}"
+      "checks": [
+        {
+          "name": "~/.ssh is 700",
+          "cmd": "test \"$(stat -c %a ~/.ssh)\" = 700",
+          "fail": "`~/.ssh` should be `700`."
+        },
+        {
+          "name": "config and key are 600",
+          "cmd": "test \"$(stat -c %a ~/.ssh/config)\" = 600 && test \"$(stat -c %a ~/.ssh/id_deploy)\" = 600",
+          "fail": "`~/.ssh/config` and `~/.ssh/id_deploy` should both be `600`. ssh refuses a config others can write, and a private key others can read."
+        },
+        {
+          "name": "web1 goes to 10.0.0.5:2222 as deploy",
+          "cmd": "ssh -G web1 2>/dev/null | grep -Eqx 'hostname 10\\.0\\.0\\.5' && ssh -G web1 2>/dev/null | grep -Eqx 'port 2222' && ssh -G web1 2>/dev/null | grep -Eqx 'user deploy'",
+          "fail": "`ssh -G web1` does not show `hostname 10.0.0.5`, `port 2222` and `user deploy`. For each setting the **first** value found wins, so a `Host *` block at the top beats everything below it."
+        },
+        {
+          "name": "web1 offers only id_deploy",
+          "cmd": "ssh -G web1 2>/dev/null | grep -Eqx 'identityfile (~|/home/learner)/\\.ssh/id_deploy' && ssh -G web1 2>/dev/null | grep -Eqx 'identitiesonly yes'",
+          "fail": "`ssh -G web1` should show `identityfile ~/.ssh/id_deploy` and `identitiesonly yes`."
+        },
+        {
+          "name": "bastion is set up",
+          "cmd": "ssh -G bastion 2>/dev/null | grep -Eqx 'hostname bastion\\.example\\.com' && ssh -G bastion 2>/dev/null | grep -Eqx 'user ops'",
+          "fail": "`ssh -G bastion` should show `hostname bastion.example.com` and `user ops`."
+        },
+        {
+          "name": "db1 jumps through bastion",
+          "cmd": "ssh -G db1 2>/dev/null | grep -Eqx 'hostname 10\\.0\\.1\\.20' && ssh -G db1 2>/dev/null | grep -Eqx 'user deploy' && ssh -G db1 2>/dev/null | grep -Eqx 'proxyjump bastion'",
+          "fail": "`ssh -G db1` should show `hostname 10.0.1.20`, `user deploy` and `proxyjump bastion`."
+        }
       ],
       "hints": [
-        "Track whether the current block matches with a bool, updated at each `Host` line.",
-        "`??=` assigns only when still null: exactly \"first value wins\"."
+        "`chmod 700 ~/.ssh && chmod 600 ~/.ssh/config ~/.ssh/id_deploy`, then `ssh -G web1` reads the file.",
+        "ssh takes the **first** value it finds for each setting, top to bottom. Specific `Host` blocks go first, `Host *` last.",
+        "Rewrite it: `cat > ~/.ssh/config <<'EOF'` with blocks `Host web1` (HostName, User, Port, IdentityFile, IdentitiesOnly yes), `Host bastion` (HostName, User), `Host db1` (HostName, User, ProxyJump bastion), and then `Host *` with the defaults."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoCfg = new List<string> { \"# my hosts\", \"Host web1 web1.prod\", \"    HostName 10.20.0.11\", \"    User deploy\", \"    Port 2222\", \"\", \"Host *\", \"    User ana\", \"    Port 22022\" };",
-        "Dojo.Eq(\"web1\", (\"10.20.0.11\", \"deploy\", 2222), SshResolve(dojoCfg, \"web1\", \"me\"));",
-        "Dojo.Eq(\"second pattern on the Host line\", (\"10.20.0.11\", \"deploy\", 2222), SshResolve(dojoCfg, \"web1.prod\", \"me\"));",
-        "Dojo.Eq(\"only Host * applies\", (\"other.example\", \"ana\", 22022), SshResolve(dojoCfg, \"other.example\", \"me\"));",
-        "Dojo.Eq(\"defaults with empty config\", (\"x\", \"me\", 22), SshResolve(new List<string>(), \"x\", \"me\"));"
+      "solution": [
+        "ssh -G web1",
+        "chmod 700 ~/.ssh && chmod 600 ~/.ssh/config ~/.ssh/id_deploy",
+        "cat > ~/.ssh/config <<'EOF'",
+        "Host web1",
+        "    HostName 10.0.0.5",
+        "    User deploy",
+        "    Port 2222",
+        "    IdentityFile ~/.ssh/id_deploy",
+        "    IdentitiesOnly yes",
+        "",
+        "Host bastion",
+        "    HostName bastion.example.com",
+        "    User ops",
+        "",
+        "Host db1",
+        "    HostName 10.0.1.20",
+        "    User deploy",
+        "    ProxyJump bastion",
+        "",
+        "# Defaults for every host: last, because the first value found wins",
+        "Host *",
+        "    User root",
+        "    ServerAliveInterval 30",
+        "EOF",
+        "ssh -G web1 | grep -E '^(hostname|user|port|identityfile|identitiesonly) '",
+        "ssh -G db1 | grep -E '^(hostname|proxyjump) '"
+      ],
+      "explain": [
+        "`ssh -G` is the debugger for ssh config: it shows the final values after every `Host` and `Match` block. For a real",
+        "connection, `ssh -v web1` shows which config lines and keys were used. `IdentitiesOnly yes` stops ssh offering every",
+        "key in your agent: with many keys, servers drop you after a few failures (*Too many authentication failures*)."
       ]
     },
     {

@@ -158,6 +158,12 @@ function keyTrail(log) {
 export function vimLab(container, notify = () => {}) {
   const S = game.state.labs.vim ||= {};
   S.solved ||= {}; S.tab ||= 'vim'; S.at ??= 0; S.nanoAt ??= 0; S.cheat ??= true;
+  // A lesson's lab step (labsteps.js) asks for one challenge: open on it, then forget the request.
+  if (S.challenge) {
+    const v = VIM_LEVELS.findIndex(l => l.id === S.challenge), n = NANO_LEVELS.findIndex(l => l.id === S.challenge);
+    if (v >= 0) { S.tab = 'vim'; S.at = v; } else if (n >= 0) { S.tab = 'nano'; S.nanoAt = n; }
+    delete S.challenge;
+  }
 
   const tabs = h('div.vm-tabs');
   const progress = h('div.vm-progress');
@@ -222,7 +228,7 @@ export function vimLab(container, notify = () => {}) {
     function load(i) {
       S[atKey] = i; game.save();
       L = levels[i]; solvedNow = false; hintShown = false;
-      const opts = { row: L.cursor?.[0] ?? 0, col: L.cursor?.[1] ?? 0, disk: L.disk, file: L.file || (isNano ? 'config' : 'file.txt') };
+      const opts = { row: L.cursor?.[0] ?? 0, col: L.cursor?.[1] ?? 0, disk: L.disk, pre: L.pre, file: L.file || (isNano ? 'config' : 'file.txt') };
       ed = isNano ? new Nano(L.start, opts) : new Vim(L.start, opts);
       paintList(); paint();
       view.el.focus({ preventScroll: true });

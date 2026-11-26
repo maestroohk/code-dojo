@@ -22,7 +22,12 @@ public static partial class LabSteps
         ["kubebuild"] = "kubesim.js",
         ["pipebuild"] = "pipesim.js",
         ["pki"] = "lab-pki.js",
+        ["vim"] = "vim-levels.js",
     };
+
+    // The Vim & nano trainer's levels: { id: 'quit', group: ..., par: 3, ... } in VIM_LEVELS and NANO_LEVELS.
+    [GeneratedRegex(@"^\s*\{\s*id:\s*'([A-Za-z0-9-]+)'", RegexOptions.Multiline)]
+    private static partial Regex LevelRe();
 
     // { id: 'static', title: 'Two routers, static routes', xp: 40, ... } as the labs write them.
     [GeneratedRegex(@"\{\s*id:\s*'([a-z0-9-]+)'[^\n]*?\bxp:\s*(\d+)")]
@@ -33,6 +38,8 @@ public static partial class LabSteps
     {
         if (!Visual.TryGetValue(lab, out var file) || !File.Exists(Path.Combine(uiDir, file))) return [];
         var text = File.ReadAllText(Path.Combine(uiDir, file));
+        if (lab == "vim")   // every level is a graded challenge (XP comes from its stars)
+            return LevelRe().Matches(text).Select(m => m.Groups[1].Value).Distinct().ToDictionary(id => id, _ => 10);
         var at = text.IndexOf("CHALLENGES = [", StringComparison.Ordinal);
         if (at < 0) return [];
         var found = new Dictionary<string, int>();
