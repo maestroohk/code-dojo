@@ -1,0 +1,118 @@
+{
+  "title": "Boss: the report service fails its health checks",
+  "summary": "Unblock an asyncio event loop with to_thread, then return whatever arrived before a deadline.",
+  "minutes": 22,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**OPS-3310: report pods restart every evening.**",
+        "",
+        "```text",
+        "Warning  Unhealthy  kubelet  Liveness probe failed: Get \"http://10.1.4.17:8000/healthz\": context deadline exceeded",
+        "Normal   Killing    kubelet  Container reports failed liveness probe, will be restarted",
+        "app  INFO  building 40 reports ...",
+        "app  WARN  supplier prices: request for slow-b still pending after 30 s",
+        "```",
+        "",
+        "The service is an asyncio app. `/healthz` is trivial, yet it times out while reports are built: the event loop is blocked. And a",
+        "slow supplier holds the price page hostage. Both fixes go into `~/reports/report.py` (read `~/reports/README.txt`)."
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "1. Unblock the loop",
+      "prompt": [
+        "`build_reports(names)` calls `render_pdf`, a **blocking** library function, straight from a coroutine. While it runs, nothing else on",
+        "the loop runs (the check measures a heartbeat coroutine).",
+        "",
+        "Change `build_reports` so the blocking calls run **off the event loop** and it still returns the file names in order.",
+        "Do not change `render_pdf`. Check with `python3 /opt/dojo/files/check_loop.py heartbeat`."
+      ],
+      "setup": ["loop-setup.sh"],
+      "checks": [
+        {
+          "name": "the loop keeps running while reports are built",
+          "cmd": "python3 /opt/dojo/files/check_loop.py heartbeat",
+          "expectOutput": "files=['q1.pdf', 'q2.pdf', 'q3.pdf'] loop_blocked=no",
+          "fail": "The heartbeat stopped for more than 0.2 s, or the files are wrong. `python3 /opt/dojo/files/check_loop.py heartbeat` shows what happens."
+        }
+      ],
+      "hints": [
+        "`asyncio.to_thread(fn, *args)` runs a blocking function on a worker thread and lets you await it.",
+        "In the loop: `files.append(await asyncio.to_thread(render_pdf, name))`. A `sed -i` on that one line is enough."
+      ],
+      "solution": [
+        "sed -i 's/files.append(render_pdf(name))/files.append(await asyncio.to_thread(render_pdf, name))/' ~/reports/report.py",
+        "python3 /opt/dojo/files/check_loop.py heartbeat"
+      ],
+      "explain": [
+        "`to_thread` is asyncio's `Task.Run`: right for blocking calls you cannot replace. For CPU-heavy Python with the GIL, a process",
+        "pool (`loop.run_in_executor(ProcessPoolExecutor(), ...)`) gives real parallelism; a thread only keeps the loop responsive."
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "2. Whatever arrived by the deadline",
+      "prompt": [
+        "Rewrite `prices_by_deadline(skus, get_price, seconds)` in `~/reports/report.py`:",
+        "",
+        "- ask for all prices **concurrently** (a `TaskGroup`);",
+        "- after `seconds`, **cancel** the ones still running (`asyncio.timeout`) and return `{sku: price}` for the ones that arrived;",
+        "- it must not raise because of the timeout.",
+        "",
+        "Check with `python3 /opt/dojo/files/check_loop.py deadline`: two fast suppliers answer in 10 ms, one hangs."
+      ],
+      "setup": ["loop-setup.sh", "sed -i 's/files.append(render_pdf(name))/files.append(await asyncio.to_thread(render_pdf, name))/' ~/reports/report.py"],
+      "checks": [
+        {
+          "name": "the fast prices arrive and the slow one is dropped, on time",
+          "cmd": "python3 /opt/dojo/files/check_loop.py deadline",
+          "expectOutput": "prices={'fast-a': 6, 'fast-c': 6} on_time=yes",
+          "fail": "Expected the two fast prices within the deadline, with no exception. `python3 /opt/dojo/files/check_loop.py deadline` shows what you return."
+        },
+        {
+          "name": "report.py uses asyncio.timeout",
+          "cmd": "grep -q 'asyncio.timeout' ~/reports/report.py",
+          "fail": "Use `async with asyncio.timeout(seconds):` around the TaskGroup."
+        }
+      ],
+      "hints": [
+        "Store each price in the dict from an inner coroutine as soon as it arrives; the dict then holds what came in before the deadline.",
+        "`try: async with asyncio.timeout(seconds): async with asyncio.TaskGroup() as tg: ...` then `except TimeoutError: pass` and `return prices`."
+      ],
+      "solution": [
+        "python3 - <<'EOF'",
+        "import pathlib, re",
+        "p = pathlib.Path.home() / 'reports' / 'report.py'",
+        "src = p.read_text()",
+        "start = src.index('async def prices_by_deadline')",
+        "src = src[:start] + '''async def prices_by_deadline(skus, get_price, seconds):",
+        "    prices = {}",
+        "",
+        "    async def one(sku):",
+        "        prices[sku] = await get_price(sku)",
+        "",
+        "    try:",
+        "        async with asyncio.timeout(seconds):",
+        "            async with asyncio.TaskGroup() as tg:",
+        "                for sku in skus:",
+        "                    tg.create_task(one(sku))",
+        "    except TimeoutError:",
+        "        pass",
+        "    return prices",
+        "'''",
+        "p.write_text(src)",
+        "EOF",
+        "python3 /opt/dojo/files/check_loop.py deadline"
+      ],
+      "explain": [
+        "When the timeout fires, `asyncio.timeout` cancels the task waiting in the TaskGroup; the group cancels its children and the",
+        "cancellation becomes a `TimeoutError` at the `async with`. Results stored before that point stay. This is the asyncio form of the",
+        "\"time budget with a fallback\" from module 3."
+      ]
+    }
+  ]
+}

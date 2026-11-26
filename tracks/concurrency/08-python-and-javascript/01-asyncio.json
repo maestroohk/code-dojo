@@ -1,0 +1,197 @@
+{
+  "title": "asyncio: TaskGroup, Semaphore and the GIL",
+  "summary": "One thread, one loop: how asyncio maps to what you know from .NET, why TaskGroup replaced gather, bounded concurrency, and where the GIL stands in 2026.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "asyncio from a .NET point of view",
+      "body": [
+        "Python's `async`/`await` looks like C#'s, with one big difference: **everything runs on one thread**, the *event loop*.",
+        "",
+        "| .NET | asyncio |",
+        "|---|---|",
+        "| `Task` started by calling an async method | a *coroutine* does nothing until awaited or wrapped in a task: `asyncio.create_task(coro)` |",
+        "| continuations on the thread pool | continuations on the loop's single thread |",
+        "| `Task.WhenAll` | `asyncio.TaskGroup` (3.11+) or `asyncio.gather` |",
+        "| `SemaphoreSlim.WaitAsync` | `async with asyncio.Semaphore(n):` |",
+        "| `CancelAfter` / `WaitAsync` | `async with asyncio.timeout(s):` (3.11+), `asyncio.wait_for` |",
+        "| `CancellationToken` | `task.cancel()` raises `CancelledError` *inside* the task at its next `await` |",
+        "| `Task.Run` for blocking work | `await asyncio.to_thread(fn, ...)` |",
+        "",
+        "Because there is one thread, plain Python code between two `await`s cannot be interleaved with other coroutines: no lost updates",
+        "on `count += 1` *within the loop*. The price: **any blocking call** (`time.sleep`, `requests.get`, a CPU-heavy loop) freezes",
+        "every coroutine, health checks included. It is thread-pool starvation's cousin, with a pool of one."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Inside an `async def` handler in a FastAPI or aiohttp service: does it block the event loop?",
+      "buckets": ["Blocks the loop", "Fine"],
+      "items": [
+        ["`time.sleep(1)`", 0],
+        ["`await asyncio.sleep(1)`", 1],
+        ["`requests.get(url)`", 0],
+        ["`await client.get(url)` with `httpx.AsyncClient`", 1],
+        ["`hashlib.scrypt(...)` on a large input", 0],
+        ["`await asyncio.to_thread(hashlib.scrypt, ...)`", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "gather or TaskGroup?",
+      "body": [
+        "Both run coroutines concurrently. They differ when something **fails** (checked on Python 3.13):",
+        "",
+        "```python",
+        "await asyncio.gather(job(\"a\", fail=True), job(\"b\"))",
+        "# raises ValueError('a'); job b KEEPS RUNNING in the background (no one awaits or cancels it)",
+        "",
+        "async with asyncio.TaskGroup() as tg:",
+        "    tg.create_task(job(\"a\", fail=True))",
+        "    tg.create_task(job(\"b\"))",
+        "# cancels b, waits for it, then raises ExceptionGroup([ValueError('a')])",
+        "```",
+        "",
+        "`TaskGroup` (3.11+) is **structured concurrency**: no task outlives the `async with` block, and every failure is reported (several",
+        "failures arrive together in the `ExceptionGroup`; handle them with `except* ValueError:`). Prefer it for new code. `gather(...,",
+        "return_exceptions=True)` is still handy when you want every result *or* error and no cancellation."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "With `await asyncio.gather(charge(card), send_receipt(email))`, `charge` raises. What happens to `send_receipt`?",
+      "options": [
+        "It keeps running in the background; the receipt may still be sent for a failed charge",
+        "It is cancelled immediately",
+        "It never started, because gather runs them in order",
+        "The whole program exits"
+      ],
+      "answer": 0,
+      "explain": "`gather` propagates the first exception but does not cancel the other awaitables. With `TaskGroup`, `send_receipt` would be cancelled and both outcomes handled in one place."
+    },
+    {
+      "type": "learn",
+      "title": "The GIL and free-threaded Python, as of late 2026",
+      "body": [
+        "CPython's **Global Interpreter Lock** lets only one thread run Python bytecode at a time. Threads still help for I/O (the GIL is",
+        "released while waiting), but CPU-bound Python code does not get faster with threads; people use `multiprocessing` or",
+        "`concurrent.futures.ProcessPoolExecutor`, or move the hot loop into a C extension that releases the GIL (NumPy does).",
+        "",
+        "- **3.13** (Oct 2024) added an optional **free-threaded build** (PEP 703), usually installed as `python3.13t`, marked experimental.",
+        "- **3.14** (Oct 2025) made it **officially supported but optional** (PEP 779).",
+        "- **3.15** (Oct 2026) keeps it optional and adds a stable ABI for free-threaded extensions. The default download still has the GIL.",
+        "",
+        "Check at run time with `sys._is_gil_enabled()`. In a free-threaded interpreter, importing a C extension that has not declared",
+        "free-threading support turns the GIL back on (with a warning). Without the GIL, Python threads race exactly like .NET threads:",
+        "`count += 1` from two threads can lose updates, so the locks you learned in module 4 (`threading.Lock`) matter again."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the Python tool to its .NET counterpart.",
+      "pairs": [
+        ["`asyncio.TaskGroup`", "`Task.WhenAll` plus cancelling the rest on failure"],
+        ["`asyncio.Semaphore(4)`", "`new SemaphoreSlim(4)`"],
+        ["`asyncio.timeout(2)`", "`CancelAfter(TimeSpan.FromSeconds(2))`"],
+        ["`asyncio.to_thread(fn)`", "`Task.Run(fn)`"],
+        ["`ProcessPoolExecutor`", "separate processes for CPU-bound work (no GIL to share)"]
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the lines into a bounded, structured `fetch_all`.",
+      "lines": [
+        "async def fetch_all(skus, get_price, limit):",
+        "    gate = asyncio.Semaphore(limit)",
+        "    prices = {}",
+        "    async def one(sku):",
+        "        async with gate:",
+        "            prices[sku] = await get_price(sku)",
+        "    async with asyncio.TaskGroup() as tg:",
+        "        for sku in skus:",
+        "            tg.create_task(one(sku))",
+        "    return prices"
+      ],
+      "also": [
+        [
+          "async def fetch_all(skus, get_price, limit):",
+          "    prices = {}",
+          "    gate = asyncio.Semaphore(limit)",
+          "    async def one(sku):",
+          "        async with gate:",
+          "            prices[sku] = await get_price(sku)",
+          "    async with asyncio.TaskGroup() as tg:",
+          "        for sku in skus:",
+          "            tg.create_task(one(sku))",
+          "    return prices"
+        ]
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "Bounded and structured, for real",
+      "prompt": [
+        "`~/prices/fetch.py` fetches prices one at a time (read `~/prices/README.txt`). Rewrite `fetch_all(skus, get_price, limit)` so that:",
+        "",
+        "1. the calls run **concurrently, at most `limit` at once** (`asyncio.Semaphore`);",
+        "2. it uses **`asyncio.TaskGroup`**, so one failing call cancels the others and the error comes out as an `ExceptionGroup`;",
+        "3. it still returns `{sku: price}` for every sku.",
+        "",
+        "This terminal has no full-screen editor: `nano ~/prices/fetch.py` opens the file in an editor on the page, or write it with",
+        "`cat > ~/prices/fetch.py <<'EOF'` ... `EOF`. Try `python3 /opt/dojo/files/check_fetch.py limit` and `... failure` as you go."
+      ],
+      "setup": ["prices-setup.sh"],
+      "checks": [
+        {
+          "name": "at most 3 calls at once, and every price returned",
+          "cmd": "python3 /opt/dojo/files/check_fetch.py limit",
+          "expectOutput": "peak=3 results=ok",
+          "fail": "With limit 3 and 10 skus the peak must be exactly 3 and every price present. `python3 /opt/dojo/files/check_fetch.py limit` shows what you have."
+        },
+        {
+          "name": "a failure cancels the rest and raises an ExceptionGroup",
+          "cmd": "python3 /opt/dojo/files/check_fetch.py failure",
+          "expectOutput": "group ['ValueError'] cancelled=True",
+          "fail": "One call raises ValueError while another is still running: the other must be cancelled and the error must come out of a TaskGroup as an ExceptionGroup."
+        },
+        {
+          "name": "fetch.py uses asyncio.TaskGroup",
+          "cmd": "grep -q 'TaskGroup' ~/prices/fetch.py",
+          "fail": "Use `async with asyncio.TaskGroup() as tg:`."
+        }
+      ],
+      "hints": [
+        "Create `gate = asyncio.Semaphore(limit)` and an inner `async def one(sku)` that does `async with gate:` around the call and stores the price.",
+        "Start one task per sku inside `async with asyncio.TaskGroup() as tg:` with `tg.create_task(one(sku))`; return the dict after the block.",
+        "The arrange-the-lines step just before this one is the whole file (plus `import asyncio` at the top)."
+      ],
+      "solution": [
+        "cat > ~/prices/fetch.py <<'EOF'",
+        "import asyncio",
+        "",
+        "",
+        "async def fetch_all(skus, get_price, limit):",
+        "    gate = asyncio.Semaphore(limit)",
+        "    prices = {}",
+        "",
+        "    async def one(sku):",
+        "        async with gate:",
+        "            prices[sku] = await get_price(sku)",
+        "",
+        "    async with asyncio.TaskGroup() as tg:",
+        "        for sku in skus:",
+        "            tg.create_task(one(sku))",
+        "    return prices",
+        "EOF",
+        "python3 /opt/dojo/files/check_fetch.py limit",
+        "python3 /opt/dojo/files/check_fetch.py failure"
+      ],
+      "explain": [
+        "This is the Python twin of the C# `FetchAllAsync` from module 5, with one improvement .NET makes you build by hand: the",
+        "TaskGroup guarantees no call outlives the function, failed or not. Writing to `prices` from many coroutines is safe here because",
+        "they all run on the loop's one thread and the write has no `await` inside it."
+      ]
+    }
+  ]
+}
