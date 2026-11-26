@@ -128,6 +128,7 @@ public sealed partial class SearchIndex(string root, Content content)
         ("pipesim.js", "CHALLENGES", "pipebuild", "pipebuild"),
         ("rabbitsim.js", "CHALLENGES", "msgbuild-rabbit", "msgbuild/rabbitmq"),
         ("kafkasim.js", "CHALLENGES", "msgbuild-kafka", "msgbuild/kafka"),
+        ("sdsim.js", "CHALLENGES", "sysdesign", "sysdesign"),
         ("lab-pki.js", "CHALLENGES", "pki", "pki"),
         ("lab-regex.js", "CHALLENGES", "regex", "regex"),
         ("vim-levels.js", "VIM_LEVELS", "vim", "vim"),
@@ -288,7 +289,7 @@ public sealed partial class SearchIndex(string root, Content content)
     {
         ["netbuild"] = "Network builder", ["archbuild"] = "Architecture builder", ["composebuild"] = "Compose builder",
         ["kubebuild"] = "Kubernetes builder", ["pipebuild"] = "Pipeline builder", ["msgbuild-rabbit"] = "Messaging builder · RabbitMQ",
-        ["msgbuild-kafka"] = "Messaging builder · Kafka", ["pki"] = "Certificate chain lab", ["regex"] = "Regex lab", ["vim"] = "Vim & nano trainer",
+        ["msgbuild-kafka"] = "Messaging builder · Kafka", ["pki"] = "Certificate chain lab", ["regex"] = "Regex lab", ["vim"] = "Vim & nano trainer", ["sysdesign"] = "System design board",
     };
 
     /// <summary>

@@ -15,6 +15,7 @@ import { composeBuildLab } from './lab-composebuild.js';
 import { kubeBuildLab } from './lab-kubebuild.js';
 import { pipeBuildLab } from './lab-pipebuild.js';
 import { msgBuildLab } from './lab-msgbuild.js';
+import { sysDesignLab } from './lab-sysdesign.js';
 import { vimLab } from './lab-vim.js';
 import { regexLab } from './lab-regex.js';
 import { workbench } from './workbench.js';
@@ -187,6 +188,8 @@ const LABS = [
     text: 'Jobs, needs, artifacts, caches, a matrix, environments with approvals and secrets. Run it for a push, a pull request or a fork and watch the timeline. Generates the GitHub Actions YAML. Ten challenges.' },
   { id: 'msgbuild', icon: '📨', title: 'Messaging builder', category: 'Messaging',
     text: 'RabbitMQ and Kafka on one board: exchanges, bindings, acks, dead-letter queues and restarts; partitions, keys, replicas, consumer groups, offsets and lag. Every message animated, every decision explained. Eleven challenges each.' },
+  { id: 'sysdesign', icon: '🏛', title: 'System design board', category: 'Architecture',
+    text: 'Rack load balancers, app servers, caches, a sharded database with replicas, streams with workers, a CDN and object storage, then run a 10-minute load test: p50/p95/p99, utilisation, hit rates, replica lag, backlog and the monthly bill on a Grafana-style dashboard. Kill a zone, flush the cache, start a retry storm. Fourteen challenges.' },
   { id: 'vim', icon: '⌨', title: 'Vim & nano trainer', category: 'Linux',
     text: 'A real Vim emulator with 36 keystroke-golf challenges, from "how do I quit?" to text objects, dot-repeat and :%s. Plus nano basics, a cheat sheet and free practice.' },
   { id: 'regex', icon: '.*', title: 'Regex lab', category: 'Tools',
@@ -423,6 +426,7 @@ function labsView(id, sub) {
     return;
   }
   if (id === 'msgbuild') { const host = h('div'); page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'), h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`), h('p.muted', 'Build a messaging setup as a diagram, send messages through it, and read why each one landed, waited, retried or got lost.'))), host); leave = msgBuildLab(host, (xp, title) => toast(h('div', h('b', `+${xp} XP`), ` · solved "${title}"`), 'gold'), sub); return; }
+  if (id === 'sysdesign') { const host = h('div'); page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'), h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`), h('p.muted', 'Design a service on real equipment, put it under load, break it, and read why every number on the dashboard is what it is.'))), host); leave = sysDesignLab(host, (xp, title) => toast(h('div', h('b', `+${xp} XP`), ` · solved "${title}"`), 'gold')); return; }
   if (id === 'composebuild' || id === 'kubebuild' || id === 'pipebuild') {
     const host = h('div');
     page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'),

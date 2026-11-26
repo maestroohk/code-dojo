@@ -421,9 +421,9 @@ learner has done it there.
   "title": "Mission: pipes and plumbing", "prompt": "In the mission **Pipes and plumbing**, answer ...", "explain": "..." }
 ```
 
-- **Visual labs** (`"lab"`): `netbuild`, `archbuild`, `composebuild`, `kubebuild`, `pipebuild`, `pki` or `vim`, and a
-  `challenge` id from that lab's `CHALLENGES` list (in `ui/netsim.js`, `archsim.js`, `composesim.js`, `kubesim.js`,
-  `pipesim.js`, `lab-pki.js`), or for `vim` a level id from `VIM_LEVELS` / `NANO_LEVELS` in `ui/vim-levels.js` (graded by real
+- **Visual labs** (`"lab"`): `netbuild`, `archbuild`, `composebuild`, `kubebuild`, `pipebuild`, `sysdesign`, `pki` or `vim`,
+  and a `challenge` id from that lab's `CHALLENGES` list (in `ui/netsim.js`, `archsim.js`, `composesim.js`, `kubesim.js`,
+  `pipesim.js`, `sdsim.js`, `lab-pki.js`), or for `vim` a level id from `VIM_LEVELS` / `NANO_LEVELS` in `ui/vim-levels.js` (graded by real
   keystrokes on the emulator in `ui/vim-core.js`; replay each new level's `solution` through it in Node). The lab opens **inline** in the step, on that challenge (its full-screen button still works),
   and the step passes as soon as the lab's saved progress marks the challenge solved. Sandbox challenges (no XP) cannot
   be required.

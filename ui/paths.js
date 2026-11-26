@@ -22,6 +22,7 @@ export const LAB_INFO = {
   pki: 'Certificate chain lab', subnet: 'Subnetting trainer', netbuild: 'Network builder', archbuild: 'Architecture builder',
   composebuild: 'Compose builder', kubebuild: 'Kubernetes builder', pipebuild: 'Pipeline builder',
   'msgbuild-rabbit': 'Messaging builder: RabbitMQ', 'msgbuild-kafka': 'Messaging builder: Kafka', vim: 'Vim & nano trainer', regex: 'Regex lab',
+  sysdesign: 'System design board',
 };
 const LAB_MINUTES_PER_CHALLENGE = 8;
 const DEFAULT_LESSON_MINUTES = 10;

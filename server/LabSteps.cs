@@ -23,6 +23,7 @@ public static partial class LabSteps
         ["pipebuild"] = "pipesim.js",
         ["pki"] = "lab-pki.js",
         ["vim"] = "vim-levels.js",
+        ["sysdesign"] = "sdsim.js",
     };
 
     // The Vim & nano trainer's levels: { id: 'quit', group: ..., par: 3, ... } in VIM_LEVELS and NANO_LEVELS.

@@ -19,7 +19,7 @@ namespace CodeDojo;
 public static class Paths
 {
     /// <summary>The visual labs that record solved challenges in state.labs (ids as the UI stores them). Same list as ui/paths.js.</summary>
-    public static readonly string[] Labs = ["pki", "subnet", "netbuild", "archbuild", "composebuild", "kubebuild", "pipebuild", "msgbuild-rabbit", "msgbuild-kafka", "vim", "regex"];
+    public static readonly string[] Labs = ["pki", "subnet", "netbuild", "archbuild", "composebuild", "kubebuild", "pipebuild", "msgbuild-rabbit", "msgbuild-kafka", "vim", "regex", "sysdesign"];
 
     static readonly JsonDocumentOptions DocOptions = new() { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
 

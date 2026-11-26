@@ -237,6 +237,7 @@ const VISUAL = {
   composebuild: { title: 'Compose builder', icon: '🐳', load: () => import('./lab-composebuild.js').then(m => m.composeBuildLab), sim: () => import('./composesim.js') },
   kubebuild: { title: 'Kubernetes builder', icon: '☸', load: () => import('./lab-kubebuild.js').then(m => m.kubeBuildLab), sim: () => import('./kubesim.js') },
   pipebuild: { title: 'Pipeline builder', icon: '⛓', load: () => import('./lab-pipebuild.js').then(m => m.pipeBuildLab), sim: () => import('./pipesim.js') },
+  sysdesign: { title: 'System design board', icon: '🏛', load: () => import('./lab-sysdesign.js').then(m => m.sysDesignLab), sim: () => import('./sdsim.js') },
   pki: { title: 'Certificate chain lab', icon: '🔐', load: () => import('./lab-pki.js').then(m => m.pkiLab) },
   // Real keystrokes on the Vim and nano emulator (vim-core.js); a challenge is a level id from vim-levels.js.
   vim: { title: 'Vim & nano trainer', icon: '⌨', load: () => import('./lab-vim.js').then(m => m.vimLab),
