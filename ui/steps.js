@@ -7,6 +7,9 @@ import { state, save } from './game.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
 import { memoryTrace, eventLoop } from './polyviz.js';
+import { testViz } from './testviz.js';
+/** The language free runs use: the lesson's (a module may run another language than its track, app.js sets it). */
+const runLang = () => document.documentElement.dataset.codeLang || undefined;
 import { sqlGrid } from './sqlgrid.js';
 import { overTime, clock } from './pacing.js';
 // "terminal" (a real shell in a container) and "lab" (a visual or live lab challenge): labsteps.js.
@@ -94,7 +97,7 @@ function typeDrill(target, ctx, onClose) {
   const run = async () => {
     out.hidden = false;
     out.replaceChildren(h('span.muted.small', 'Compiling and running…'));
-    try { const r = await api('run', { track: ctx.track, code: editor.value, setup: ctx.dataSetup }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
+    try { const r = await api('run', { track: ctx.track, language: runLang(), code: editor.value, setup: ctx.dataSetup }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
     catch { out.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
   };
   const el = h('div.drill', meter, editor.el,
@@ -139,7 +142,7 @@ function tryIt(source, ctx, onClose) {
   const run = async () => {
     out.hidden = false;
     out.replaceChildren(h('span.muted.small', 'Compiling and running…'));
-    try { const r = await api('run', { track: ctx.track, code: editor.value, setup: ctx.dataSetup, stdin: stdin?.value }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
+    try { const r = await api('run', { track: ctx.track, language: runLang(), code: editor.value, setup: ctx.dataSetup, stdin: stdin?.value }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
     catch { out.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
   };
   setTimeout(() => editor.focus());
@@ -203,7 +206,7 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), sqlVisuals(step)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), step.testviz && testViz(step.testviz), sqlVisuals(step)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }
@@ -694,7 +697,7 @@ function code(step, ctx) {
     if (busy) return;
     setBusy(true, 'Compiling and running…');
     try {
-      const r = await api('run', { track: ctx.track, code: editor.value, stdin: firstInput || step.stdin || '', template: step.template, framework: step.framework, setup: step.setup });
+      const r = await api('run', { track: ctx.track, language: runLang(), code: editor.value, stdin: firstInput || step.stdin || '', template: step.template, framework: step.framework, setup: step.setup, target: step.xunit?.target });
       editor.mark(r.diagnostics);
       renderRunOutput(panel, r, { stdin: firstInput });
     } catch (e) {
@@ -735,6 +738,7 @@ function code(step, ctx) {
     h('div.code-head', step.title && h('h2', step.title), step.mode === 'fix' && h('span.tag.fix', '🐞 Fix the bug'),
       (step.framework || '').split('+').includes('web') && h('span.tag.web', '🌐 Live web server'),
       (step.framework || '').split('+').includes('efcore') && h('span.tag.web', '🗄 EF Core + SQLite'),
+      (step.framework || '').split('+').includes('xunit') && (step.xunit || /\[(Fact|Theory)\b/.test(`${step.template || ''} ${step.starter || ''}`)) && h('span.tag.web', step.xunit?.target ? '🧪 xUnit v3: your tests vs planted bugs' : '🧪 xUnit v3'),
       step.carry && ctx.carried && h('span.tag', 'Your code so far')),
     promptEl,
     editor.el,

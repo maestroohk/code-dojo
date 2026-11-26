@@ -512,6 +512,80 @@ samples uses the track default.
   `[Migration]` attributes) and applied with `Database.Migrate()`. Ignore
   `RelationalEventId.PendingModelChangesWarning` when there is no model snapshot.
 
+### xUnit steps (`"framework": "xunit"`)
+
+`"framework": "xunit"` compiles a C# step as a real **xUnit v3** test assembly (xUnit 4.0.3, the server's own NuGet
+restore, `server/CodeDojo.csproj`), with **NSubstitute** 6, **Microsoft.Extensions.TimeProvider.Testing**
+(`FakeTimeProvider`) and **Microsoft.AspNetCore.TestHost** (`TestServer`) available. `"xunit+web"` adds the ASP.NET Core
+usings (tests host the app themselves with `builder.WebHost.UseTestServer()` and `app.GetTestClient()`; no port is
+opened), `"xunit+efcore"` adds EF Core with SQLite. A track can make it the default in `track.json` (`tracks/testing` does).
+
+- `using Xunit;` is implicit, as in a real v3 project. NSubstitute and the others need their own `using` lines
+  (`using NSubstitute;`, `using Microsoft.Extensions.Time.Testing;`, `using Microsoft.AspNetCore.TestHost;`).
+- Running the program runs xUnit's in-process console runner (`-parallelMode none -culture en-US`). Its real console
+  output is shown under the results, and **every test (every `[InlineData]` row) is one results row**, named by its xUnit
+  display name (`ShippingTests.Cost(total: 50, expected: 0)`). A failing row shows xUnit's message and the learner's lines.
+- Top-level statements still win as the entry point, so ordinary `Dojo.*` template steps keep working in an xUnit track.
+- Test classes must be `public`; `[Fact]` and `[Theory]` methods `public`. Async tests return `Task` (or `ValueTask`) and
+  should pass `TestContext.Current.CancellationToken` to async calls (xUnit's analyzer warns otherwise in a real project).
+- An xUnit run gets the larger CPU budget (8 s), like EF Core.
+
+Three ways to grade with it:
+
+1. **Hidden xUnit tests**: the learner writes code, the `template` holds `public class ...Tests` with `[Fact]`s after
+   `{{CODE}}`. Each hidden test is a row.
+2. **The learner writes the tests, checked against planted bugs** (the core of `tracks/testing`):
+
+```json
+{ "type": "code", "framework": "xunit",
+  "xunit": {
+    "target": ["public static class Shipping", "{", "    public static decimal Cost(decimal total) => total >= 50m ? 0m : 4.99m;", "}"],
+    "minTests": 3,
+    "mutants": [
+      { "name": "the free-shipping boundary moved", "replace": [[">= 50m", "> 50m"]], "hint": "Test exactly 50." },
+      { "name": "small orders ship free", "replace": [["0m : 4.99m", "0m : 0m"]] } ] },
+  "starter": ["public class ShippingTests", "{", "}"],
+  "solution": ["..."] }
+```
+
+   The learner's code is the test file; `target` is compiled beside it as `Target.cs` (show it in the prompt). The tests
+   must pass on the target, number at least `minTests` (default 1; each `[InlineData]` row counts), and then **at least one
+   test must fail on every mutant**: each mutant is the target with every `replace` pair applied once (each old text must
+   occur), or a whole `"code"`, compiled with the same tests and run with `-stopOnFail`. A timeout or a crash also counts as
+   caught, as in Stryker.NET. Rows: "xUnit finds at least N tests", "Your tests pass on the correct code", then one
+   "Catches the bug: name" per mutant (with its `hint` when it survives). The output ends with a mutation report and score.
+   `"file"` renames `Target.cs`. A step with a `target` ignores `template`; put helper types (interfaces, records) in the target.
+   **Run** runs the learner's tests against the target.
+3. **Test-driven**: `"xunit": { "minTests": 3 }` with no target. The learner writes the code *and* their own tests; the
+   template's hidden test classes check the code, and the tests in classes the template does not declare must number at
+   least `minTests`.
+
+`dojo validate` checks the shape (`framework` includes `xunit`, `minTests` is a number, every mutant has a unique name
+and its `replace` texts occur in the target), and runs the `solution` through the grader: it must pass on the target
+and catch every mutant. Write mutants a good suite should catch (a boundary, a dropped rule, a wrong rounding, a skipped
+call), never one no test can see (an equivalent mutant), and not ones that only rename things.
+
+### Testing visuals (`"testviz"` on a learn card)
+
+`ui/testviz.js` draws, under the card's text:
+
+| `kind` | Shows | Fields |
+|---|---|---|
+| `pyramid` | the test pyramid and the testing trophy; each layer clickable (speed, count, catches, cost, tools) | `highlight`: `unit`, `integration`, `e2e` or `static` |
+| `doubles` | a class under test with dummy, stub, spy, mock and fake around it; NSubstitute and Moq code for each | none |
+| `mutation` | a Stryker-style report: the code with each mutant on its line, line coverage, the mutation score | `file`, `code` (lines), `mutants`: `[{ "line", "from", "to", "status": "killed\|survived\|timeout\|nocoverage", "by", "name", "hint" }]`, `covered` (line numbers), `lang` |
+| `tdd` | a kata replayed step by step, with a red/green/refactor ring, the test list and the code | `title`, `steps`: `[{ "phase": "red\|green\|refactor", "list": ["[x] done", "[>] now", "[ ] later"], "code", "note" }]` |
+| `flaky` | a grid of repeated runs (one row per test); flaky rows are marked; click a row for its cause | `title`, `subtitle`, `tests`: `[{ "name", "runs": "PPFP...", "cause" }]` (P pass, F fail, S skipped, same length) |
+
+`dojo validate` checks each one (`server/TestViz.cs`): mutant lines exist and their `from` text is on that line, phases
+are known, every flaky row has the same number of runs.
+
+### A module in another language
+
+A `module.json` may set `"language"` (for example `"python"` in the C# topic `tracks/testing`): its code and predict
+steps then run and are graded in that language (pytest steps included), and the editor highlights it. The track's
+default `framework` is not applied to such a module.
+
 ## Tracks in Python, JavaScript or TypeScript
 
 Set `"language"` in `track.json` to `"python"`, `"javascript"` or `"typescript"`. Code steps then run
@@ -572,7 +646,8 @@ messages are correct; the one-line helper prelude is accounted for.
 - Learner code is compiled as C# (latest) with nullable enabled, as a top-level-statements program.
 - These usings are implicit: `System`, `System.Collections.Generic`, `System.IO`, `System.Linq`,
   `System.Text`, `System.Threading`, `System.Threading.Tasks`.
-- Only the base class library is referenced. No NuGet packages (except EF Core for `"framework": "efcore"` steps).
+- Only the base class library is referenced. No NuGet packages (except EF Core for `"framework": "efcore"` steps, and
+  xUnit v3, NSubstitute, FakeTimeProvider and TestHost for `"framework": "xunit"` steps).
 - Culture is fixed to `en-US`, so number and date formatting is predictable.
 - A run is stopped after 4 seconds of CPU time, or 15 seconds on the clock (the generous clock limit
   is deliberate: security scanners sometimes pause a new program for several seconds). Keep delays
