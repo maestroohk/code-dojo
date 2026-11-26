@@ -135,6 +135,7 @@ export function createBoard(opt) {
     else if (e.key === '+' || e.key === '=') zoomTo(zoom * 1.15);
     else if (e.key === '-') zoomTo(zoom / 1.15);
     else if (e.key === '0') fit();
+    else if (e.key === 'f' || e.key === 'F') toggleFull();
   });
 
   // ------------------------------------------------------------ geometry
@@ -376,12 +377,30 @@ export function createBoard(opt) {
     o.howto && h('p.muted.small.bk-howto', o.howto));
 
   const viewBtns = o.form ? ['board', 'form'].map(v => h(`button.tab${view === v ? '.active' : ''}`, { type: 'button', onclick: () => setView(v) },
-    v === 'board' ? '🧱 Board' : '☰ Form')) : [];
+    v === 'board' ? '⊞ Board' : '☰ Form')) : [];
+  // Full screen: the whole workspace (board, inspector, run controls) fills the window, so devices can be
+  // shown large instead of shrunk to fit a narrow column. Esc or the button returns.
+  const fullBtn = h('button.btn.ghost.small', { type: 'button', title: 'Full screen (F), Esc to return', onclick: () => toggleFull() }, '⤢');
+  function toggleFull(on) {
+    const target = el.closest('.nb-main') || el;
+    on ??= !target.classList.contains('bk-full');
+    target.classList.toggle('bk-full', on);
+    document.body.classList.toggle('ed-modal-open', on);
+    fullBtn.textContent = on ? '⤡' : '⤢';
+    fullBtn.title = on ? 'Back to the page (Esc)' : 'Full screen (F), Esc to return';
+    requestAnimationFrame(() => fit());
+  }
+  const onFullKey = e => {
+    if (e.key === 'Escape' && (el.closest('.nb-main') || el).classList.contains('bk-full') && !e.target.closest('input, select, textarea')) toggleFull(false);
+  };
+  document.addEventListener('keydown', onFullKey);
+  window.addEventListener('hashchange', () => { document.removeEventListener('keydown', onFullKey); document.body.classList.remove('ed-modal-open'); }, { once: true });
   const zoomBar = h('div.bk-zoombar',
     h('button.btn.ghost.small', { type: 'button', title: 'Zoom out (-)', onclick: () => zoomTo(zoom / 1.2) }, '−'),
     zoomLabel,
     h('button.btn.ghost.small', { type: 'button', title: 'Zoom in (+)', onclick: () => zoomTo(zoom * 1.2) }, '+'),
-    h('button.btn.ghost.small', { type: 'button', title: 'Fit everything (0)', onclick: fit }, 'Fit'));
+    h('button.btn.ghost.small', { type: 'button', title: 'Fit everything (0)', onclick: fit }, 'Fit'),
+    fullBtn);
   surface.append(zoomBar);
   const toolbar = h('div.bk-toolbar', viewBtns.length > 0 && h('div.bk-viewtoggle', viewBtns), o.toolbar);
 

@@ -18,6 +18,13 @@ const KINDS = {
   client: { label: 'Client cert', icon: '👤', ca: false, eku: 'client', years: 2 },
 };
 
+// A rosette seal for the certificate face, and a small document icon for the palette (drawn here, no images).
+const SEAL = '<svg viewBox="0 0 40 40" width="34" height="34"><g fill="var(--brick)"><path d="M20 2l3.2 3.6 4.7-1.2 1.4 4.6 4.6 1.4-1.2 4.7L36.3 18.4l-3.6 3.2 1.2 4.7-4.6 1.4-1.4 4.6-4.7-1.2L20 34.8l-3.2-3.6-4.7 1.2-1.4-4.6-4.6-1.4 1.2-4.7L3.7 18.4l3.6-3.2-1.2-4.7 4.6-1.4 1.4-4.6 4.7 1.2z"/></g>'
+  + '<circle cx="20" cy="18.4" r="8.5" fill="none" stroke="#fff" stroke-opacity=".75" stroke-width="1.4"/><path d="M15.5 18.6l3 3 6-6.2" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
+  + '<path d="M14 31l-3 7 4-1.5 2 3.5 2.5-7M26 31l3 7-4-1.5-2 3.5-2.5-7" fill="var(--brick)" opacity=".85"/></svg>';
+const DOC = '<svg viewBox="0 0 24 24" width="22" height="22"><rect x="3.5" y="3" width="17" height="18" rx="2" fill="#f4efe1" stroke="var(--brick)" stroke-width="1.5"/>'
+  + '<rect x="3.5" y="3" width="17" height="4" rx="1.5" fill="var(--brick)"/><path d="M7 11h10M7 14h7" stroke="#8a8270" stroke-width="1.4" stroke-linecap="round"/><circle cx="16.5" cy="17" r="2.4" fill="var(--brick)"/></svg>';
+
 let seq = 0;
 const newId = () => 'c' + Date.now().toString(36) + (seq++);
 
@@ -136,7 +143,9 @@ export function pkiLab(container, onXp) {
         if (!c.issuer || c.issuer === c.id) continue;
         const p = byId(c.issuer);
         if (!p) continue;
-        const a = { x: c.x + 95, y: c.y }, b = { x: p.x + 95, y: p.y + 92 };
+        // The cable leaves the top of this certificate and arrives at the bottom of its signer (measured, not assumed).
+        const signerHeight = surface.querySelector(`.pk-node[data-id="${p.id}"]`)?.offsetHeight || 92;
+        const a = { x: c.x + 95, y: c.y }, b = { x: p.x + 95, y: p.y + signerHeight };
         const path = document.createElementNS(svg.namespaceURI, 'path');
         const my = (a.y + b.y) / 2;
         path.setAttribute('d', `M${a.x},${a.y} C${a.x},${my} ${b.x},${my} ${b.x},${b.y}`);
@@ -178,9 +187,10 @@ export function pkiLab(container, onXp) {
           node.addEventListener('pointerup', up, { once: true });
         },
       },
-        h('div.pk-stud'), h('div.pk-stud'), h('div.pk-stud'),
-        h('div.pk-node-head', h('span.pk-icon', k.icon), h('span.pk-kind', k.label)),
-        h('div.pk-name', c.name),
+        // Drawn as a certificate: a band in the kind's colour, a seal, then the fields a certificate viewer shows.
+        h('div.pk-node-head', h('span.pk-kind', k.label), h('span.pk-seal', { html: SEAL, 'aria-hidden': 'true', title: 'X.509 certificate' })),
+        h('div.pk-name', { title: c.name }, c.name),
+        h('div.pk-fv', h('span.pk-fl', 'issued by '), c.issuer && c.issuer !== c.id ? (byId(c.issuer)?.name || '?') : 'itself (self-signed)'),
         h('div.pk-dates', `${c.notBefore} → ${c.notAfter}`),
         h('div.pk-tags', tags),
         c.issuer !== c.id && h('button.pk-port', {
@@ -212,7 +222,7 @@ export function pkiLab(container, onXp) {
     requestAnimationFrame(drawWires);
 
     const palette = h('div.pk-palette',
-      h('div.muted.small', 'Bricks'),
+      h('div.muted.small', 'Add a certificate'),
       Object.entries(KINDS).map(([kind, k]) => h(`button.pk-brick.k-${kind}`, {
         type: 'button', title: `Add a ${k.label}`,
         onclick: () => update(() => {
@@ -226,8 +236,8 @@ export function pkiLab(container, onXp) {
           selected = c.id;
           if (kind === 'server' && !byId(model.leaf)) model.leaf = c.id;
         }),
-      }, h('span', k.icon), ' ', k.label)),
-      h('p.muted.small.pk-howto', 'Drag a block to move it. Drag its ⬆ handle onto the block that signs it. Drop the handle on empty board to make it self-signed.'));
+      }, h('span.pk-pal-doc', { html: DOC, 'aria-hidden': 'true' }), k.label)),
+      h('p.muted.small.pk-howto', 'Drag a certificate to move it. Drag its ⬆ handle onto the certificate that signs it. Drop the handle on empty board to make it self-signed.'));
 
     return h('div.pk-board-wrap', palette, surface);
   }
@@ -239,7 +249,7 @@ export function pkiLab(container, onXp) {
       h('b', `${KINDS[c.kind]?.icon || ''} ${c.name}`),
       h('span.muted.small', c.issuer && c.issuer !== c.id ? `signed by ${byId(c.issuer)?.name || '?'}` : 'self-signed'),
       h('span.muted.small', `${c.notBefore} → ${c.notAfter}`))),
-      !model.certs.length && h('p.muted', 'No certificates yet. Switch to the board to add bricks, or start a challenge.'));
+      !model.certs.length && h('p.muted', 'No certificates yet. Switch to the board to add certificates, or start a challenge.'));
   }
 
   // ------------------------------------------------------------ inspector: edit one certificate
@@ -330,7 +340,7 @@ export function pkiLab(container, onXp) {
         h('label', 'on ', h('input', { type: 'date', value: model.at, onchange: e => update(() => { model.at = e.target.value; }) })),
         h('div.pk-viewtoggle',
           ['board', 'form'].map(v => h(`button.tab${saved.view === v ? '.active' : ''}`, { type: 'button', onclick: () => { saved.view = v; persist(); render(); } },
-            v === 'board' ? '🧱 Visual board' : '☰ Form')))),
+            v === 'board' ? '⊞ Visual board' : '☰ Form')))),
       h('div.pk-main',
         h('div.pk-left', saved.view === 'form' ? form() : board()),
         h('div.pk-right', inspectorSlot, verdictSlot)));
