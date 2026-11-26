@@ -209,11 +209,12 @@ public sealed partial class Content(string root)
                 if (all[i] is JsonObject st) all[i] = ForDream(st, dream, lexicon);
             if (obj["title"] is JsonValue t && t.TryGetValue<string>(out var title)) obj["title"] = Lex(title, lexicon);
         }
+        // Cold rebuilds borrow from their source step first, so a source's own framework ("xunit+web") wins over the default.
+        if (coldOf) Pacing.ApplyColdOf(this, track, obj, dream);
         // A track may set a default "framework" (e.g. "efcore") for every code and predict step that names none.
         if (Framework(track) is { Length: > 0 } framework && Language(track, module) == Language(track))
             foreach (var step in (obj["steps"] as JsonArray ?? []).OfType<JsonObject>())
                 if ((string?)step["type"] is "code" or "predict" && step["framework"] is null) step["framework"] = framework;
-        if (coldOf) Pacing.ApplyColdOf(this, track, obj, dream);
         obj["id"] = lesson;
         obj["key"] = $"{track}/{module}/{lesson}";
         return obj;
