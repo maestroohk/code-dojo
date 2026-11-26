@@ -1,4 +1,4 @@
-// Network builder: place PCs, switches, routers and the Internet on a lego board, cable them, give every
+// Network builder: place PCs, switches, routers and the Internet on a topology board, cable them, give every
 // interface an address, set gateways, static routes and NAT, then ping. The packet travels hop by hop
 // and every decision is explained (same subnet? which route? ARP? NAT? TTL?), including exactly why
 // it failed. The simulation itself lives in netsim.js (DOM-free, tested in Node).
@@ -8,9 +8,10 @@ import { createBoard } from './blocks.js';
 import * as N from './netsim.js';
 
 const LAB = 'netbuild';
-const COLORS = { pc: '#3d6f8a', switch: '#4f7a3a', router: '#b8572a', cloud: '#5f5590' };
-const WIDTH = { pc: 210, switch: 300, router: 250, cloud: 220 };
-const KINDS = Object.fromEntries(Object.entries(N.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: WIDTH[k] }]));
+const COLORS = { pc: '#5b8def', switch: '#3fb68b', router: '#d08a4a', cloud: '#9a86d6' };
+const WIDTH = { pc: 190, switch: 300, router: 230, cloud: 200 };
+const ART = { pc: 'pc', switch: 'switch', router: 'router', cloud: 'cloud' };
+const KINDS = Object.fromEntries(Object.entries(N.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: WIDTH[k], art: ART[k], panel: k === 'switch' }]));
 /** replaceChildren that skips false/null (from `cond && node`). */
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false));
 const starText = n => '★'.repeat(n) + '☆'.repeat(3 - n);
@@ -95,10 +96,25 @@ export function netBuildLab(container, onXp) {
     onMove: () => persist(),
     blockClass: d => [d.fixed && 'fixed', badDevice === d.id && 'bad'].filter(Boolean).join(' '),
     wireState: w => wireStates.get(w.id) || '',
+    zones: subnetZones,
     form: formView,
     view: saved.view,
     onView: v => { saved.view = v; persist(); },
   });
+
+  /** One tinted area per subnet the PCs are in, with the switches they are cabled to. A PC with a wrong mask shows up in an area of its own. */
+  function subnetZones() {
+    const groups = new Map();
+    for (const d of model.devices) if (d.kind === 'pc' && N.validIp(d.ifaces[0].ip)) {
+      const c = N.cidr(d.ifaces[0].ip, d.ifaces[0].prefix);
+      if (!groups.has(c)) groups.set(c, new Set());
+      groups.get(c).add(d.id);
+    }
+    for (const l of model.links) for (const [x, y] of [[l.a, l.b], [l.b, l.a]]) {
+      if (dev(x.dev)?.kind === 'pc' && dev(y.dev)?.kind === 'switch') for (const s of groups.values()) if (s.has(x.dev)) s.add(y.dev);
+    }
+    return [...groups].map(([c, s]) => ({ id: c, label: `subnet ${c}`, members: [...s] }));
+  }
 
   function addDevice(kind, at) {
     if (kind === 'cloud' && model.devices.some(d => d.kind === 'cloud')) return 'There is only one Internet on this board.';
