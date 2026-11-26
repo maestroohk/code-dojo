@@ -13,6 +13,7 @@ import { overTime, clock } from './pacing.js';
 import { EXTRA_STEPS, EXTRA_LABELS } from './labsteps.js';
 import { regexStep } from './regexstep.js';
 import { regexCard } from './regex-ui.js';
+import { pipeViz } from './pspipe.js';
 import { sqlVisuals, withSqlVisuals, sqlPlanButton } from './sqlviz.js';
 
 export const DRAG_TYPES = new Set(['order', 'blanks', 'match', 'sort']);
@@ -203,7 +204,7 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), sqlVisuals(step)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), step.pspipe && pipeViz(step.pspipe), sqlVisuals(step)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }
@@ -257,7 +258,7 @@ function mcq(step, ctx) {
     b.classList.toggle('selected', chosen.has(order[n]));
     b.classList.remove('right', 'wrong');
   });
-  const el = h('div.mcq', prompt(step), step.code && h('div', { html: codeBlock(step.code) }),
+  const el = h('div.mcq', prompt(step), step.code && h('div', { html: codeBlock(step.code, step.lang) }),
     multi && h('p.muted', 'Select all that apply.'), h(`div.options${multi ? '.multi' : ''}`, buttons));
 
   const onKey = e => {
@@ -297,7 +298,7 @@ function predict(step, ctx) {
 
   const shown = h('div.revealed');
   return {
-    el: h('div.predict', prompt(step), step.setup && sqlData(step.setup, ctx, { open: true, label: 'The data this query runs on' }), h('div', { html: codeBlock(step.code, document.documentElement.dataset.codeLang || 'csharp') }),
+    el: h('div.predict', prompt(step), step.setup && sqlData(step.setup, ctx, { open: true, label: 'The data this query runs on' }), h('div', { html: codeBlock(step.code, step.lang || document.documentElement.dataset.codeLang || 'csharp') }),
       step.stdin != null && h('div.predict-stdin', h('div.field-label', 'Input it reads (what someone types)'), h('div', { html: codeBlock(Array.isArray(step.stdin) ? step.stdin.join('\n') : String(step.stdin), 'text') })),
       h('label.field', h('span.field-label', 'Output'), input), shown),
     ready: () => input.value.trim().length > 0,

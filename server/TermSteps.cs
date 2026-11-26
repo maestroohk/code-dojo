@@ -52,11 +52,13 @@ public sealed partial class TermSteps : IAsyncDisposable
     /// image folders (not lessons) can ask for this: the Docker and Kubernetes images run a container runtime inside
     /// the step's container, which needs <c>privileged</c> (still with no network), more memory and processes, and
     /// <c>exclusive</c>: at most one such container at a time on the laptop. <c>Machine</c> and <c>Starting</c> are
-    /// what the page says about the machine while it starts and once it is ready.
+    /// what the page says about the machine while it starts and once it is ready. <c>Shell</c> is what the learner
+    /// types into: "bash" (default) or "pwsh" (the PowerShell image opens its terminal in pwsh), so `dojo validate`
+    /// runs a step's solution in that shell. Setup and checks are bash either way.
     /// </summary>
     public sealed record Machine(bool Privileged = false, string? Memory = null, string? Cpus = null, int? Pids = null, bool Exclusive = false,
         string Name = "Your own Debian machine for this step", string Starting = "A fresh Linux container just for this step. The first time takes a few seconds.",
-        int SetupSeconds = 180);
+        int SetupSeconds = 180, string Shell = "bash");
 
     public Machine MachineFor(string image)
     {
@@ -211,11 +213,15 @@ public sealed partial class TermSteps : IAsyncDisposable
     Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, params string[] env) =>
         Exec(name, user, script, seconds, null, env);
 
-    Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, Action<string>? onLine, params string[] env)
+    Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, Action<string>? onLine, params string[] env) =>
+        Exec(name, user, script, seconds, onLine, "bash", env);
+
+    Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, Action<string>? onLine, string shell, params string[] env)
     {
         var args = new List<string> { "exec", "-u", user, "-w", Home, "-e", "HOME=" + (user == "root" ? "/root" : Home), "-e", "DOJO_FILES=" + FilesIn };
         foreach (var e in env) { args.Add("-e"); args.Add(e); }
-        args.AddRange([name, "bash", "-c", script]);
+        args.Add(name);
+        args.AddRange(shell == "pwsh" ? ["pwsh", "-NoLogo", "-NonInteractive", "-Command", script] : ["bash", "-c", script]);
         return NetLabs.Docker(args, TimeSpan.FromSeconds(seconds), onLine: onLine);
     }
 
@@ -433,7 +439,8 @@ public sealed partial class TermSteps : IAsyncDisposable
             if (spec.Solution.Trim().Length == 0) { problems.Add("missing 'solution' (the commands an expert would type)"); return problems; }
             // Typed one line at a time, like the learner would: a command that stops on purpose (a revert that
             // conflicts) does not end the script. The checks afterwards decide.
-            var sol = await Exec(name, User, "cd ~\n" + spec.Solution, Math.Max(180, MachineFor(spec.Image).SetupSeconds), "GIT_EDITOR=true", "EDITOR=true", "DOJO_LINE_TERM=1");
+            var machine = MachineFor(spec.Image);
+            var sol = await Exec(name, User, "cd ~\n" + spec.Solution, Math.Max(180, machine.SetupSeconds), (Action<string>?)null, machine.Shell, "GIT_EDITOR=true", "EDITOR=true", "DOJO_LINE_TERM=1");
             var after = await ChecksOn(name, spec);
             foreach (var row in after.Where(r => !r.Pass))
                 problems.Add($"after the solution, check \"{row.Name}\" fails: {row.Detail?.Replace("\n", " | ")}");
