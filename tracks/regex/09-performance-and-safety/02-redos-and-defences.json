@@ -1,0 +1,449 @@
+{
+  "title": "ReDoS: when a regex takes down production",
+  "summary": "Regex denial of service as a security bug, the Stack Overflow and Cloudflare outages, the defences in order, NonBacktracking and match timeouts in .NET, and the tools that find the stuck thread.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "ReDoS: a denial of service in one string",
+      "body": [
+        "**ReDoS** (regular expression denial of service) needs two things: a pattern that can backtrack badly, and input an",
+        "attacker controls. One request pins a thread at 100% CPU; a handful pin every core. No exploit code, just text.",
+        "It is a real vulnerability class (CWE-1333) and dependency scanners file CVEs for it.",
+        "",
+        "Two outages every senior has heard of:",
+        "",
+        "- **Stack Overflow, 20 July 2016.** A post contained about 20,000 consecutive whitespace characters. The home page",
+        "  ran a trim regex over it: `^[\\s\\u200c]+|[\\s\\u200c]+$` (shown below). The load balancer's health check hit the home",
+        "  page, timed out, and took the web servers out of rotation. The site was down for 34 minutes. The fix was to",
+        "  replace the regex with a plain trim loop.",
+        "- **Cloudflare, 2 July 2019.** A new WAF rule containing `.*(?:.*=.*)` was deployed to every edge server at once. CPU",
+        "  went to 100% worldwide and Cloudflare served 502 errors for about 27 minutes. Afterwards they moved rule matching",
+        "  to an engine with guaranteed linear time and changed rollouts to be staged.",
+        "",
+        "Neither pattern looks dangerous. Both passed normal tests."
+      ],
+      "regex": {
+        "pattern": "^[\\s\\u200c]+|[\\s\\u200c]+$",
+        "flags": "",
+        "text": "      padded post title      "
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why was the Stack Overflow trim regex slow on 20,000 spaces followed by a letter?",
+      "options": [
+        "At every start position inside the run, `[\\s\\u200c]+` ran to the end of the spaces and then `$` failed on the letter: about 20,000 × 20,000 / 2 = 200 million steps",
+        "Comparing against `\\u200c` is slow",
+        "Nested quantifiers made it exponential",
+        "The `|` makes the engine scan the input twice"
+      ],
+      "answer": 0,
+      "explain": "This one is **quadratic**, not exponential: no nested quantifier, but an unanchored search retries at every position, and each retry rescans the rest of the run. Quadratic is enough: 20,000 characters became 200 million steps per page view. Watch for patterns that start with a variable-length run and fail at the end."
+    },
+    {
+      "type": "regex",
+      "title": "Trailing whitespace, in linear time",
+      "prompt": [
+        "Find the run of trailing whitespace (`\\s` or U+200C, the zero-width non-joiner) at the end of the text, as one",
+        "match. The Stack Overflow version, `[\\s\\u200c]+$`, fails the check with 20,000 spaces and a letter.",
+        "",
+        "Only start a match where the previous character is **not** whitespace, with a negative lookbehind `(?<!...)`. Then",
+        "only one position in the run is ever tried."
+      ],
+      "starter": "[\\s\\u200c]+$",
+      "solution": "(?<![\\s\\u200c])[\\s\\u200c]+$",
+      "tests": {
+        "all": [
+          {
+            "input": "trim me   ",
+            "matches": [
+              "   "
+            ]
+          },
+          {
+            "input": "title‌ ",
+            "matches": [
+              "‌ "
+            ]
+          }
+        ],
+        "find": [
+          "hello \t"
+        ],
+        "noFind": [
+          "hello",
+          "hel  lo",
+          "  leading only"
+        ],
+        "fast": [
+          {
+            "repeat": " ",
+            "times": 20000,
+            "suffix": "x"
+          }
+        ]
+      },
+      "require": [
+        {
+          "pattern": "\\(\\?<[!=]",
+          "message": "Uses a lookbehind to start only at the beginning of the run"
+        }
+      ],
+      "hints": [
+        "Put `(?<![\\s\\u200c])` in front of the starter.",
+        "`(?<![\\s\\u200c])[\\s\\u200c]+$`"
+      ],
+      "explain": "Inside the run, every position fails the lookbehind in one step. Only the first space of the run starts a real attempt, so the whole scan is linear. In application code, `string.TrimEnd()` (or a loop) is simpler still, which is what Stack Overflow shipped."
+    },
+    {
+      "type": "learn",
+      "title": "The defences, in order",
+      "body": [
+        "1. **Rewrite** so each character can be matched one way (previous lesson). This fixes the cause.",
+        "2. **Atomic groups** `(?>...)` where a rewrite is awkward.",
+        "3. **`RegexOptions.NonBacktracking`** (.NET 7+): a different engine built on finite automata. Matching time is linear",
+        "   in the input length, whatever the pattern. The costs: no lookarounds, backreferences, atomic groups or conditionals",
+        "   (the constructor throws `NotSupportedException`), construction is slower, and simple patterns can match a little",
+        "   slower than with the backtracking engine.",
+        "4. **A match timeout, always, for untrusted input.** The default is `Regex.InfiniteMatchTimeout`. Set one per regex,",
+        "   or once for the process at startup, before any regex is built:",
+        "",
+        "```csharp",
+        "var slug = new Regex(@\"^[a-z0-9]+(?:-[a-z0-9]+)*$\", RegexOptions.None, TimeSpan.FromMilliseconds(100));",
+        "AppContext.SetData(\"REGEX_DEFAULT_MATCH_TIMEOUT\", TimeSpan.FromSeconds(1));   // process-wide default",
+        "",
+        "try { ok = slug.IsMatch(input); }",
+        "catch (RegexMatchTimeoutException ex)",
+        "{",
+        "    logger.LogWarning(\"Regex timed out after {Timeout} on {Length} chars\", ex.MatchTimeout, input.Length);",
+        "    ok = false;   // a safe answer: treat it as invalid",
+        "}",
+        "```",
+        "",
+        "Log the pattern and the input **length**, not the input: it may be huge or personal data. And bound the input first",
+        "(a 32-character username field should never see 1 MB), although, as you will see, a length limit alone is not enough."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "try",
+        "{",
+        "    var twice = new Regex(@\"(\\w)\\1\", RegexOptions.NonBacktracking);",
+        "    Console.WriteLine(\"built\");",
+        "}",
+        "catch (NotSupportedException)",
+        "{",
+        "    Console.WriteLine(\"not supported\");",
+        "}",
+        "var words = new Regex(@\"^(\\w+\\s?)*$\", RegexOptions.NonBacktracking);",
+        "Console.WriteLine(words.IsMatch(new string('a', 1000) + \"!\"));"
+      ],
+      "answer": [
+        "not supported",
+        "False"
+      ],
+      "explain": "A backreference needs to remember what a group matched, which a finite automaton cannot do, so the constructor refuses it. The catastrophic pattern is harmless under NonBacktracking: it answers `False` in linear time, without trying splits at all."
+    },
+    {
+      "type": "sort",
+      "prompt": "Constructing a regex with `RegexOptions.NonBacktracking`: does this construct work, or does it throw?",
+      "buckets": [
+        "Works with NonBacktracking",
+        "Throws NotSupportedException"
+      ],
+      "items": [
+        [
+          "Named groups `(?<year>[0-9]{4})`",
+          0
+        ],
+        [
+          "Alternation `GET|POST`",
+          0
+        ],
+        [
+          "Anchors `^`, `$` and `\\b`",
+          0
+        ],
+        [
+          "Classes and counts `[^,]{2,5}`",
+          0
+        ],
+        [
+          "Lookahead `(?=...)`",
+          1
+        ],
+        [
+          "Lookbehind `(?<=...)`",
+          1
+        ],
+        [
+          "Backreference `\\1`",
+          1
+        ],
+        [
+          "Atomic group `(?>...)`",
+          1
+        ]
+      ],
+      "explain": "Captures still work, so most parsing patterns move over unchanged. Lookarounds, backreferences and atomic groups are the price of the linear-time guarantee (and atomic groups are pointless there anyway: nothing backtracks)."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Symptom: the signup API pegs a core",
+      "prompt": [
+        "**Symptom.** Last Tuesday one request to `POST /signup` pinned a CPU core until the pod restarted. `dotnet-counters`",
+        "showed CPU at 100% with almost no requests completing, and a dump showed the hot thread here:",
+        "",
+        "```text",
+        "System.Text.RegularExpressions.RegexInterpreter.TryMatchAtCurrentPosition",
+        "System.Text.RegularExpressions.Regex.RunSingleMatch",
+        "Signup.Api.UsernameRules.IsValidUsername",
+        "```",
+        "",
+        "The hotfix added a 100 ms timeout. Now that request returns **500** with an unhandled `RegexMatchTimeoutException`.",
+        "",
+        "Fix `bool IsValidUsername(string name)` properly. The rule (product confirmed it): 3 to 32 characters, runs of ASCII",
+        "letters and digits joined by **single** underscores, no underscore at the start or end.",
+        "",
+        "- Check the length first. It is cheap, but notice that it does not save you: the attack input is only 32 characters.",
+        "- Rewrite the pattern so it is linear, and end it with `\\z` (`$` would let `ana\\n` through).",
+        "- Keep the 100 ms timeout and catch `RegexMatchTimeoutException`, returning `false`, as a safety net."
+      ],
+      "starter": [
+        "var username = new Regex(@\"^([a-zA-Z0-9]+_?)+$\", RegexOptions.None, TimeSpan.FromMilliseconds(100));",
+        "",
+        "bool IsValidUsername(string name)",
+        "{",
+        "    return username.IsMatch(name);",
+        "}"
+      ],
+      "solution": [
+        "var username = new Regex(@\"^[a-zA-Z0-9]+(?:_[a-zA-Z0-9]+)*\\z\", RegexOptions.None, TimeSpan.FromMilliseconds(100));",
+        "",
+        "bool IsValidUsername(string name)",
+        "{",
+        "    if (name.Length < 3 || name.Length > 32) return false;",
+        "    try",
+        "    {",
+        "        return username.IsMatch(name);",
+        "    }",
+        "    catch (RegexMatchTimeoutException)",
+        "    {",
+        "        return false;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"ana is valid\", true, IsValidUsername(\"ana\"));",
+        "Dojo.Eq(\"ana_b_2 is valid\", true, IsValidUsername(\"ana_b_2\"));",
+        "Dojo.Eq(\"32 characters is valid\", true, IsValidUsername(new string('a', 32)));",
+        "Dojo.Eq(\"2 characters is too short\", false, IsValidUsername(\"ab\"));",
+        "Dojo.Eq(\"33 characters is too long\", false, IsValidUsername(new string('a', 33)));",
+        "Dojo.Eq(\"a double underscore is refused\", false, IsValidUsername(\"ana__b\"));",
+        "Dojo.Eq(\"a leading underscore is refused\", false, IsValidUsername(\"_ana\"));",
+        "Dojo.Eq(\"a trailing underscore is refused\", false, IsValidUsername(\"ana_\"));",
+        "Dojo.Eq(\"a space is refused\", false, IsValidUsername(\"ana b\"));",
+        "Dojo.Eq(\"a trailing newline is refused\", false, IsValidUsername(\"ana\\n\"));",
+        "Dojo.Try(\"the 32-character attack input (unhandled exception)\", () => Dojo.Eq(\"the 32-character attack input is refused fast\", false, IsValidUsername(new string('a', 31) + \"!\")));"
+      ],
+      "require": [
+        {
+          "pattern": "catch\\s*\\(\\s*RegexMatchTimeoutException",
+          "message": "Catches RegexMatchTimeoutException"
+        },
+        {
+          "pattern": "TimeSpan\\.From",
+          "message": "Keeps a match timeout"
+        }
+      ],
+      "hints": [
+        "Pattern: one run, then repeat \"an underscore and a run\": `^[a-zA-Z0-9]+(?:_[a-zA-Z0-9]+)*\\z`.",
+        "Wrap `return username.IsMatch(name);` in `try { ... } catch (RegexMatchTimeoutException) { return false; }`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: finding and preventing a stuck regex",
+      "body": "When a .NET service is hot, these tell you which thread and which frame, without a debugger attached. Then the scanners keep the next vulnerable pattern out of main. Install the diagnostics with `dotnet tool install -g dotnet-counters` (likewise dotnet-dump, dotnet-trace).",
+      "toolkit": [
+        {
+          "cmd": "dotnet-counters monitor -n Signup.Api",
+          "what": "Live runtime counters for a running .NET process: CPU, GC, thread pool queue, exceptions. A ReDoS shows as CPU stuck high while the request rate drops and the thread pool queue grows.",
+          "flags": [["-n / -p", "pick the process by name or by id (dotnet-counters ps lists them)"], ["--counters", "which counter sets to show, e.g. System.Runtime,Microsoft.AspNetCore.Hosting"], ["--refresh-interval 1", "seconds between updates"]],
+          "example": "dotnet-counters monitor -p 4242 --counters System.Runtime,Microsoft.AspNetCore.Hosting",
+          "when": "the first look when a service is slow or hot"
+        },
+        {
+          "cmd": "dotnet-dump collect -p 4242",
+          "what": "Snapshot every thread of the process, then read the stacks offline. A stuck regex is a thread sitting in System.Text.RegularExpressions frames under your own method.",
+          "flags": [["collect -p", "write a dump of process 4242"], ["analyze <file>", "open the dump in an SOS shell"], ["clrstack -all", "the managed stack of every thread"], ["pstacks", "parallel stacks: identical stacks merged, so the hot one stands out"]],
+          "example": "dotnet-dump analyze core_20261126_091204   (then: clrstack -all)",
+          "when": "a process is pegged or hung and you need to know where"
+        },
+        {
+          "cmd": "dotnet-trace collect -p 4242 --duration 00:00:00:30",
+          "what": "Sample where CPU time goes for 30 seconds. Open the .nettrace in Visual Studio or PerfView, or write Speedscope format for speedscope.app.",
+          "flags": [["--duration dd:hh:mm:ss", "stop on its own after this long"], ["--format Speedscope", "a file speedscope.app can open in the browser"], ["-p", "the process id"]],
+          "example": "dotnet-trace collect -p 4242 --duration 00:00:00:30 --format Speedscope",
+          "when": "CPU is high but not stuck, and you want the hot path"
+        },
+        {
+          "cmd": "dotnet run -c Release -- --filter '*Regex*'",
+          "what": "BenchmarkDotNet, the standard .NET micro-benchmark library: warm-up, many iterations, mean and error. A Stopwatch loop in a Debug build tells you very little.",
+          "flags": [["-c Release", "benchmarks must run optimised"], ["--filter", "which benchmarks to run (a glob)"], ["--memory", "allocations per operation too"], ["[Benchmark(Baseline = true)]", "compare the others against this one"]],
+          "example": "dotnet run -c Release -- --filter '*Slug*' --memory",
+          "when": "before you claim one pattern or API is faster than another"
+        },
+        {
+          "cmd": "codeql database analyze db codeql/javascript-queries --format=sarif-latest --output=results.sarif",
+          "what": "CodeQL's security queries include js/redos and py/redos (exponential) and js/polynomial-redos and py/polynomial-redos (quadratic, like Stack Overflow's). GitHub code scanning runs them on every pull request.",
+          "flags": [["database create db --language=javascript-typescript", "extract the code into a database first (python, csharp, java-kotlin too)"], ["codeql/python-queries", "the standard pack for another language"], ["--format=sarif-latest", "output that code scanning and editors read"]],
+          "example": "codeql database create db --language=python && codeql database analyze db codeql/python-queries --format=sarif-latest --output=py.sarif",
+          "when": "in CI, so a vulnerable pattern is flagged in review"
+        },
+        {
+          "cmd": "rg 'user=\\w+' logs/",
+          "what": "ripgrep's default engine is Rust's regex crate (like RE2 and Go's regexp): finite automata, linear time on any input, so no pattern can hang it. The price: no lookarounds or backreferences.",
+          "flags": [["-P", "use PCRE2 for lookarounds and backreferences: a backtracking engine again"], ["--engine auto", "the default engine, switching to PCRE2 only when the pattern needs it"]],
+          "example": "rg -P '(?<=user=)\\w+' logs/",
+          "when": "searching huge or untrusted files: stay on the default engine when you can"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to what it gives you.",
+      "pairs": [
+        [
+          "`dotnet-counters monitor`",
+          "CPU, GC and thread pool numbers, live"
+        ],
+        [
+          "`dotnet-dump collect`",
+          "a snapshot of every thread in the process"
+        ],
+        [
+          "`clrstack -all`",
+          "the managed stack of each thread in a dump"
+        ],
+        [
+          "`dotnet-trace collect`",
+          "a sample of which methods used the CPU over time"
+        ],
+        [
+          "`rg -P`",
+          "ripgrep switched to PCRE2, a backtracking engine"
+        ],
+        [
+          "`js/redos`",
+          "a CodeQL query for exponential regexes"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "The signup pod is at 100% CPU. Complete the commands: watch it live, take a dump, then open it.",
+      "code": [
+        "# watch CPU live",
+        "dotnet-counters __1__ -p 4242",
+        "# capture every thread",
+        "dotnet-dump __2__ -p 4242",
+        "# open the dump and print the stacks",
+        "dotnet-dump __3__ core_20261126_091204",
+        "> clrstack -all"
+      ],
+      "blanks": [
+        "monitor",
+        "collect",
+        "analyze"
+      ],
+      "bank": [
+        "ps",
+        "trace",
+        "report",
+        "attach"
+      ],
+      "explain": "In the stacks, look for the same `System.Text.RegularExpressions` frames on several threads, under the same method of yours. That method's pattern is the one to fix."
+    },
+    {
+      "type": "code",
+      "title": "Compile a customer's filter safely",
+      "prompt": [
+        "Your log product lets customers type their own regex filters. You cannot rewrite their patterns, so make the engine",
+        "safe instead. Write `Regex? CompileUserFilter(string pattern)`:",
+        "",
+        "- Build the regex with `RegexOptions.NonBacktracking` and a 100 ms match timeout, so no pattern can take more than",
+        "  linear time and nothing can run forever.",
+        "- Return `null` when the pattern is invalid (`ArgumentException`; `RegexParseException` derives from it) or needs a",
+        "  feature NonBacktracking does not support (`NotSupportedException`), so the UI can say \"pattern not supported\".",
+        "",
+        "`System.Text.RegularExpressions` is imported."
+      ],
+      "starter": [
+        "Regex? CompileUserFilter(string pattern)",
+        "{",
+        "    return new Regex(pattern);",
+        "}"
+      ],
+      "solution": [
+        "Regex? CompileUserFilter(string pattern)",
+        "{",
+        "    try",
+        "    {",
+        "        return new Regex(pattern, RegexOptions.NonBacktracking, TimeSpan.FromMilliseconds(100));",
+        "    }",
+        "    catch (ArgumentException)",
+        "    {",
+        "        return null;",
+        "    }",
+        "    catch (NotSupportedException)",
+        "    {",
+        "        return null;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Try(\"a simple filter compiles\", () =>",
+        "{",
+        "    var dojoF = CompileUserFilter(\"error|fatal\");",
+        "    Dojo.Check(\"a simple filter compiles\", dojoF is not null, \"returned null\");",
+        "    Dojo.Eq(\"it matches 'fatal: disk full'\", true, dojoF!.IsMatch(\"fatal: disk full\"));",
+        "    Dojo.Eq(\"it uses NonBacktracking\", true, dojoF.Options.HasFlag(RegexOptions.NonBacktracking));",
+        "    Dojo.Eq(\"it has a 100 ms timeout\", TimeSpan.FromMilliseconds(100), dojoF.MatchTimeout);",
+        "});",
+        "Dojo.Try(\"(a+)+$ on 5,000 a and ! (timed out or threw)\", () =>",
+        "{",
+        "    var dojoBad = CompileUserFilter(\"(a+)+$\");",
+        "    Dojo.Eq(\"(a+)+$ on 5,000 a and ! answers false, fast\", false, dojoBad!.IsMatch(new string('a', 5000) + \"!\"));",
+        "});",
+        "Dojo.Check(\"a backreference is refused\", CompileUserFilter(@\"(\\w)\\1\") is null, \"expected null\");",
+        "Dojo.Check(\"a lookbehind is refused\", CompileUserFilter(@\"(?<=id=)[0-9]+\") is null, \"expected null\");",
+        "Dojo.Check(\"a broken pattern is refused\", CompileUserFilter(\"(\") is null, \"expected null\");"
+      ],
+      "require": [
+        {
+          "pattern": "RegexOptions\\.NonBacktracking",
+          "message": "Uses RegexOptions.NonBacktracking"
+        },
+        {
+          "pattern": "TimeSpan\\.From",
+          "message": "Sets a match timeout"
+        }
+      ],
+      "hints": [
+        "`new Regex(pattern, RegexOptions.NonBacktracking, TimeSpan.FromMilliseconds(100))` inside a `try`.",
+        "Two catch blocks, `ArgumentException` and `NotSupportedException`, each returning `null`."
+      ]
+    }
+  ]
+}

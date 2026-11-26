@@ -1,0 +1,191 @@
+{
+  "title": "Boss: filters for the log pipeline",
+  "summary": "The platform team is moving to a new log shipper that takes one regex per rule. Write the drop filter, the metric extractor, the branch policy and the card-number mask.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**PLAT-219: rules for the new log pipeline.** The shipper gives each rule **one pattern field** (it runs .NET",
+        "regex), with no invert option and no code. The rules:",
+        "",
+        "1. **Drop** health checks: keep only lines that do not hit `/healthz` or `/readyz`.",
+        "2. **Extract** the request duration in milliseconds as a metric, the number only.",
+        "3. **Tag** builds by the ticket in the branch name, and reject branches that break the naming policy.",
+        "4. **Mask** card numbers before anything is stored (PCI DSS: show at most the last four digits).",
+        "",
+        "Rules 3 and 4 also run in the C# ingestion service, so they are written as methods."
+      ]
+    },
+    {
+      "type": "regex",
+      "title": "Drop the health checks",
+      "prompt": [
+        "With Multiline on, match each **whole line** to keep: every line that does not request `/healthz` or `/readyz`.",
+        "Those names are whole path segments: `/readyzone` is a real endpoint and must be kept."
+      ],
+      "flags": "m",
+      "solution": "^(?!.*/(?:healthz|readyz)\\b).*$",
+      "tests": {
+        "all": [
+          {
+            "input": [
+              "GET /healthz 200 2ms",
+              "GET /orders/42 200 87ms",
+              "GET /readyz 200 1ms",
+              "POST /pay 503 1200ms",
+              "GET /readyzone 200 5ms",
+              "GET /api/healthz?full=1 200 9ms"
+            ],
+            "matches": [
+              "GET /orders/42 200 87ms",
+              "POST /pay 503 1200ms",
+              "GET /readyzone 200 5ms"
+            ]
+          }
+        ],
+        "noFind": [
+          "GET /healthz 200 2ms"
+        ]
+      }
+    },
+    {
+      "type": "regex",
+      "title": "Extract the duration metric",
+      "prompt": [
+        "Lines carry `key=value` fields. The metric is the number in `duration=<n>ms`, and the match must be **the number",
+        "only** (the shipper stores the whole match). `duration=7s` is in seconds and does not count, and",
+        "`predicted_duration=` is a different field."
+      ],
+      "solution": "(?<=\\bduration=)[0-9]+(?=ms\\b)",
+      "tests": {
+        "all": [
+          {
+            "input": "status=503 duration=1200ms bytes=512 duration=7s",
+            "matches": [
+              "1200"
+            ]
+          },
+          {
+            "input": "status=200 duration=87ms",
+            "matches": [
+              "87"
+            ]
+          }
+        ],
+        "noFind": [
+          "status=200 duration=fast",
+          "predicted_duration=50ms",
+          "duration=12mss"
+        ]
+      },
+      "require": [
+        {
+          "pattern": "\\(\\?<=",
+          "message": "Uses a lookbehind for the field name"
+        },
+        {
+          "pattern": "\\(\\?=",
+          "message": "Uses a lookahead for the unit"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The branch naming policy",
+      "prompt": [
+        "Write `string? TicketOfBranch(string branch)`. A valid branch name is, in this order:",
+        "",
+        "- a type: `feature`, `fix` or `chore`, then `/`",
+        "- a ticket key: 2 to 5 capital letters, `-`, digits",
+        "- `-` and a slug of lowercase letters, digits and dashes",
+        "",
+        "and anywhere in it, no `--`, and it does not end with `-`. Return the ticket key for a valid name, `null` otherwise.",
+        "",
+        "| branch | result |",
+        "|---|---|",
+        "| `feature/OPS-311-retry-payments` | `OPS-311` |",
+        "| `hotfix/OPS-1-x` | `null` |",
+        "| `feature/OPS-311-retry--payments` | `null` |",
+        "",
+        "Use one pattern: alternation for the type, a named group for the ticket, negative lookaheads for the two",
+        "\"anywhere\" rules. `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "string? TicketOfBranch(string branch)",
+        "{",
+        "    return null;",
+        "}"
+      ],
+      "solution": [
+        "string? TicketOfBranch(string branch)",
+        "{",
+        "    var m = Regex.Match(branch, @\"^(?!.*--)(?!.*-$)(?:feature|fix|chore)/(?<ticket>[A-Z]{2,5}-[0-9]+)-[a-z0-9-]+$\");",
+        "    return m.Success ? m.Groups[\"ticket\"].Value : null;",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"feature/OPS-311-retry-payments\", \"OPS-311\", TicketOfBranch(\"feature/OPS-311-retry-payments\"));",
+        "Dojo.Eq(\"fix/PAY-7-null-amount\", \"PAY-7\", TicketOfBranch(\"fix/PAY-7-null-amount\"));",
+        "Dojo.Eq(\"chore/OPS-12-bump-deps-2026\", \"OPS-12\", TicketOfBranch(\"chore/OPS-12-bump-deps-2026\"));",
+        "Dojo.Eq(\"hotfix is not an allowed type\", (string?)null, TicketOfBranch(\"hotfix/OPS-1-x\"));",
+        "Dojo.Eq(\"features is not feature\", (string?)null, TicketOfBranch(\"features/OPS-1-x\"));",
+        "Dojo.Eq(\"no double dash\", (string?)null, TicketOfBranch(\"feature/OPS-311-retry--payments\"));",
+        "Dojo.Eq(\"no trailing dash\", (string?)null, TicketOfBranch(\"chore/OPS-12-bump-deps-\"));",
+        "Dojo.Eq(\"the ticket key is in capitals\", (string?)null, TicketOfBranch(\"feature/ops-311-retry\"));",
+        "Dojo.Eq(\"the slug is lowercase\", (string?)null, TicketOfBranch(\"feature/OPS-311-Retry\"));",
+        "Dojo.Eq(\"a slug is required\", (string?)null, TicketOfBranch(\"fix/PAY-7\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Mask card numbers",
+      "prompt": [
+        "Write `string MaskCards(string text)`. Every run of **13 to 19** digits is a card number: replace each of its",
+        "digits with `*`, except the last four. Shorter and longer runs of digits (order ids, trace ids) stay as they are.",
+        "",
+        "| text | result |",
+        "|---|---|",
+        "| `card 4111111111111111 ok` | `card ************1111 ok` |",
+        "| `order 123456` | `order 123456` |",
+        "",
+        "Any correct approach passes. The neat one is a single `Regex.Replace` with `\"*\"` as the replacement, where the",
+        "pattern matches one digit that has at least four digits after it, inside a run of the right length (a lookbehind",
+        "may contain a lookahead in .NET). `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "string MaskCards(string text)",
+        "{",
+        "    return text;",
+        "}"
+      ],
+      "solution": [
+        "string MaskCards(string text)",
+        "{",
+        "    // A digit with 4+ digits after it, inside a run that starts at a non-digit and is 13-19 digits long.",
+        "    return Regex.Replace(text, @\"(?<=(?<![0-9])(?=[0-9]{13,19}(?![0-9]))[0-9]*)[0-9](?=[0-9]{4})\", \"*\");",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"a 16-digit card\", \"card ************1111 ok\", MaskCards(\"card 4111111111111111 ok\"));",
+        "Dojo.Eq(\"two cards in one line\", \"two cards ************5556 and ************4444\", MaskCards(\"two cards 4000056655665556 and 5555555555554444\"));",
+        "Dojo.Eq(\"13 digits is a card\", \"*********2222\", MaskCards(\"4222222222222\"));",
+        "Dojo.Eq(\"19 digits is a card\", \"x ***************6123\", MaskCards(\"x 4000056655665556123\"));",
+        "Dojo.Eq(\"short and long runs stay\", \"order 123456 trace 12345678901234567890\", MaskCards(\"order 123456 trace 12345678901234567890\"));",
+        "Dojo.Eq(\"no digits, no change\", \"nothing to hide\", MaskCards(\"nothing to hide\"));"
+      ],
+      "require": [
+        {
+          "pattern": "Regex\\.Replace",
+          "message": "Uses Regex.Replace"
+        }
+      ]
+    }
+  ]
+}

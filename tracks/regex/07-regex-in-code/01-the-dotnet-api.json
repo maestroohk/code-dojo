@@ -1,0 +1,373 @@
+{
+  "title": "The .NET Regex API",
+  "summary": "IsMatch, Match and NextMatch, Matches, Count, EnumerateMatches, Split and Replace: which call to make, what each one costs, and why you build a Regex once.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One pattern, many questions",
+      "body": [
+        "`System.Text.RegularExpressions.Regex` answers different questions with different methods. Pick the one that",
+        "asks exactly what you need, because the cheaper questions do less work:",
+        "",
+        "| Question | Call | Returns |",
+        "|---|---|---|",
+        "| Is there a match? | `regex.IsMatch(s)` | `bool` |",
+        "| What is the first match? | `regex.Match(s)`, then `m.NextMatch()` | `Match` (check `m.Success`) |",
+        "| Every match, with groups | `regex.Matches(s)` | `MatchCollection` |",
+        "| How many? (.NET 7+) | `regex.Count(s)` | `int` |",
+        "| Where, without allocating? (.NET 7+) | `regex.EnumerateMatches(s)` | `ValueMatch` per match |",
+        "| Cut the text apart | `regex.Split(s)` | `string[]` |",
+        "| Rewrite it | `regex.Replace(s, \"...\")` | `string` |",
+        "",
+        "Below, each match of `key=number` is highlighted with its two named groups. `mode=fast` has no number, so it",
+        "is not a match. In C# you would read the groups with `m.Groups[\"key\"].Value`."
+      ],
+      "regex": {
+        "pattern": "(?<key>\\w+)=(?<value>\\d+)",
+        "text": [
+          "retries=3 timeout=30 mode=fast",
+          "pool=16"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "`Match` gives the first match; `NextMatch` continues from where it ended. What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "var m = Regex.Match(\"a1 b22 c333\", @\"\\d+\");",
+        "while (m.Success)",
+        "{",
+        "    Console.WriteLine($\"{m.Value} at {m.Index}\");",
+        "    m = m.NextMatch();",
+        "}"
+      ],
+      "answer": [
+        "1 at 1",
+        "22 at 4",
+        "333 at 8"
+      ],
+      "explain": "`Index` is the zero-based position where the match starts. When there are no more matches, `NextMatch` returns a `Match` whose `Success` is false (never null), which ends the loop."
+    },
+    {
+      "type": "regex",
+      "title": "Settings as key=value",
+      "prompt": [
+        "A config line holds settings like `retries=3 timeout=30`. Write a pattern with two named groups, `key` (a word)",
+        "and `value` (digits), that finds every numeric setting. Settings with a non-numeric value, like `mode=fast`, are",
+        "not matches."
+      ],
+      "solution": "(?<key>\\w+)=(?<value>\\d+)",
+      "tests": {
+        "all": [
+          {
+            "input": "retries=3 timeout=30 mode=fast",
+            "matches": [
+              "retries=3",
+              "timeout=30"
+            ]
+          }
+        ],
+        "captures": [
+          {
+            "input": "retries=3 timeout=30 mode=fast",
+            "match": 1,
+            "groups": {
+              "key": "timeout",
+              "value": "30"
+            }
+          }
+        ],
+        "noFind": [
+          "mode=fast",
+          "retries = 3"
+        ]
+      },
+      "hints": [
+        "Name the groups with `(?<key>...)` and `(?<value>...)`.",
+        "`(?<key>\\w+)=(?<value>\\d+)`"
+      ],
+      "explain": "In C#: `foreach (Match m in regex.Matches(line)) settings[m.Groups[\"key\"].Value] = int.Parse(m.Groups[\"value\"].Value);`"
+    },
+    {
+      "type": "learn",
+      "title": "Matches, Count and EnumerateMatches",
+      "body": [
+        "`Matches` returns a `MatchCollection` that is **lazy**: no matching happens until you enumerate it. Asking for",
+        "its `.Count` forces a scan of the whole input and creates a `Match` object (with its groups) for every hit.",
+        "",
+        "Since .NET 7 there are two cheaper calls for hot paths:",
+        "",
+        "```csharp",
+        "var digits = new Regex(@\"[0-9]+\");",
+        "",
+        "int n = digits.Count(line);                     // how many, no Match objects at all",
+        "",
+        "foreach (ValueMatch m in digits.EnumerateMatches(line))",
+        "{",
+        "    ReadOnlySpan<char> number = line.AsSpan(m.Index, m.Length);   // where: Index and Length only",
+        "    total += int.Parse(number);",
+        "}",
+        "```",
+        "",
+        "`ValueMatch` has only `Index` and `Length`: no `Value` string and no groups. That is the trade: zero",
+        "allocations in exchange for slicing the input yourself. The enumerator is a `ref struct`, so it cannot be used",
+        "with LINQ or kept across an `await`. When you need groups, use `Matches`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A service counts `ERROR` lines in a 2 GB log, line by line, with a `Regex` built once. Which call does the least work per line?",
+      "options": [
+        "`regex.Count(line)`",
+        "`regex.Matches(line).Count`",
+        "`regex.Matches(line).ToList().Count`",
+        "`regex.Split(line).Length - 1`"
+      ],
+      "answer": 0,
+      "explain": "`Count` (.NET 7+) only counts: it never builds a `Match`, a `Group` or a substring. `Matches(...).Count` gets the same number but allocates an object per match. `Split` builds strings for all the text in between. If you only need yes or no, `IsMatch` is cheaper still."
+    },
+    {
+      "type": "predict",
+      "prompt": "`Split` cuts the text at every match. What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "Console.WriteLine(string.Join(\"|\", Regex.Split(\"a1b2c\", @\"\\d\")));",
+        "Console.WriteLine(string.Join(\"|\", Regex.Split(\"a1b2c\", @\"(\\d)\")));"
+      ],
+      "answer": [
+        "a|b|c",
+        "a|1|b|2|c"
+      ],
+      "explain": "When the pattern has a capturing group, .NET puts the captured text into the result too, between the pieces. That is handy for keeping separators, and a surprise when you only added brackets for grouping. Use `(?:...)` to group without capturing."
+    },
+    {
+      "type": "regex",
+      "title": "Split a messy list",
+      "prompt": [
+        "Users type tag lists like `a, b,c ;d`: commas or semicolons, with or without spaces around them. Write a",
+        "pattern for `Regex.Split` that returns just the tags, with no spaces and no empty entries."
+      ],
+      "solution": "\\s*[,;]\\s*",
+      "tests": {
+        "split": [
+          {
+            "input": "a, b,c ;d",
+            "parts": [
+              "a",
+              "b",
+              "c",
+              "d"
+            ]
+          },
+          {
+            "input": "prod;eu-west",
+            "parts": [
+              "prod",
+              "eu-west"
+            ]
+          }
+        ],
+        "noFind": [
+          "single-tag",
+          "two words"
+        ]
+      },
+      "hints": [
+        "The separator is one comma or semicolon, `[,;]`, with optional whitespace on both sides.",
+        "`\\s*[,;]\\s*`, and no capturing groups, or the separators end up in the result."
+      ],
+      "explain": "Putting the spaces inside the separator is what keeps them out of the tags. A space alone is not a separator here, so `two words` stays one tag."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the allocation-free loop that adds up every number in `line`.",
+      "code": [
+        "var digits = new Regex(@\"[0-9]+\");",
+        "int total = 0;",
+        "foreach (ValueMatch m in digits.__1__(line))",
+        "    total += int.Parse(line.AsSpan(m.Index, m.__2__));"
+      ],
+      "blanks": [
+        "EnumerateMatches",
+        "Length"
+      ],
+      "bank": [
+        "Matches",
+        "Value",
+        "Count",
+        "Groups"
+      ],
+      "explain": "`EnumerateMatches` yields `ValueMatch` values, which carry only `Index` and `Length`. There is no `Value`: you slice the span yourself."
+    },
+    {
+      "type": "code",
+      "title": "Sum the numbers without allocating",
+      "prompt": [
+        "Write `int SumNumbers(string text)`: the sum of every run of ASCII digits in `text`. `a1 b22 c333` gives 356.",
+        "",
+        "Use `EnumerateMatches` and parse each number from a span, so no `Match` objects or substrings are created.",
+        "Use `[0-9]+`, not `\\d+`: `\\d` also matches digits from other scripts (like `٣`), which `int.Parse` rejects.",
+        "`System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "int SumNumbers(string text)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int SumNumbers(string text)",
+        "{",
+        "    var digits = new Regex(@\"[0-9]+\");",
+        "    var total = 0;",
+        "    foreach (ValueMatch m in digits.EnumerateMatches(text))",
+        "        total += int.Parse(text.AsSpan(m.Index, m.Length));",
+        "    return total;",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"a1 b22 c333\", 356, SumNumbers(\"a1 b22 c333\"));",
+        "Dojo.Eq(\"order 12, qty 3\", 15, SumNumbers(\"order 12, qty 3\"));",
+        "Dojo.Eq(\"a minus sign is not part of the number\", 5, SumNumbers(\"x-5y\"));",
+        "Dojo.Eq(\"no numbers gives 0\", 0, SumNumbers(\"none\"));",
+        "Dojo.Eq(\"an empty string gives 0\", 0, SumNumbers(\"\"));",
+        "Dojo.Eq(\"Arabic-Indic digits are not ASCII digits\", 7, SumNumbers(\"\u0663 and 7\"));"
+      ],
+      "require": [
+        {
+          "pattern": "EnumerateMatches",
+          "message": "Uses EnumerateMatches"
+        }
+      ],
+      "forbid": [
+        {
+          "pattern": "\\.Matches\\(",
+          "message": "Does not allocate a MatchCollection"
+        }
+      ],
+      "hints": [
+        "`foreach (ValueMatch m in new Regex(@\"[0-9]+\").EnumerateMatches(text))`",
+        "Inside the loop: `total += int.Parse(text.AsSpan(m.Index, m.Length));`"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Build it once",
+      "body": [
+        "Creating a `Regex` **parses** the pattern and builds a matcher. With `RegexOptions.Compiled` it also generates",
+        "IL at run time, which costs far more (often a millisecond or more). Doing that per call is a classic hot spot.",
+        "",
+        "- `new Regex(...)` is **never cached**. Build it once and keep it: a `private static readonly Regex` field.",
+        "- The **static** methods (`Regex.IsMatch(input, pattern)`) keep a small cache of recently used patterns,",
+        "  `Regex.CacheSize`, 15 by default. Fine for a handful of constant patterns; more than 15 in a hot path and",
+        "  they are parsed again and again.",
+        "- A `Regex` is immutable and **thread-safe**: one instance can serve every request at once.",
+        "",
+        "```csharp",
+        "static class TicketKeys",
+        "{",
+        "    private static readonly Regex Key = new(@\"\\b[A-Z]{2,5}-[0-9]+\\b\", RegexOptions.Compiled);",
+        "    public static bool Has(string s) => Key.IsMatch(s);",
+        "}",
+        "```",
+        "",
+        "For a fixed pattern, the next lesson's `[GeneratedRegex]` is better still: the work happens at build time."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Is the regex usage fine as written, or should it be built once (or generated)?",
+      "buckets": [
+        "Fine as written",
+        "Build it once / generate it"
+      ],
+      "items": [
+        [
+          "`Regex.IsMatch(arg, @\"^--\\w+\")` once, when a CLI tool starts",
+          0
+        ],
+        [
+          "`new Regex(p, RegexOptions.Compiled)` inside an ASP.NET request handler",
+          1
+        ],
+        [
+          "`new Regex(@\"[0-9]+\")` inside a loop over a million lines",
+          1
+        ],
+        [
+          "A `private static readonly Regex` field used by every request",
+          0
+        ],
+        [
+          "Static `Regex.Match` calls with 40 different constant patterns in a hot path",
+          1
+        ],
+        [
+          "A `[GeneratedRegex]` method called per request",
+          0
+        ]
+      ],
+      "explain": "One-off use costs nothing worth fixing. Construction per call, and more distinct static patterns than `Regex.CacheSize` (15), parse the same pattern over and over."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Symptom: CPU at 90% in the ticket service",
+      "prompt": [
+        "**Symptom.** After a release, the ticket service's p99 latency went from 8 ms to 400 ms and CPU sits at 90%.",
+        "The profiler's flame graph is dominated by `RegexCompiler`, `DynamicMethod` and `RegexParser.Parse`, all",
+        "called from `TicketParser.Keys`.",
+        "",
+        "The results are correct; the cost is not. Fix `TicketParser` so the regex is built **once** and shared by",
+        "every call. Keep `RegexOptions.Compiled`: it pays off once the regex is reused."
+      ],
+      "starter": [
+        "static class TicketParser",
+        "{",
+        "    public static List<string> Keys(string text)",
+        "    {",
+        "        var key = new Regex(@\"\\b[A-Z]{2,5}-[0-9]+\\b\", RegexOptions.Compiled);",
+        "        return key.Matches(text).Select(m => m.Value).ToList();",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "static class TicketParser",
+        "{",
+        "    private static readonly Regex Key = new(@\"\\b[A-Z]{2,5}-[0-9]+\\b\", RegexOptions.Compiled);",
+        "",
+        "    public static List<string> Keys(string text)",
+        "    {",
+        "        return Key.Matches(text).Select(m => m.Value).ToList();",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "Dojo.Eq(\"finds both keys\", new List<string> { \"OPS-311\", \"PAY-7\" }, TicketParser.Keys(\"fixes OPS-311 and PAY-7\"));",
+        "Dojo.Eq(\"no keys in plain text\", new List<string>(), TicketParser.Keys(\"nothing to see\"));",
+        "var dojoTotal = 0;",
+        "for (var i = 0; i < 200; i++) dojoTotal += TicketParser.Keys($\"request {i}: OPS-{i}\").Count;",
+        "Dojo.Eq(\"200 requests, one key each\", 200, dojoTotal);",
+        "{{CODE}}"
+      ],
+      "require": [
+        {
+          "pattern": "static\\s+readonly\\s+Regex",
+          "message": "Keeps the Regex in a static readonly field"
+        }
+      ],
+      "hints": [
+        "Move the `new Regex(...)` out of the method into a field of the class.",
+        "`private static readonly Regex Key = new(@\"...\", RegexOptions.Compiled);` and use `Key.Matches(text)` in the method."
+      ],
+      "explain": "Each `new Regex(..., RegexOptions.Compiled)` parsed the pattern and emitted IL on every request. A static readonly field does that once per process, and the instance is safe to share across threads. The analyzer `SYSLIB1045` would also point at this line and suggest `[GeneratedRegex]`."
+    }
+  ]
+}

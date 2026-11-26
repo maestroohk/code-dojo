@@ -1,0 +1,312 @@
+{
+  "title": "Replacement syntax",
+  "summary": "Rewrite what a pattern finds: $1, ${name}, $0 and $$ in .NET, real refactors as find-and-replace, and computed replacements with a MatchEvaluator.",
+  "minutes": 13,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Find, then rewrite",
+      "body": [
+        "A find-and-replace has two halves. The **pattern** finds text and captures pieces of it in groups. The",
+        "**replacement** is a small template that says what to write instead, and it can refer to those groups.",
+        "",
+        "In .NET (C#, PowerShell, Visual Studio) the replacement language is short:",
+        "",
+        "| In the replacement | Inserts |",
+        "|---|---|",
+        "| `$1`, `$2` | group 1, group 2 |",
+        "| `${name}` | the named group `(?<name>...)` |",
+        "| `$0` | the whole match |",
+        "| `$$` | a literal `$` |",
+        "",
+        "Everything else is literal text: the replacement is **not** a regex, so `.` and `\\` mean themselves there.",
+        "",
+        "Below, dates written day first are rewritten as ISO 8601 (`yyyy-MM-dd`), the format that sorts correctly as",
+        "text. Try swapping `${m}` and `${d}` in the replacement and watch the result change."
+      ],
+      "regex": {
+        "pattern": "(?<d>\\d{2})/(?<m>\\d{2})/(?<y>\\d{4})",
+        "text": [
+          "invoice 1041 issued 26/11/2026",
+          "invoice 1042 issued 01/12/2026, due 31/12/2026"
+        ],
+        "replace": "${y}-${m}-${d}"
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "The pattern `(\\w+)@(\\w+)\\.com` with the replacement `$2:$1` runs over `mail ann@contoso.com`. What is the result?",
+      "options": [
+        "`mail contoso:ann`",
+        "`contoso:ann`",
+        "`mail ann:contoso`",
+        "`mail $2:$1`"
+      ],
+      "answer": 0,
+      "explain": "Only the match is replaced: `ann@contoso.com` becomes group 2, a colon, group 1. The text around the match (`mail `) is kept as it was."
+    },
+    {
+      "type": "regex",
+      "title": "Dates to ISO 8601",
+      "prompt": [
+        "A CSV export writes dates as `dd/MM/yyyy`. The importer wants `yyyy-MM-dd`. Write the pattern **and** the",
+        "replacement that turn `26/11/2026` into `2026-11-26`.",
+        "",
+        "Leave ISO dates and two-digit years alone."
+      ],
+      "solution": "\\b(\\d{2})/(\\d{2})/(\\d{4})\\b",
+      "solutionReplacement": "$3-$2-$1",
+      "tests": {
+        "replace": [
+          {
+            "input": "due 26/11/2026",
+            "output": "due 2026-11-26"
+          },
+          {
+            "input": "01/02/2025 and 31/12/2026",
+            "output": "2025-02-01 and 2026-12-31"
+          },
+          {
+            "input": "already 2026-11-26",
+            "output": "already 2026-11-26"
+          }
+        ],
+        "noFind": [
+          "2026-11-26",
+          "26/11/26",
+          "26-11-2026"
+        ]
+      },
+      "hints": [
+        "Capture day, month and year in three groups: `(\\d{2})/(\\d{2})/(\\d{4})`.",
+        "The replacement puts them back in the other order: `$3-$2-$1`."
+      ],
+      "explain": "`$3-$2-$1` writes year, month, day with dashes between. Named groups (`(?<y>\\d{4})` and `${y}`) say the same thing in a way the next reader understands without counting brackets."
+    },
+    {
+      "type": "learn",
+      "title": "$0, $$ and the digit trap",
+      "body": [
+        "Three details catch people out in real refactors:",
+        "",
+        "- **`$0` is the whole match.** Use it to wrap text without capturing anything: pattern `\\bOPS-\\d+\\b`,",
+        "  replacement `[$0]` turns `OPS-311` into `[OPS-311]`.",
+        "- **`$$` is a literal dollar.** A price template like `$$$0` writes a `$` and then the match.",
+        "- **A group number followed by a digit is ambiguous.** Is `$10` group 10, or group 1 and a `0`? Write",
+        "  `${1}0` and nobody has to guess. Braces cost nothing, so seniors use them whenever text follows.",
+        "",
+        "A reference to a group that does not exist (`$7` in a pattern with two groups) is **not** an error in .NET:",
+        "it is copied as the literal text `$7`. That is why a typo in a replacement shows up as strange output, not",
+        "as an exception. Always look at a sample of the result.",
+        "",
+        "```csharp",
+        "Regex.Replace(\"OPS-311 is fixed\", @\"\\bOPS-\\d+\\b\", \"[$0]\");   // [OPS-311] is fixed",
+        "```"
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "Console.WriteLine(Regex.Replace(\"cost 5\", @\"\\d+\", \"$$$0\"));",
+        "Console.WriteLine(Regex.Replace(\"v2\", @\"(\\d)\", \"${1}0\"));",
+        "Console.WriteLine(Regex.Replace(\"a-b\", @\"(\\w)-(\\w)\", \"$2-$1\"));"
+      ],
+      "answer": [
+        "cost $5",
+        "v20",
+        "b-a"
+      ],
+      "explain": "`$$` is one literal dollar, then `$0` is the match `5`. `${1}0` is group 1 (`2`) followed by a literal `0`. The last line swaps the two captured letters."
+    },
+    {
+      "type": "regex",
+      "title": "Link every ticket key",
+      "prompt": [
+        "Release notes mention ticket keys like `OPS-311`. Turn each one into a Markdown link to the tracker:",
+        "",
+        "`OPS-311` becomes `[OPS-311](https://tracker.example.com/browse/OPS-311)`",
+        "",
+        "A key is 2 to 5 capital letters, a dash and digits. Write the pattern and the replacement. You need no",
+        "capturing group at all."
+      ],
+      "solution": "\\b[A-Z]{2,5}-\\d+\\b",
+      "solutionReplacement": "[$0](https://tracker.example.com/browse/$0)",
+      "tests": {
+        "replace": [
+          {
+            "input": "fixes OPS-311 and PAY-7",
+            "output": "fixes [OPS-311](https://tracker.example.com/browse/OPS-311) and [PAY-7](https://tracker.example.com/browse/PAY-7)"
+          },
+          {
+            "input": "see the docs",
+            "output": "see the docs"
+          }
+        ],
+        "noFind": [
+          "ops-311 in lower case",
+          "OPS- with no number",
+          "TOOLONG-1"
+        ]
+      },
+      "hints": [
+        "The key pattern from module 1 works: `\\b[A-Z]{2,5}-\\d+\\b`.",
+        "Use `$0` twice in the replacement: `[$0](https://tracker.example.com/browse/$0)`."
+      ],
+      "explain": "`$0` inserts the whole match, so there is nothing to capture. Note that running this twice would link the keys inside the links again: a replacement that is safe to run twice (idempotent) is worth designing for, for example by skipping keys that already follow a `[`."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the C#: turn `Lovelace, Ada` into `Ada Lovelace` with named groups.",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "var name = Regex.Replace(\"Lovelace, Ada\", @\"(?<last>\\w+), (?<first>\\w+)\", \"__1__ __2__\");"
+      ],
+      "blanks": [
+        "${first}",
+        "${last}"
+      ],
+      "bank": [
+        "$first",
+        "\\g<last>",
+        "$<first>",
+        "\\1"
+      ],
+      "explain": "In .NET a named group in the replacement is `${name}`. `$<name>` is JavaScript, `\\g<name>` and `\\1` are Python. `$first` without braces is copied literally in .NET."
+    },
+    {
+      "type": "regex",
+      "title": "Reformat \"Last, First\"",
+      "prompt": [
+        "An HR export lists people as `Last, First`, separated by semicolons. The new system wants `First Last`.",
+        "Use **named groups** `last` and `first`, and refer to them by name in the replacement."
+      ],
+      "solution": "(?<last>\\w+), (?<first>\\w+)",
+      "solutionReplacement": "${first} ${last}",
+      "tests": {
+        "replace": [
+          {
+            "input": "Lovelace, Ada",
+            "output": "Ada Lovelace"
+          },
+          {
+            "input": "Hopper, Grace; Turing, Alan",
+            "output": "Grace Hopper; Alan Turing"
+          }
+        ],
+        "noFind": [
+          "Ada Lovelace"
+        ],
+        "captures": [
+          {
+            "input": "Hopper, Grace",
+            "groups": {
+              "last": "Hopper",
+              "first": "Grace"
+            }
+          }
+        ]
+      },
+      "hints": [
+        "Two named groups around the comma and space: `(?<last>\\w+), (?<first>\\w+)`.",
+        "Replacement: `${first} ${last}`."
+      ],
+      "explain": "Named groups survive edits: if someone later adds a middle-name group, `${first}` still means the first name, while `$2` might silently change meaning. (Real names contain spaces, hyphens and apostrophes; for production data, `[^,;]+` is closer than `\\w+`.)"
+    },
+    {
+      "type": "learn",
+      "title": "Computed replacements: MatchEvaluator",
+      "body": [
+        "A replacement string can only rearrange captured text. When the new text must be **computed** (a number plus",
+        "one, a name in upper case, a mask as long as the original), pass a function instead. .NET calls it once per",
+        "match with the `Match`, and inserts whatever it returns:",
+        "",
+        "```csharp",
+        "using System.Text.RegularExpressions;",
+        "",
+        "// Bump every number by one: \"v1.9.3\" becomes \"v2.10.4\"",
+        "var next = Regex.Replace(\"v1.9.3\", @\"\\d+\", m => (int.Parse(m.Value) + 1).ToString());",
+        "",
+        "// Mask card numbers, keep the last four digits",
+        "var safe = Regex.Replace(log, @\"\\b\\d{12}(\\d{4})\\b\", m => \"************\" + m.Groups[1].Value);",
+        "```",
+        "",
+        "The lambda's type is `MatchEvaluator`. Whatever it returns is inserted **literally**: no `$` processing. That",
+        "makes it the safe choice whenever the new text comes from data, not from you."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "Console.WriteLine(Regex.Replace(\"v1.9.3\", @\"\\d+\", m => (int.Parse(m.Value) + 1).ToString()));",
+        "Console.WriteLine(Regex.Replace(\"ann and bo\", @\"\\b\\w\", m => m.Value.ToUpperInvariant()));"
+      ],
+      "answer": [
+        "v2.10.4",
+        "Ann And Bo"
+      ],
+      "explain": "The evaluator runs once per match: 1, 9 and 3 become 2, 10 and 4. In the second line `\\b\\w` matches the first letter of each word, and the lambda upper-cases it."
+    },
+    {
+      "type": "code",
+      "title": "Mask email addresses before sharing a log",
+      "prompt": [
+        "Support wants to attach a log to a public bug report. Write `string MaskLocalParts(string text)` that keeps the",
+        "first character of every email's local part (the part before `@`) and replaces the rest of it with `*`, one",
+        "star per character. Domains stay as they are.",
+        "",
+        "| input | output |",
+        "|---|---|",
+        "| `mail ann.lee@contoso.com now` | `mail a******@contoso.com now` |",
+        "| `to: bo@x.io, cc: zed@y.dev` | `to: b*@x.io, cc: z**@y.dev` |",
+        "",
+        "The local part is made of `A-Z a-z 0-9 . _ % + -`. The number of stars depends on the match, so use",
+        "`Regex.Replace` with a lambda. `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "string MaskLocalParts(string text)",
+        "{",
+        "    return text;",
+        "}"
+      ],
+      "solution": [
+        "string MaskLocalParts(string text)",
+        "{",
+        "    return Regex.Replace(text, @\"([A-Za-z0-9._%+-]+)@\", m =>",
+        "    {",
+        "        var local = m.Groups[1].Value;",
+        "        return local[0] + new string('*', local.Length - 1) + \"@\";",
+        "    });",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"ann.lee becomes a******\", \"mail a******@contoso.com now\", MaskLocalParts(\"mail ann.lee@contoso.com now\"));",
+        "Dojo.Eq(\"two addresses, each masked to its own length\", \"to: b*@x.io, cc: z**@y.dev\", MaskLocalParts(\"to: bo@x.io, cc: zed@y.dev\"));",
+        "Dojo.Eq(\"plus addressing is masked too\", \"from j*********@contoso.com\", MaskLocalParts(\"from jo+billing@contoso.com\"));",
+        "Dojo.Eq(\"text without an email is unchanged\", \"no email here: see the docs\", MaskLocalParts(\"no email here: see the docs\"));"
+      ],
+      "require": [
+        {
+          "pattern": "Regex\\.Replace",
+          "message": "Uses Regex.Replace"
+        },
+        {
+          "pattern": "=>",
+          "message": "Computes the replacement with a lambda (MatchEvaluator)"
+        }
+      ],
+      "hints": [
+        "Capture the local part and require the `@` after it: `@\"([A-Za-z0-9._%+-]+)@\"`.",
+        "In the lambda: `var local = m.Groups[1].Value; return local[0] + new string('*', local.Length - 1) + \"@\";`"
+      ]
+    }
+  ]
+}

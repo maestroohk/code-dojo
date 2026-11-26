@@ -1,0 +1,448 @@
+{
+  "title": "The same regex in Python and JavaScript",
+  "summary": "Python's re (raw strings, match versus search versus fullmatch, findall's groups) and JavaScript's RegExp (flags, lastIndex, matchAll, named groups), with the bug each one is famous for, then a port to C#.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Python: re in five calls",
+      "body": [
+        "Python's `re` module is close to .NET, with different names. Always write patterns as **raw strings**",
+        "`r\"...\"`, so Python leaves the backslashes alone.",
+        "",
+        "```python",
+        "import re",
+        "",
+        "TICKET = re.compile(r\"[A-Z]{2,5}-\\d+\")          # compile once at module level, reuse",
+        "",
+        "re.search(r\"\\d+\", \"id 42\")       # first match ANYWHERE      -> <re.Match ... match='42'>",
+        "re.match(r\"\\d+\", \"id 42\")        # only at the START         -> None",
+        "re.fullmatch(r\"\\d+\", \"42\")       # the WHOLE string          -> a match: use this to validate",
+        "",
+        "for m in TICKET.finditer(text):   # Match objects: m.group(), m.start(), m[\"name\"]",
+        "    print(m.group())",
+        "",
+        "re.sub(r\"\\d+\", lambda m: str(int(m.group()) + 1), \"v1.9\")   # 'v2.10'",
+        "```",
+        "",
+        "- Named groups are `(?P<name>...)`; Python's `re` does not accept .NET's `(?<name>...)`.",
+        "- `re.VERBOSE` (`re.X`) is .NET's IgnorePatternWhitespace. Python 3.11+ also has atomic groups and possessive",
+        "  quantifiers.",
+        "- **`findall` changes shape with groups**: no group gives the matched strings, one group gives that group's",
+        "  text, several groups give tuples. The whole match is gone as soon as you add a group."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Python API must reject anything that is not exactly a ticket key, such as `OPS-311`. Which call does that?",
+      "options": [
+        "`re.fullmatch(r\"[A-Z]{2,5}-\\d+\", s)`",
+        "`re.match(r\"[A-Z]{2,5}-\\d+\", s)`",
+        "`re.search(r\"[A-Z]{2,5}-\\d+\", s)`",
+        "`re.findall(r\"[A-Z]{2,5}-\\d+\", s)`"
+      ],
+      "answer": 0,
+      "explain": "`re.match` only anchors the **start**: it accepts `OPS-311; DROP TABLE`. `re.search` accepts a key anywhere. `fullmatch` requires the whole string, like `^...\\Z` (or `\\A...\\z` in .NET)."
+    },
+    {
+      "type": "predict",
+      "verify": false,
+      "prompt": "What does this Python print?",
+      "code": [
+        "import re",
+        "",
+        "print(re.findall(r\"\\w+=\\d+\", \"a=1 b=22\"))",
+        "print(re.findall(r\"(\\w+)=(\\d+)\", \"a=1 b=22\"))",
+        "print(re.findall(r\"(\\w+)=\\d+\", \"a=1 b=22\"))"
+      ],
+      "answer": [
+        "['a=1', 'b=22']",
+        "[('a', '1'), ('b', '22')]",
+        "['a', 'b']"
+      ],
+      "explain": "No group: whole matches. Two groups: a tuple per match. One group: just that group, and the numbers are gone. When you need the whole match and the groups, use `finditer`."
+    },
+    {
+      "type": "regex",
+      "title": "Symptom: the release script prints tuples",
+      "prompt": [
+        "**Symptom.** A Python release script runs `re.findall(r\"v(\\d+)\\.(\\d+)(\\.\\d+)?\", notes)` and the changelog",
+        "shows `[('1', '2', ''), ('2', '10', '.3')]` instead of `['v1.2', 'v2.10.3']`.",
+        "",
+        "Rewrite the pattern so it matches the same versions but has **no capturing groups**, so `findall` returns",
+        "whole matches. (The checks run in .NET, which treats groups the same way here.)"
+      ],
+      "starter": "v(\\d+)\\.(\\d+)(\\.\\d+)?",
+      "solution": "v\\d+\\.\\d+(?:\\.\\d+)?",
+      "tests": {
+        "all": [
+          {
+            "input": "ships v1.2 and v2.10.3, not v3",
+            "matches": [
+              "v1.2",
+              "v2.10.3"
+            ]
+          }
+        ],
+        "noFind": [
+          "v3 only",
+          "version 1.2"
+        ]
+      },
+      "forbid": [
+        {
+          "pattern": "(?<!\\\\)\\((?!\\?)",
+          "message": "Has no capturing groups (use (?:...) to group)"
+        }
+      ],
+      "hints": [
+        "`(?:...)` groups without capturing.",
+        "The first two groups are not needed at all: `v\\d+\\.\\d+(?:\\.\\d+)?`."
+      ],
+      "explain": "With no capturing group, `findall` returns whole matches. The optional patch still needs a group for `?` to apply to, so make it non-capturing. In .NET, `RegexOptions.ExplicitCapture` does the same for a whole pattern."
+    },
+    {
+      "type": "learn",
+      "title": "JavaScript: literals, flags and lastIndex",
+      "body": [
+        "In JavaScript a regex is usually a **literal**: `/pattern/flags`, so there is no string escaping at all.",
+        "",
+        "```typescript",
+        "const ticket = /\\b[A-Z]{2,5}-\\d+\\b/g;",
+        "",
+        "ticket.test(s);                                // boolean",
+        "s.match(/(?<y>\\d{4})-(?<m>\\d\\d)/)?.groups?.y;  // first match; named groups on .groups",
+        "for (const m of s.matchAll(ticket)) {}         // every match (m[0], m.index); needs the g flag",
+        "s.replace(/(?<u>\\w+)@(\\w+)/, \"$<u> at $2\");     // first match only, unless the regex has g",
+        "s.replaceAll(/\\d+/g, n => String(Number(n) + 1)); // with a regex, replaceAll requires g",
+        "```",
+        "",
+        "Flags: `g` global, `i`, `m`, `s` (dot matches newlines), `u` Unicode, `v` (ES2024: Unicode sets, such as",
+        "`[\\p{L}--[a-z]]`), `y` sticky, `d` (indices of every group in `m.indices`).",
+        "",
+        "**The trap:** a regex with `g` or `y` is **stateful**. `test()` and `exec()` start searching at",
+        "`regex.lastIndex` and move it forward after a match. Reuse such a regex on another string, and it starts",
+        "in the middle.",
+        "",
+        "New in ES2025: `RegExp.escape(text)` (Node 24+), inline modifiers like `(?i:abc)`, and the same group name",
+        "in different alternatives."
+      ]
+    },
+    {
+      "type": "predict",
+      "verify": false,
+      "prompt": "A filter keeps the error lines. What does this JavaScript print?",
+      "code": [
+        "const isError = /error/g;",
+        "const lines = [\"error 1\", \"error 2\", \"error 3\", \"error 4\"];",
+        "console.log(lines.filter(l => isError.test(l)).length);"
+      ],
+      "answer": "2",
+      "explain": "The first `test` matches and sets `lastIndex` to 5. The second starts at position 5 of `\"error 2\"`, finds nothing, returns false and resets `lastIndex` to 0. So the results alternate: true, false, true, false. A classic production bug: it only shows up with several inputs in a row."
+    },
+    {
+      "type": "mcq",
+      "prompt": "How do you fix the filter so it keeps all four lines? Select all that apply.",
+      "code": [
+        "const isError = /error/g;",
+        "lines.filter(l => isError.test(l));"
+      ],
+      "options": [
+        "Remove the `g` flag: `const isError = /error/;`",
+        "Set `isError.lastIndex = 0` before each `test`",
+        "Add the `y` flag as well",
+        "Add the `i` flag"
+      ],
+      "answer": [
+        0,
+        1
+      ],
+      "explain": "`g` only makes sense for `matchAll`, `replace` and `replaceAll`; a yes-or-no test should not have it. Resetting `lastIndex` also works but is easy to forget. `y` (sticky) also uses `lastIndex`, and anchors the search there, so it makes things worse."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: regex APIs in three languages",
+      "body": "The calls experienced engineers reach for when a regex goes into code, and the option on each that prevents the classic bug.",
+      "toolkit": [
+        {
+          "cmd": "[GeneratedRegex(@\"^[A-Z]{2,5}-\\d+$\", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)]\nprivate static partial Regex TicketKey();",
+          "what": "C#: the default for a pattern known at build time. Generated at compile time, no startup cost, works with Native AOT; analyzer SYSLIB1045 suggests it.",
+          "flags": [
+            [
+              "RegexOptions.CultureInvariant",
+              "with IgnoreCase: the same answer on every machine (the Turkish i)"
+            ],
+            [
+              "matchTimeoutMilliseconds",
+              "stop a runaway match"
+            ],
+            [
+              "RegexOptions.ExplicitCapture",
+              "only named groups capture"
+            ]
+          ],
+          "example": "if (TicketKey().IsMatch(input)) { ... }",
+          "when": "every fixed pattern in production C#",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "foreach (ValueMatch m in regex.EnumerateMatches(text)) total += m.Length;",
+          "what": "C#: scan without allocating a Match per hit (.NET 7+). Regex.Count(text) counts the same way.",
+          "flags": [
+            [
+              "Matches",
+              "every Match with groups (allocates)"
+            ],
+            [
+              "EnumerateMatches",
+              "index and length only, no allocation"
+            ],
+            [
+              "Count",
+              "how many, nothing else"
+            ],
+            [
+              "Replace(text, m => ...)",
+              "computed replacement with a MatchEvaluator"
+            ]
+          ],
+          "example": "int errors = Patterns.ServerError().Count(log);",
+          "when": "hot paths: log ingestion, request filters",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "PATTERN = re.compile(r\"(?P<key>\\w+)=(?P<value>\\S+)\")",
+          "what": "Python: compile once at module level, always with a raw string r\"...\".",
+          "flags": [
+            [
+              "fullmatch",
+              "the whole string must match (use it to validate)"
+            ],
+            [
+              "search",
+              "a match anywhere"
+            ],
+            [
+              "match",
+              "only anchors the start, a common validation bug"
+            ],
+            [
+              "finditer",
+              "Match objects, not the tuples findall gives with groups"
+            ],
+            [
+              "re.VERBOSE",
+              "spaces and # comments in the pattern"
+            ]
+          ],
+          "example": "pairs = {m['key']: m['value'] for m in PATTERN.finditer(line)}",
+          "when": "scripts, data pipelines, CLI tools",
+          "lang": "python"
+        },
+        {
+          "cmd": "const re = /(?<key>\\w+)=(?<value>\\S+)/g;\nfor (const m of line.matchAll(re)) map.set(m.groups.key, m.groups.value);",
+          "what": "JavaScript: matchAll for every match with groups. A /g regex keeps lastIndex, so never reuse one with test() across strings.",
+          "flags": [
+            [
+              "g",
+              "global: needed by matchAll and replaceAll"
+            ],
+            [
+              "i",
+              "ignore case"
+            ],
+            [
+              "s",
+              ". matches newlines"
+            ],
+            [
+              "u / v",
+              "Unicode mode, needed for \\p{...}"
+            ],
+            [
+              "d",
+              "match indices in m.indices"
+            ]
+          ],
+          "example": "const isTicket = /^[A-Z]{2,5}-\\d+$/.test(input);   // no g flag on a validator",
+          "when": "front ends, Node services, build scripts",
+          "lang": "typescript"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each JavaScript feature to what it does.",
+      "pairs": [
+        [
+          "`str.matchAll(re)`",
+          "every match as an iterator; a TypeError without the `g` flag"
+        ],
+        [
+          "the `d` flag",
+          "`m.indices`: start and end of the match and of each group"
+        ],
+        [
+          "the `v` flag",
+          "set operations in classes, such as `[\\p{L}--[a-z]]`"
+        ],
+        [
+          "`m.groups.name`",
+          "the text of a named group"
+        ],
+        [
+          "`$<name>`",
+          "a named group inside a replacement string"
+        ],
+        [
+          "`RegExp.escape(s)`",
+          "make user text literal (ES2025)"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which language does each piece of syntax belong to?",
+      "buckets": [
+        ".NET (C#)",
+        "Python",
+        "JavaScript"
+      ],
+      "items": [
+        [
+          "`(?P<name>...)`",
+          1
+        ],
+        [
+          "`m.Groups[\"name\"].Value`",
+          0
+        ],
+        [
+          "`m.group(\"name\")`",
+          1
+        ],
+        [
+          "`m.groups.name`",
+          2
+        ],
+        [
+          "`RegexOptions.IgnorePatternWhitespace`",
+          0
+        ],
+        [
+          "`re.VERBOSE`",
+          1
+        ],
+        [
+          "`regex.lastIndex`",
+          2
+        ]
+      ],
+      "explain": "`(?<name>...)` works in .NET and JavaScript but not in Python's `re`. JavaScript has no flag for comments in a pattern at all."
+    },
+    {
+      "type": "regex",
+      "title": "Port a Python pattern to .NET",
+      "prompt": [
+        "A Python validator uses `(?P<key>[a-z_]+)=(?P<val>\\d+)` for settings like `max_conn=40`. .NET does not accept",
+        "`(?P<`. Write the .NET pattern with the same two group names, matching a whole setting."
+      ],
+      "solution": "(?<key>[a-z_]+)=(?<val>\\d+)",
+      "tests": {
+        "match": [
+          "max_conn=40",
+          "a=1"
+        ],
+        "reject": [
+          "A=1",
+          "a=",
+          "a=1x",
+          "=5"
+        ],
+        "captures": [
+          {
+            "input": "max_conn=40",
+            "groups": {
+              "key": "max_conn",
+              "val": "40"
+            }
+          }
+        ]
+      },
+      "forbid": [
+        {
+          "pattern": "\\(\\?P<",
+          "message": "Uses .NET's (?<name>...) syntax"
+        }
+      ],
+      "hints": [
+        "Only the group syntax changes: `(?P<key>...)` becomes `(?<key>...)`."
+      ],
+      "explain": "Most of a pattern ports unchanged. What differs is group syntax, flags and edge cases: `\\d` matches all Unicode digits in .NET and Python, but only `0-9` in JavaScript; `$` without the m flag accepts a final newline in .NET and Python, but not in JavaScript."
+    },
+    {
+      "type": "code",
+      "title": "Port the JavaScript log parser to C#",
+      "prompt": [
+        "The browser client summarises log lines like this:",
+        "",
+        "```typescript",
+        "const LINE = /^(?<ts>\\S+) (?<level>[A-Z]+) (?<msg>.*)$/;",
+        "function summary(line) {",
+        "  const m = LINE.exec(line);",
+        "  return m ? `${m.groups.level}: ${m.groups.msg}` : null;",
+        "}",
+        "```",
+        "",
+        "Port it to C# so the server gives the **same** answers. Write `static partial class LogLine` with a",
+        "source-generated regex and `public static string? Summary(string line)`.",
+        "",
+        "One difference matters: in JavaScript, `$` without the m flag only matches at the very end, so a line with a",
+        "trailing `\\n` gives `null`. In .NET, `$` also matches before a final `\\n`. End the .NET pattern with `\\z`.",
+        "",
+        "`System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "static partial class LogLine",
+        "{",
+        "    public static string? Summary(string line)",
+        "    {",
+        "        return null;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "static partial class LogLine",
+        "{",
+        "    [GeneratedRegex(@\"^(?<ts>\\S+) (?<level>[A-Z]+) (?<msg>.*)\\z\")]",
+        "    private static partial Regex Pattern();",
+        "",
+        "    public static string? Summary(string line)",
+        "    {",
+        "        var m = Pattern().Match(line);",
+        "        return m.Success ? $\"{m.Groups[\"level\"].Value}: {m.Groups[\"msg\"].Value}\" : null;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "Dojo.Eq(\"an ERROR line\", \"ERROR: disk full\", LogLine.Summary(\"2026-11-26T09:12:04Z ERROR disk full\"));",
+        "Dojo.Eq(\"an INFO line\", \"INFO: ok\", LogLine.Summary(\"2026-11-26T09:12:05Z INFO ok\"));",
+        "Dojo.Check(\"not a log line gives null\", LogLine.Summary(\"not a log line\") is null, \"expected null\");",
+        "Dojo.Check(\"a trailing newline gives null, as in JavaScript\", LogLine.Summary(\"2026-11-26T09:12:04Z ERROR disk full\\n\") is null, \"expected null: end the pattern with \\\\z\");",
+        "Dojo.Check(\"two lines give null, as in JavaScript\", LogLine.Summary(\"2026-11-26T09:12:04Z ERROR first\\nsecond\") is null, \"expected null\");",
+        "{{CODE}}"
+      ],
+      "require": [
+        {
+          "pattern": "\\[GeneratedRegex\\(",
+          "message": "Uses [GeneratedRegex]"
+        }
+      ],
+      "hints": [
+        "Same pattern, with `\\z` instead of `$`: `@\"^(?<ts>\\S+) (?<level>[A-Z]+) (?<msg>.*)\\z\"`.",
+        "`m.Groups[\"level\"].Value` is the C# for `m.groups.level`."
+      ]
+    }
+  ]
+}

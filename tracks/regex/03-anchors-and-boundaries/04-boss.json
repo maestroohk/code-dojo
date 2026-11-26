@@ -1,0 +1,195 @@
+{
+  "title": "Boss: harden the account service",
+  "summary": "A security ticket: validate tenant slugs properly, pull real error lines out of a log, redact a codename and lint a .env file.",
+  "minutes": 24,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket SEC-221",
+      "body": [
+        "> **SEC-221: input handling in the account service.** Found in the penetration test. Assigned to you.",
+        "",
+        "1. Tenant slugs were accepted with spaces, semicolons and trailing newlines. Write the check properly.",
+        "2. The incident timeline needs the real `ERROR` lines from the log, not every line that mentions one.",
+        "3. The release notes must not mention the internal codename. Redact it as a whole word.",
+        "4. The deploy tool chokes on malformed `.env` files. Report the bad lines by number.",
+        "",
+        "Every part is about **where** a match may start and end."
+      ]
+    },
+    {
+      "type": "regex",
+      "title": "Tenant slugs",
+      "prompt": [
+        "The service accepts a slug when `Regex.IsMatch(slug, pattern)` is true, and these checks run the same way. A valid",
+        "slug:",
+        "",
+        "- is 3 to 32 characters of lowercase ASCII letters, digits and `-`,",
+        "- starts with a letter,",
+        "- does not end with `-`.",
+        "",
+        "Nothing else may get through, not even a trailing newline."
+      ],
+      "solution": "\\A[a-z][a-z0-9-]{1,30}[a-z0-9]\\z",
+      "tests": {
+        "find": [
+          "acme",
+          "abc",
+          "contoso-eu-1",
+          "abcdefghijklmnopqrstuvwxyzabcdef"
+        ],
+        "noFind": [
+          [
+            "acme",
+            ""
+          ],
+          "Acme",
+          "acme corp",
+          "acme;rm -rf /",
+          "ac",
+          "-acme",
+          "1acme",
+          "acme-",
+          "abcdefghijklmnopqrstuvwxyzabcdefg"
+        ]
+      },
+      "explain": "First character, middle `{1,30}`, last character: 3 to 32 in total. `\\A` and `\\z` make `IsMatch` check the whole slug; `$` would let the newline through."
+    },
+    {
+      "type": "regex",
+      "title": "The real error lines",
+      "flags": "",
+      "solutionFlags": "m",
+      "prompt": [
+        "The whole log is one string. Find every line that **starts** with a timestamp `HH:MM:SS`, a space and the word",
+        "`ERROR`, and match the entire line. Indented lines from stack dumps, `ERRORS` and timestamps quoted inside a",
+        "message do not count."
+      ],
+      "solution": "^[0-9]{2}:[0-9]{2}:[0-9]{2} ERROR\\b.*",
+      "tests": {
+        "all": [
+          {
+            "input": [
+              "09:12:01 ERROR db down",
+              "09:12:02 INFO ok",
+              "  09:12:03 ERROR indented, from a stack dump",
+              "09:12:04 ERRORS summary sent",
+              "msg=\"09:12:05 ERROR quoted\"",
+              "09:12:06 ERROR timeout"
+            ],
+            "matches": [
+              "09:12:01 ERROR db down",
+              "09:12:06 ERROR timeout"
+            ]
+          }
+        ],
+        "noFind": [
+          "09:12:04 ERRORS summary sent"
+        ]
+      },
+      "explain": "Multiline makes `^` match at each line start, `\\b` refuses `ERRORS`, and `.*` stops at the end of the line."
+    },
+    {
+      "type": "code",
+      "title": "Redact the codename",
+      "prompt": [
+        "Write `string RedactCodename(string text, string codename)` that replaces every whole-word occurrence of",
+        "`codename`, in any case, with `***`. Parts of longer words stay. The codename comes from config, so escape it.",
+        "",
+        "`RedactCodename(\"Falcon ships Friday; falconry is unaffected; FALCON.\", \"falcon\")` returns",
+        "`\"*** ships Friday; falconry is unaffected; ***.\"`. `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "string RedactCodename(string text, string codename)",
+        "{",
+        "    return text;",
+        "}"
+      ],
+      "solution": [
+        "string RedactCodename(string text, string codename)",
+        "{",
+        "    return Regex.Replace(text, @\"\\b\" + Regex.Escape(codename) + @\"\\b\", \"***\", RegexOptions.IgnoreCase);",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "Dojo.Eq(\"whole words in any case\", \"*** ships Friday; falconry is unaffected; ***.\", RedactCodename(\"Falcon ships Friday; falconry is unaffected; FALCON.\", \"falcon\"));",
+        "Dojo.Eq(\"_ joins words, - does not\", \"Project Falcon_v2 and ***-v2\", RedactCodename(\"Project Falcon_v2 and falcon-v2\", \"falcon\"));",
+        "Dojo.Eq(\"a dot in the codename is literal\", \"see *** not v1x2\", RedactCodename(\"see v1.2 not v1x2\", \"v1.2\"));",
+        "Dojo.Eq(\"no codename, no change\", \"nothing here\", RedactCodename(\"nothing here\", \"falcon\"));"
+      ],
+      "require": [
+        {
+          "pattern": "Regex\\.Escape",
+          "message": "Escapes the codename"
+        },
+        {
+          "pattern": "Regex\\.Replace",
+          "message": "Uses Regex.Replace"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Lint the .env file",
+      "prompt": [
+        "Write `List<int> BadLines(string env)` that returns the line numbers (counting from 1) of the malformed lines in",
+        "a `.env` file, in order. Lines are separated by `\\n`; a line may end in `\\r` (Windows), which you should ignore.",
+        "",
+        "- A **blank** line (empty, or only spaces and tabs) is fine.",
+        "- A **comment** (first non-blank character `#`) is fine.",
+        "- Every other line must start with a key and `=`: the key is an uppercase ASCII letter followed by uppercase",
+        "  letters, digits or `_`. The value after `=` may be anything, even empty.",
+        "",
+        "```text",
+        "API_KEY=abc          fine",
+        "api_key=abc          bad: lowercase key",
+        "API KEY=x            bad: space in the key",
+        "=x                   bad: no key",
+        "PORT                 bad: no =",
+        "```",
+        "",
+        "Check each line on its own with `\\A` anchors. `System.Text.RegularExpressions` is already imported."
+      ],
+      "starter": [
+        "List<int> BadLines(string env)",
+        "{",
+        "    var bad = new List<int>();",
+        "    var lines = env.Split('\\n');",
+        "    return bad;",
+        "}"
+      ],
+      "solution": [
+        "List<int> BadLines(string env)",
+        "{",
+        "    var bad = new List<int>();",
+        "    var lines = env.Split('\\n');",
+        "    for (var i = 0; i < lines.Length; i++)",
+        "    {",
+        "        var line = lines[i].TrimEnd('\\r');",
+        "        if (Regex.IsMatch(line, @\"\\A[ \\t]*\\z\") || Regex.IsMatch(line, @\"\\A[ \\t]*#\")) continue;",
+        "        if (!Regex.IsMatch(line, @\"\\A[A-Z][A-Z0-9_]*=\")) bad.Add(i + 1);",
+        "    }",
+        "    return bad;",
+        "}"
+      ],
+      "template": [
+        "using System.Text.RegularExpressions;",
+        "{{CODE}}",
+        "var dojoEnv = \"# settings\\nAPI_KEY=abc\\n\\napi_key=abc\\nAPI KEY=x\\n  # indented comment\\nDB_URL=postgres://db:5432/app?ssl=true\\n=x\\n1KEY=x\\nPORT\\n   \\nLOG_LEVEL=\";",
+        "Dojo.Eq(\"lines 4, 5, 8, 9 and 10 are bad\", new List<int> { 4, 5, 8, 9, 10 }, BadLines(dojoEnv));",
+        "Dojo.Eq(\"Windows line endings\", new List<int> { 2 }, BadLines(\"A=1\\r\\nbad line\\r\\n\"));",
+        "Dojo.Eq(\"a clean file has no bad lines\", new List<int>(), BadLines(\"# ok\\nA=1\\nB_2=x=y\\n\"));",
+        "Dojo.Eq(\"an empty file has no bad lines\", new List<int>(), BadLines(\"\"));"
+      ],
+      "require": [
+        {
+          "pattern": "Regex\\.IsMatch",
+          "message": "Uses Regex.IsMatch"
+        }
+      ]
+    }
+  ]
+}
