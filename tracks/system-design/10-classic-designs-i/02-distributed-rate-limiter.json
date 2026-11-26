@@ -1,0 +1,390 @@
+{
+  "title": "Design a distributed rate limiter",
+  "summary": "Per-key limits shared by many gateway nodes: where the limiter sits, the sliding window counter, atomic Redis scripts, fail-open versus fail-closed and the headers callers need.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** every API key gets a limit (say 100 requests per second, or 10,000 per hour) and every gateway node",
+        "must enforce the **same** limit, however many nodes there are.",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | limits per API key, per user or per IP, per route; reject with `429 Too Many Requests` and `Retry-After` |",
+        "| Non-functional | adds under 1-2 ms to each request; a limiter outage must not take the API down; roughly accurate is fine (a few % over is acceptable) |",
+        "| Out of scope | billing, quotas measured in days (use a usage pipeline, not the hot path) |",
+        "",
+        "```text",
+        "peak traffic      50,000 requests / s across 40 gateway nodes",
+        "limiter calls     one atomic round trip per request = 50,000 ops / s   (a few Redis shards handle that)",
+        "keys              1 M active API keys x 2 windows x ~100 bytes   ≈ 200 MB of memory",
+        "latency budget    same-AZ round trip to Redis ≈ 0.2-0.5 ms",
+        "```",
+        "",
+        "The numbers say: memory is trivial, **one network round trip per request** is the real cost, and it must be",
+        "atomic or concurrent nodes will both let request 101 through."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Where does the shared limiter usually sit, and why?",
+      "options": [
+        "In the API gateway (or edge proxy), before the request reaches any service, so rejected requests cost almost nothing",
+        "Inside each backend service, so each team can tune it",
+        "In the database, as a trigger that counts inserts",
+        "In the client SDK, so the server never has to check"
+      ],
+      "answer": 0,
+      "explain": "Rejecting at the edge is cheapest and protects everything behind it. Services may still keep their own coarse limits (a bulkhead for their own database), but the per-customer contract lives at the gateway. A client-side limiter is a politeness, never protection."
+    },
+    {
+      "type": "learn",
+      "title": "The sliding window counter",
+      "body": [
+        "Module 8 covers the algorithms in depth. The one most shared limiters use is the **sliding window counter**:",
+        "keep a count for the current fixed window and the previous one, and weight the previous one by how much of it",
+        "still overlaps the sliding window.",
+        "",
+        "```text",
+        "        previous window (1 s)          current window (1 s)",
+        "  |-----------------------------|--------------|----------------|",
+        "                 80 requests      ^ 25% in      30 so far",
+        "            <------ sliding 1 s window ------>",
+        "",
+        "estimate = previous x (1 - elapsed / window) + current",
+        "         = 80 x 0.75 + 30 = 90        allow while estimate < limit",
+        "```",
+        "",
+        "Two integers per key, no list of timestamps, and no burst of 2 x limit at the window edge that a plain fixed",
+        "window allows. It assumes the previous window's requests were spread evenly, which is close enough in practice."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "double prev = 80, curr = 30;",
+        "double elapsed = 250, window = 1000;",
+        "var estimate = prev * (1 - elapsed / window) + curr;",
+        "Console.WriteLine(estimate);"
+      ],
+      "answer": "90",
+      "explain": "A quarter of the current window has passed, so three quarters of the previous window still overlap: 80 x 0.75 = 60, plus the 30 already counted."
+    },
+    {
+      "type": "learn",
+      "title": "Atomic in Redis: one script, one round trip",
+      "body": [
+        "`GET` then `SET` from the gateway is a race: two nodes both read 99, both allow, both write 100. Make the",
+        "read-check-write **one atomic operation** on the server. Redis runs a Lua script atomically (nothing else",
+        "runs on that shard meanwhile), and it is one round trip:",
+        "",
+        "```lua",
+        "-- KEYS[1] = rl:{key42}:1732700000   ARGV[1] = limit   ARGV[2] = window in ms",
+        "local n = redis.call('INCR', KEYS[1])",
+        "if n == 1 then",
+        "  redis.call('PEXPIRE', KEYS[1], ARGV[2])",
+        "end",
+        "if n > tonumber(ARGV[1]) then return 0 end",
+        "return 1",
+        "```",
+        "",
+        "- Load it once with `SCRIPT LOAD` and call it with `EVALSHA` (Redis 7+ also has `FUNCTION LOAD` and `FCALL`).",
+        "- In a **Redis Cluster**, every key one script touches must be in the same hash slot: put the shared part in",
+        "  braces, `rl:{key42}:...`, so the current and previous window of one API key land together.",
+        "- The expiry cleans up old windows, so memory stays bounded."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the fixed-window script: count the request, and give the key an expiry only when the window starts.",
+      "code": [
+        "local n = redis.call('__1__', KEYS[1])",
+        "if n == 1 then",
+        "  redis.call('__2__', KEYS[1], ARGV[2])",
+        "end",
+        "if n > tonumber(ARGV[1]) then return 0 end",
+        "return 1"
+      ],
+      "blanks": [
+        "INCR",
+        "PEXPIRE"
+      ],
+      "bank": [
+        "GET",
+        "SET",
+        "EXPIREAT",
+        "DEL"
+      ],
+      "explain": "`INCR` creates the key at 1 if it is missing and returns the new value atomically. `PEXPIRE` takes milliseconds (`EXPIRE` takes seconds). Setting the expiry only on the first request keeps the window fixed instead of sliding forward on every call."
+    },
+    {
+      "type": "sort",
+      "prompt": "Redis is unreachable for 30 seconds. Should the limiter fail **open** (allow) or **closed** (reject)?",
+      "buckets": [
+        "Fail open",
+        "Fail closed"
+      ],
+      "items": [
+        [
+          "Public product search API",
+          0
+        ],
+        [
+          "Login and password attempts",
+          1
+        ],
+        [
+          "Sending SMS one-time codes (each one costs money)",
+          1
+        ],
+        [
+          "Read-only status page",
+          0
+        ],
+        [
+          "Free-tier AI image generation on expensive GPUs",
+          1
+        ],
+        [
+          "Internal dashboard reads",
+          0
+        ]
+      ],
+      "explain": "Fail open when the limiter only protects fairness and the backends can take a short spike; fail closed when abuse costs money or security (brute force, SMS pumping fraud). Many teams fail open but fall back to a coarse local in-memory limit per node, so it is never unlimited."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** A customer on the 100 requests/second plan is measured at about 400 requests/second, all",
+        "returning 200. You run 4 gateway nodes behind a round-robin load balancer. The limiter config is:",
+        "",
+        "```yaml",
+        "rateLimit:",
+        "  algorithm: token-bucket",
+        "  store: memory      # per process",
+        "  rate: 100/s",
+        "  burst: 100",
+        "```",
+        "",
+        "What is going on?"
+      ],
+      "options": [
+        "Each node keeps its own bucket, so the real limit is 100 x 4 nodes. Use a shared store (or divide the limit by the node count and accept the error)",
+        "The token bucket allows bursts of 4 x the rate",
+        "Round robin is sending all of that customer's traffic to one node",
+        "The customer is retrying 429s, which counts as 200s"
+      ],
+      "answer": 0,
+      "explain": "An in-memory limiter is per process. With N nodes you get N x the limit. A shared counter (Redis) fixes it; `rate / N` per node is a cheap approximation that drifts when nodes scale or traffic is uneven."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: running a rate limiter",
+      "body": "The commands you reach for when the limiter is slow, wrong or the reason customers are angry.",
+      "toolkit": [
+        {
+          "cmd": "redis-cli SCRIPT LOAD",
+          "what": "Loads a Lua script once and returns its SHA1, so callers send the short hash instead of the whole script.",
+          "flags": [
+            [
+              "SCRIPT LOAD \"$(cat f.lua)\"",
+              "upload the script, print its sha"
+            ],
+            [
+              "EVALSHA <sha> 1 <key> <args>",
+              "run it: 1 is the number of keys that follow"
+            ],
+            [
+              "SCRIPT EXISTS <sha>",
+              "check it is still cached (it is lost on restart: retry with EVAL on NOSCRIPT)"
+            ]
+          ],
+          "example": "redis-cli -h redis.example.com EVALSHA \"$SHA\" 1 'rl:{key42}:1732700000' 100 1000",
+          "when": "deploying or testing a new limiter script",
+          "lang": "bash"
+        },
+        {
+          "cmd": "redis-cli --latency",
+          "what": "Measures round-trip latency to Redis continuously: the floor of what the limiter adds to each request.",
+          "flags": [
+            [
+              "--latency",
+              "min, max and average in ms, updated live"
+            ],
+            [
+              "--latency-history",
+              "a new line every 15 s, to spot spikes"
+            ],
+            [
+              "-i 5",
+              "the history interval in seconds"
+            ]
+          ],
+          "example": "redis-cli -h redis.example.com --latency-history -i 5",
+          "when": "gateway p99 rose and you suspect the limiter",
+          "lang": "bash"
+        },
+        {
+          "cmd": "redis-cli INFO commandstats",
+          "what": "Per-command call counts and microseconds per call, so you see whether EVALSHA got slower or busier.",
+          "flags": [
+            [
+              "cmdstat_evalsha",
+              "calls, usec, usec_per_call for scripts"
+            ],
+            [
+              "CONFIG RESETSTAT",
+              "zero the counters before a test"
+            ]
+          ],
+          "example": "redis-cli -h redis.example.com INFO commandstats | grep -E 'evalsha|incr'",
+          "lang": "bash"
+        },
+        {
+          "cmd": "redis-cli CLUSTER KEYSLOT",
+          "what": "Shows which hash slot a key maps to, to check that one key's windows share a slot (a script fails with CROSSSLOT otherwise).",
+          "flags": [
+            [
+              "{...}",
+              "a hash tag: only the part in braces is hashed"
+            ]
+          ],
+          "example": "redis-cli -c -h redis.example.com CLUSTER KEYSLOT 'rl:{key42}:1732700000'",
+          "lang": "bash"
+        },
+        {
+          "cmd": "curl -i (429 checks)",
+          "what": "Calls the API until it is limited and shows the status and the headers a caller needs to back off.",
+          "flags": [
+            [
+              "-i",
+              "print the response headers"
+            ],
+            [
+              "Retry-After",
+              "seconds (or a date) to wait before retrying"
+            ],
+            [
+              "RateLimit / RateLimit-Policy",
+              "remaining quota headers from the IETF draft; many APIs use X-RateLimit-* instead"
+            ]
+          ],
+          "example": "for i in $(seq 1 120); do curl -s -o /dev/null -w '%{http_code}\\n' -H 'X-Api-Key: test-key' https://api.example.com/v1/search?q=lamp; done | sort | uniq -c",
+          "lang": "bash"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to what it tells you.",
+      "pairs": [
+        [
+          "`EVALSHA <sha> 1 <key> 100 1000`",
+          "runs the loaded limiter script for one key"
+        ],
+        [
+          "`--latency-history`",
+          "how much one round trip to Redis costs, over time"
+        ],
+        [
+          "`INFO commandstats`",
+          "calls and microseconds per call for each command"
+        ],
+        [
+          "`CLUSTER KEYSLOT`",
+          "which hash slot a key lives in"
+        ],
+        [
+          "`Retry-After`",
+          "how long a limited caller should wait"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A sliding window counter",
+      "prompt": [
+        "Write a class `SlidingWindowCounter` (what the Redis script computes, with time passed in so it can be tested):",
+        "",
+        "- `SlidingWindowCounter(int limit, long windowMs)`: a limit or window of `0` or less throws `ArgumentOutOfRangeException`.",
+        "- `bool Allow(string key, long nowMs)`: windows are aligned: the current one starts at `nowMs / windowMs * windowMs`.",
+        "  When time has moved into the **next** window, the old current count becomes the previous count; if it moved",
+        "  further than that, the previous count is `0`. Then",
+        "  `estimate = previous x (1 - (nowMs - currentStart) / windowMs) + current` (as a `double`). If `estimate < limit`",
+        "  the request is allowed and counted; otherwise it is rejected and **not** counted.",
+        "- Each key has its own counts.",
+        "",
+        "With a limit of 10 per 1,000 ms: 10 requests at t = 100 pass and the 11th fails. At t = 1,500 the previous 10",
+        "still count half, so 5 more pass."
+      ],
+      "starter": [
+        "class SlidingWindowCounter",
+        "{",
+        "    public SlidingWindowCounter(int limit, long windowMs) { }",
+        "",
+        "    public bool Allow(string key, long nowMs) => true;",
+        "}"
+      ],
+      "solution": [
+        "class SlidingWindowCounter",
+        "{",
+        "    readonly int limit;",
+        "    readonly long windowMs;",
+        "    readonly Dictionary<string, (long Start, int Current, int Previous)> state = new();",
+        "",
+        "    public SlidingWindowCounter(int limit, long windowMs)",
+        "    {",
+        "        if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));",
+        "        if (windowMs <= 0) throw new ArgumentOutOfRangeException(nameof(windowMs));",
+        "        this.limit = limit;",
+        "        this.windowMs = windowMs;",
+        "    }",
+        "",
+        "    public bool Allow(string key, long nowMs)",
+        "    {",
+        "        var start = nowMs / windowMs * windowMs;",
+        "        if (!state.TryGetValue(key, out var s)) s = (start, 0, 0);",
+        "        else if (s.Start != start) s = (start, 0, start - s.Start == windowMs ? s.Current : 0);",
+        "        var weight = 1.0 - (nowMs - start) / (double)windowMs;",
+        "        if (s.Previous * weight + s.Current >= limit)",
+        "        {",
+        "            state[key] = s;",
+        "            return false;",
+        "        }",
+        "        state[key] = (s.Start, s.Current + 1, s.Previous);",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep `(long Start, int Current, int Previous)` per key in a dictionary.",
+        "When `start` changed: if `start - old.Start == windowMs` the old current becomes previous, else previous is 0. Then compute the weight `1.0 - (nowMs - start) / (double)windowMs`."
+      ],
+      "template": [
+        "var dojoL = new SlidingWindowCounter(10, 1000);",
+        "var dojoFirst = 0;",
+        "for (var dojoI = 0; dojoI < 12; dojoI++) if (dojoL.Allow(\"a\", 100)) dojoFirst++;",
+        "Dojo.Eq(\"10 of 12 allowed in the first window\", 10, dojoFirst);",
+        "var dojoMid = 0;",
+        "for (var dojoI = 0; dojoI < 10; dojoI++) if (dojoL.Allow(\"a\", 1500)) dojoMid++;",
+        "Dojo.Eq(\"half-way into the next window the previous 10 weigh 5: 5 more pass\", 5, dojoMid);",
+        "Dojo.Eq(\"another key has its own window\", true, dojoL.Allow(\"b\", 1500));",
+        "var dojoLate = 0;",
+        "for (var dojoI = 0; dojoI < 12; dojoI++) if (dojoL.Allow(\"a\", 3000)) dojoLate++;",
+        "Dojo.Eq(\"two windows later the old counts are gone\", 10, dojoLate);",
+        "var dojoC = new SlidingWindowCounter(10, 1000);",
+        "for (var dojoI = 0; dojoI < 10; dojoI++) dojoC.Allow(\"c\", 100);",
+        "var dojoEnd = 0;",
+        "for (var dojoI = 0; dojoI < 12; dojoI++) if (dojoC.Allow(\"c\", 1850)) dojoEnd++;",
+        "Dojo.Eq(\"85% into the next window the previous 10 weigh 1.5: 9 pass\", 9, dojoEnd);",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"limit must be positive\", () => new SlidingWindowCounter(0, 1000));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"window must be positive\", () => new SlidingWindowCounter(5, 0));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

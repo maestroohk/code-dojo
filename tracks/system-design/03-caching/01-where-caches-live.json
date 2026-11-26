@@ -1,0 +1,245 @@
+{
+  "title": "Where caches live and how they fill",
+  "summary": "The cache layers between a user and the database, cache-aside versus read-through, write-through, write-behind and write-around, and why you delete on write instead of updating.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A cache at every hop",
+      "body": [
+        "A **cache** is a copy of data kept closer to the reader than the source of truth. Every hop on the way to",
+        "the database can hold one:",
+        "",
+        "```text",
+        " browser ──> CDN edge ──> reverse proxy ──> app server ──> distributed cache ──> database",
+        " (HTTP       (seconds    (nginx/Envoy      (in-process      (Redis / Valkey     (source of",
+        "  cache)      to days)    micro-cache)      memory, ns)      cluster, ~0.5 ms)   truth, ms)",
+        "```",
+        "",
+        "| Layer | Typical hit cost | Shared by | Invalidate with |",
+        "|---|---|---|---|",
+        "| Browser | 0 (no request) | one user | `Cache-Control`, versioned URLs |",
+        "| CDN edge | 5-30 ms from the user | a region of users | TTL, purge API |",
+        "| In-process (near cache) | ~100 ns | one app instance | short TTL, a pub/sub message |",
+        "| Distributed cache | ~0.2-1 ms in the same AZ | every app instance | delete the key |",
+        "",
+        "The closer the cache, the cheaper the hit, and the **harder it is to invalidate**: you can delete one",
+        "Redis key in a millisecond, but you cannot reach into 40,000 browsers. That trade-off decides what each",
+        "layer may hold."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Where would you cache each of these? Pick the layer closest to the user that is still safe.",
+      "buckets": [
+        "Browser / CDN",
+        "In-process near cache",
+        "Distributed cache",
+        "Do not cache"
+      ],
+      "items": [
+        ["`app.3f9a1c.js` (a hashed bundle)", 0],
+        ["The product page HTML for logged-out visitors", 0],
+        ["The feature-flag set, re-read every 30 s", 1],
+        ["A user's shopping cart, read on every page", 2],
+        ["Rendered product details shared by all app servers", 2],
+        ["The current balance shown before a payment is approved", 3]
+      ],
+      "explain": [
+        "A hashed bundle never changes, so the browser can keep it for a year. Feature flags are tiny and read",
+        "constantly: an in-process copy with a short refresh is ideal. A cart must look the same on every server,",
+        "so it belongs in a shared cache (or the database). A balance used to approve a payment must come from the",
+        "source of truth: a stale read there costs real money."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Five ways to fill and write",
+      "body": [
+        "- **Cache-aside** (lazy loading): the app reads the cache; on a miss it reads the database and puts the",
+        "  value in the cache. On a write it updates the database and **deletes** the cache key. The most common",
+        "  pattern, because the cache can fail and the app still works (slowly).",
+        "- **Read-through**: the cache library itself loads misses from the database (a loader function). Same",
+        "  shape as cache-aside, but the loading code lives in one place.",
+        "- **Write-through**: every write goes to the cache and the database together, so the cache is always warm",
+        "  for recent writes. Costs a cache write per database write, even for data nobody reads.",
+        "- **Write-behind** (write-back): the write lands in the cache and is flushed to the database later in",
+        "  batches. Fast writes, but a cache crash **loses data** that was acknowledged. Rarely the right call for",
+        "  business data.",
+        "- **Write-around**: writes go only to the database; the cache fills on the next read. Good for data that",
+        "  is written often and read rarely (logs, bulk imports).",
+        "",
+        "```text",
+        "cache-aside read:   GET key ──hit──> return",
+        "                       └─miss──> SELECT ... ──> SET key value EX 300 ──> return",
+        "cache-aside write:  UPDATE ... ──> DEL key",
+        "```"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each pattern to its defining behaviour.",
+      "pairs": [
+        ["Cache-aside", "The app loads misses itself and deletes the key after a write"],
+        ["Read-through", "The cache calls a loader function on a miss"],
+        ["Write-through", "Each write updates the cache and the database together"],
+        ["Write-behind", "Writes are acknowledged from the cache and flushed to the database later"],
+        ["Write-around", "Writes skip the cache; the next read fills it"]
+      ],
+      "explain": "In an interview, name the pattern and its failure mode: write-behind loses acknowledged writes when the cache dies; write-through pays for writes nobody reads; cache-aside serves a miss storm when the cache is empty."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a cache-aside **read** of product 42 in order.",
+      "lines": [
+        "GET product:42 from the cache",
+        "On a miss, SELECT the row from the database",
+        "SET product:42 with a TTL (EX 300)",
+        "Return the value to the caller"
+      ],
+      "explain": "Setting a TTL on fill is the safety net: even if an invalidation is lost, a stale value lives at most one TTL."
+    },
+    {
+      "type": "learn",
+      "title": "Delete on write, and the race that remains",
+      "body": [
+        "Why **delete** the key instead of writing the new value into the cache? Two writers can interleave:",
+        "",
+        "```text",
+        "t1  writer A: UPDATE price = 10            t3  writer B: SET cache = 12",
+        "t2  writer B: UPDATE price = 12            t4  writer A: SET cache = 10   <- cache says 10, DB says 12, forever",
+        "```",
+        "",
+        "With delete-on-write, both writers just `DEL`, and the next reader loads the true value. One race is",
+        "left: a **slow reader** reads the old row, a writer updates and deletes, then the slow reader puts the",
+        "old row back into the cache. It is rare (the read must be slower than a whole write), and three things",
+        "bound it:",
+        "",
+        "1. A **TTL** on every key: the stale value dies within one TTL.",
+        "2. A **version** (or `updated_at`) stored with the value: only `SET` if the version is newer (a Lua",
+        "   script or `SET ... NX` on a versioned key).",
+        "3. A **delayed second delete** a few hundred milliseconds after the write, for hot keys.",
+        "",
+        "Rule of thumb: decide how stale each piece of data may be (\"prices: 1 minute, stock count: never shown",
+        "from cache at checkout\"), and pick the TTL from that, not from a habit."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** After a price change, some customers see the old price for exactly 24 hours, then it",
+        "fixes itself. The code updates the database and then runs this:"
+      ],
+      "code": [
+        "await db.ExecuteAsync(\"UPDATE products SET price = @p WHERE id = @id\", new { p, id });",
+        "await cache.StringSetAsync($\"product:{id}\", JsonSerializer.Serialize(product), TimeSpan.FromHours(24));"
+      ],
+      "options": [
+        "Two concurrent writes can leave the older value in the cache, and the 24 h TTL keeps it there; delete the key instead and use a TTL that matches how stale a price may be",
+        "Redis lost the write; switch to write-behind",
+        "The database is lagging; read prices from the primary",
+        "The TTL is too short; raise it to 7 days"
+      ],
+      "answer": 0,
+      "explain": "Writing the value into the cache after the update is exactly the interleaving race. Exactly 24 hours of staleness is the fingerprint of the TTL bounding the damage. `KeyDeleteAsync` plus a shorter TTL fixes both halves."
+    },
+    {
+      "type": "code",
+      "title": "A cache-aside wrapper",
+      "prompt": [
+        "Write a class `CacheAside` over a database (a `Dictionary<string, string>`) with its own in-memory cache:",
+        "",
+        "- `CacheAside(Dictionary<string, string> db)`",
+        "- `string? Get(string key)`: return the cached value on a hit. On a miss, read the database (count it in",
+        "  `DbReads`), cache the value and return it. A key missing from the database returns `null` and is **not**",
+        "  cached.",
+        "- `void Update(string key, string value)`: write the database, then **delete** the cached copy.",
+        "- `bool IsCached(string key)` and `int DbReads { get; }`.",
+        "",
+        "Reading `p1` twice costs one database read; after `Update(\"p1\", ...)` the next read goes to the database",
+        "and sees the new value."
+      ],
+      "starter": [
+        "class CacheAside",
+        "{",
+        "    public CacheAside(Dictionary<string, string> db) { }",
+        "",
+        "    public int DbReads { get; }",
+        "",
+        "    public string? Get(string key) => null;",
+        "",
+        "    public void Update(string key, string value) { }",
+        "",
+        "    public bool IsCached(string key) => false;",
+        "}"
+      ],
+      "solution": [
+        "class CacheAside",
+        "{",
+        "    readonly Dictionary<string, string> db;",
+        "    readonly Dictionary<string, string> cache = new();",
+        "",
+        "    public CacheAside(Dictionary<string, string> db) { this.db = db; }",
+        "",
+        "    public int DbReads { get; private set; }",
+        "",
+        "    public string? Get(string key)",
+        "    {",
+        "        if (cache.TryGetValue(key, out var hit)) return hit;",
+        "        DbReads++;",
+        "        if (!db.TryGetValue(key, out var row)) return null;",
+        "        cache[key] = row;",
+        "        return row;",
+        "    }",
+        "",
+        "    public void Update(string key, string value)",
+        "    {",
+        "        db[key] = value;",
+        "        cache.Remove(key);",
+        "    }",
+        "",
+        "    public bool IsCached(string key) => cache.ContainsKey(key);",
+        "}"
+      ],
+      "hints": [
+        "Keep a second dictionary for the cache. `Get` tries it first with `TryGetValue`.",
+        "`Update` writes `db[key] = value;` and then `cache.Remove(key);`: never `cache[key] = value`."
+      ],
+      "template": [
+        "var dojoDb = new Dictionary<string, string> { [\"p1\"] = \"9.99\", [\"p2\"] = \"4.50\" };",
+        "var dojoC = new CacheAside(dojoDb);",
+        "Dojo.Eq(\"first read of p1 comes from the database\", \"9.99\", dojoC.Get(\"p1\"));",
+        "Dojo.Eq(\"second read of p1 is a hit\", \"9.99\", dojoC.Get(\"p1\"));",
+        "Dojo.Eq(\"one database read so far\", 1, dojoC.DbReads);",
+        "dojoC.Update(\"p1\", \"8.99\");",
+        "Dojo.Eq(\"the database has the new price\", \"8.99\", dojoDb[\"p1\"]);",
+        "Dojo.Check(\"Update deletes the cached copy\", !dojoC.IsCached(\"p1\"), \"after Update, p1 should not be in the cache\");",
+        "Dojo.Eq(\"the next read sees the new price\", \"8.99\", dojoC.Get(\"p1\"));",
+        "Dojo.Eq(\"that read went to the database\", 2, dojoC.DbReads);",
+        "Dojo.Eq(\"a key missing from the database returns null\", (string?)null, dojoC.Get(\"nope\"));",
+        "dojoC.Get(\"nope\");",
+        "Dojo.Check(\"missing keys are not cached\", !dojoC.IsCached(\"nope\"), \"nope should not be cached\");",
+        "Dojo.Eq(\"each read of a missing key costs a database read\", 4, dojoC.DbReads);",
+        "{{CODE}}"
+      ],
+      "explain": [
+        "Not caching misses is a choice. Under attack (requests for random ids that do not exist) every request",
+        "reaches the database; the usual fix is **negative caching**: store a short-lived \"not found\" marker."
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "cache-aside",
+      "title": "Build it: cache the catalogue",
+      "prompt": [
+        "In the **System design board**, open *Cache the catalogue*. A read-heavy catalogue with skewed keys is",
+        "overloading its database. Add a cache cluster in front of the database (cache-aside from the app servers),",
+        "size it for the hot set rather than the whole catalogue, and run the load test until the database",
+        "utilisation and p99 goals are met within the budget."
+      ],
+      "explain": "Watch the cache hit rate panel: a cache that holds a few percent of the keys can still serve most reads when the traffic is skewed. That is the next lesson."
+    }
+  ]
+}

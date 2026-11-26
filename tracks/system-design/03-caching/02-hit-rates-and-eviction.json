@@ -1,0 +1,335 @@
+{
+  "title": "Hit rates, skew and eviction",
+  "summary": "The miss rate is what the database feels. Working sets and Zipf skew, sizing a cache for the hot set, LRU, LFU and W-TinyLFU, Redis maxmemory policies, and the redis-cli commands that show what your cache is doing.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The database feels the misses",
+      "body": [
+        "A cache in front of a database turns `reads` into `reads × (1 − hit ratio)` database reads. The hit ratio",
+        "looks like a vanity number, but the **miss ratio** is the one that decides the database size:",
+        "",
+        "| Hit ratio | Miss ratio | DB reads at 20,000 reads/s |",
+        "|---|---|---|",
+        "| 90 % | 10 % | 2,000/s |",
+        "| 95 % | 5 % | 1,000/s |",
+        "| 99 % | 1 % | 200/s |",
+        "",
+        "Going from 90 % to 99 % sounds like a 10 % improvement. For the database it is a **10× drop** in load.",
+        "The flip side: a cache that drops from 99 % to 90 % (a deploy that changed key names, a restart) sends",
+        "10× the reads to a database that was sized for the cache being there. Seniors size the database for",
+        "the realistic **worst** hit ratio, or protect it (next lesson)."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "int reads = 20000;",
+        "foreach (var hit in new[] { 90, 95, 99 })",
+        "    Console.Write(reads * (100 - hit) / 100 + \" \");"
+      ],
+      "answer": "2000 1000 200",
+      "explain": "The database load falls with the miss ratio: every percentage point near the top of the hit ratio is worth more than the one before."
+    },
+    {
+      "type": "learn",
+      "title": "Skew: a small hot set takes most reads",
+      "body": [
+        "Real traffic is not uniform. A few products, profiles or videos take most of the reads. A common model is",
+        "**Zipf**: the key of rank *i* gets traffic in proportion to `1 / i^s`, with `s` near 1 for many web",
+        "workloads. With one million keys and `s = 1`:",
+        "",
+        "| Hottest keys cached | Share of keys | Share of reads they serve |",
+        "|---|---|---|",
+        "| 1,000 | 0.1 % | about 52 % |",
+        "| 10,000 | 1 % | about 68 % |",
+        "| 100,000 | 10 % | about 84 % |",
+        "",
+        "- **Working set**: the keys read within a time window (say, an hour). Size the cache for the hot part",
+        "  of the working set, not for the whole table.",
+        "",
+        "Two consequences. First, a cache much smaller than the data can still have a high hit ratio. Second, the",
+        "last few percent are expensive: each extra point of hit ratio needs many more cold keys in memory. Measure",
+        "the curve (hit ratio against cache size) on real traffic before buying memory."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "A catalogue has 50 million products of about 2 KB each (100 GB). Logs show the top 2 million products take",
+        "about 90 % of reads, and the database can comfortably serve 15 % of today's reads. What is a sensible first",
+        "cache size?"
+      ],
+      "options": [
+        "About 4-6 GB of values plus overhead, holding the hot 2 million products",
+        "100 GB, so every product is cached",
+        "200 MB, because caches should be small",
+        "No cache: add read replicas instead"
+      ],
+      "answer": 0,
+      "explain": "2 million × 2 KB = 4 GB of values; Redis adds per-key overhead (tens of bytes plus the key), so budget roughly 5-6 GB and leave memory headroom. A 90 % hit ratio leaves 10 % of reads for the database, under its 15 % budget. Caching all 100 GB costs 20× the memory for the last 10 % of reads."
+    },
+    {
+      "type": "learn",
+      "title": "Eviction: who leaves when memory is full",
+      "body": [
+        "- **LRU** (least recently used): evict the key untouched for longest. Simple and good for recency, but a",
+        "  one-off scan (a batch job reading every product once) pushes the whole hot set out.",
+        "- **LFU** (least frequently used): evict the key with the lowest access count, so a scan does little",
+        "  harm. Needs counters that **decay**, or yesterday's hits keep stale keys forever.",
+        "- **W-TinyLFU** (Caffeine on the JVM): a small LRU window for new keys plus a frequency sketch that",
+        "  decides whether a newcomer may replace a victim. Near-optimal hit ratios on most traces.",
+        "",
+        "Redis and Valkey choose with `maxmemory-policy`. Their LRU and LFU are **approximate**: they sample a few",
+        "keys (`maxmemory-samples`, default 5) and evict the best candidate among them.",
+        "",
+        "| Policy | Evicts |",
+        "|---|---|",
+        "| `noeviction` (the default) | nothing: writes fail with an OOM error when memory is full |",
+        "| `allkeys-lru` / `allkeys-lfu` | any key, by recency / frequency |",
+        "| `volatile-lru` / `volatile-lfu` | only keys that have a TTL |",
+        "| `volatile-ttl` | keys with a TTL, soonest to expire first |",
+        "| `allkeys-random` / `volatile-random` | a random key |",
+        "",
+        "For a pure cache, `allkeys-lfu` or `allkeys-lru` is the usual choice. `noeviction` is right when Redis",
+        "holds data you cannot lose (queues, locks), and then you must alert on memory."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each situation to the policy or behaviour it calls for.",
+      "pairs": [
+        ["A pure cache whose hot set is stable for days", "`allkeys-lfu`"],
+        ["A nightly job reads every key once and wrecks the hit ratio", "Use LFU (or W-TinyLFU) so a scan cannot flush the hot set"],
+        ["The same Redis holds session data without TTLs and cache keys with TTLs", "`volatile-lru`: only keys with a TTL may be evicted"],
+        ["Redis holds a job queue that must never drop entries", "`noeviction`, plus a memory alert"],
+        ["Writes start failing with `OOM command not allowed`", "Memory is full under `noeviction`"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: looking inside a cache",
+      "body": "When the cache is slow, cold or full, these show you why. All of them work on Redis and on Valkey.",
+      "toolkit": [
+        { "cmd": "redis-cli INFO stats", "what": "Server counters since start-up: hits, misses, evictions, expirations. Hit ratio = hits / (hits + misses); compare two snapshots a minute apart for the current rate.",
+          "flags": [["keyspace_hits / keyspace_misses", "reads that found / did not find the key"], ["evicted_keys", "keys removed because memory was full"], ["expired_keys", "keys removed by their TTL"]],
+          "example": "redis-cli -h cache.example.com INFO stats | grep -E 'keyspace_(hits|misses)|evicted_keys'", "when": "first look at a cache that seems cold", "lang": "bash" },
+        { "cmd": "redis-cli --hotkeys", "what": "Scans the keyspace and lists the most frequently used keys. Only works with an LFU `maxmemory-policy`, because it reads the LFU counters.",
+          "flags": [["--hotkeys", "report hot keys from LFU counters"], ["-i 0.1", "sleep 0.1 s between SCAN batches to go easy on production"]],
+          "example": "redis-cli -h cache.example.com --hotkeys -i 0.1", "when": "one cache node is far busier than the others", "lang": "bash" },
+        { "cmd": "redis-cli --bigkeys / --memkeys", "what": "Scans for the largest keys by element count (`--bigkeys`) or by memory (`--memkeys`). Big keys make single commands slow and block the server.",
+          "flags": [["--bigkeys", "largest key of each type"], ["--memkeys", "largest keys by bytes used"], ["-i 0.1", "pause between batches"]],
+          "example": "redis-cli -h cache.example.com --memkeys -i 0.1", "when": "latency spikes that line up with one command", "lang": "bash" },
+        { "cmd": "MEMORY USAGE key", "what": "Bytes a key and its value take, including overhead. Multiply by the key count to size a cache.",
+          "flags": [["SAMPLES 0", "examine every element of a collection (slow on huge keys)"]],
+          "example": "redis-cli MEMORY USAGE product:42", "lang": "bash" },
+        { "cmd": "OBJECT FREQ key", "what": "The LFU access counter of one key (LFU policies only). A quick check of whether a suspected hot key really is hot.",
+          "flags": [["FREQ", "logarithmic access counter, 0-255"], ["IDLETIME", "seconds since last access (LRU policies)"]],
+          "example": "redis-cli OBJECT FREQ product:42", "lang": "bash" },
+        { "cmd": "CONFIG SET maxmemory-policy", "what": "Changes the eviction policy at run time. Persist it in the config file too, or it is lost on restart.",
+          "flags": [["maxmemory 12gb", "the memory limit eviction starts at"], ["allkeys-lfu", "evict any key by frequency"], ["CONFIG REWRITE", "write the running config back to the file"]],
+          "example": "redis-cli CONFIG SET maxmemory-policy allkeys-lfu", "when": "a pure cache running with the `noeviction` default", "lang": "bash" },
+        { "cmd": "redis-cli --latency", "what": "Pings the server continuously and prints min, max and average round trip in ms. Separates \"Redis is slow\" from \"my client or network is slow\".",
+          "flags": [["--latency-history", "a new line every 15 s instead of one running total"], ["-i 5", "seconds per history window"]],
+          "example": "redis-cli -h cache.example.com --latency-history -i 5", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Switch a cache to frequency-based eviction, then list its hottest keys gently.",
+      "code": [
+        "redis-cli CONFIG SET maxmemory-policy __1__",
+        "redis-cli __2__ -i 0.1"
+      ],
+      "blanks": ["allkeys-lfu", "--hotkeys"],
+      "bank": ["noeviction", "volatile-ttl", "--bigkeys", "--latency"],
+      "explain": "`--hotkeys` reads the LFU counters, so it refuses to run unless the policy is one of the `*-lfu` ones."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Database reads doubled overnight with no traffic change. Two snapshots of the cache, 60 s",
+        "apart:"
+      ],
+      "code": [
+        "# 09:00:00                     # 09:01:00",
+        "keyspace_hits:812004110       keyspace_hits:812151110",
+        "keyspace_misses:90012000      keyspace_misses:90117000",
+        "evicted_keys:4100220          evicted_keys:4201220",
+        "used_memory_human:11.99G      used_memory_human:11.99G",
+        "maxmemory_human:12.00G        maxmemory_human:12.00G"
+      ],
+      "options": [
+        "The cache is full and evicting about 1,700 keys a second; the hit ratio in this minute is only 58 %. The hot set has outgrown 12 GB: add memory (or shards), and check for new big keys",
+        "The hit ratio is 90 %, which is healthy; look at the database instead",
+        "Redis is down",
+        "TTLs are too long"
+      ],
+      "answer": 0,
+      "explain": [
+        "Use the deltas, not the totals: 147,000 hits and 105,000 misses in the minute is 58 %. The totals (90 %)",
+        "hide the change because they include weeks of history. Memory at the limit plus a fast-growing",
+        "`evicted_keys` means keys are pushed out before they are read again."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Hit ratio and database load",
+      "prompt": [
+        "Write three functions:",
+        "",
+        "- `double HitRatio(long hits, long misses)`: hits divided by all lookups; `0` when there were none.",
+        "- `int DbReadsPerSecond(int readsPerSecond, double hitRatio)`: the reads that miss, **rounded** to the",
+        "  nearest whole number.",
+        "- `double RequiredHitRatio(int readsPerSecond, int dbCapacity)`: the lowest hit ratio that keeps database",
+        "  reads at or under `dbCapacity`; `0` when the database can take every read on its own.",
+        "",
+        "`DbReadsPerSecond(20000, 0.99)` is `200`. `RequiredHitRatio(20000, 1500)` is `0.925`."
+      ],
+      "starter": [
+        "double HitRatio(long hits, long misses) => 0;",
+        "",
+        "int DbReadsPerSecond(int readsPerSecond, double hitRatio) => 0;",
+        "",
+        "double RequiredHitRatio(int readsPerSecond, int dbCapacity) => 0;"
+      ],
+      "solution": [
+        "double HitRatio(long hits, long misses) => hits + misses == 0 ? 0 : (double)hits / (hits + misses);",
+        "",
+        "int DbReadsPerSecond(int readsPerSecond, double hitRatio) => (int)Math.Round(readsPerSecond * (1 - hitRatio));",
+        "",
+        "double RequiredHitRatio(int readsPerSecond, int dbCapacity) =>",
+        "    dbCapacity >= readsPerSecond ? 0 : 1 - (double)dbCapacity / readsPerSecond;"
+      ],
+      "hints": [
+        "Cast to `double` before dividing, or integer division gives 0.",
+        "Required hit ratio: the database may take at most `dbCapacity / reads` of the reads; the cache must take the rest."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"hit ratio from the 09:00-09:01 deltas\", 0.583, Math.Round(HitRatio(147000, 105000), 3));",
+        "Dojo.Eq(\"no lookups gives 0\", 0.0, HitRatio(0, 0));",
+        "Dojo.Eq(\"all hits gives 1\", 1.0, HitRatio(10, 0));",
+        "Dojo.Eq(\"20k reads at 90 %\", 2000, DbReadsPerSecond(20000, 0.9));",
+        "Dojo.Eq(\"20k reads at 99 %\", 200, DbReadsPerSecond(20000, 0.99));",
+        "Dojo.Eq(\"no cache: every read\", 7000, DbReadsPerSecond(7000, 0));",
+        "Dojo.Eq(\"required hit ratio for a 1,500/s database\", 0.925, Math.Round(RequiredHitRatio(20000, 1500), 3));",
+        "Dojo.Eq(\"a database that copes alone needs no cache\", 0.0, RequiredHitRatio(1000, 1500));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An O(1) LRU cache",
+      "prompt": [
+        "Write a generic class `LruCache<TKey, TValue> where TKey : notnull` that holds at most `capacity` entries",
+        "and evicts the **least recently used** one, with every operation in O(1):",
+        "",
+        "- `LruCache(int capacity)`: throws `ArgumentOutOfRangeException` when `capacity <= 0`.",
+        "- `bool TryGet(TKey key, out TValue value)`: a hit marks the key as most recently used.",
+        "- `void Put(TKey key, TValue value)`: inserts or updates (an update also marks it most recently used and",
+        "  never evicts). Inserting into a full cache first evicts the least recently used key.",
+        "- `int Count` and `int Evictions`.",
+        "",
+        "Use a `Dictionary` from key to a `LinkedListNode`, and a `LinkedList` kept in recency order (most recent",
+        "first), so you never search the list."
+      ],
+      "starter": [
+        "class LruCache<TKey, TValue> where TKey : notnull",
+        "{",
+        "    public LruCache(int capacity) { }",
+        "",
+        "    public int Count => 0;",
+        "    public int Evictions { get; }",
+        "",
+        "    public bool TryGet(TKey key, out TValue value) { value = default!; return false; }",
+        "",
+        "    public void Put(TKey key, TValue value) { }",
+        "}"
+      ],
+      "solution": [
+        "class LruCache<TKey, TValue> where TKey : notnull",
+        "{",
+        "    readonly int capacity;",
+        "    readonly Dictionary<TKey, LinkedListNode<(TKey Key, TValue Value)>> map = new();",
+        "    readonly LinkedList<(TKey Key, TValue Value)> order = new();",
+        "",
+        "    public LruCache(int capacity)",
+        "    {",
+        "        if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));",
+        "        this.capacity = capacity;",
+        "    }",
+        "",
+        "    public int Count => map.Count;",
+        "    public int Evictions { get; private set; }",
+        "",
+        "    public bool TryGet(TKey key, out TValue value)",
+        "    {",
+        "        if (map.TryGetValue(key, out var node))",
+        "        {",
+        "            order.Remove(node);",
+        "            order.AddFirst(node);",
+        "            value = node.Value.Value;",
+        "            return true;",
+        "        }",
+        "        value = default!;",
+        "        return false;",
+        "    }",
+        "",
+        "    public void Put(TKey key, TValue value)",
+        "    {",
+        "        if (map.TryGetValue(key, out var node))",
+        "        {",
+        "            order.Remove(node);",
+        "            node.Value = (key, value);",
+        "            order.AddFirst(node);",
+        "            return;",
+        "        }",
+        "        if (map.Count == capacity)",
+        "        {",
+        "            var last = order.Last!;",
+        "            order.RemoveLast();",
+        "            map.Remove(last.Value.Key);",
+        "            Evictions++;",
+        "        }",
+        "        map[key] = order.AddFirst((key, value));",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Store `(key, value)` in each list node, so evicting `order.Last` tells you which dictionary entry to remove.",
+        "Moving a node to the front is `order.Remove(node); order.AddFirst(node);`, both O(1) when you hold the node."
+      ],
+      "require": [
+        { "pattern": "LinkedList", "message": "Keeps recency order in a LinkedList" }
+      ],
+      "template": [
+        "var dojoL = new LruCache<string, int>(2);",
+        "dojoL.Put(\"a\", 1);",
+        "dojoL.Put(\"b\", 2);",
+        "Dojo.Check(\"a is a hit\", dojoL.TryGet(\"a\", out var dojoA) && dojoA == 1, \"TryGet(\\\"a\\\") should return 1\");",
+        "dojoL.Put(\"c\", 3);",
+        "Dojo.Check(\"b was evicted: a was used more recently\", !dojoL.TryGet(\"b\", out _), \"b should be gone\");",
+        "Dojo.Check(\"a survived because it was read\", dojoL.TryGet(\"a\", out _), \"a should still be cached\");",
+        "Dojo.Check(\"c is cached\", dojoL.TryGet(\"c\", out var dojoC) && dojoC == 3, \"TryGet(\\\"c\\\") should return 3\");",
+        "Dojo.Eq(\"count never exceeds the capacity\", 2, dojoL.Count);",
+        "dojoL.Put(\"a\", 10);",
+        "Dojo.Eq(\"updating a key does not evict\", 1, dojoL.Evictions);",
+        "dojoL.Put(\"d\", 4);",
+        "Dojo.Check(\"the update made a most recent, so c goes\", !dojoL.TryGet(\"c\", out _), \"c should be evicted\");",
+        "Dojo.Check(\"a has the updated value\", dojoL.TryGet(\"a\", out var dojoA2) && dojoA2 == 10, \"a should be 10\");",
+        "Dojo.Eq(\"two evictions in total\", 2, dojoL.Evictions);",
+        "var dojoBig = new LruCache<int, int>(1000);",
+        "for (var dojoI = 0; dojoI < 200000; dojoI++) dojoBig.Put(dojoI, dojoI);",
+        "Dojo.Eq(\"200,000 inserts keep exactly 1,000 keys\", 1000, dojoBig.Count);",
+        "Dojo.Check(\"the newest key is cached\", dojoBig.TryGet(199999, out _), \"199999 should be cached\");",
+        "Dojo.Check(\"an old key is gone\", !dojoBig.TryGet(5, out _), \"5 should be evicted\");",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"capacity 0 is rejected\", () => new LruCache<string, int>(0));",
+        "{{CODE}}"
+      ],
+      "explain": "This is the structure behind most in-process caches and a staple interview question. Redis does not keep a global list (too much memory per key); it samples keys and evicts the oldest of the sample, which is close enough at a fraction of the cost."
+    }
+  ]
+}

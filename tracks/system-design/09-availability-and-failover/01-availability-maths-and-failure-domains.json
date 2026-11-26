@@ -1,0 +1,315 @@
+{
+  "title": "Availability maths and failure domains",
+  "summary": "Serial parts multiply, redundant parts add nines only when they fail independently. Failure domains, blast radius, cells, shuffle sharding, and the N+1 headroom you need to lose a zone.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Serial parts multiply, redundant parts add nines",
+      "body": [
+        "A request that needs **every** part in a chain succeeds only if all of them work. Availabilities multiply:",
+        "",
+        "```text",
+        "load balancer 99.99%  ->  app 99.9%  ->  database 99.95%",
+        "A = 0.9999 x 0.999 x 0.9995 = 0.9984   (99.84%: worse than the weakest part)",
+        "```",
+        "",
+        "Every hard dependency you add makes the whole thing **less** available. Ten parts at 99.9% give 99.0%.",
+        "",
+        "Redundant copies work the other way. The tier is down only if **all** copies are down at once:",
+        "",
+        "```text",
+        "one app server     99%     -> down 1 in 100",
+        "two, independent   1 - (1 - 0.99)^2 = 99.99%",
+        "three, independent 1 - (1 - 0.99)^3 = 99.9999%",
+        "```",
+        "",
+        "So you design by putting redundancy into every tier of the serial chain, then multiplying the tiers.",
+        "The catch is the word **independent**. That is the rest of this lesson."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Three tiers in a row: two at 99.9% and one at 99.95%. What does this print?",
+      "code": [
+        "var a = 0.999 * 0.999 * 0.9995;",
+        "Console.WriteLine(Math.Round(a * 100, 2));"
+      ],
+      "answer": "99.75",
+      "explain": "0.999 x 0.999 = 0.998001; times 0.9995 is 0.99750. Three good parts in series already lose a quarter of a percent: about 108 minutes a month."
+    },
+    {
+      "type": "learn",
+      "title": "Failure domains and blast radius",
+      "body": [
+        "Redundancy only counts when the copies do not share a cause of failure. A **failure domain** is a set of",
+        "things that fail together:",
+        "",
+        "| Failure domain | Typical causes | Copies must be in different... |",
+        "|---|---|---|",
+        "| process, instance | crash, bad deploy on one host, full disk | instances |",
+        "| host, rack | power supply, top-of-rack switch | hosts (anti-affinity) |",
+        "| availability zone (AZ) | power, cooling, networking of one data centre group | zones |",
+        "| region | regional control plane, a bad regional deploy, a large disaster | regions |",
+        "| global | one config push, one DNS change, one certificate, one deploy pipeline | ... time: roll out slowly |",
+        "",
+        "- **Failure domain**: a group of components that a single fault takes down together.",
+        "- **Blast radius**: how many users or requests one fault can hurt.",
+        "- **Cell**: a complete, independent copy of the service that serves a slice of users. A bad deploy or a poison request hurts one cell, not everyone.",
+        "- **Shuffle sharding**: each customer gets a random small set of workers (say 2 of 8). Two customers rarely share the same set (1 in 28 here), so one noisy customer cannot take down everyone.",
+        "",
+        "The most common \"redundant but not really\" failure is the **global** row: two regions that take the same bad",
+        "config at the same minute fail together. Roll changes out one domain at a time."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Is this real redundancy, or do the copies share fate?",
+      "buckets": [ "Independent enough to count", "Shared fate: not real redundancy" ],
+      "items": [
+        [ "Two app instances in different availability zones", 0 ],
+        [ "Two app instances on the same physical host", 1 ],
+        [ "A database primary and a synchronous standby in different zones", 0 ],
+        [ "Two regions that read their config from one global flag service with no local copy", 1 ],
+        [ "Two regions deployed by the same pipeline in the same minute", 1 ],
+        [ "Three cache nodes spread across three zones", 0 ]
+      ],
+      "explain": "Count copies only across the failure domain you are protecting against. A shared host, a shared config source or a simultaneous deploy is one failure domain, however many boxes you draw."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A multi-tenant API runs 8 workers. One tenant sends requests that crash any worker that handles them. Why does giving each tenant a **shuffle shard** of 2 random workers help?",
+      "options": [
+        "The bad tenant can crash only its own 2 workers; almost every other tenant has at least one worker outside that pair",
+        "It stops the crash from happening",
+        "It makes the bad tenant's requests faster",
+        "It doubles the capacity of every tenant"
+      ],
+      "answer": 0,
+      "explain": [
+        "With 8 workers there are 28 possible pairs, so only about 1 tenant in 28 shares both of the bad tenant's workers.",
+        "Everyone else keeps a healthy worker and, with retries to the other worker in their shard, sees little impact.",
+        "Without sharding, the poison requests would spread to all 8 workers and take everyone down."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "N+1: headroom to lose a zone",
+      "body": [
+        "Spreading across zones only helps if the zones that are left can carry the **whole** peak. Lose one of",
+        "`n` zones and each survivor takes `n / (n - 1)` times its load:",
+        "",
+        "```text",
+        "zones   load per zone before   after losing one   so run below",
+        "  2            50%                  100%              50%",
+        "  3            66%                  100%              66%",
+        "  4            75%                  100%              75%",
+        "```",
+        "",
+        "\"Run below\" is the ceiling just to *fit*. You also want a sane utilisation **after** the loss (queueing",
+        "explodes near 100%, module 2), so multiply by your target: at a 70% target with 3 zones, run below about 47%",
+        "before the loss. That is why three zones are popular: the spare capacity is a third, not half.",
+        "",
+        "Autoscaling does not replace headroom. New instances take minutes to boot, and when a whole zone fails,",
+        "everyone in that region asks for capacity at the same moment. Step through the numbers:"
+      ],
+      "trace": {
+        "code": [
+          "var target = 0.70;",
+          "for (var zones = 2; zones <= 4; zones++)",
+          "{",
+          "    var fit = (zones - 1) / (double)zones;",
+          "    var safe = target * fit;",
+          "    Console.WriteLine($\"{zones} zones: fit below {Math.Round(fit * 100)}%, keep {Math.Round(target * 100)}% after a loss below {Math.Round(safe * 100)}%\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Three zones, each running at 60% CPU at peak. One zone fails and its traffic spreads evenly over the other two. What does this print?",
+      "code": [
+        "var util = 0.60 * 3 / 2;",
+        "Console.WriteLine($\"{util * 100:F0}%\");"
+      ],
+      "answer": "90%",
+      "explain": "The same work now runs on two thirds of the machines: 60% x 3 / 2 = 90%. It fits, but at 90% the queues are long, so p99 climbs sharply until you add capacity."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Dashboard after a zone failure.** Checkout runs in 3 zones with autoscaling on. Zone b lost power at 14:02.",
+        "Which change would have prevented what you see?"
+      ],
+      "code": [
+        "time    zones up  instances  CPU (avg)  p99      5xx",
+        "13:55   3         30         72%        140 ms   0.02%",
+        "14:03   2         20         100%       4.8 s    11%",
+        "14:06   2         24         100%       3.1 s    6%    (autoscaler: 10 launching)",
+        "14:09   2         30         74%        150 ms   0.03%"
+      ],
+      "options": [
+        "Run enough instances that 2 zones carry the peak at a sane utilisation (about 45 instances here), instead of relying on the autoscaler",
+        "Faster health checks on the load balancer",
+        "A bigger database",
+        "Move all instances into the healthiest zone"
+      ],
+      "answer": 0,
+      "explain": [
+        "At 72% across 3 zones, the 2 survivors needed 108% of their capacity: queues grew and requests failed until",
+        "new instances booted 7 minutes later. Headroom of a third (N+1 per zone) absorbs the loss at once. The",
+        "autoscaler then restores the spare capacity, rather than being on the critical path. Putting everything in one",
+        "zone removes the redundancy entirely."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to its meaning.",
+      "pairs": [
+        [ "Failure domain", "Components that one fault takes down together" ],
+        [ "Blast radius", "How much of the user base one fault can hurt" ],
+        [ "Cell", "An independent full copy of the service for a slice of users" ],
+        [ "Shuffle sharding", "Each customer gets a random small subset of workers" ],
+        [ "N+1 per zone", "Enough capacity that losing any one zone still fits the peak" ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Availability of a design",
+      "prompt": [
+        "Write three methods:",
+        "",
+        "- `double Serial(params double[] parts)`: the availability of parts that are **all** needed (multiply them).",
+        "  `Serial()` with no parts is `1`.",
+        "- `double Parallel(double a, int n)`: the availability of `n` independent copies of a part with",
+        "  availability `a`, where one working copy is enough: `1 - (1 - a)^n`. `n` below 1 throws `ArgumentException`.",
+        "- `double DowntimeMinutes(double availability)`: expected minutes down in a 30-day month (43,200 minutes).",
+        "",
+        "`Serial(Parallel(0.99, 2), 0.9995)` is about `0.9994`: two app servers at 99% in front of a 99.95% database."
+      ],
+      "starter": [
+        "double Serial(params double[] parts)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double Parallel(double a, int n)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double DowntimeMinutes(double availability)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double Serial(params double[] parts)",
+        "{",
+        "    var a = 1.0;",
+        "    foreach (var p in parts) a *= p;",
+        "    return a;",
+        "}",
+        "",
+        "double Parallel(double a, int n)",
+        "{",
+        "    if (n < 1) throw new ArgumentException(\"need at least one copy\", nameof(n));",
+        "    return 1 - Math.Pow(1 - a, n);",
+        "}",
+        "",
+        "double DowntimeMinutes(double availability)",
+        "{",
+        "    return (1 - availability) * 43_200;",
+        "}"
+      ],
+      "hints": [
+        "Start `Serial` at `1.0` and multiply each part in.",
+        "`Parallel` is `1 - Math.Pow(1 - a, n)`; check `n` first."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"three tiers in series\", 0.997502, Math.Round(Serial(0.999, 0.999, 0.9995), 6));",
+        "Dojo.Eq(\"no parts: nothing can fail\", 1.0, Serial());",
+        "Dojo.Eq(\"two independent copies at 99%\", 0.9999, Math.Round(Parallel(0.99, 2), 6));",
+        "Dojo.Eq(\"one copy is just the part\", 0.95, Math.Round(Parallel(0.95, 1), 6));",
+        "Dojo.Eq(\"redundant app tier in front of a database\", 0.9994, Math.Round(Serial(Parallel(0.99, 2), 0.9995), 4));",
+        "Dojo.Eq(\"99.9% is 43.2 minutes a month\", 43.2, Math.Round(DowntimeMinutes(0.999), 1));",
+        "Dojo.Eq(\"downtime of the three-tier chain\", 107.9, Math.Round(DowntimeMinutes(Serial(0.999, 0.999, 0.9995)), 1));",
+        "Dojo.Throws<ArgumentException>(\"zero copies is an error\", () => Parallel(0.99, 0));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Size the pool to lose a zone",
+      "prompt": [
+        "Write two methods:",
+        "",
+        "- `double MaxUtilToSurvive(int zones)`: the highest utilisation you can run at so that losing one zone still",
+        "  fits: `(zones - 1) / zones`. Fewer than 2 zones throws `ArgumentException` (one zone cannot survive its own loss).",
+        "- `int InstancesNeeded(double peakQps, double qpsPerInstance, int zones)`: instances in total, spread evenly,",
+        "  so that after losing **one** zone the others still serve `peakQps` with each instance at most",
+        "  `qpsPerInstance` (already your target, for example the QPS one instance handles at 70% CPU). Work out the",
+        "  instances per zone (rounded **up**), then multiply by `zones`. Fewer than 2 zones throws `ArgumentException`.",
+        "",
+        "`InstancesNeeded(20000, 500, 3)` is `60`: 40 instances must survive, that is 20 in each of the 2 zones left,",
+        "so 20 per zone in all 3."
+      ],
+      "starter": [
+        "double MaxUtilToSurvive(int zones)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "int InstancesNeeded(double peakQps, double qpsPerInstance, int zones)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double MaxUtilToSurvive(int zones)",
+        "{",
+        "    if (zones < 2) throw new ArgumentException(\"one zone cannot survive its own loss\", nameof(zones));",
+        "    return (zones - 1) / (double)zones;",
+        "}",
+        "",
+        "int InstancesNeeded(double peakQps, double qpsPerInstance, int zones)",
+        "{",
+        "    if (zones < 2) throw new ArgumentException(\"one zone cannot survive its own loss\", nameof(zones));",
+        "    var survivors = peakQps / qpsPerInstance;",
+        "    var perZone = (int)Math.Ceiling(survivors / (zones - 1));",
+        "    return perZone * zones;",
+        "}"
+      ],
+      "hints": [
+        "After the loss, `zones - 1` zones must hold `peakQps / qpsPerInstance` instances between them.",
+        "`perZone = (int)Math.Ceiling(needed / (zones - 1))`, then `perZone * zones`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"2 zones: run below 50%\", 0.5, MaxUtilToSurvive(2));",
+        "Dojo.Eq(\"3 zones: run below 67%\", 0.667, Math.Round(MaxUtilToSurvive(3), 3));",
+        "Dojo.Eq(\"4 zones: run below 75%\", 0.75, MaxUtilToSurvive(4));",
+        "Dojo.Eq(\"20k QPS, 500 each, 3 zones\", 60, InstancesNeeded(20_000, 500, 3));",
+        "Dojo.Eq(\"the same on 2 zones costs more\", 80, InstancesNeeded(20_000, 500, 2));",
+        "Dojo.Eq(\"round up per zone\", 6, InstancesNeeded(1_000, 300, 3));",
+        "Dojo.Eq(\"4 zones\", 28, InstancesNeeded(10_000, 500, 4));",
+        "Dojo.Throws<ArgumentException>(\"one zone cannot survive its own loss\", () => InstancesNeeded(1_000, 100, 1));",
+        "Dojo.Throws<ArgumentException>(\"MaxUtilToSurvive(1) is an error\", () => MaxUtilToSurvive(1));"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "az-down",
+      "title": "Build it: lose a zone",
+      "prompt": [
+        "In the **System design board**, a busy service runs in one zone with no load balancer health checks and no",
+        "database standby. The load test kills availability zone a at peak. Spread the app servers across three",
+        "zones with N+1 headroom, turn on health checks, give the database a standby in another zone (and the cache a",
+        "replica), then meet the availability, p99 and budget goals the board shows."
+      ],
+      "explain": "Watch the dashboard at the moment the zone dies: the error spike is the health-check detection time and the database failover; the latency bump is the survivors' utilisation. Headroom you paid for in advance is what keeps p99 flat."
+    }
+  ]
+}

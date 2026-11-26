@@ -1,0 +1,364 @@
+{
+  "title": "Design a URL shortener",
+  "summary": "The classic warm-up, done properly: requirements, estimates, base62 codes, counter ranges versus hashing, 301 versus 302, caching redirects and five years of storage.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Requirements and estimates",
+      "body": [
+        "**The ask:** turn `https://shop.example.com/sale/2026/winter?utm=mail` into `https://short.example.com/aZ3kQ9`, and send",
+        "anyone who opens the short link to the long one.",
+        "",
+        "Ask before you draw. A good set of answers:",
+        "",
+        "| Kind | Requirement |",
+        "|---|---|",
+        "| Functional | create a short link (optionally a custom alias and an expiry); redirect; count clicks |",
+        "| Non-functional | redirects are fast (p99 under 50 ms at the server) and very available (99.99%); codes are hard to guess |",
+        "| Out of scope | link previews, user accounts and billing, malware scanning (mention it, then park it) |",
+        "",
+        "**Estimates** (say the arithmetic out loud):",
+        "",
+        "```text",
+        "writes   100 M new links / month  = 100e6 / 2.6e6 s     ≈ 40 / s average",
+        "reads    100 reads per write                            ≈ 4,000 / s average",
+        "peak     about 3 x average                              ≈ 12,000 redirects / s",
+        "storage  100 M x 12 months x 5 years = 6 B links",
+        "         6 B x ~500 bytes (URL, code, owner, dates, index) ≈ 3 TB, x 3 copies ≈ 9 TB",
+        "cache    80% of clicks hit ~20% of links: cache the hot set, tens of GB",
+        "```",
+        "",
+        "The shape is clear before any box is drawn: **tiny writes, a huge read ratio, small rows**. This is a",
+        "read-path and caching problem, not a storage problem."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A rival plan: 300 M new links a month, kept 3 years, about 400 bytes per link, before replication. Roughly how much storage?",
+      "options": [
+        "About 4.3 TB",
+        "About 430 GB",
+        "About 43 TB",
+        "About 1.4 TB"
+      ],
+      "answer": 0,
+      "explain": "300 M x 36 months = 10.8 B links; x 400 bytes = 4.32 TB. Replication (x3) would make it about 13 TB. Still small enough that storage does not drive the design."
+    },
+    {
+      "type": "learn",
+      "title": "API, data model and the high-level design",
+      "body": [
+        "**API**",
+        "",
+        "```text",
+        "POST /links            { \"url\": \"https://...\", \"alias\": \"winter\"?, \"expiresAt\": \"...\"? }",
+        "                       -> 201 { \"code\": \"aZ3kQ9\", \"shortUrl\": \"https://short.example.com/aZ3kQ9\" }",
+        "GET  /{code}           -> 302 Location: <long url>   (404 if unknown, 410 if expired)",
+        "GET  /links/{code}/stats -> { \"clicks\": 1234, ... }   (read from the analytics store, not the hot path)",
+        "```",
+        "",
+        "**Data model.** One table keyed by `code`: `code (PK) | long_url | owner_id | created_at | expires_at`. Every",
+        "redirect is a point read by primary key, which any database does well. A key-value store fits too.",
+        "",
+        "```text",
+        "            +-------+     +---------------+     +------------------+     +-------------+",
+        " browser -->|  CDN  |---->| load balancer |---->| redirect servers |---->| cache (hot) |",
+        "            +-------+     +---------------+     +------------------+     +------+------+",
+        "                                                   |          |               | miss",
+        "                                                   |          v               v",
+        "                                                   |   click events     +-----------+",
+        "                                                   |   -> stream ->     | links DB  |",
+        "                                                   |   analytics        +-----------+",
+        "                                                   v",
+        "                                            id ranges from a counter service",
+        "```",
+        "",
+        "Clicks are counted **off the hot path**: the redirect server publishes an event and returns at once. Writing",
+        "a counter row per click would turn 12,000 reads a second into 12,000 writes a second."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which redirect status gives each behaviour?",
+      "buckets": [
+        "301 Moved Permanently",
+        "302 Found"
+      ],
+      "items": [
+        [
+          "Browsers may cache it and skip the shortener next time",
+          0
+        ],
+        [
+          "Every click reaches your servers, so it can be counted",
+          1
+        ],
+        [
+          "Safe when the owner may change the target later",
+          1
+        ],
+        [
+          "Lowest load on your servers",
+          0
+        ],
+        [
+          "Search engines treat it as a permanent move",
+          0
+        ]
+      ],
+      "explain": "A 301 can be cached by browsers indefinitely, so you lose clicks and cannot change the target. Most shorteners answer 302 (or 307) and let the CDN cache it briefly with `Cache-Control: max-age`, which caps the load and keeps analytics."
+    },
+    {
+      "type": "learn",
+      "title": "Where do codes come from?",
+      "body": [
+        "A code is a number written in **base62** (`0-9`, `a-z`, `A-Z`). Seven characters give 62^7 = **3.5 trillion**",
+        "codes, about 590 times the 6 B links we need.",
+        "",
+        "| Approach | How | Cost |",
+        "|---|---|---|",
+        "| Hash the URL | first 7 characters of base62(SHA-256(url)) | collisions: you must check the DB and retry on a clash; the same URL always gets the same code (good or bad) |",
+        "| One global counter | `INCR` on one row or key | a single hot spot and a single point of failure; codes are sequential and guessable |",
+        "| **Counter ranges** | each server leases a block of, say, 1,000 numbers and hands them out from memory | one coordination call per 1,000 links; a crash loses the rest of its block (gaps are fine) |",
+        "",
+        "Ranges are the usual answer. To make codes **hard to guess**, do not hand them out in order: run the number",
+        "through a reversible shuffle (a keyed permutation of the 64-bit space) before base62, or keep the keyspace sparse",
+        "(use far fewer codes than exist). Sequential codes let anyone enumerate every link, including private ones."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "const string A = \"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\";",
+        "long n = 4000;",
+        "var s = \"\";",
+        "while (n > 0)",
+        "{",
+        "    s = A[(int)(n % 62)] + s;",
+        "    n /= 62;",
+        "}",
+        "Console.WriteLine(s);"
+      ],
+      "answer": "12w",
+      "explain": "4000 = 1 x 62^2 + 2 x 62 + 32. Digit 32 is `w` (a is 10, so w is 10 + 22). Base62 is ordinary positional notation, written most significant digit first."
+    },
+    {
+      "type": "order",
+      "prompt": "Put the redirect path in order for a link that is not in the CDN yet.",
+      "lines": [
+        "The browser resolves short.example.com and connects to the nearest CDN edge",
+        "The edge has no cached answer for GET /aZ3kQ9 and forwards it to the load balancer",
+        "A redirect server looks up aZ3kQ9 in the cache, and in the links DB on a miss",
+        "It publishes a click event to the stream without waiting, and answers 302 with the long URL",
+        "The edge keeps the 302 for its max-age, so the next clicks from that region stop at the edge"
+      ],
+      "explain": "Every layer you add in front of the database removes load from the one behind it. The cost: clicks served by the edge never reach your servers, so either accept counting from CDN logs or keep the edge max-age short."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** A celebrity posts one short link. Your dashboard at 20:05:",
+        "",
+        "```text",
+        "redirect p99            8 ms  ->  940 ms",
+        "cache node cache-3 CPU  31%   ->  100%     (cache-1, -2, -4 .. -6 around 30%)",
+        "links DB CPU            22%   ->  24%",
+        "top key on cache-3      link:aZ3kQ9   61% of all GETs",
+        "```",
+        "",
+        "What is the cause and the best first fix?"
+      ],
+      "options": [
+        "A hot key: one link lives on one cache node. Cache it in-process on the redirect servers for a few seconds (a near cache) and let the CDN hold the 302",
+        "The cache cluster is too small: add six more nodes",
+        "The database is the bottleneck: add read replicas",
+        "The load balancer is unbalanced: switch to least connections"
+      ],
+      "answer": 0,
+      "explain": "All requests for one key go to the node that owns it, so more nodes do nothing for that key. A near cache (even a 1-second TTL) turns tens of thousands of cache calls into one per server per second. The DB is fine: the cache still answers, just slowly."
+    },
+    {
+      "type": "code",
+      "title": "Base62 codes",
+      "prompt": [
+        "Write the two functions every shortener has:",
+        "",
+        "- `string Encode(long n)`: `n` in base62 with the alphabet `0-9`, then `a-z`, then `A-Z`. `Encode(0)` is `\"0\"`.",
+        "  A negative `n` throws `ArgumentOutOfRangeException`.",
+        "- `long Decode(string code)`: the reverse. An empty code, or any character outside the alphabet, throws",
+        "  `ArgumentException`.",
+        "",
+        "`Encode(62)` is `\"10\"`, `Encode(4000)` is `\"12w\"` and `Decode(\"ZZ\")` is `3843`."
+      ],
+      "starter": [
+        "string Encode(long n)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "long Decode(string code)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "string Encode(long n)",
+        "{",
+        "    const string A = \"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\";",
+        "    if (n < 0) throw new ArgumentOutOfRangeException(nameof(n));",
+        "    if (n == 0) return \"0\";",
+        "    var sb = new StringBuilder();",
+        "    while (n > 0)",
+        "    {",
+        "        sb.Insert(0, A[(int)(n % 62)]);",
+        "        n /= 62;",
+        "    }",
+        "    return sb.ToString();",
+        "}",
+        "",
+        "long Decode(string code)",
+        "{",
+        "    const string A = \"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\";",
+        "    if (string.IsNullOrEmpty(code)) throw new ArgumentException(\"empty code\", nameof(code));",
+        "    long n = 0;",
+        "    foreach (var c in code)",
+        "    {",
+        "        var d = A.IndexOf(c);",
+        "        if (d < 0) throw new ArgumentException($\"'{c}' is not a base62 character\", nameof(code));",
+        "        n = n * 62 + d;",
+        "    }",
+        "    return n;",
+        "}"
+      ],
+      "hints": [
+        "Encode: take `n % 62` as the last digit, then divide by 62, until `n` is 0. Build the string from the right.",
+        "Decode: start at 0 and for each character do `n = n * 62 + A.IndexOf(c)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"Encode(0)\", \"0\", Encode(0));",
+        "Dojo.Eq(\"Encode(61) is the last digit\", \"Z\", Encode(61));",
+        "Dojo.Eq(\"Encode(62)\", \"10\", Encode(62));",
+        "Dojo.Eq(\"Encode(4000)\", \"12w\", Encode(4000));",
+        "Dojo.Eq(\"62^7 - 1 is the largest 7-character code\", \"ZZZZZZZ\", Encode(3_521_614_606_207));",
+        "Dojo.Eq(\"62^7 needs 8 characters\", \"10000000\", Encode(3_521_614_606_208));",
+        "Dojo.Eq(\"Decode(\\\"ZZ\\\")\", 3843L, Decode(\"ZZ\"));",
+        "Dojo.Eq(\"Decode(\\\"abc\\\")\", 39134L, Decode(\"abc\"));",
+        "Dojo.Eq(\"round trip\", 987_654_321_012L, Decode(Encode(987_654_321_012)));",
+        "Dojo.Throws<ArgumentException>(\"Decode rejects '-'\", () => Decode(\"a-b\"));",
+        "Dojo.Throws<ArgumentException>(\"Decode rejects an empty code\", () => Decode(\"\"));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"Encode rejects negatives\", () => Encode(-1));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Bottlenecks and trade-offs, out loud",
+      "body": [
+        "Close the design by naming what breaks first and what you chose:",
+        "",
+        "- **Hot links** break first: one key, one cache node. Near cache plus a short CDN max-age.",
+        "- **302 over 301**: costs a request per click, buys analytics and editable targets.",
+        "- **Counter ranges over hashing**: no collision checks on write; codes need a shuffle so they are not guessable.",
+        "- **Clicks through a stream**: the stats are seconds behind, and the redirect never waits for them.",
+        "- **Storage is not the problem**: 9 TB fits one database cluster; shard by `code` later if writes grow.",
+        "- **Expiry**: check `expires_at` on read (410), and delete in a background job, not on the hot path.",
+        "",
+        "Now build the range allocator that hands out the numbers."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Counter ranges",
+      "prompt": [
+        "Write a class `RangeAllocator` that hands out unique ids to many servers, with one shared counter call per block:",
+        "",
+        "- `RangeAllocator(int blockSize)`: a block size of `0` or less throws `ArgumentOutOfRangeException`.",
+        "- `long Next(string server)`: the next id for that server. A server without a block, or whose block is used up,",
+        "  leases the next block from the shared counter: blocks are `[0, blockSize)`, `[blockSize, 2 x blockSize)` and",
+        "  so on, in the order they are leased.",
+        "- `int BlocksLeased`: how many blocks have been leased (the number of calls to the shared counter).",
+        "- `void Crash(string server)`: the server forgets its block. Its unused ids are lost for good (gaps are fine).",
+        "",
+        "With a block size of 3: `Next(\"a\")` is 0, `Next(\"b\")` is 3, then `Next(\"a\")` gives 1, 2, then 6."
+      ],
+      "starter": [
+        "class RangeAllocator",
+        "{",
+        "    public RangeAllocator(int blockSize) { }",
+        "",
+        "    public int BlocksLeased { get; }",
+        "",
+        "    public long Next(string server) => 0;",
+        "",
+        "    public void Crash(string server) { }",
+        "}"
+      ],
+      "solution": [
+        "class RangeAllocator",
+        "{",
+        "    readonly int blockSize;",
+        "    long nextBlockStart;",
+        "    readonly Dictionary<string, (long Next, long End)> leases = new();",
+        "",
+        "    public RangeAllocator(int blockSize)",
+        "    {",
+        "        if (blockSize <= 0) throw new ArgumentOutOfRangeException(nameof(blockSize));",
+        "        this.blockSize = blockSize;",
+        "    }",
+        "",
+        "    public int BlocksLeased { get; private set; }",
+        "",
+        "    public long Next(string server)",
+        "    {",
+        "        if (!leases.TryGetValue(server, out var lease) || lease.Next == lease.End)",
+        "        {",
+        "            lease = (nextBlockStart, nextBlockStart + blockSize);",
+        "            nextBlockStart += blockSize;",
+        "            BlocksLeased++;",
+        "        }",
+        "        leases[server] = (lease.Next + 1, lease.End);",
+        "        return lease.Next;",
+        "    }",
+        "",
+        "    public void Crash(string server) => leases.Remove(server);",
+        "}"
+      ],
+      "hints": [
+        "Keep, per server, the next id to hand out and the end of its block: `Dictionary<string, (long Next, long End)>`.",
+        "When a server has no block or `Next == End`, lease `[nextBlockStart, nextBlockStart + blockSize)` and move `nextBlockStart` on."
+      ],
+      "template": [
+        "var dojoR = new RangeAllocator(3);",
+        "Dojo.Eq(\"a gets the first block\", 0L, dojoR.Next(\"a\"));",
+        "Dojo.Eq(\"b gets the second block\", 3L, dojoR.Next(\"b\"));",
+        "Dojo.Eq(\"a carries on from memory\", 1L, dojoR.Next(\"a\"));",
+        "Dojo.Eq(\"a uses its last id\", 2L, dojoR.Next(\"a\"));",
+        "Dojo.Eq(\"a leases a new block when its own runs out\", 6L, dojoR.Next(\"a\"));",
+        "Dojo.Eq(\"three blocks so far\", 3, dojoR.BlocksLeased);",
+        "dojoR.Crash(\"b\");",
+        "Dojo.Eq(\"after a crash b starts a fresh block (4 and 5 are lost)\", 9L, dojoR.Next(\"b\"));",
+        "Dojo.Eq(\"four blocks so far\", 4, dojoR.BlocksLeased);",
+        "var dojoBig = new RangeAllocator(1000);",
+        "for (var dojoI = 0; dojoI < 2500; dojoI++) dojoBig.Next(\"web-1\");",
+        "Dojo.Eq(\"2,500 ids cost only 3 counter calls\", 3, dojoBig.BlocksLeased);",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"block size must be positive\", () => new RangeAllocator(0));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "cache-aside",
+      "title": "Build it: cache the read path",
+      "prompt": [
+        "A shortener is a read-heavy, skewed workload, exactly like the catalogue in this challenge. In the **System design",
+        "board**, put a cache cluster in front of the database, size it for the hot set, and run the load test until the",
+        "database utilisation and p99 goals are met within the budget."
+      ],
+      "explain": "Skew is what makes caching cheap: a cache that holds a small share of the keys can answer most of the reads. Size it for the hot set, not the whole data set."
+    }
+  ]
+}

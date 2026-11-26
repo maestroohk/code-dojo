@@ -1,0 +1,235 @@
+{
+  "title": "Connections and pools",
+  "summary": "Why a database connection is expensive, sizing pools with Little's law, the arithmetic behind \"sorry, too many clients already\", PgBouncer transaction pooling and what it breaks, and the views seniors query first.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Connections are not free",
+      "body": [
+        "PostgreSQL runs **one server process per connection**. Each costs memory (a few MB, more with large",
+        "`work_mem` sorts), and thousands of them compete for CPU and locks even when mostly idle. That is why",
+        "`max_connections` is a hard limit (the default is 100) and why every app keeps a **pool** of open",
+        "connections instead of opening one per request.",
+        "",
+        "```text",
+        " 60 app instances × pool of 20  =  1,200 connections wanted",
+        "                                      │",
+        "                                      ▼",
+        "              PostgreSQL  max_connections = 800   →  400 refused:",
+        "              FATAL:  sorry, too many clients already",
+        "```",
+        "",
+        "The trap is that the total grows with the **number of instances**, not with traffic. Autoscaling the app",
+        "tier during a spike multiplies connections at exactly the moment the database is busiest."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "int instances = 60, poolPerInstance = 20, maxConnections = 800;",
+        "int wanted = instances * poolPerInstance;",
+        "Console.WriteLine($\"{wanted} wanted, {wanted - maxConnections} refused\");"
+      ],
+      "answer": "1200 wanted, 400 refused",
+      "explain": "Pools fill lazily, so this often appears minutes after a scale-out, when traffic grows and the late pools try to open their connections."
+    },
+    {
+      "type": "learn",
+      "title": "Size the pool with Little's law",
+      "body": [
+        "Little's law says the number of things in a system equals arrival rate × time each spends there. For a",
+        "pool: **connections in use = queries per second × seconds per query**.",
+        "",
+        "```text",
+        "one instance: 400 queries/s × 5 ms = 2 connections busy on average",
+        "add headroom for bursts (×1.5)    → a pool of 3 is plenty",
+        "```",
+        "",
+        "A bigger pool does **not** make a busy database faster. Once the database CPUs are saturated, more",
+        "concurrent queries only add contention and context switches, so each query gets slower. A well-known",
+        "starting point for the database side (from the HikariCP pool-sizing notes) is about",
+        "`cores × 2 + effective disks` active connections. Requests beyond that should **wait in the app's pool**,",
+        "where waiting is cheap and visible, not inside the database.",
+        "",
+        "In .NET with Npgsql the pool is on by default; set its size in the connection string:",
+        "`Host=db.example.com;Database=shop;Maximum Pool Size=10;Timeout=5`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** At 12:03 the app autoscaled from 20 to 60 instances for a sale. From 12:05 about a third of",
+        "requests fail. The database CPU is only 45 %. App logs:"
+      ],
+      "code": [
+        "Npgsql.PostgresException (0x80004005): 53300: sorry, too many clients already",
+        "   at Npgsql.Internal.NpgsqlConnector.ReadMessageLong(...)"
+      ],
+      "options": [
+        "The pools of the new instances exceed `max_connections`: put PgBouncer (or the cloud's proxy) in front in transaction mode, or shrink each pool so instances × pool fits",
+        "The database is overloaded: buy a bigger instance",
+        "Raise `max_connections` to 10,000",
+        "Retry failed requests three times"
+      ],
+      "answer": 0,
+      "explain": "SQLSTATE 53300 (`too_many_connections`) with a calm CPU is a connection-count problem, not a load problem. Raising `max_connections` far up costs memory per process and moves the collapse to when those connections all get busy. Retries add more connection attempts."
+    },
+    {
+      "type": "learn",
+      "title": "PgBouncer: many clients, few server connections",
+      "body": [
+        "PgBouncer sits between the apps and PostgreSQL, accepts thousands of client connections and shares a",
+        "small number of real server connections between them. `pool_mode` decides when a server connection is",
+        "given back:",
+        "",
+        "| `pool_mode` | Server connection is returned | Fits |",
+        "|---|---|---|",
+        "| `session` | when the client disconnects | anything, but saves little |",
+        "| `transaction` | after each transaction | most web apps; the usual choice |",
+        "| `statement` | after each statement | autocommit-only workloads; multi-statement transactions are refused |",
+        "",
+        "In **transaction** mode, consecutive transactions of one client may run on different server connections,",
+        "so anything tied to a **session** breaks: `SET` without `LOCAL`, session-level advisory locks,",
+        "`LISTEN`, temporary tables kept across transactions. Protocol-level prepared statements used to break",
+        "too; PgBouncer 1.21 and later can track them when `max_prepared_statements` is set above zero."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Behind PgBouncer in `pool_mode = transaction`, does this work?",
+      "buckets": [
+        "Works",
+        "Breaks"
+      ],
+      "items": [
+        ["A `BEGIN; UPDATE ...; INSERT ...; COMMIT;` transaction", 0],
+        ["`SET LOCAL statement_timeout = '2s'` inside a transaction", 0],
+        ["`pg_advisory_xact_lock(42)` (released at commit)", 0],
+        ["`SET search_path = tenant_7` once after connecting", 1],
+        ["A background listener using `LISTEN order_events`", 1],
+        ["`pg_advisory_lock(42)` held across several transactions", 1]
+      ],
+      "explain": "Transaction-scoped things travel with the transaction, so they are safe. Session-scoped things stay on a server connection that the next transaction may not get. Run listeners and session-heavy jobs on a direct connection."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: what is the database doing?",
+      "body": "When the database is slow or refusing connections, these answer \"who is connected, what are they running, and what is expensive?\"",
+      "toolkit": [
+        { "cmd": "SHOW max_connections;", "what": "The hard connection limit. Compare it with instances × pool size across every service that connects.",
+          "flags": [["superuser_reserved_connections", "slots kept back for admins (default 3)"]],
+          "example": "SHOW max_connections;", "lang": "sql" },
+        { "cmd": "pg_stat_activity", "what": "One row per connection: who, from where, what state, what query, waiting on what.",
+          "flags": [["state", "`active`, `idle`, `idle in transaction` (holding locks and a connection)"], ["wait_event_type", "`Lock`, `IO`, `LWLock`... why an active query is not running"], ["application_name", "set it in the connection string to tell services apart"]],
+          "example": "SELECT application_name, state, count(*) FROM pg_stat_activity GROUP BY 1, 2 ORDER BY 3 DESC;", "when": "connection errors, or a pile-up of waiting queries", "lang": "sql" },
+        { "cmd": "pg_stat_statements", "what": "Totals per normalised query since the last reset: calls, total and mean time, rows, buffers. The top of `total_exec_time` is where the database spends its life.",
+          "flags": [["total_exec_time", "ms spent in this query in total"], ["mean_exec_time", "ms per call"], ["shared_blks_read", "pages read from outside shared buffers"]],
+          "example": "SELECT calls, round(mean_exec_time::numeric, 1) AS mean_ms, left(query, 60) FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;", "when": "\"the database is busy\" with no obvious culprit", "lang": "sql" },
+        { "cmd": "EXPLAIN (ANALYZE, BUFFERS)", "what": "Runs the query and shows the real plan with row counts, times and pages read.",
+          "flags": [["ANALYZE", "actually execute it (careful with writes: wrap them in BEGIN ... ROLLBACK)"], ["BUFFERS", "pages hit in cache and read from disk"]],
+          "example": "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE customer_id = 7 ORDER BY created_at DESC LIMIT 20;", "lang": "sql" },
+        { "cmd": "pg_stat_replication", "what": "On the primary: one row per replica with its state and how far behind it is (next lesson).",
+          "flags": [["state", "`streaming` when healthy, `catchup` while behind"], ["replay_lag", "time since the last WAL the replica has applied"]],
+          "example": "SELECT application_name, state, replay_lag FROM pg_stat_replication;", "lang": "sql" },
+        { "cmd": "SHOW POOLS; (PgBouncer)", "what": "PgBouncer's admin console. `cl_waiting` above zero means clients are queueing for a server connection.",
+          "flags": [["cl_active / cl_waiting", "clients with / waiting for a server connection"], ["sv_active / sv_idle", "server connections in use / spare"], ["maxwait", "seconds the oldest waiting client has waited"]],
+          "example": "psql -h pgbouncer.example.com -p 6432 -U admin pgbouncer -c 'SHOW POOLS;'", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Configure PgBouncer to accept up to 5,000 client connections and return server connections after every transaction.",
+      "code": [
+        "[pgbouncer]",
+        "listen_port = 6432",
+        "pool_mode = __1__",
+        "__2__ = 5000",
+        "default_pool_size = 40",
+        "max_prepared_statements = 200"
+      ],
+      "blanks": ["transaction", "max_client_conn"],
+      "bank": ["session", "statement", "max_connections", "pool_size"],
+      "explain": "`max_client_conn` is how many apps may connect to PgBouncer; `default_pool_size` is how many real connections it opens per database and user pair. The second number is the one PostgreSQL feels."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each observation to what it means.",
+      "pairs": [
+        ["Hundreds of rows in `pg_stat_activity` with state `idle`", "Pools hold open connections that nobody is using right now"],
+        ["State `idle in transaction` for minutes", "A client opened a transaction and stopped; it holds locks and a connection"],
+        ["`wait_event_type = Lock` on many active rows", "Queries are queued behind a lock held by another transaction"],
+        ["`cl_waiting` above zero in PgBouncer", "Clients are waiting for a free server connection"]
+      ],
+      "explain": "Set `idle_in_transaction_session_timeout` so a stuck transaction is killed instead of blocking everyone behind its locks."
+    },
+    {
+      "type": "code",
+      "title": "Size the pools",
+      "prompt": [
+        "Write three functions:",
+        "",
+        "- `int PoolSize(double queriesPerSec, double queryMs, double headroom)`: Little's law,",
+        "  `queriesPerSec × queryMs / 1000`, times `1 + headroom`, rounded **up**, and never below `1`.",
+        "- `bool Fits(int instances, int pool, int maxConnections, int reserved)`: do `instances × pool` connections",
+        "  fit into `maxConnections − reserved`?",
+        "- `int MaxPoolPerInstance(int instances, int maxConnections, int reserved)`: the largest pool each instance",
+        "  may have so that they fit (whole connections). Throw `ArgumentOutOfRangeException` when `instances <= 0`.",
+        "",
+        "`PoolSize(400, 5, 0.5)` is `3`. 60 instances under `max_connections = 800` with 10 reserved may have",
+        "`13` connections each."
+      ],
+      "starter": [
+        "int PoolSize(double queriesPerSec, double queryMs, double headroom) => 0;",
+        "",
+        "bool Fits(int instances, int pool, int maxConnections, int reserved) => false;",
+        "",
+        "int MaxPoolPerInstance(int instances, int maxConnections, int reserved) => 0;"
+      ],
+      "solution": [
+        "int PoolSize(double queriesPerSec, double queryMs, double headroom) =>",
+        "    Math.Max(1, (int)Math.Ceiling(queriesPerSec * queryMs / 1000 * (1 + headroom)));",
+        "",
+        "bool Fits(int instances, int pool, int maxConnections, int reserved) =>",
+        "    (long)instances * pool <= maxConnections - reserved;",
+        "",
+        "int MaxPoolPerInstance(int instances, int maxConnections, int reserved)",
+        "{",
+        "    if (instances <= 0) throw new ArgumentOutOfRangeException(nameof(instances));",
+        "    return (maxConnections - reserved) / instances;",
+        "}"
+      ],
+      "hints": [
+        "Busy connections = queries per second × seconds per query. Remember `queryMs / 1000`.",
+        "Integer division rounds down, which is what you want for the largest pool that still fits."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"400 q/s at 5 ms with 50 % headroom\", 3, PoolSize(400, 5, 0.5));",
+        "Dojo.Eq(\"1,000 q/s at 12 ms with 25 % headroom\", 15, PoolSize(1000, 12, 0.25));",
+        "Dojo.Eq(\"fractions round up\", 1, PoolSize(10, 1, 0));",
+        "Dojo.Eq(\"never below one connection\", 1, PoolSize(0, 5, 0.5));",
+        "Dojo.Check(\"60 × 20 does not fit in 800\", !Fits(60, 20, 800, 10), \"1,200 connections cannot fit in 790 slots\");",
+        "Dojo.Check(\"60 × 13 fits in 790\", Fits(60, 13, 800, 10), \"780 connections fit in 790 slots\");",
+        "Dojo.Eq(\"largest pool for 60 instances\", 13, MaxPoolPerInstance(60, 800, 10));",
+        "Dojo.Eq(\"largest pool for 20 instances\", 39, MaxPoolPerInstance(20, 800, 10));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"zero instances is an error\", () => MaxPoolPerInstance(0, 800, 10));"
+      ],
+      "explain": "Do this arithmetic for the **maximum** the autoscaler can reach, not today's instance count, and include every service and cron job that shares the database."
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "pool-exhaustion",
+      "title": "Build it: too many connections",
+      "prompt": [
+        "In the **System design board**, open *Too many connections*. The app tier was scaled out and now a share of",
+        "requests fail with \"sorry, too many clients already\" while the database CPU is calm. Make the connections",
+        "fit (a pooler in front of the database, or smaller pools) and get the error rate under the goal."
+      ],
+      "explain": "The board counts connections as instances × pool size against the database's limit, exactly the arithmetic from this lesson."
+    }
+  ]
+}

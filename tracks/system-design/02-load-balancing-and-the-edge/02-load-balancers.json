@@ -1,0 +1,311 @@
+{
+  "title": "Load balancers: layers, algorithms, health",
+  "summary": "L4 and L7 load balancers, reverse proxies and TLS termination; round robin, smooth weighted round robin, least connections, power of two choices and ring hashing; active and passive health checks and connection draining.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "L4 or L7",
+      "body": [
+        "A load balancer spreads requests over a pool of servers and stops sending to the ones that are sick.",
+        "The big choice is which layer it understands.",
+        "",
+        "| | L4 (transport: TCP/UDP) | L7 (application: HTTP, gRPC) |",
+        "|---|---|---|",
+        "| Sees | addresses, ports, connections | methods, paths, headers, cookies |",
+        "| Balances | connections | individual requests (many per connection with HTTP/2 and HTTP/3) |",
+        "| Can do | pass TLS through untouched, any protocol, millions of connections cheaply | route `/api` vs `/static`, canaries by header, retries, TLS termination, compression |",
+        "| Costs | little CPU, almost no added latency | parses every request; a little more latency and CPU |",
+        "",
+        "- **Reverse proxy**: a server that accepts client requests and forwards them to backends (nginx, HAProxy, Envoy). An L7 load balancer is a reverse proxy with a pool.",
+        "- **TLS termination**: the proxy decrypts TLS so it can read HTTP; it may re-encrypt to the backends.",
+        "- **API gateway**: an L7 proxy with API concerns on top: authentication, scopes, rate limits, versions. The *Integration* topic covers it in depth.",
+        "",
+        "A classic trap: an L4 balancer with HTTP/2 or gRPC. One long-lived connection carries every request from a",
+        "client, so one backend gets all of it while others sit idle. Balance gRPC at L7 (per request)."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which layer do you need for each requirement?",
+      "buckets": [
+        "L4 is enough",
+        "Needs L7"
+      ],
+      "items": [
+        [ "Send `/images/*` to one pool and `/api/*` to another", 1 ],
+        [ "Spread PostgreSQL connections over read replicas", 0 ],
+        [ "Send requests with header `X-Canary: 1` to the new version", 1 ],
+        [ "Keep TLS end to end without the balancer seeing the content", 0 ],
+        [ "Retry an idempotent GET on another server after a 503", 1 ],
+        [ "Spread gRPC calls from one client over many backends", 1 ]
+      ],
+      "explain": "Anything that looks inside a request (paths, headers, status codes) or balances individual requests on a shared connection needs L7. Plain connection spreading and TLS pass-through are L4 jobs."
+    },
+    {
+      "type": "learn",
+      "title": "Algorithms",
+      "body": [
+        "| Algorithm | How it picks | Good for | Weakness |",
+        "|---|---|---|---|",
+        "| Round robin | next server in turn | identical servers, similar requests | ignores a slow or busy server |",
+        "| Weighted round robin | in turn, in proportion to weights | mixed server sizes, canaries | still blind to load |",
+        "| Least connections / least outstanding requests | the server with the fewest in flight | uneven request costs, a slow server | needs the balancer to track counts |",
+        "| Power of two random choices | pick two at random, take the less loaded | many balancers with stale load info | slightly less exact than full least-loaded |",
+        "| Ring hash / Maglev (consistent hashing) | hash a key (user, session) to a server | cache affinity, sticky sessions | hot keys; uneven load |",
+        "",
+        "**Smooth weighted round robin** (the algorithm nginx uses) avoids bursts. With weights a=5, b=1, c=1 a naive",
+        "version sends `aaaaabc`; the smooth one interleaves `aabacaa`. Each round, every server's *current* value grows",
+        "by its weight, the biggest wins, and the winner pays back the total weight. Step through it:"
+      ],
+      "trace": {
+        "code": [
+          "string[] names = { \"a\", \"b\", \"c\" };",
+          "int[] weight = { 5, 1, 1 };",
+          "int[] current = { 0, 0, 0 };",
+          "var total = 7;",
+          "var picks = \"\";",
+          "for (var n = 0; n < 7; n++)",
+          "{",
+          "    var best = 0;",
+          "    for (var i = 0; i < 3; i++)",
+          "    {",
+          "        current[i] += weight[i];",
+          "        if (current[i] > current[best]) best = i;",
+          "    }",
+          "    current[best] -= total;",
+          "    picks += names[best];",
+          "}",
+          "Console.WriteLine(picks);"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Smooth weighted round robin with weights a=3, b=1 (ties go to the first server). What does this print?",
+      "code": [
+        "string[] names = { \"a\", \"b\" };",
+        "int[] weight = { 3, 1 };",
+        "int[] current = { 0, 0 };",
+        "var picks = \"\";",
+        "for (var n = 0; n < 4; n++)",
+        "{",
+        "    var best = 0;",
+        "    for (var i = 0; i < 2; i++)",
+        "    {",
+        "        current[i] += weight[i];",
+        "        if (current[i] > current[best]) best = i;",
+        "    }",
+        "    current[best] -= 4;",
+        "    picks += names[best];",
+        "}",
+        "Console.WriteLine(picks);"
+      ],
+      "answer": "aaba",
+      "explain": "Currents go (3,1) -> a wins, (-1,1); (2,2) tie -> a, (-2,2); (1,3) -> b, (1,-1); (4,0) -> a, (0,0). Three a's and one b, with the b in the middle instead of at the end."
+    },
+    {
+      "type": "learn",
+      "title": "Health checks and draining",
+      "body": [
+        "- **Active health check**: the balancer calls `/healthz` every few seconds. A server is marked down after `fall` failures in a row and up again after `rise` successes in a row, so one blip does not flap it.",
+        "- **Passive health check (outlier detection)**: the balancer watches real traffic and ejects a server that returns too many 5xx or times out, for a while. It reacts to real failures, including a server that answers `/healthz` fine but fails real work.",
+        "- **Readiness vs liveness**: *ready* means \"send me traffic\" (dependencies reachable, warmed up); *live* means \"do not restart me\". A health endpoint that checks the database makes every server fail at once when the database blips: keep the load-balancer check shallow, and let outlier detection catch real errors.",
+        "- **Connection draining**: when a server is removed (deploy, scale-in), stop sending new requests and let in-flight ones finish within a timeout. Without it every deploy drops requests.",
+        "",
+        "Health checks only help if the pool has room left: losing 1 of 4 servers moves 33% more load onto each of the other three."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Dashboard snapshot.** A pool of 10 identical servers behind round robin. Overall p99 rose from 120 ms to 900 ms.",
+        "Per-server panels: nine servers show p99 around 110 ms; `app-07` shows p99 of 2.4 s and long garbage-collection",
+        "pauses, but its `/healthz` answers 200. What change on the balancer helps most right now?"
+      ],
+      "options": [
+        "Switch to least outstanding requests and turn on outlier detection, so slow app-07 gets less traffic or is ejected",
+        "Lower the active health-check interval from 5 s to 1 s",
+        "Switch to ring hash so each user always lands on the same server",
+        "Add five more servers to the pool"
+      ],
+      "answer": 0,
+      "explain": [
+        "Round robin keeps sending app-07 10% of requests, and those make the p99. Least-outstanding sends work where",
+        "it finishes, and outlier detection ejects a server whose real requests fail or crawl. The health check passes,",
+        "so checking it faster changes nothing. More servers dilute the problem but app-07 still serves its share."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: the edge, measured",
+      "body": "When a request is slow or lands on the wrong server, measure each hop yourself before changing anything.",
+      "toolkit": [
+        {
+          "cmd": "dig +noall +answer",
+          "what": "Shows what DNS really answers, with the remaining TTL in the second column.",
+          "flags": [ [ "+short", "addresses only" ], [ "+noall +answer", "just the answer section, with TTLs" ], [ "@1.1.1.1", "ask a specific resolver" ] ],
+          "example": "dig +noall +answer shop.example.com @1.1.1.1",
+          "when": "checking a DNS failover or a TTL change",
+          "lang": "bash"
+        },
+        {
+          "cmd": "curl -w (timing)",
+          "what": "Splits one request into DNS, TCP connect, TLS, time to first byte and total.",
+          "flags": [ [ "%{time_namelookup}", "DNS done" ], [ "%{time_connect}", "TCP connected" ], [ "%{time_appconnect}", "TLS done" ], [ "%{time_starttransfer}", "first byte back" ], [ "-o /dev/null -s", "drop the body, no progress bar" ] ],
+          "example": "curl -s -o /dev/null -w 'dns %{time_namelookup} tcp %{time_connect} tls %{time_appconnect} ttfb %{time_starttransfer} total %{time_total}\\n' https://shop.example.com/",
+          "lang": "bash"
+        },
+        {
+          "cmd": "curl -sI (cache headers)",
+          "what": "Shows whether a response is cacheable and was served from cache: `Cache-Control`, `Age` (seconds in cache) and vendor headers such as `X-Cache`.",
+          "flags": [ [ "-I", "HEAD request, headers only" ], [ "-H 'Accept-Encoding: br'", "ask for the same variant a browser would" ] ],
+          "example": "curl -sI https://www.example.com/static/app.3f9a1c.js | grep -iE 'cache-control|^age|x-cache'",
+          "lang": "bash"
+        },
+        {
+          "cmd": "nginx upstream",
+          "what": "nginx's pool definition: algorithm, weights and passive health checks (open-source nginx has no active checks; those are an NGINX Plus feature).",
+          "flags": [ [ "least_conn;", "pick the server with the fewest active connections" ], [ "weight=5", "share of requests" ], [ "max_fails=3 fail_timeout=10s", "after 3 failures, skip the server for 10 s" ] ],
+          "example": "upstream api { least_conn; server 10.0.1.11:8080 weight=5 max_fails=3 fail_timeout=10s; server 10.0.1.12:8080; }",
+          "lang": "bash"
+        },
+        {
+          "cmd": "HAProxy backend",
+          "what": "HAProxy's pool with active health checks and rise/fall thresholds.",
+          "flags": [ [ "balance leastconn", "fewest connections (also roundrobin, source, uri)" ], [ "option httpchk GET /healthz", "an HTTP health check" ], [ "check inter 2s rise 2 fall 3", "check every 2 s; up after 2 passes, down after 3 failures" ] ],
+          "example": "backend api\n  balance leastconn\n  option httpchk GET /healthz\n  server app1 10.0.1.11:8080 check inter 2s rise 2 fall 3",
+          "lang": "bash"
+        },
+        {
+          "cmd": "wrk2 -R",
+          "what": "A load generator that sends a **constant rate** and records latency without coordinated omission (it does not slow down when the server does).",
+          "flags": [ [ "-R 2000", "requests per second to send (required)" ], [ "-t4 -c100", "threads and open connections" ], [ "-d60s", "duration" ], [ "--latency", "print the full latency percentile table" ] ],
+          "example": "wrk2 -t4 -c100 -d60s -R2000 --latency https://staging.example.com/api/items",
+          "when": "finding a server's knee: rerun at rising -R",
+          "lang": "bash"
+        },
+        {
+          "cmd": "k6 run",
+          "what": "Scripted load tests in JavaScript; the `constant-arrival-rate` executor keeps the request rate fixed like wrk2.",
+          "flags": [ [ "--vus 50", "virtual users (for closed-model tests)" ], [ "--duration 2m", "how long" ], [ "executor: 'constant-arrival-rate'", "fixed requests per second in the script's options" ] ],
+          "example": "k6 run --duration 2m load.js",
+          "lang": "bash"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each option to what it does.",
+      "pairs": [
+        [ "HAProxy `rise 2 fall 3`", "Up after 2 passing checks, down after 3 failing ones" ],
+        [ "nginx `max_fails=3 fail_timeout=10s`", "Skip a server for 10 s after 3 failed requests" ],
+        [ "wrk2 `-R 2000`", "Send a constant 2,000 requests per second" ],
+        [ "curl `%{time_starttransfer}`", "Time until the first byte of the response" ],
+        [ "dig `+noall +answer`", "Only the answer records, with their remaining TTL" ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "An HAProxy backend that sends each request to the server with the fewest connections, checks `/healthz` every 2 s, and marks a server up after 2 passes and down after 3 failures.",
+      "code": [
+        "backend api",
+        "  balance __1__",
+        "  option httpchk GET /healthz",
+        "  server app1 10.0.1.11:8080 check inter 2s __2__ 2 __3__ 3"
+      ],
+      "blanks": [ "leastconn", "rise", "fall" ],
+      "bank": [ "source", "first", "weight" ],
+      "explain": "`leastconn` adapts to slow servers; `rise`/`fall` stop a single slow check from flapping the server in and out."
+    },
+    {
+      "type": "code",
+      "title": "Smooth weighted round robin with health",
+      "prompt": [
+        "Write a class `SmoothWrr`:",
+        "",
+        "- `SmoothWrr(string[] names, int[] weights)`: the pool, every server healthy, every *current* value 0.",
+        "- `void SetHealthy(string name, bool healthy)`: an unknown name throws `ArgumentException`.",
+        "- `string Next()`: for each **healthy** server in order, add its weight to its current value; the healthy server",
+        "  with the largest current value wins (ties go to the earlier one); subtract the **sum of the healthy weights** from",
+        "  the winner's current value; return its name. Unhealthy servers keep their current value unchanged. If no",
+        "  server is healthy, throw `InvalidOperationException`.",
+        "",
+        "Weights 5, 1, 1 give `aabacaa`; with `b` unhealthy they give `aaacaa`."
+      ],
+      "starter": [
+        "class SmoothWrr",
+        "{",
+        "    public SmoothWrr(string[] names, int[] weights) { }",
+        "",
+        "    public void SetHealthy(string name, bool healthy) { }",
+        "",
+        "    public string Next() => \"\";",
+        "}"
+      ],
+      "solution": [
+        "class SmoothWrr",
+        "{",
+        "    readonly string[] names;",
+        "    readonly int[] weights;",
+        "    readonly int[] current;",
+        "    readonly bool[] healthy;",
+        "",
+        "    public SmoothWrr(string[] names, int[] weights)",
+        "    {",
+        "        this.names = names;",
+        "        this.weights = weights;",
+        "        current = new int[names.Length];",
+        "        healthy = Enumerable.Repeat(true, names.Length).ToArray();",
+        "    }",
+        "",
+        "    public void SetHealthy(string name, bool healthy)",
+        "    {",
+        "        var i = Array.IndexOf(names, name);",
+        "        if (i < 0) throw new ArgumentException($\"unknown server '{name}'\", nameof(name));",
+        "        this.healthy[i] = healthy;",
+        "    }",
+        "",
+        "    public string Next()",
+        "    {",
+        "        var best = -1;",
+        "        var total = 0;",
+        "        for (var i = 0; i < names.Length; i++)",
+        "        {",
+        "            if (!healthy[i]) continue;",
+        "            current[i] += weights[i];",
+        "            total += weights[i];",
+        "            if (best < 0 || current[i] > current[best]) best = i;",
+        "        }",
+        "        if (best < 0) throw new InvalidOperationException(\"no healthy server\");",
+        "        current[best] -= total;",
+        "        return names[best];",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep four arrays: names, weights, current values and a healthy flag. `Array.IndexOf` finds a name.",
+        "In `Next`, skip unhealthy servers, sum the healthy weights as you go, and track the index of the largest current value with a strict `>` so ties stay with the earlier server."
+      ],
+      "template": [
+        "string dojoRun(SmoothWrr w, int n) { var s = \"\"; for (var i = 0; i < n; i++) s += w.Next(); return s; }",
+        "Dojo.Eq(\"weights 5,1,1 interleave\", \"aabacaa\", dojoRun(new SmoothWrr(new[] { \"a\", \"b\", \"c\" }, new[] { 5, 1, 1 }), 7));",
+        "Dojo.Eq(\"the pattern repeats\", \"aabacaaaabacaa\", dojoRun(new SmoothWrr(new[] { \"a\", \"b\", \"c\" }, new[] { 5, 1, 1 }), 14));",
+        "Dojo.Eq(\"equal weights alternate\", \"abab\", dojoRun(new SmoothWrr(new[] { \"a\", \"b\" }, new[] { 1, 1 }), 4));",
+        "var dojoSick = new SmoothWrr(new[] { \"a\", \"b\", \"c\" }, new[] { 5, 1, 1 });",
+        "dojoSick.SetHealthy(\"b\", false);",
+        "Dojo.Eq(\"an unhealthy server gets nothing\", \"aaacaa\", dojoRun(dojoSick, 6));",
+        "var dojoBack = new SmoothWrr(new[] { \"a\", \"b\", \"c\" }, new[] { 5, 1, 1 });",
+        "dojoBack.SetHealthy(\"b\", false);",
+        "dojoBack.SetHealthy(\"b\", true);",
+        "Dojo.Eq(\"a recovered server is back in the rotation\", \"aabacaa\", dojoRun(dojoBack, 7));",
+        "var dojoNone = new SmoothWrr(new[] { \"a\" }, new[] { 1 });",
+        "dojoNone.SetHealthy(\"a\", false);",
+        "Dojo.Throws<InvalidOperationException>(\"no healthy server\", () => dojoNone.Next());",
+        "Dojo.Throws<ArgumentException>(\"unknown server name\", () => dojoNone.SetHealthy(\"zz\", true));",
+        "{{CODE}}"
+      ]
+    }
+  ]
+}

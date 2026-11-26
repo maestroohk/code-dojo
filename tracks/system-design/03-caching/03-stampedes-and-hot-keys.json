@@ -1,0 +1,277 @@
+{
+  "title": "Stampedes, hot keys and big keys",
+  "summary": "How a cache takes a database down: dogpiles on expiry and after a flush, synchronised TTLs, one celebrity key on one node, and keys too big to touch. Single-flight, early expiration, stale-while-revalidate, jitter and near caches.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The dogpile",
+      "body": [
+        "A hot key gets 5,000 reads a second. Its TTL runs out. For the 40 ms it takes the database to answer,",
+        "every request misses, and **every one of them** queries the database for the same row:",
+        "",
+        "```text",
+        "t=0 ms    key expires",
+        "t=0-40    5,000/s × 0.04 s = 200 identical queries hit the database",
+        "t=40      the first answer refills the cache; the other 199 overwrite it with the same value",
+        "```",
+        "",
+        "This is a **cache stampede** (or dogpile). On one key it is a blip. After a cache **flush** or restart it",
+        "is every key at once: the database receives the full read load it was never sized for, slows down, the",
+        "refills take longer, so more requests miss... and it may never recover on its own. The cache made the",
+        "database small; losing the cache makes it far too small."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A key gets 5,000 reads per second and a refill takes 40 ms. What does this print?",
+      "code": [
+        "int perSecond = 5000, fillMs = 40;",
+        "int duplicates = perSecond * fillMs / 1000;",
+        "Console.WriteLine($\"{duplicates} database queries for one key\");"
+      ],
+      "answer": "200 database queries for one key",
+      "explain": "Duplicate queries grow with both the key's traffic and the fill time. When the database slows down under the stampede, the fill time grows, and so does the stampede."
+    },
+    {
+      "type": "learn",
+      "title": "Five defences",
+      "body": [
+        "1. **Request coalescing (single-flight)**: the first miss for a key starts the load; concurrent misses for",
+        "   the same key **wait for that load** instead of starting their own. In .NET, `HybridCache`",
+        "   (`Microsoft.Extensions.Caching.Hybrid`) does this per instance; across instances, a short lock key",
+        "   (`SET lock:product:42 1 NX PX 2000`) lets one instance load while others briefly wait or serve stale.",
+        "2. **Stale-while-revalidate**: keep serving the old value for a short grace period while one request",
+        "   refreshes it in the background. Users see slightly old data instead of a slow page.",
+        "3. **Probabilistic early expiration**: each read refreshes a little **before** the TTL with a probability",
+        "   that rises as expiry nears, so one lucky request reloads it while the rest still hit.",
+        "4. **TTL jitter**: keys loaded together (a deploy warm-up, a bulk import) expire together. Add ±10 % random",
+        "   to each TTL so their expiries spread out.",
+        "5. **Protect the database anyway**: a bounded connection pool and admission control (a breaker, load",
+        "   shedding) so a cold cache produces fast errors or slow pages, not a collapsed database.",
+        "",
+        "Step through the first idea: requests arrive every 5 ms while the 40 ms refill runs."
+      ],
+      "trace": {
+        "code": [
+          "var arrivals = new[] { 0, 5, 10, 15, 20, 25, 30, 35, 45, 50 };",
+          "var fillMs = 40;   // the first miss at t=0 puts the value back at t=40",
+          "var plain = 0;",
+          "var coalesced = 0;",
+          "foreach (var t in arrivals)",
+          "{",
+          "    var cached = t >= fillMs;",
+          "    if (!cached) plain++;                  // every early request queries the database",
+          "    if (!cached && t == 0) coalesced++;    // single-flight: only the first does; the rest wait for it",
+          "}",
+          "Console.WriteLine($\"without coalescing {plain} queries, with coalescing {coalesced}\");"
+        ]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Every five minutes since 09:00 the database CPU spikes to 95 % for a few seconds, then",
+        "falls back to 30 %. At 09:00 a deploy warmed the cache by loading all 2 million products, each with",
+        "`EX 300`. What is the most direct fix?"
+      ],
+      "options": [
+        "Add random jitter to each TTL (for example 270-330 s) so the keys stop expiring together",
+        "Raise the TTL to 600 s",
+        "Add a read replica",
+        "Switch the cache to `noeviction`"
+      ],
+      "answer": 0,
+      "explain": "All keys were written in the same second with the same TTL, so they all expire in the same second, every 300 s. A longer TTL only changes the period of the spike. Jitter spreads the expiries; coalescing caps the damage per key."
+    },
+    {
+      "type": "sort",
+      "prompt": "What does each technique do?",
+      "buckets": [
+        "Collapses concurrent misses for one key",
+        "Spreads expiries over time",
+        "Serves something while it refreshes"
+      ],
+      "items": [
+        ["In-process single-flight around the loader", 0],
+        ["`SET lock:key 1 NX PX 2000` before loading", 0],
+        ["A random ±10 % on every TTL", 1],
+        ["Loading a bulk import in staggered batches", 1],
+        ["Stale-while-revalidate with a 30 s grace period", 2],
+        ["Returning the last known value when the database errors", 2]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Hot keys and big keys",
+      "body": [
+        "A cache cluster spreads **keys** over nodes. It cannot spread **one** key: every read of `feed:celebrity`",
+        "lands on the node that owns it. When one key takes half the traffic, that node saturates while the others",
+        "idle, and **adding nodes does not help**. Fixes:",
+        "",
+        "- **Near cache**: keep the hottest keys in each app instance's memory for 1-5 seconds. 100 instances",
+        "  each refresh the key once every few seconds instead of sending it 50,000 reads a second.",
+        "- **Key replication**: store copies as `feed:celebrity#0` ... `#7`; readers pick a random suffix, writers",
+        "  update (or delete) all eight. Spreads the key over up to eight nodes.",
+        "- **Read replicas** of the cache node, if the client can read from them.",
+        "",
+        "- **Big key**: one key so large (a 50 MB hash, a list with millions of items) that a single command on it",
+        "  takes milliseconds of server time. Redis runs commands on one main thread, so `HGETALL` on it stalls",
+        "  every other client on that node. Split it into smaller keys, page with `HSCAN`, and delete it with",
+        "  `UNLINK` (frees memory in the background) rather than `DEL`.",
+        "",
+        "Find both with `redis-cli --hotkeys` and `--memkeys` (previous lesson), and with per-node CPU on the",
+        "dashboard: one hot node among cool ones is the signature."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** p99 for the home feed rose from 40 ms to 900 ms. The cache dashboard shows one of six",
+        "nodes at 100 % CPU and the other five at about 20 %. `redis-cli --hotkeys` on the hot node:"
+      ],
+      "code": [
+        "hot key found with counter: 255\tkeyname: \"feed:user:9001\"",
+        "hot key found with counter: 41\tkeyname: \"feed:user:17\"",
+        "hot key found with counter: 38\tkeyname: \"feed:user:2210\""
+      ],
+      "options": [
+        "One celebrity's feed is hot; serve it from a short-lived near cache in the app (or replicate the key with suffixes)",
+        "Add six more cache nodes",
+        "Raise the TTL of every feed key",
+        "Move the cache to bigger machines with more memory"
+      ],
+      "answer": 0,
+      "explain": "More nodes move other keys around but `feed:user:9001` still lives on one node. Memory is not the bottleneck; one key's request rate is. A 2-second near cache turns tens of thousands of reads per second into a few per instance."
+    },
+    {
+      "type": "code",
+      "title": "TTL with jitter",
+      "prompt": [
+        "Write `int JitteredTtl(int baseSeconds, double jitter, Random rng)`: a TTL spread uniformly between",
+        "`baseSeconds × (1 − jitter)` and `baseSeconds × (1 + jitter)`, rounded to whole seconds.",
+        "",
+        "- `jitter` must be at least `0` and below `1`; otherwise throw `ArgumentOutOfRangeException`.",
+        "- With `jitter = 0` it always returns `baseSeconds`.",
+        "",
+        "Take the randomness from `rng` (the tests pass a seeded `Random`, so results are repeatable)."
+      ],
+      "starter": [
+        "int JitteredTtl(int baseSeconds, double jitter, Random rng)",
+        "{",
+        "    return baseSeconds;",
+        "}"
+      ],
+      "solution": [
+        "int JitteredTtl(int baseSeconds, double jitter, Random rng)",
+        "{",
+        "    if (jitter < 0 || jitter >= 1) throw new ArgumentOutOfRangeException(nameof(jitter));",
+        "    return (int)Math.Round(baseSeconds * (1 - jitter + 2 * jitter * rng.NextDouble()));",
+        "}"
+      ],
+      "hints": [
+        "`rng.NextDouble()` is in [0, 1). Map it to [1 − jitter, 1 + jitter).",
+        "`1 - jitter + 2 * jitter * rng.NextDouble()`, times `baseSeconds`, rounded."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRng = new Random(7);",
+        "var dojoTtls = Enumerable.Range(0, 10000).Select(_ => JitteredTtl(300, 0.1, dojoRng)).ToList();",
+        "Dojo.Check(\"every TTL is within 270-330 s\", dojoTtls.All(t => t >= 270 && t <= 330), $\"got {dojoTtls.Min()}..{dojoTtls.Max()}\");",
+        "Dojo.Check(\"the low end is used\", dojoTtls.Min() < 275, $\"lowest was {dojoTtls.Min()}\");",
+        "Dojo.Check(\"the high end is used\", dojoTtls.Max() > 325, $\"highest was {dojoTtls.Max()}\");",
+        "Dojo.Check(\"the TTLs are spread out, not a few values\", dojoTtls.Distinct().Count() > 40, $\"{dojoTtls.Distinct().Count()} distinct values\");",
+        "Dojo.Check(\"roughly centred on 300\", Math.Abs(dojoTtls.Average() - 300) < 2, $\"average {dojoTtls.Average():F1}\");",
+        "Dojo.Eq(\"no jitter returns the base\", 300, JitteredTtl(300, 0, new Random(1)));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"negative jitter is rejected\", () => JitteredTtl(300, -0.1, new Random(1)));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"jitter of 1 is rejected\", () => JitteredTtl(300, 1, new Random(1)));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Count the stampede",
+      "prompt": [
+        "Simulate one cache key and count database queries. Write",
+        "`int DbCalls(int[] arrivalsMs, int fillMs, int ttlMs, bool coalesce)`. The cache starts empty; arrivals are",
+        "sorted. For a request at time `t`:",
+        "",
+        "- It is a **hit** if some finished fill covers it: a fill done at `d` serves requests with `d <= t < d + ttlMs`.",
+        "- Otherwise it is a miss. With `coalesce`, if a fill is still **in flight** (some fill finishes after `t`),",
+        "  the request waits for it: no new query.",
+        "- Otherwise it queries the database: count it, and that fill is done at `t + fillMs`.",
+        "",
+        "A key read every millisecond for one second (fill 50 ms, TTL 300 ms) costs `150` queries without",
+        "coalescing and `3` with it."
+      ],
+      "starter": [
+        "int DbCalls(int[] arrivalsMs, int fillMs, int ttlMs, bool coalesce)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int DbCalls(int[] arrivalsMs, int fillMs, int ttlMs, bool coalesce)",
+        "{",
+        "    var fillsDoneAt = new List<int>();",
+        "    var calls = 0;",
+        "    foreach (var t in arrivalsMs)",
+        "    {",
+        "        if (fillsDoneAt.Any(d => d <= t && t < d + ttlMs)) continue;   // hit",
+        "        if (coalesce && fillsDoneAt.Any(d => d > t)) continue;         // join the fill in flight",
+        "        calls++;",
+        "        fillsDoneAt.Add(t + fillMs);",
+        "    }",
+        "    return calls;",
+        "}"
+      ],
+      "hints": [
+        "Keep a list of the times each fill finishes. A hit is any finished fill whose `[d, d + ttlMs)` window holds `t`.",
+        "In flight means a fill that finishes after `t`: `fillsDoneAt.Any(d => d > t)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoBurst = Enumerable.Range(0, 20).Select(i => i * 5).ToArray();",
+        "Dojo.Eq(\"a request every 5 ms during a 40 ms fill: 8 queries\", 8, DbCalls(dojoBurst, 40, 1000, false));",
+        "Dojo.Eq(\"the same with single-flight: 1 query\", 1, DbCalls(dojoBurst, 40, 1000, true));",
+        "var dojoSlow = Enumerable.Range(0, 21).Select(i => i * 100).ToArray();",
+        "Dojo.Eq(\"a cool key refills once per expiry\", 4, DbCalls(dojoSlow, 40, 500, false));",
+        "Dojo.Eq(\"coalescing changes nothing without concurrency\", 4, DbCalls(dojoSlow, 40, 500, true));",
+        "var dojoHot = Enumerable.Range(0, 1000).ToArray();",
+        "Dojo.Eq(\"a hot key without coalescing\", 150, DbCalls(dojoHot, 50, 300, false));",
+        "Dojo.Eq(\"a hot key with coalescing\", 3, DbCalls(dojoHot, 50, 300, true));",
+        "Dojo.Eq(\"no requests, no queries\", 0, DbCalls(new int[0], 50, 300, true));"
+      ],
+      "explain": [
+        "50× fewer queries for the hot key, and the gap grows with traffic and with fill time. That is why",
+        "single-flight is the first defence, and why a database that slows down under a stampede makes the",
+        "stampede worse: `fillMs` is the multiplier."
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "stampede",
+      "title": "Build it: cache flush at peak",
+      "prompt": [
+        "In the **System design board**, open *Cache flush at peak*. The cache is flushed in the middle of the load",
+        "test and the database collapses and does not recover on its own. Turn on request coalescing and protect",
+        "the database (a breaker or other admission control) so the system recovers quickly and meets the",
+        "availability goal."
+      ],
+      "explain": "Watch the cache hit rate and database utilisation panels together: recovery is a race between refills succeeding and the backlog growing."
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "hot-key",
+      "title": "Build it: the celebrity key",
+      "prompt": [
+        "In the **System design board**, open *The celebrity key*. Partway through the test one key starts taking",
+        "half of all reads and the cache node that owns it saturates. Try adding nodes first and watch it fail,",
+        "then add a near cache on the app servers to meet the goals."
+      ],
+      "explain": "The per-node utilisation panel shows the signature: one hot node, the rest cool. Capacity you add elsewhere does not touch it."
+    }
+  ]
+}

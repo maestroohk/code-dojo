@@ -1,0 +1,248 @@
+{
+  "title": "Resharding, secondary indexes and IDs",
+  "summary": "Move data between shards while serving traffic, query by something other than the partition key, survive the tail latency of scatter-gather, and generate IDs that are unique, compact and sort by time.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Resharding while the site is up",
+      "body": [
+        "Sooner or later a shard is too big or too hot and you must split it. You cannot stop writes for a day, so",
+        "seniors move data in phases, each one reversible:",
+        "",
+        "```text",
+        "1. dual write   app writes to old AND new shard (old is still the source of truth)",
+        "2. backfill     copy existing rows old -> new, in batches, throttled",
+        "3. verify       compare counts and checksums per key range; fix differences",
+        "4. cut over     reads move to the new shard (flag, a few % first)",
+        "5. clean up     stop writing the old copy, then delete it later",
+        "```",
+        "",
+        "Two tricks make it cheaper:",
+        "",
+        "- **Split in two.** Going from 8 to 16 shards by splitting each one means every key moves to a *known* place",
+        "  (its old shard or one new sibling), and only half the keys move.",
+        "- **Many small logical shards** (say 1,024) mapped onto a few machines. Resharding becomes moving whole",
+        "  logical shards between machines, never re-hashing rows. Redis Cluster's 16,384 slots work this way."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the phases of an online reshard in order.",
+      "lines": [
+        "Start writing every change to both the old and the new shard",
+        "Backfill the existing rows into the new shard in throttled batches",
+        "Verify counts and checksums per key range and repair differences",
+        "Move a small share of reads to the new shard, then all of them",
+        "Stop writing to the old copy and delete it after a safe delay"
+      ],
+      "explain": "Dual writes first, so nothing written during the backfill is lost. Verify before any reads move. Each phase can be rolled back, because the old shard stays complete until the very end."
+    },
+    {
+      "type": "learn",
+      "title": "Secondary indexes and scatter-gather",
+      "body": [
+        "Shard `orders` by `customer_id` and \"my orders\" touches one shard. But \"orders for product 7\" has no shard to",
+        "go to. Two options:",
+        "",
+        "| Index | Where it lives | Write | Read by the indexed column |",
+        "|---|---|---|---|",
+        "| **Local** (per shard) | each shard indexes its own rows | cheap, same transaction | **scatter-gather**: ask every shard, merge |",
+        "| **Global** (partitioned by the indexed value) | a separate index sharded by `product_id` | one more write, usually async | one shard, but may lag behind the data |",
+        "",
+        "Scatter-gather has a hidden cost: the request waits for the **slowest** shard. If each shard is slow 1% of the",
+        "time, a query that asks 20 shards is slow far more often than 1%:",
+        "",
+        "```text",
+        "P(at least one slow) = 1 - (1 - p)^n        p = 0.01, n = 20  ->  about 18%",
+        "```",
+        "",
+        "So shard p99 becomes the query's typical latency. This is the *tail at scale* effect; hedged requests and fewer,",
+        "bigger fan-outs are the usual defences."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "Each shard is slow on 1% of requests. A query asks 20 shards. What does this print?",
+      "code": [
+        "var p = 1 - Math.Pow(0.99, 20);",
+        "Console.WriteLine(p.ToString(\"F3\"));"
+      ],
+      "answer": "0.182",
+      "explain": "0.99^20 is about 0.818, so about 18.2% of these queries wait for at least one slow shard. Shard p99 has become the query's p82."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "`orders` is sharded by `order_id` across 32 shards. The support tool's \"orders for this customer\" page has",
+        "p99 = 2.4 s while each shard's p99 is 40 ms, and its traffic is growing. Which change fixes the cause?"
+      ],
+      "options": [
+        "Partition by `customer_id` (or add a global index on it), so the query reads one shard instead of 32",
+        "Add read replicas to every shard",
+        "Raise the query timeout to 5 s",
+        "Add an index on `customer_id` on every shard"
+      ],
+      "answer": 0,
+      "explain": "The query fans out to all 32 shards and waits for the slowest. A local index on each shard makes each shard faster but keeps the fan-out. Make the common query hit one shard."
+    },
+    {
+      "type": "code",
+      "title": "How often does a fan-out hit a slow shard?",
+      "prompt": [
+        "Write `double SlowFraction(double pSlowPerShard, int fanout)`: the probability that at least one of `fanout`",
+        "independent shards is slow, `1 - (1 - p)^n`.",
+        "",
+        "`SlowFraction(0.01, 20)` is about `0.182`."
+      ],
+      "starter": [
+        "double SlowFraction(double pSlowPerShard, int fanout)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double SlowFraction(double pSlowPerShard, int fanout)",
+        "{",
+        "    return 1 - Math.Pow(1 - pSlowPerShard, fanout);",
+        "}"
+      ],
+      "hints": [
+        "First work out the chance that **all** shards are fast: `Math.Pow(1 - p, n)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"20 shards at 1%\", 0.182, Math.Round(SlowFraction(0.01, 20), 3));",
+        "Dojo.Eq(\"one shard is just p\", 0.01, Math.Round(SlowFraction(0.01, 1), 3));",
+        "Dojo.Eq(\"100 shards at 1%\", 0.634, Math.Round(SlowFraction(0.01, 100), 3));",
+        "Dojo.Eq(\"never slow\", 0.0, Math.Round(SlowFraction(0, 50), 3));",
+        "Dojo.Eq(\"two coin flips\", 0.75, Math.Round(SlowFraction(0.5, 2), 3));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "IDs that are unique, small and sorted",
+      "body": [
+        "With many shards, one auto-increment counter no longer works: two shards would hand out the same id.",
+        "",
+        "| Scheme | Size | Sorted by time? | Notes |",
+        "|---|---|---|---|",
+        "| Auto-increment per shard | 8 bytes | per shard only | collides across shards unless you add the shard number |",
+        "| **UUIDv4** | 16 bytes | no, random | inserts land all over the B-tree: page splits, more pages in memory, more WAL |",
+        "| **UUIDv7** (RFC 9562, 2024) | 16 bytes | yes | 48-bit Unix milliseconds first, then random bits; .NET 9+ `Guid.CreateVersion7()`, PostgreSQL 18 `uuidv7()` |",
+        "| **Snowflake-style** | 8 bytes | yes | 1 sign bit, 41 bits of milliseconds since a custom epoch, 10 bits machine, 12 bits sequence |",
+        "",
+        "```text",
+        " 63 62                              22 21        12 11          0",
+        " +--+---------------------------------+-----------+-------------+",
+        " |0 |  milliseconds since epoch (41)  | machine 10| sequence 12 |",
+        " +--+---------------------------------+-----------+-------------+",
+        "```",
+        "",
+        "41 bits of milliseconds last about 69 years; 12 bits allow 4,096 ids per millisecond per machine. Keep in",
+        "mind: time-sorted ids are exactly what makes **range** partitions hot (lesson 1), so hash them for placement.",
+        "",
+        "- **UUIDv7**: a time-ordered 128-bit UUID (RFC 9562) whose first 48 bits are Unix milliseconds, so new keys insert at the end of a B-tree."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each ID scheme to its property.",
+      "pairs": [
+        [
+          "UUIDv4",
+          "random: unique without coordination, but scatters B-tree inserts"
+        ],
+        [
+          "UUIDv7",
+          "128 bits that sort by creation time"
+        ],
+        [
+          "Snowflake-style id",
+          "64 bits: time, machine and a per-millisecond sequence"
+        ],
+        [
+          "Auto-increment per shard",
+          "collides across shards unless combined with the shard number"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Pack a Snowflake-style id: 41 bits of time, then 10 bits of machine, then 12 bits of sequence.",
+      "code": [
+        "long id = (ms << __1__) | ((long)machine << __2__) | sequence;"
+      ],
+      "blanks": [
+        "22",
+        "12"
+      ],
+      "bank": [
+        "41",
+        "10",
+        "63",
+        "32"
+      ],
+      "explain": "The sequence takes the low 12 bits, the machine the next 10, so the machine shifts by 12 and the time by 12 + 10 = 22."
+    },
+    {
+      "type": "code",
+      "title": "Snowflake ids",
+      "prompt": [
+        "Write four functions for 64-bit Snowflake-style ids (41 bits time, 10 bits machine, 12 bits sequence):",
+        "",
+        "- `long Encode(long ms, int machine, int sequence)`: `ms` is milliseconds since your epoch, `0` to `2^41 - 1`;",
+        "  `machine` `0` to `1023`; `sequence` `0` to `4095`. Anything outside throws `ArgumentOutOfRangeException`.",
+        "- `long TimeOf(long id)`, `int MachineOf(long id)`, `int SequenceOf(long id)`: take an id apart again.",
+        "",
+        "`Encode(1, 0, 0)` is `4194304` (1 shifted left by 22)."
+      ],
+      "starter": [
+        "long Encode(long ms, int machine, int sequence)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "long TimeOf(long id) => 0;",
+        "int MachineOf(long id) => 0;",
+        "int SequenceOf(long id) => 0;"
+      ],
+      "solution": [
+        "long Encode(long ms, int machine, int sequence)",
+        "{",
+        "    if (ms < 0 || ms >= 1L << 41) throw new ArgumentOutOfRangeException(nameof(ms));",
+        "    if (machine < 0 || machine > 1023) throw new ArgumentOutOfRangeException(nameof(machine));",
+        "    if (sequence < 0 || sequence > 4095) throw new ArgumentOutOfRangeException(nameof(sequence));",
+        "    return (ms << 22) | ((long)machine << 12) | (long)sequence;",
+        "}",
+        "",
+        "long TimeOf(long id) => id >> 22;",
+        "int MachineOf(long id) => (int)((id >> 12) & 1023);",
+        "int SequenceOf(long id) => (int)(id & 4095);"
+      ],
+      "hints": [
+        "Shift the time left by 22 and the machine (as a `long`) by 12, then OR everything together.",
+        "To take it apart, shift right and mask: `(id >> 12) & 1023` for the machine, `id & 4095` for the sequence."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"all zero\", 0L, Encode(0, 0, 0));",
+        "Dojo.Eq(\"one millisecond\", 4194304L, Encode(1, 0, 0));",
+        "Dojo.Eq(\"machine 1\", 4096L, Encode(0, 1, 0));",
+        "Dojo.Eq(\"sequence 1\", 1L, Encode(0, 0, 1));",
+        "Dojo.Eq(\"Encode(1000, 7, 42)\", 4194332714L, Encode(1000, 7, 42));",
+        "var dojoId = Encode(1000, 7, 42);",
+        "Dojo.Eq(\"time comes back\", 1000L, TimeOf(dojoId));",
+        "Dojo.Eq(\"machine comes back\", 7, MachineOf(dojoId));",
+        "Dojo.Eq(\"sequence comes back\", 42, SequenceOf(dojoId));",
+        "Dojo.Eq(\"the largest id is long.MaxValue\", long.MaxValue, Encode((1L << 41) - 1, 1023, 4095));",
+        "Dojo.Check(\"a later millisecond always sorts after\", Encode(5, 1023, 4095) < Encode(6, 0, 0), \"ids must sort by time first\");",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"machine 1024 is too big\", () => Encode(0, 1024, 0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"sequence 4096 is too big\", () => Encode(0, 0, 4096));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"negative time\", () => Encode(-1, 0, 0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"time needs more than 41 bits\", () => Encode(1L << 41, 0, 0));"
+      ]
+    }
+  ]
+}

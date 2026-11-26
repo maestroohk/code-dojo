@@ -1,0 +1,263 @@
+{
+  "title": "SLOs, error budgets and Little's law",
+  "summary": "Turn \"fast and reliable\" into numbers: SLIs, SLOs, error budgets and burn-rate alerts; then use Little's law and CPU time to work out concurrency and cores.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "SLI, SLO, SLA and the error budget",
+      "body": [
+        "- **SLI** (service level indicator): a measured ratio of good events to all events, such as \"requests answered with a non-5xx status in under 300 ms\".",
+        "- **SLO** (service level objective): the target for an SLI over a window, such as \"99.9% over 30 days\".",
+        "- **SLA** (service level agreement): a contract with consequences (credits, refunds). Set it looser than the SLO.",
+        "- **Error budget**: what the SLO allows to fail. 99.9% means 0.1% may fail.",
+        "",
+        "Time-based budgets for a 30-day window (43,200 minutes):",
+        "",
+        "| SLO | Budget per 30 days | Per year (365 days) |",
+        "|---|---|---|",
+        "| 99% | 7.2 hours | 3.65 days |",
+        "| 99.9% | 43.2 minutes | 8.8 hours |",
+        "| 99.95% | 21.6 minutes | 4.4 hours |",
+        "| 99.99% | 4.3 minutes | 53 minutes |",
+        "",
+        "(You will also see \"43.8 minutes\" for 99.9%: that uses an average month of 30.44 days. Say which you use.)",
+        "",
+        "The budget is a tool, not a punishment. While budget remains, ship features; when it is spent, spend the",
+        "time on reliability. Each extra nine costs roughly ten times more: 99.99% usually means several zones, automated",
+        "failover and no manual step in recovery, because 4 minutes is shorter than a human getting to a laptop."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var minutes = 30 * 24 * 60;",
+        "Console.WriteLine(Math.Round(minutes * (1 - 0.999), 1));"
+      ],
+      "answer": "43.2",
+      "explain": "30 days are 43,200 minutes; 0.1% of that is 43.2 minutes. The rounding hides floating-point noise: `1 - 0.999` is not exactly `0.001` in binary."
+    },
+    {
+      "type": "learn",
+      "title": "Burn rate: alert on how fast the budget goes",
+      "body": [
+        "Alerting on \"error rate above 0.1%\" pages you for every blip. Alert on the **burn rate** instead:",
+        "",
+        "```text",
+        "burn rate = observed error rate / error rate the SLO allows",
+        "",
+        "SLO 99.9%  -> allowed 0.1%",
+        "1.44% errors for an hour -> burn rate 14.4 -> 14.4 / 720 hours = 2% of a 30-day budget in one hour",
+        "```",
+        "",
+        "A common multiwindow setup for a 30-day 99.9% SLO (from the Google SRE workbook):",
+        "",
+        "| Burn rate | Long window | Short window | Budget spent | Action |",
+        "|---|---|---|---|---|",
+        "| 14.4 | 1 hour | 5 minutes | 2% | page |",
+        "| 6 | 6 hours | 30 minutes | 5% | page |",
+        "| 1 | 3 days | 6 hours | 10% | ticket |",
+        "",
+        "Both windows must be over the threshold: the long one proves it matters, the short one proves it is still",
+        "happening (so the alert clears soon after the fix)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Alert.** A 99.9% / 30-day SLO. Over the last hour, 0.6% of requests failed; over the last 5 minutes,",
+        "0.7%. Using the table above, what should happen?"
+      ],
+      "options": [
+        "Nothing pages yet: the burn rate is about 6 over one hour, below 14.4. If it holds for 6 hours (with the 30-minute window also above 6) it pages",
+        "Page now: any error rate above 0.1% is an SLO breach",
+        "Page now: the burn rate is 60",
+        "Open a ticket: the 3-day window is certainly above 1"
+      ],
+      "answer": 0,
+      "explain": [
+        "0.6% / 0.1% = burn rate 6. That is below the 1-hour page threshold of 14.4. The 6-hour rule catches it if",
+        "it continues. We cannot know the 3-day window from this. Paging on raw error rate is what makes on-call miserable."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to its meaning.",
+      "pairs": [
+        [ "SLI", "The measured ratio of good events to all events" ],
+        [ "SLO", "The internal target for that ratio over a window" ],
+        [ "SLA", "A contract with customers, with penalties" ],
+        [ "Error budget", "The share of events allowed to fail" ],
+        [ "Burn rate", "How many times faster than allowed the budget is being spent" ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Little's law, and cores from CPU time",
+      "body": [
+        "**Little's law** holds for any stable system: the number of requests inside it equals the arrival rate times",
+        "the time each one spends inside.",
+        "",
+        "```text",
+        "L = lambda x W",
+        "2,000 requests/s x 0.25 s = 500 requests in flight",
+        "```",
+        "",
+        "That is how you size thread pools, connection pools and concurrency limits: 500 in flight means a pool of",
+        "50 connections cannot work if every request holds one for the whole 250 ms.",
+        "",
+        "The same idea gives **cores**. Each request uses some CPU time; a core gives 1,000 ms of CPU per second:",
+        "",
+        "```text",
+        "cores = peak QPS x CPU ms per request / 1,000 / target utilisation",
+        "12,000 QPS x 10 ms / 1,000 = 120 cores busy; at a 70% target -> 172 cores",
+        "```",
+        "",
+        "Why not plan for 100%? Because queues grow without bound near 100% (module 2 shows the curve), and you need",
+        "room for a lost server, a deploy and tomorrow's growth. Step through the numbers:"
+      ],
+      "trace": {
+        "code": [
+          "var qps = 12_000;",
+          "var cpuMs = 10.0;",
+          "foreach (var target in new[] { 1.0, 0.7, 0.5 })",
+          "{",
+          "    var cores = qps * cpuMs / 1000 / target;",
+          "    Console.WriteLine($\"target {target:0%}: {Math.Ceiling(cores)} cores\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Dashboard snapshot.** An API pool has 8 instances with 4 cores each. Peak traffic is 2,800 requests/s and",
+        "profiling says each request uses about 15 ms of CPU. p99 latency went from 80 ms to 6 s this morning and",
+        "keeps rising. What is going on?"
+      ],
+      "options": [
+        "Demand is 2,800 x 15 ms = 42 cores of work on 32 cores: the pool is past 100% and the queue grows every second",
+        "The pool is at 42% utilisation, so the problem must be the database",
+        "Little's law says 2,800 x 0.015 = 42 requests in flight, which is fine for 8 instances",
+        "p99 is always 75 times the median under load"
+      ],
+      "answer": 0,
+      "explain": [
+        "42 cores of CPU work per second against 32 cores is 131% utilisation. Work arrives faster than it can be done,",
+        "so the queue (and latency) grows without limit. Add at least 6 instances to get under 70%: 42 / 0.7 = 60 cores = 15 instances."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Error budgets and burn rate",
+      "prompt": [
+        "Write two methods:",
+        "",
+        "- `double ErrorBudgetMinutes(double slo, int days)`: the minutes the SLO allows to fail in a window of `days`.",
+        "  `ErrorBudgetMinutes(0.999, 30)` is `43.2`.",
+        "- `double BurnRate(double errorRate, double slo)`: the observed error rate divided by the allowed one.",
+        "  `BurnRate(0.0144, 0.999)` is `14.4`.",
+        "",
+        "The tests round your results."
+      ],
+      "starter": [
+        "double ErrorBudgetMinutes(double slo, int days)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "double BurnRate(double errorRate, double slo)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double ErrorBudgetMinutes(double slo, int days)",
+        "{",
+        "    return days * 24 * 60 * (1 - slo);",
+        "}",
+        "",
+        "double BurnRate(double errorRate, double slo)",
+        "{",
+        "    return errorRate / (1 - slo);",
+        "}"
+      ],
+      "hints": [
+        "A day has 24 x 60 minutes. The allowed failure share is `1 - slo`.",
+        "Burn rate is `errorRate / (1 - slo)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"99.9% over 30 days\", 43.2, Math.Round(ErrorBudgetMinutes(0.999, 30), 1));",
+        "Dojo.Eq(\"99.95% over 30 days\", 21.6, Math.Round(ErrorBudgetMinutes(0.9995, 30), 1));",
+        "Dojo.Eq(\"99% over 7 days\", 100.8, Math.Round(ErrorBudgetMinutes(0.99, 7), 1));",
+        "Dojo.Eq(\"1.44% errors on 99.9%\", 14.4, Math.Round(BurnRate(0.0144, 0.999), 1));",
+        "Dojo.Eq(\"exactly on budget\", 1.0, Math.Round(BurnRate(0.001, 0.999), 1));",
+        "Dojo.Eq(\"0.6% errors on 99.9%\", 6.0, Math.Round(BurnRate(0.006, 0.999), 1));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Concurrency and cores",
+      "prompt": [
+        "Write two methods:",
+        "",
+        "- `double Concurrency(double qps, double latencyMs)`: requests in flight by Little's law.",
+        "  `Concurrency(2000, 250)` is `500`.",
+        "- `int CoresNeeded(double qps, double cpuMsPerRequest, double targetUtil)`: the cores needed so the pool runs",
+        "  at `targetUtil` (0 to 1), **rounded up** to a whole core. `CoresNeeded(12000, 10, 0.7)` is `172`."
+      ],
+      "starter": [
+        "double Concurrency(double qps, double latencyMs)",
+        "{",
+        "    return 0;",
+        "}",
+        "",
+        "int CoresNeeded(double qps, double cpuMsPerRequest, double targetUtil)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double Concurrency(double qps, double latencyMs)",
+        "{",
+        "    return qps * latencyMs / 1000;",
+        "}",
+        "",
+        "int CoresNeeded(double qps, double cpuMsPerRequest, double targetUtil)",
+        "{",
+        "    var busy = qps * cpuMsPerRequest / 1000;",
+        "    return (int)Math.Ceiling(busy / targetUtil);",
+        "}"
+      ],
+      "hints": [
+        "Latency is in milliseconds; Little's law wants seconds, so divide by 1,000.",
+        "Busy cores are `qps * cpuMs / 1000`. Divide by the target, then `Math.Ceiling` and cast to `int`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"2,000 QPS at 250 ms\", 500.0, Concurrency(2000, 250));",
+        "Dojo.Eq(\"120 QPS at 50 ms\", 6.0, Concurrency(120, 50));",
+        "Dojo.Eq(\"12k QPS, 10 ms, 70%\", 172, CoresNeeded(12_000, 10, 0.7));",
+        "Dojo.Eq(\"2,800 QPS, 15 ms, 75%\", 56, CoresNeeded(2_800, 15, 0.75));",
+        "Dojo.Eq(\"500 QPS, 3 ms, 50%\", 3, CoresNeeded(500, 3, 0.5));",
+        "Dojo.Eq(\"a fraction of a core still needs a core\", 1, CoresNeeded(10, 1, 0.5));"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "first-service",
+      "title": "Build it: your first service",
+      "prompt": [
+        "In the **System design board**, the parts of a small service are on the board but nothing is wired.",
+        "Wire **Users -> load balancer -> app servers -> database**, run the load test, and read the dashboard:",
+        "requests per second, p50/p95/p99 latency, utilisation of each part and the monthly cost. Meet the",
+        "availability and p99 goals the board shows."
+      ],
+      "explain": "Every later design is this one with more parts. Notice which part has the highest utilisation: that is where the next problem will come from."
+    }
+  ]
+}

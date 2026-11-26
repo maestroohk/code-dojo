@@ -1,0 +1,327 @@
+{
+  "title": "Search indexes: fast, rebuildable, never the truth",
+  "summary": "Inverted indexes and analyzers, near-real-time refresh, feeding the index with an outbox or change data capture instead of dual writes, versioned updates, and why search must always be rebuildable from the database.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The inverted index",
+      "body": [
+        "`WHERE title LIKE '%lamp%'` reads every row. A search engine (Elasticsearch, OpenSearch, Solr, or the",
+        "full-text search built into PostgreSQL) builds an **inverted index** instead: for every term, the list of",
+        "documents that contain it.",
+        "",
+        "```text",
+        "doc 1: \"Brass desk lamp\"        analyzer        brass → [1, 3]",
+        "doc 2: \"Oak desk\"           ─────────────>    desk  → [1, 2]",
+        "doc 3: \"Brass floor lamp\"                      lamp  → [1, 3]",
+        "                                                oak   → [2]",
+        "                                                floor → [3]",
+        "query \"brass lamp\" = brass ∩ lamp = [1, 3]",
+        "```",
+        "",
+        "- **Analyzer**: turns text into terms: split into tokens, lowercase, optionally remove stop words and stem",
+        "  (`lamps` → `lamp`). The **same** analyzer must run on documents and on queries, or nothing matches.",
+        "- **Postings list**: the sorted document ids for one term. An AND query intersects lists; OR unions them;",
+        "  ranking (BM25 is the usual default) scores the survivors.",
+        "",
+        "It answers in milliseconds over millions of documents, which is why product search, log search and",
+        "autocomplete all sit on one."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "A very small analyzer. What does this print?",
+      "code": [
+        "var text = \"Brass LAMP, brass-shade\";",
+        "var tokens = text.ToLowerInvariant()",
+        "    .Split(new[] { ' ', ',', '-' }, StringSplitOptions.RemoveEmptyEntries)",
+        "    .Distinct();",
+        "Console.WriteLine(string.Join(\"|\", tokens));"
+      ],
+      "answer": "brass|lamp|shade",
+      "explain": "Lowercasing makes `Brass` and `brass` one term, splitting on punctuation turns `brass-shade` into two terms, and `Distinct` keeps the first occurrence of each. Real analyzers do the same with more rules (Unicode word breaks, stemming, synonyms)."
+    },
+    {
+      "type": "learn",
+      "title": "Feeding the index",
+      "body": [
+        "The database is the **source of truth**; the index is a **read model** derived from it. Ways to keep it fed:",
+        "",
+        "| Approach | How | Problem |",
+        "|---|---|---|",
+        "| Dual write | the API writes the DB, then the index | the second write fails or reorders: the index silently drifts |",
+        "| Transactional outbox | the API writes the row and an outbox event in one transaction; a relay publishes it | one more table and relay to run |",
+        "| Change data capture | a connector (Debezium, for example) reads the DB's log (the PostgreSQL WAL) and emits changes | needs log access and care with schema changes |",
+        "",
+        "Either way, an **indexer** consumes the events and writes the index. Make it idempotent and order-safe:",
+        "store the row's **version** and ignore any event older than what the index already has (Elasticsearch calls",
+        "this external versioning).",
+        "",
+        "Search is also **near real time**: a write becomes searchable after the next refresh (Elasticsearch and",
+        "OpenSearch default to about one second). So \"I saved it but search does not show it\" for a second is normal;",
+        "for minutes is a lagging pipeline. The **Messaging** topic covers the outbox in code."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The product API saves to PostgreSQL and then calls the search engine directly. Under load, about one update in 5,000 never shows up in search. Why, and what is the fix?",
+      "options": [
+        "A dual write: the second call sometimes fails or times out after the DB committed. Publish changes from an outbox or CDC and index idempotently",
+        "The search engine loses writes under load: add more search nodes",
+        "The refresh interval is too long: set it to 1 ms",
+        "PostgreSQL drops commits under load: add a replica"
+      ],
+      "answer": 0,
+      "explain": "Two systems, no shared transaction: any failure between the writes leaves them apart, and nothing retries. An outbox (or CDC) makes the change event part of the database commit, so it is published eventually, even after a crash."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a change-data-capture indexing pipeline in order, from a user's edit to search results.",
+      "lines": [
+        "The API updates the product row in one transaction",
+        "The database writes the change to its write-ahead log",
+        "The CDC connector reads the log and publishes a change event with the row's version",
+        "The indexer consumes the event and skips it if the index already has a newer version",
+        "The search engine refreshes and the change becomes searchable"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which store should answer each query?",
+      "buckets": [
+        "The database",
+        "The search index"
+      ],
+      "items": [
+        [
+          "\"Does order 8812 exist, and what is its total?\"",
+          0
+        ],
+        [
+          "\"Reserve the last seat on flight EX123\"",
+          0
+        ],
+        [
+          "\"Products matching *brass lamp*, typo-tolerant, best first\"",
+          1
+        ],
+        [
+          "\"Log lines containing `timeout` in the last hour\"",
+          1
+        ],
+        [
+          "\"Change this user's email address\"",
+          0
+        ],
+        [
+          "\"Count products by colour for the filter sidebar\"",
+          1
+        ]
+      ],
+      "explain": "Anything that must be exact and current, or that changes data, goes to the database. Ranked, fuzzy, faceted reads go to the index, which is allowed to lag a little."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Merchants complain that price changes take about a minute to appear in search. You check",
+        "the pipeline:"
+      ],
+      "code": [
+        "$ kafka-consumer-groups.sh --bootstrap-server kafka.example.com:9092 --describe --group product-indexer | awk '{print $3, $6}'",
+        "PARTITION LAG",
+        "0 0",
+        "1 2",
+        "2 0",
+        "$ curl -sS 'https://search.example.com/products/_settings' | jq '.products.settings.index.refresh_interval'",
+        "\"60s\""
+      ],
+      "options": [
+        "The indexer keeps up; the index only refreshes every 60 seconds. Lower `refresh_interval` (1s is the default) and accept the extra indexing cost",
+        "The indexer is behind: add consumers",
+        "CDC is broken: switch to dual writes",
+        "The CDN caches search results for a minute"
+      ],
+      "answer": 0,
+      "explain": "Lag near zero means events reach the indexer at once. Writes then sit in the index buffer until the next refresh, which someone set to 60 s (often for a bulk import and never set back). Refreshing more often costs CPU and makes more small segments; one second is the usual compromise."
+    },
+    {
+      "type": "learn",
+      "title": "Keep it rebuildable",
+      "body": [
+        "Because the index is derived, you must be able to throw it away and build it again: a mapping change, a",
+        "new analyzer, a corrupted cluster. The usual move:",
+        "",
+        "```text",
+        "products  (alias) ──> products_v7",
+        "                        build products_v8 from a DB snapshot, then replay events since the snapshot",
+        "products  (alias) ──> products_v8          switch the alias in one step; delete v7 later",
+        "```",
+        "",
+        "Rules seniors hold to: the app queries an **alias**, never a versioned index name; every document carries",
+        "its source **version**; the indexer is **idempotent**; and nothing reads the index to make a decision that",
+        "must be correct (stock, money, permissions). Those go to the database."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An inverted index with AND queries",
+      "prompt": [
+        "Write a class `SearchIndex`:",
+        "",
+        "- the analyzer: lowercase the text and split it into terms on every character that is not a letter or a",
+        "  digit (`char.IsLetterOrDigit`); empty terms are dropped;",
+        "- `void Add(int id, string text)`: indexes the document. Adding an id that exists **replaces** its old text;",
+        "- `void Remove(int id)`: removes the document (unknown ids are ignored);",
+        "- `List<int> Search(string query)`: the ids of documents containing **every** query term, in ascending order.",
+        "  A query with no terms returns an empty list.",
+        "",
+        "With docs 1 \"Brass desk lamp\", 2 \"Oak desk\", 3 \"Brass floor lamp\": `Search(\"BRASS lamp\")` is `[1, 3]`."
+      ],
+      "starter": [
+        "class SearchIndex",
+        "{",
+        "    public void Add(int id, string text) { }",
+        "    public void Remove(int id) { }",
+        "    public List<int> Search(string query) => new();",
+        "}"
+      ],
+      "solution": [
+        "class SearchIndex",
+        "{",
+        "    readonly Dictionary<string, SortedSet<int>> postings = new();",
+        "    readonly Dictionary<int, List<string>> docs = new();",
+        "",
+        "    static List<string> Analyze(string text)",
+        "    {",
+        "        var terms = new List<string>();",
+        "        var current = new StringBuilder();",
+        "        foreach (var c in text.ToLowerInvariant())",
+        "        {",
+        "            if (char.IsLetterOrDigit(c)) current.Append(c);",
+        "            else if (current.Length > 0) { terms.Add(current.ToString()); current.Clear(); }",
+        "        }",
+        "        if (current.Length > 0) terms.Add(current.ToString());",
+        "        return terms;",
+        "    }",
+        "",
+        "    public void Add(int id, string text)",
+        "    {",
+        "        Remove(id);",
+        "        var terms = Analyze(text).Distinct().ToList();",
+        "        docs[id] = terms;",
+        "        foreach (var t in terms)",
+        "        {",
+        "            if (!postings.TryGetValue(t, out var ids)) postings[t] = ids = new SortedSet<int>();",
+        "            ids.Add(id);",
+        "        }",
+        "    }",
+        "",
+        "    public void Remove(int id)",
+        "    {",
+        "        if (!docs.Remove(id, out var terms)) return;",
+        "        foreach (var t in terms)",
+        "        {",
+        "            postings[t].Remove(id);",
+        "            if (postings[t].Count == 0) postings.Remove(t);",
+        "        }",
+        "    }",
+        "",
+        "    public List<int> Search(string query)",
+        "    {",
+        "        var terms = Analyze(query).Distinct().ToList();",
+        "        if (terms.Count == 0) return new List<int>();",
+        "        IEnumerable<int>? result = null;",
+        "        foreach (var t in terms)",
+        "        {",
+        "            if (!postings.TryGetValue(t, out var ids)) return new List<int>();",
+        "            result = result is null ? ids : result.Intersect(ids);",
+        "        }",
+        "        return result!.OrderBy(x => x).ToList();",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Keep two maps: term → sorted ids (the postings) and id → its terms (so `Remove` knows what to clean up).",
+        "`Add` can start by calling `Remove(id)`. `Search` intersects the postings of every term and returns early when one term has none."
+      ],
+      "template": [
+        "var dojoIx = new SearchIndex();",
+        "dojoIx.Add(1, \"Brass desk lamp\");",
+        "dojoIx.Add(2, \"Oak desk\");",
+        "dojoIx.Add(3, \"Brass floor lamp\");",
+        "Dojo.Eq(\"brass AND lamp\", new List<int> { 1, 3 }, dojoIx.Search(\"brass lamp\"));",
+        "Dojo.Eq(\"queries go through the analyzer too\", new List<int> { 1, 3 }, dojoIx.Search(\"BRASS, lamp!\"));",
+        "Dojo.Eq(\"one term\", new List<int> { 1, 2 }, dojoIx.Search(\"desk\"));",
+        "Dojo.Eq(\"every term must match\", new List<int>(), dojoIx.Search(\"oak lamp\"));",
+        "Dojo.Eq(\"an unknown term matches nothing\", new List<int>(), dojoIx.Search(\"chair\"));",
+        "Dojo.Eq(\"punctuation splits terms\", new List<int> { 4 }, new Func<List<int>>(() => { dojoIx.Add(4, \"steel-frame chair\"); return dojoIx.Search(\"frame\"); })());",
+        "dojoIx.Add(1, \"Brass desk clock\");",
+        "Dojo.Eq(\"re-adding an id replaces its old terms\", new List<int> { 3 }, dojoIx.Search(\"lamp\"));",
+        "Dojo.Eq(\"and indexes the new ones\", new List<int> { 1 }, dojoIx.Search(\"clock\"));",
+        "dojoIx.Remove(3);",
+        "Dojo.Eq(\"removed documents are gone\", new List<int>(), dojoIx.Search(\"floor\"));",
+        "dojoIx.Remove(99);",
+        "Dojo.Eq(\"an empty query returns nothing\", new List<int>(), dojoIx.Search(\" , \"));",
+        "Dojo.Eq(\"ids come back in ascending order\", new List<int> { 1, 2 }, new Func<List<int>>(() => { dojoIx.Add(2, \"Oak desk\"); return dojoIx.Search(\"desk\"); })());",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An order-safe indexer",
+      "prompt": [
+        "Change events can arrive twice or out of order. Write",
+        "`Dictionary<int, string> Project(List<(int Id, long Version, string? Text)> events)` that applies them in the",
+        "given order and returns what the index should hold:",
+        "",
+        "- an event whose version is **not greater** than the last version seen for that id is ignored (a duplicate",
+        "  or a stale event);",
+        "- `Text == null` is a delete. Remember its version (a **tombstone**), so a stale update arriving after it",
+        "  cannot bring the document back;",
+        "- otherwise the text becomes the document's current text.",
+        "",
+        "Events `(1, v1, \"lamp\")`, `(1, v3, \"brass lamp\")`, `(1, v2, \"old lamp\")` leave doc 1 as `\"brass lamp\"`."
+      ],
+      "starter": [
+        "Dictionary<int, string> Project(List<(int Id, long Version, string? Text)> events)",
+        "{",
+        "    return new Dictionary<int, string>();",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<int, string> Project(List<(int Id, long Version, string? Text)> events)",
+        "{",
+        "    var versions = new Dictionary<int, long>();",
+        "    var docs = new Dictionary<int, string>();",
+        "    foreach (var (id, version, text) in events)",
+        "    {",
+        "        if (versions.TryGetValue(id, out var seen) && version <= seen) continue;",
+        "        versions[id] = version;",
+        "        if (text is null) docs.Remove(id);",
+        "        else docs[id] = text;",
+        "    }",
+        "    return docs;",
+        "}"
+      ],
+      "hints": [
+        "Keep the last version per id in its own dictionary, separate from the documents, so deletes keep theirs.",
+        "`if (versions.TryGetValue(id, out var seen) && version <= seen) continue;`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoA = Project(new List<(int Id, long Version, string? Text)> { (1, 1, \"lamp\"), (1, 3, \"brass lamp\"), (1, 2, \"old lamp\") });",
+        "Dojo.Eq(\"a stale update is ignored\", \"brass lamp\", dojoA[1]);",
+        "var dojoB = Project(new List<(int Id, long Version, string? Text)> { (2, 1, \"oak desk\"), (2, 1, \"oak desk\"), (3, 1, \"chair\") });",
+        "Dojo.Eq(\"a redelivered event changes nothing\", 2, dojoB.Count);",
+        "Dojo.Eq(\"other ids are independent\", \"chair\", dojoB[3]);",
+        "var dojoC = Project(new List<(int Id, long Version, string? Text)> { (4, 1, \"stool\"), (4, 5, null), (4, 4, \"red stool\") });",
+        "Dojo.Check(\"a delete removes the document\", !dojoC.ContainsKey(4), \"doc 4 should be gone\");",
+        "var dojoD = Project(new List<(int Id, long Version, string? Text)> { (5, 2, null), (5, 1, \"ghost\"), (5, 3, \"back again\") });",
+        "Dojo.Eq(\"a newer write after a delete brings it back\", \"back again\", dojoD[5]);",
+        "Dojo.Eq(\"no events, empty index\", 0, Project(new List<(int Id, long Version, string? Text)>()).Count);"
+      ]
+    }
+  ]
+}

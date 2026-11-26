@@ -1,0 +1,244 @@
+{
+  "title": "Boss: the clip upload review",
+  "summary": "A load-test report for a video clip feature: read the consumer lag, size the API for streaming versus direct uploads, make the thumbnail worker idempotent and loop-proof, and price the bucket with lifecycle tiers.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket: CLIPS-214, load-test review",
+      "body": [
+        "Short video clips launch next month. The load test from staging came back, and your lead wants a review",
+        "before the design is signed off:",
+        "",
+        "```text",
+        "LOAD TEST: clips-upload   target: 2,200 uploads/s at peak, average clip 5 MB",
+        "api pods (8 vCPU, 10 Gbps)   cpu 22%   net rx saturated at 6 pods   p99 4.1 s   errors 3.2%",
+        "thumbnail worker group       lag growing on one partition, the others near 0",
+        "thumbnail worker             processed 1.9x more events than uploads",
+        "bucket (projected)           100 GB/day of new clips, nothing ever deleted or moved",
+        "",
+        "$ kafka-consumer-groups.sh --describe --group thumbnails   (excerpt in step 2)",
+        "```",
+        "",
+        "Four findings to turn into code: where the lag is, how many pods the two upload designs need, why the",
+        "worker does almost twice the work, and what the bucket will cost with lifecycle tiers."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Where is the lag?",
+      "prompt": [
+        "Write `(long Total, int WorstPartition) Lag(string[] lines)` for `kafka-consumer-groups.sh --describe` output.",
+        "Columns are separated by spaces: `GROUP TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG CONSUMER-ID`.",
+        "",
+        "- skip the header (first column `GROUP`), blank lines and notes that start with `(`;",
+        "- a partition's lag is the `LAG` column; when it is `-`, use `LOG-END - CURRENT`, or the whole `LOG-END` when",
+        "  `CURRENT` is also `-` (the group never committed);",
+        "- return the total lag and the partition with the largest lag (the lowest partition number on a tie);",
+        "  with no partitions, `(0, -1)`.",
+        "",
+        "One partition holding most of the lag means a hot key or a stuck consumer, not too few consumers."
+      ],
+      "starter": [
+        "(long Total, int WorstPartition) Lag(string[] lines)",
+        "{",
+        "    return (0, -1);",
+        "}"
+      ],
+      "solution": [
+        "(long Total, int WorstPartition) Lag(string[] lines)",
+        "{",
+        "    long total = 0, worstLag = -1;",
+        "    var worst = -1;",
+        "    foreach (var line in lines)",
+        "    {",
+        "        var cols = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        if (cols.Length < 6 || cols[0] == \"GROUP\" || cols[0].StartsWith('(')) continue;",
+        "        var partition = int.Parse(cols[2]);",
+        "        long lag;",
+        "        if (cols[5] != \"-\") lag = long.Parse(cols[5]);",
+        "        else if (cols[3] == \"-\") lag = long.Parse(cols[4]);",
+        "        else lag = long.Parse(cols[4]) - long.Parse(cols[3]);",
+        "        total += lag;",
+        "        if (lag > worstLag || (lag == worstLag && partition < worst)) { worstLag = lag; worst = partition; }",
+        "    }",
+        "    return (total, worst);",
+        "}"
+      ],
+      "hints": [
+        "`line.Split(' ', StringSplitOptions.RemoveEmptyEntries)` gives the columns; skip rows whose first column is `GROUP` or starts with `(`.",
+        "Keep the worst lag seen so far and its partition; replace it on a larger lag, or an equal lag with a smaller partition number."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoOut = new[] {",
+        "    \"GROUP       TOPIC    PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG     CONSUMER-ID\",",
+        "    \"thumbnails  uploads  0          1000            1200            200     thumbnails-1\",",
+        "    \"thumbnails  uploads  1          900             4900            4000    thumbnails-2\",",
+        "    \"thumbnails  uploads  2          -               800             -       -\",",
+        "    \"thumbnails  uploads  3          500             1300            800     thumbnails-3\",",
+        "    \"\",",
+        "    \"(2 more members have no partitions assigned)\" };",
+        "Dojo.Eq(\"total lag, with the never-committed partition counted in full\", (5800L, 1), Lag(dojoOut));",
+        "Dojo.Eq(\"'-' lag with a committed offset is LOG-END minus CURRENT\", (300L, 0), Lag(new[] { \"g t 0 700 1000 - c-1\" }));",
+        "Dojo.Eq(\"a tie goes to the lower partition\", (100L, 2), Lag(new[] { \"g t 5 0 50 50 c\", \"g t 2 0 50 50 c\" }));",
+        "Dojo.Eq(\"no partitions\", (0L, -1), Lag(new[] { \"GROUP TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG CONSUMER-ID\" }));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Bandwidth or CPU?",
+      "prompt": [
+        "Write `int PodsNeeded(double rps, double cpuMsPerRequest, int coresPerPod, double maxCpu, double mbPerRequest, double nicGbps, double maxNic)`:",
+        "",
+        "- by CPU: `rps × cpuMsPerRequest / 1000` cores busy, divided by `coresPerPod × maxCpu`, rounded up;",
+        "- by network: `rps × mbPerRequest × 8 / 1000` Gbps, divided by `nicGbps × maxNic`, rounded up;",
+        "- return the larger, at least 1.",
+        "",
+        "Streaming the clips through the API: 2,200 uploads/s, 4 ms CPU, 8 cores, 60% CPU target, 5 MB each, 10 Gbps",
+        "cards at 60%: **15 pods**, all for bandwidth. With presigned direct uploads the API only handles about 2 KB",
+        "of JSON per upload: **2 pods**."
+      ],
+      "starter": [
+        "int PodsNeeded(double rps, double cpuMsPerRequest, int coresPerPod, double maxCpu, double mbPerRequest, double nicGbps, double maxNic)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int PodsNeeded(double rps, double cpuMsPerRequest, int coresPerPod, double maxCpu, double mbPerRequest, double nicGbps, double maxNic)",
+        "{",
+        "    var byCpu = (int)Math.Ceiling(rps * cpuMsPerRequest / 1000 / (coresPerPod * maxCpu));",
+        "    var byNic = (int)Math.Ceiling(rps * mbPerRequest * 8 / 1000 / (nicGbps * maxNic));",
+        "    return Math.Max(1, Math.Max(byCpu, byNic));",
+        "}"
+      ],
+      "hints": [
+        "Two rounded-up divisions with `Math.Ceiling`, then `Math.Max`.",
+        "MB/s to Gbps: multiply by 8 (bits) and divide by 1,000 (mega to giga)."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"streaming clips through the API: 15 pods for bandwidth\", 15, PodsNeeded(2200, 4, 8, 0.6, 5, 10, 0.6));",
+        "Dojo.Eq(\"direct uploads: 2 pods for CPU\", 2, PodsNeeded(2200, 4, 8, 0.6, 0.002, 10, 0.6));",
+        "Dojo.Eq(\"a CPU-heavy API is sized by CPU\", 23, PodsNeeded(1000, 100, 8, 0.55, 0.01, 10, 0.6));",
+        "Dojo.Eq(\"no traffic still runs one pod\", 1, PodsNeeded(0, 4, 8, 0.6, 5, 10, 0.6));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An idempotent, loop-proof worker",
+      "prompt": [
+        "The worker did 1.9x more work than there were uploads, for two reasons: events are delivered **at least",
+        "once**, and the worker writes its thumbnails into the **same bucket**, under `thumbs/`, which fires another",
+        "object-created event for every thumbnail.",
+        "",
+        "Write a class `ThumbnailWorker`:",
+        "",
+        "- `bool Handle(string key, string etag)` returns true when it makes a thumbnail, false when it skips;",
+        "- skip keys under `thumbs/` (its own output);",
+        "- skip a `(key, etag)` pair it has already handled (a redelivery); a **new etag** for the same key is a",
+        "  new upload (the object was overwritten) and is handled;",
+        "- `List<string> Made` lists each thumbnail made, as `thumbs/{key}` (for example `thumbs/u42/a.mp4`), in order."
+      ],
+      "starter": [
+        "class ThumbnailWorker",
+        "{",
+        "    public List<string> Made { get; } = new();",
+        "    public bool Handle(string key, string etag) => false;",
+        "}"
+      ],
+      "solution": [
+        "class ThumbnailWorker",
+        "{",
+        "    readonly HashSet<(string Key, string Etag)> seen = new();",
+        "    public List<string> Made { get; } = new();",
+        "",
+        "    public bool Handle(string key, string etag)",
+        "    {",
+        "        if (key.StartsWith(\"thumbs/\", StringComparison.Ordinal)) return false;",
+        "        if (!seen.Add((key, etag))) return false;",
+        "        Made.Add(\"thumbs/\" + key);",
+        "        return true;",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "A `HashSet<(string, string)>` remembers handled pairs; `Add` returns false when the pair is already there.",
+        "Check the `thumbs/` prefix first, with `StringComparison.Ordinal`."
+      ],
+      "template": [
+        "var dojoW = new ThumbnailWorker();",
+        "Dojo.Check(\"a new upload is handled\", dojoW.Handle(\"u42/a.mp4\", \"e1\"));",
+        "Dojo.Check(\"a redelivery is skipped\", !dojoW.Handle(\"u42/a.mp4\", \"e1\"));",
+        "Dojo.Check(\"its own thumbnail event is skipped\", !dojoW.Handle(\"thumbs/u42/a.mp4\", \"t1\"));",
+        "Dojo.Check(\"an overwrite (new etag) is handled again\", dojoW.Handle(\"u42/a.mp4\", \"e2\"));",
+        "Dojo.Check(\"another key is independent\", dojoW.Handle(\"u7/b.mp4\", \"e1\"));",
+        "Dojo.Eq(\"three thumbnails made, in order\", new List<string> { \"thumbs/u42/a.mp4\", \"thumbs/u42/a.mp4\", \"thumbs/u7/b.mp4\" }, dojoW.Made);",
+        "Dojo.Check(\"a key that only contains thumbs/ later is still handled\", dojoW.Handle(\"u9/thumbs/c.mp4\", \"e1\"));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Price the bucket with lifecycle tiers",
+      "prompt": [
+        "New clips arrive at a steady `gbPerDay`. Write `double StorageCostPerMonth(double gbPerDay, int daysRunning)`:",
+        "the monthly bill after `daysRunning` days, with a lifecycle rule that moves data by age. Each day's batch has",
+        "an age from `0` (today) to `daysRunning - 1` and is billed per GB-month at:",
+        "",
+        "| Age in days | Tier | $ per GB-month (illustrative) |",
+        "|---|---|---|",
+        "| 0 to 29 | standard | 0.023 |",
+        "| 30 to 179 | infrequent access | 0.0125 |",
+        "| 180 and over | archive | 0.004 |",
+        "",
+        "Return it rounded to cents (`Math.Round(x, 2)`). After 200 days at 100 GB/day the bill is `264.5`; without",
+        "the rule (everything standard) it would be `460`."
+      ],
+      "starter": [
+        "double StorageCostPerMonth(double gbPerDay, int daysRunning)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double StorageCostPerMonth(double gbPerDay, int daysRunning)",
+        "{",
+        "    var cost = 0.0;",
+        "    for (var age = 0; age < daysRunning; age++)",
+        "    {",
+        "        var price = age < 30 ? 0.023 : age < 180 ? 0.0125 : 0.004;",
+        "        cost += gbPerDay * price;",
+        "    }",
+        "    return Math.Round(cost, 2);",
+        "}"
+      ],
+      "hints": [
+        "Loop over the ages `0 .. daysRunning - 1` and pick the price for each.",
+        "Add `gbPerDay × price` for each day's batch, then round once at the end."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the first month is all standard\", 69.0, StorageCostPerMonth(100, 30));",
+        "Dojo.Eq(\"after 200 days, three tiers\", 264.5, StorageCostPerMonth(100, 200));",
+        "Dojo.Eq(\"after a year\", 330.5, StorageCostPerMonth(100, 365));",
+        "Dojo.Eq(\"nothing stored yet\", 0.0, StorageCostPerMonth(100, 0));",
+        "Dojo.Eq(\"one day of data\", 2.3, StorageCostPerMonth(100, 1));"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "photo-share",
+      "title": "Build it: photo sharing",
+      "prompt": [
+        "In the **System design board**, open the capstone *Photo sharing*. You start from the users alone. Put the",
+        "uploads into **object storage** with presigned URLs, serve photos through a **CDN**, cache the feed reads,",
+        "spread the servers over availability zones, and meet the latency, availability and budget goals."
+      ],
+      "explain": "The bytes never touch your app servers or your database: the bucket takes the uploads, the CDN serves the views, and your own servers only handle small JSON. That is what keeps the bill and the p99 down."
+    }
+  ]
+}

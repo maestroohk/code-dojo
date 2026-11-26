@@ -1,0 +1,208 @@
+{
+  "title": "Boss: read the load-test report",
+  "summary": "A constant-rate load test of one API server lands in your inbox before a launch. Find the knee, size the pool, write the health checker, and diagnose what kind of limit the test hit.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The report",
+      "body": [
+        "The team ran `wrk2 -R` at rising rates against **one** API server (8 vCPU) in staging, 60 s per step, and",
+        "exported the results as CSV. The SLO is **p99 under 100 ms**; launch peak is forecast at **20,000 rps**.",
+        "",
+        "```text",
+        "rps,p50,p95,p99,cpu",
+        "500,6,11,18,0.09",
+        "1000,6,12,19,0.18",
+        "2000,7,13,22,0.36",
+        "3000,7,15,26,0.54",
+        "4000,8,19,35,0.71",
+        "4500,9,24,52,0.80",
+        "5000,12,41,140,0.89",
+        "5500,35,380,1900,0.97",
+        "```",
+        "",
+        "Latencies are in ms and `cpu` is a fraction. The rows come sorted by `rps`, header first. Each step below is",
+        "checked by tests with this report and others like it."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Find the knee",
+      "prompt": [
+        "Write `int KneeRps(string[] rows, double p99LimitMs)`: skip the header line, then return the `rps` of the last",
+        "row **before the first row whose p99 is over the limit**. If no row breaks the limit, return the last row's",
+        "`rps`. If the first data row already breaks it, return `0`.",
+        "",
+        "For the report above, `KneeRps(rows, 100)` is `4500`."
+      ],
+      "starter": [
+        "int KneeRps(string[] rows, double p99LimitMs)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int KneeRps(string[] rows, double p99LimitMs)",
+        "{",
+        "    var knee = 0;",
+        "    foreach (var row in rows.Skip(1))",
+        "    {",
+        "        var f = row.Split(',');",
+        "        if (double.Parse(f[3]) > p99LimitMs) break;",
+        "        knee = int.Parse(f[0]);",
+        "    }",
+        "    return knee;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "string[] dojoReport = { \"rps,p50,p95,p99,cpu\", \"500,6,11,18,0.09\", \"1000,6,12,19,0.18\", \"2000,7,13,22,0.36\", \"3000,7,15,26,0.54\", \"4000,8,19,35,0.71\", \"4500,9,24,52,0.80\", \"5000,12,41,140,0.89\", \"5500,35,380,1900,0.97\" };",
+        "Dojo.Eq(\"SLO 100 ms\", 4500, KneeRps(dojoReport, 100));",
+        "Dojo.Eq(\"SLO 200 ms\", 5000, KneeRps(dojoReport, 200));",
+        "Dojo.Eq(\"SLO 30 ms\", 3000, KneeRps(dojoReport, 30));",
+        "Dojo.Eq(\"never breaks a 5 s limit\", 5500, KneeRps(dojoReport, 5000));",
+        "Dojo.Eq(\"breaks from the first row\", 0, KneeRps(dojoReport, 10));",
+        "Dojo.Eq(\"a dip after the break does not count\", 100, KneeRps(new[] { \"rps,p50,p95,p99,cpu\", \"100,5,8,20,0.1\", \"200,9,60,300,0.2\", \"300,6,9,25,0.3\" }, 100));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Size the pool",
+      "prompt": [
+        "Plan each server at a fraction of its knee, not at the knee. Write",
+        "`int ServersFor(int peakRps, int kneeRpsPerServer, double fractionOfKnee, int spare)`: the servers needed so",
+        "each one runs at `kneeRpsPerServer x fractionOfKnee`, **rounded up**, plus `spare`.",
+        "",
+        "`ServersFor(20000, 4500, 0.7, 1)` is `8`: 20,000 / 3,150 = 6.35, so 7, plus 1 spare."
+      ],
+      "starter": [
+        "int ServersFor(int peakRps, int kneeRpsPerServer, double fractionOfKnee, int spare)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int ServersFor(int peakRps, int kneeRpsPerServer, double fractionOfKnee, int spare)",
+        "{",
+        "    var perServer = kneeRpsPerServer * fractionOfKnee;",
+        "    return (int)Math.Ceiling(peakRps / perServer) + spare;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"launch plan\", 8, ServersFor(20_000, 4_500, 0.7, 1));",
+        "Dojo.Eq(\"exact fit\", 5, ServersFor(9_000, 4_500, 0.5, 1));",
+        "Dojo.Eq(\"tiny load needs one server\", 1, ServersFor(100, 4_500, 0.7, 0));",
+        "Dojo.Eq(\"two spares for zone loss\", 9, ServersFor(20_000, 4_500, 0.7, 2));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "The health checker",
+      "prompt": [
+        "The new pool needs active health checks with thresholds, like HAProxy's `rise` and `fall`. Write a class",
+        "`HealthCheck`:",
+        "",
+        "- `HealthCheck(int rise, int fall)`: a new server starts **unhealthy** (it must prove itself first).",
+        "- `bool Healthy` (get-only).",
+        "- `void Report(bool passed)`: count consecutive passes and consecutive failures (a pass resets the failure count",
+        "  and the other way round). An unhealthy server becomes healthy after `rise` passes in a row; a healthy server",
+        "  becomes unhealthy after `fall` failures in a row.",
+        "- `int Flaps` (get-only): how many times `Healthy` changed."
+      ],
+      "starter": [
+        "class HealthCheck",
+        "{",
+        "    public HealthCheck(int rise, int fall) { }",
+        "",
+        "    public bool Healthy { get; }",
+        "    public int Flaps { get; }",
+        "",
+        "    public void Report(bool passed) { }",
+        "}"
+      ],
+      "solution": [
+        "class HealthCheck",
+        "{",
+        "    readonly int rise, fall;",
+        "    int passes, failures;",
+        "",
+        "    public HealthCheck(int rise, int fall) { this.rise = rise; this.fall = fall; }",
+        "",
+        "    public bool Healthy { get; private set; }",
+        "    public int Flaps { get; private set; }",
+        "",
+        "    public void Report(bool passed)",
+        "    {",
+        "        if (passed) { passes++; failures = 0; }",
+        "        else { failures++; passes = 0; }",
+        "        if (!Healthy && passes >= rise) { Healthy = true; Flaps++; }",
+        "        else if (Healthy && failures >= fall) { Healthy = false; Flaps++; }",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "bool[] dojoSeq(HealthCheck h, params bool[] reports) { var seen = new List<bool>(); foreach (var r in reports) { h.Report(r); seen.Add(h.Healthy); } return seen.ToArray(); }",
+        "var dojoH = new HealthCheck(2, 3);",
+        "Dojo.Eq(\"starts unhealthy\", false, dojoH.Healthy);",
+        "Dojo.Eq(\"rise 2, fall 3\", new[] { false, true, true, true, false, false, true }, dojoSeq(dojoH, true, true, false, false, false, true, true));",
+        "Dojo.Eq(\"three flaps so far\", 3, dojoH.Flaps);",
+        "var dojoBlip = new HealthCheck(2, 3);",
+        "Dojo.Eq(\"single failures do not flap a healthy server\", new[] { false, true, true, true, true, true, true }, dojoSeq(dojoBlip, true, true, false, true, false, true, false));",
+        "Dojo.Eq(\"one flap only\", 1, dojoBlip.Flaps);",
+        "var dojoOne = new HealthCheck(1, 1);",
+        "Dojo.Eq(\"rise 1, fall 1 follows every check\", new[] { true, false, true }, dojoSeq(dojoOne, true, false, true));",
+        "{{CODE}}"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "What kind of limit?",
+      "prompt": [
+        "Before buying servers, find out **what** the test ran into. Write `string Diagnose(string[] rows)` (header first):",
+        "",
+        "- the **knee row** is the first data row whose p99 is more than **3 times** the first data row's p99;",
+        "- no such row -> `\"no knee: test at a higher rate\"`;",
+        "- the knee row's `cpu` is `0.85` or more -> `\"cpu: add cores or cut cpu per request\"`;",
+        "- otherwise -> `\"not cpu: check pools, locks and dependencies\"`.",
+        "",
+        "The report above has its knee at 5,000 rps (140 ms > 3 x 18 ms) with CPU at 0.89: CPU-bound. A knee at 40%",
+        "CPU means the server is waiting on something: a connection pool, a lock, a slow dependency."
+      ],
+      "starter": [
+        "string Diagnose(string[] rows)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Diagnose(string[] rows)",
+        "{",
+        "    var data = rows.Skip(1).Select(r => r.Split(',')).ToList();",
+        "    var baseline = double.Parse(data[0][3]);",
+        "    foreach (var f in data)",
+        "    {",
+        "        if (double.Parse(f[3]) > 3 * baseline)",
+        "            return double.Parse(f[4]) >= 0.85",
+        "                ? \"cpu: add cores or cut cpu per request\"",
+        "                : \"not cpu: check pools, locks and dependencies\";",
+        "    }",
+        "    return \"no knee: test at a higher rate\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "string[] dojoCpu = { \"rps,p50,p95,p99,cpu\", \"500,6,11,18,0.09\", \"1000,6,12,19,0.18\", \"2000,7,13,22,0.36\", \"3000,7,15,26,0.54\", \"4000,8,19,35,0.71\", \"4500,9,24,52,0.80\", \"5000,12,41,140,0.89\", \"5500,35,380,1900,0.97\" };",
+        "string[] dojoPool = { \"rps,p50,p95,p99,cpu\", \"500,9,15,25,0.08\", \"1000,9,16,27,0.16\", \"1500,10,20,31,0.24\", \"2000,40,600,2400,0.31\", \"2500,90,1500,5000,0.33\" };",
+        "string[] dojoFlat = { \"rps,p50,p95,p99,cpu\", \"500,6,11,18,0.09\", \"1000,6,12,19,0.18\", \"2000,7,13,22,0.36\" };",
+        "Dojo.Eq(\"the report: CPU-bound\", \"cpu: add cores or cut cpu per request\", Diagnose(dojoCpu));",
+        "Dojo.Eq(\"knee at 31% CPU\", \"not cpu: check pools, locks and dependencies\", Diagnose(dojoPool));",
+        "Dojo.Eq(\"never bends\", \"no knee: test at a higher rate\", Diagnose(dojoFlat));",
+        "Dojo.Eq(\"exactly 3x is not yet the knee\", \"no knee: test at a higher rate\", Diagnose(new[] { \"rps,p50,p95,p99,cpu\", \"100,5,8,20,0.1\", \"200,6,20,60,0.95\" }));",
+        "Dojo.Eq(\"exactly 0.85 counts as CPU\", \"cpu: add cores or cut cpu per request\", Diagnose(new[] { \"rps,p50,p95,p99,cpu\", \"100,5,8,20,0.1\", \"200,6,20,61,0.85\" }));"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,438 @@
+{
+  "title": "Object storage: blobs out of the database",
+  "summary": "Buckets and keys, why files do not belong in the database or through the API, presigned direct uploads, multipart limits, a CDN in front of the bucket, lifecycle tiers, and the commands to drive it.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What object storage is",
+      "body": [
+        "Object storage (Amazon S3 and the many S3-compatible stores, Azure Blob Storage, Google Cloud Storage) keeps",
+        "**objects**: a key, the bytes, and a little metadata, in a **bucket**.",
+        "",
+        "```text",
+        "bucket: photos-example",
+        "  users/42/2026/11/9f3c.jpg      2.1 MB   image/jpeg",
+        "  users/42/2026/11/9f3c_w320.jpg  38 KB   image/jpeg",
+        "```",
+        "",
+        "- **Flat namespace.** `users/42/` is a key prefix, not a folder. Listing by prefix works; renaming a \"folder\"",
+        "  means copying every object.",
+        "- **Whole objects.** You put and get whole objects (or byte ranges); you do not update the middle of one.",
+        "- **Consistency.** S3 has given strong read-after-write consistency for puts, overwrites and lists since",
+        "  December 2020. Check your store's documentation: not every S3-compatible product promises the same.",
+        "- **Cheap and huge, not fast to first byte.** Storage costs cents per GB-month and throughput scales out, but a",
+        "  GET usually takes tens of milliseconds before the first byte. S3 documents at least 3,500 writes and 5,500",
+        "  reads per second **per prefix**, so spread hot data over prefixes.",
+        "",
+        "**Why not in the database?** A 2 MB photo in a row bloats backups and replicas, fills the buffer cache with",
+        "bytes nobody queries, and makes every replica copy it. Put the bytes in a bucket and the **key plus",
+        "metadata** (owner, size, content type, checksum) in the database."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A social app stores 4 MB profile photos for 30 million users. Where do the bytes and the metadata go?",
+      "options": [
+        "Bytes in object storage behind a CDN; key, owner, size and checksum in the database",
+        "Bytes in a `bytea`/`varbinary` column next to the user row, so one transaction covers both",
+        "Bytes on the app servers' local disks, with sticky sessions",
+        "Bytes in the cache cluster, so reads are fast"
+      ],
+      "answer": 0,
+      "explain": "That is about 120 TB of photos. In the database it would dominate backups, replicas and memory. Local disks vanish with the server and break when traffic moves. A cache is memory priced for hot data, not a store of record."
+    },
+    {
+      "type": "learn",
+      "title": "Presigned URLs: upload around your servers",
+      "body": [
+        "If every upload streams **through** your API, your servers spend their network cards on bytes. 300 uploads",
+        "per second of 2 MB is 600 MB/s, about 4.8 Gbps. Let the client upload **directly** to the bucket instead:",
+        "",
+        "```text",
+        "1. client ──POST /uploads {size, type}──> API        (auth, quota, picks the key)",
+        "2. API    ──signs a URL: PUT users/42/9f3c.jpg, expires in 15 min──> client",
+        "3. client ──PUT bytes──────────────────────────────> bucket   (your servers never see them)",
+        "4. bucket ──\"object created\" event──> queue ──> thumbnail worker, then marks the photo ready",
+        "```",
+        "",
+        "A **presigned URL** carries the method, the key, an expiry and a signature made with a secret only your",
+        "service holds. The store checks the signature and the clock; anyone holding the URL can do exactly that one",
+        "thing until it expires. Keep expiries short, sign the content type and length where the store supports it,",
+        "and never trust the upload until the event arrives and a worker has checked the object."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the direct-upload flow in order.",
+      "lines": [
+        "The client asks the API for an upload slot with the file's size and type",
+        "The API checks the user and quota, picks a key and returns a short-lived presigned PUT URL",
+        "The client PUTs the bytes straight to the bucket",
+        "The bucket emits an object-created event onto a queue",
+        "A worker validates the file, makes thumbnails and marks the photo ready in the database"
+      ],
+      "explain": "The API only ever handles small JSON. The heavy bytes go client to bucket, and the slow work (thumbnails) happens behind a queue."
+    },
+    {
+      "type": "learn",
+      "title": "Big files, CDN and lifecycle",
+      "body": [
+        "**Multipart upload** splits a large object into parts that upload in parallel and can be retried one by one.",
+        "The S3 limits, which most compatible stores copy:",
+        "",
+        "| Limit | Value |",
+        "|---|---|",
+        "| part size | 5 MiB to 5 GiB (the **last** part may be smaller) |",
+        "| parts per upload | at most 10,000 |",
+        "| object size | up to 5 TiB |",
+        "| single PUT | up to 5 GiB |",
+        "",
+        "So a big file needs a part size of at least `size / 10,000`. Unfinished multipart uploads keep their parts",
+        "(and you pay for them) until aborted: add a lifecycle rule that aborts incomplete uploads after a few days.",
+        "",
+        "**Serve reads through a CDN.** Point the CDN at the bucket as its origin, use long cache lifetimes with",
+        "content-hashed or versioned keys (`9f3c_w320.jpg` never changes), and keep the bucket private to the CDN.",
+        "",
+        "**Lifecycle tiers.** Most photos are hot for days and then rarely read: move old objects to an",
+        "infrequent-access or archive class. Archive classes are cheap to keep and slow or costly to read back, so",
+        "never archive what users still open."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to what it means.",
+      "pairs": [
+        [
+          "Presigned URL",
+          "A time-limited, signed permission for one method on one key"
+        ],
+        [
+          "Multipart upload",
+          "Parallel, retryable parts that the store joins into one object"
+        ],
+        [
+          "Key prefix",
+          "The part of a key used like a folder, and the unit request limits apply to"
+        ],
+        [
+          "Lifecycle rule",
+          "Moves, expires or aborts objects by age automatically"
+        ],
+        [
+          "CDN origin",
+          "Where the CDN fetches on a miss: here, the bucket"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: queues, streams, buckets and search",
+      "body": "The commands you reach for when a pipeline is behind, an upload misbehaves or search looks wrong.",
+      "toolkit": [
+        {
+          "cmd": "aws s3 presign",
+          "what": "Prints a presigned GET URL for an object, to test a download link or hand a file to someone briefly.",
+          "flags": [
+            [
+              "--expires-in 900",
+              "seconds until the URL stops working (default 3600)"
+            ],
+            [
+              "--endpoint-url",
+              "point the CLI at an S3-compatible store"
+            ]
+          ],
+          "example": "aws s3 presign s3://photos-example/users/42/9f3c.jpg --expires-in 900",
+          "when": "checking that a stored object is really there and readable",
+          "lang": "bash"
+        },
+        {
+          "cmd": "aws s3api create-multipart-upload",
+          "what": "Starts a multipart upload and returns its `UploadId`; `upload-part` and `complete-multipart-upload` finish it.",
+          "flags": [
+            [
+              "--bucket / --key",
+              "where the object will live"
+            ],
+            [
+              "--content-type",
+              "stored with the object and sent back on GET"
+            ]
+          ],
+          "example": "aws s3api create-multipart-upload --bucket backups-example --key db/2026-11-27.dump --content-type application/octet-stream",
+          "when": "reproducing a client's failed large upload step by step",
+          "lang": "bash"
+        },
+        {
+          "cmd": "aws s3api list-multipart-uploads",
+          "what": "Lists uploads that were started and never completed or aborted: parts you are still paying for.",
+          "flags": [
+            [
+              "--bucket",
+              "the bucket to inspect"
+            ],
+            [
+              "--prefix",
+              "only keys under this prefix"
+            ]
+          ],
+          "example": "aws s3api list-multipart-uploads --bucket uploads-example --prefix users/",
+          "when": "the storage bill is higher than the objects you can see",
+          "lang": "bash"
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --describe",
+          "what": "Shows each partition's committed offset, log-end offset, lag and which member owns it.",
+          "flags": [
+            [
+              "--group thumbnails",
+              "the consumer group to describe"
+            ],
+            [
+              "--bootstrap-server",
+              "any broker address"
+            ],
+            [
+              "--members --verbose",
+              "members and their assigned partitions"
+            ]
+          ],
+          "example": "kafka-consumer-groups.sh --bootstrap-server kafka.example.com:9092 --describe --group thumbnails",
+          "when": "a pipeline is behind: is it every partition (throughput) or one (hot key, stuck consumer)?",
+          "lang": "bash"
+        },
+        {
+          "cmd": "rabbitmqctl list_queues",
+          "what": "Lists queues with the columns you ask for: depth, unacked and consumer count.",
+          "flags": [
+            [
+              "name messages_ready messages_unacknowledged consumers",
+              "the columns to print"
+            ],
+            [
+              "-p /shop",
+              "the virtual host"
+            ]
+          ],
+          "example": "rabbitmqctl list_queues -p /shop name messages_ready messages_unacknowledged consumers",
+          "when": "a work queue is growing: no consumers, slow consumers, or a poison message",
+          "lang": "bash"
+        },
+        {
+          "cmd": "curl .../_search",
+          "what": "Queries an Elasticsearch or OpenSearch index directly, bypassing your app, to see what the index really holds.",
+          "flags": [
+            [
+              "-H 'Content-Type: application/json'",
+              "the query is a JSON body"
+            ],
+            [
+              "?q=title:lamp",
+              "a quick query-string search"
+            ],
+            [
+              "_count",
+              "the same endpoint family, returning only the number of hits"
+            ]
+          ],
+          "example": "curl -sS 'https://search.example.com/products/_search?q=title:lamp&size=3' | jq '.hits.total'",
+          "when": "a product exists in the database but users cannot find it",
+          "lang": "bash"
+        }
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make a download link for the backup that stops working after 10 minutes.",
+      "code": "aws s3 __1__ s3://backups-example/db/2026-11-27.dump __2__ 600",
+      "blanks": [
+        "presign",
+        "--expires-in"
+      ],
+      "bank": [
+        "cp",
+        "sign",
+        "--ttl",
+        "--max-age"
+      ],
+      "explain": "`aws s3 presign` signs a GET for the object; `--expires-in` is in seconds. The link works for anyone who has it, so keep it short-lived."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** Since the app added video clips, the API pods run at 30% CPU but p99 has tripled, and",
+        "the database grows by 40 GB a day. The dashboard:"
+      ],
+      "code": [
+        "api pods      cpu 31%   net rx 9.1 Gbps of 10 Gbps   p99 2.4 s",
+        "orders-db     cpu 48%   storage +40 GB/day           replica lag 35 s",
+        "uploads/s     220 at peak, average clip 5 MB"
+      ],
+      "options": [
+        "Uploads stream through the API into the database: move to presigned direct uploads to a bucket and keep only keys in the DB",
+        "The API needs more CPU: double the pod size",
+        "The database needs a bigger disk",
+        "Add a cache in front of the API"
+      ],
+      "answer": 0,
+      "explain": "220 × 5 MB is 1.1 GB/s, about 8.8 Gbps: the network cards are full while CPU idles. The same bytes land in the database, so storage and replication lag grow. Direct uploads take the bytes off both."
+    },
+    {
+      "type": "code",
+      "title": "Plan a multipart upload",
+      "prompt": [
+        "Write `long[] PlanParts(long size, long preferredPart)` that returns the size of every part, in order:",
+        "",
+        "- `size` must be from 1 byte to 5 TiB, else throw `ArgumentOutOfRangeException`;",
+        "- start from `preferredPart`, clamped to 5 MiB .. 5 GiB;",
+        "- if that would need more than 10,000 parts, use the smallest **whole number of MiB** that fits in",
+        "  10,000 parts instead;",
+        "- every part has that size except the last, which holds the rest.",
+        "",
+        "`PlanParts(100 MiB, 8 MiB)` is twelve parts of 8 MiB and one of 4 MiB. (1 MiB = 1,048,576 bytes.)"
+      ],
+      "starter": [
+        "long[] PlanParts(long size, long preferredPart)",
+        "{",
+        "    const long MiB = 1024L * 1024;",
+        "    return new long[0];",
+        "}"
+      ],
+      "solution": [
+        "long[] PlanParts(long size, long preferredPart)",
+        "{",
+        "    const long MiB = 1024L * 1024;",
+        "    const long minPart = 5 * MiB;",
+        "    const long maxPart = 5 * 1024 * MiB;",
+        "    const long maxObject = 5L * 1024 * 1024 * MiB;",
+        "    if (size <= 0 || size > maxObject) throw new ArgumentOutOfRangeException(nameof(size));",
+        "    var part = Math.Clamp(preferredPart, minPart, maxPart);",
+        "    if ((size + part - 1) / part > 10_000)",
+        "    {",
+        "        var needed = (size + 9_999) / 10_000;",
+        "        part = (needed + MiB - 1) / MiB * MiB;",
+        "    }",
+        "    var count = (size + part - 1) / part;",
+        "    var parts = new long[count];",
+        "    for (var i = 0; i < count; i++) parts[i] = Math.Min(part, size - i * part);",
+        "    return parts;",
+        "}"
+      ],
+      "hints": [
+        "`Math.Clamp(preferredPart, 5 * MiB, 5 * 1024 * MiB)`, and the part count is a rounded-up division: `(size + part - 1) / part`.",
+        "Too many parts? The smallest size that fits is `size / 10,000` rounded up, then rounded up again to a whole MiB."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoMiB = 1024L * 1024;",
+        "var dojoP = PlanParts(100 * dojoMiB, 8 * dojoMiB);",
+        "Dojo.Eq(\"100 MiB in 8 MiB parts: 13 parts\", 13, dojoP.Length);",
+        "Dojo.Eq(\"the first part is 8 MiB\", 8 * dojoMiB, dojoP[0]);",
+        "Dojo.Eq(\"the last part holds the rest: 4 MiB\", 4 * dojoMiB, dojoP[^1]);",
+        "Dojo.Eq(\"a 1 MiB preference is raised to the 5 MiB minimum\", 20, PlanParts(100 * dojoMiB, dojoMiB).Length);",
+        "Dojo.Eq(\"a 10 GiB preference is capped at 5 GiB\", 5 * 1024 * dojoMiB, PlanParts(20L * 1024 * dojoMiB, 10L * 1024 * dojoMiB)[0]);",
+        "var dojoBig = PlanParts(1024L * 1024 * dojoMiB, 8 * dojoMiB);",
+        "Dojo.Eq(\"1 TiB: parts grow to 105 MiB\", 105 * dojoMiB, dojoBig[0]);",
+        "Dojo.Check(\"1 TiB: no more than 10,000 parts\", dojoBig.Length <= 10_000, $\"got {dojoBig.Length}\");",
+        "Dojo.Eq(\"1 TiB: the parts add up to the file\", 1024L * 1024 * dojoMiB, dojoBig.Sum());",
+        "Dojo.Eq(\"exact fit: no tiny last part\", 2, PlanParts(10 * dojoMiB, 5 * dojoMiB).Length);",
+        "Dojo.Eq(\"a small file is one part\", 1, PlanParts(1000, 8 * dojoMiB).Length);",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"over 5 TiB is refused\", () => PlanParts(5L * 1024 * 1024 * dojoMiB + 1, 8 * dojoMiB));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"an empty file is not a multipart upload\", () => PlanParts(0, 8 * dojoMiB));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Sign and verify an upload URL",
+      "prompt": [
+        "Build a small presigned-URL scheme (generic, not any provider's exact format). The string to sign is",
+        "`method + \"\\n\" + path + \"\\n\" + expires`, signed with HMAC-SHA256 and the secret (both as UTF-8), as",
+        "**lowercase hex**.",
+        "",
+        "- `string Sign(string secret, string method, string path, long expires)`.",
+        "- `string Presign(string secret, string method, string path, long expires)` returns",
+        "  `https://files.example.com{path}?expires={expires}&sig={signature}`.",
+        "- `bool Verify(string secret, string method, string url, long now)`: true only when `expires` and `sig` are",
+        "  both present, `now <= expires`, and the signature matches the method, the URL's path and `expires`.",
+        "  Compare signatures with `CryptographicOperations.FixedTimeEquals` so timing does not leak how much matched.",
+        "",
+        "Times are Unix seconds passed in, so the tests do not depend on the clock."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "string Sign(string secret, string method, string path, long expires)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "string Presign(string secret, string method, string path, long expires)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "bool Verify(string secret, string method, string url, long now)",
+        "{",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "string Sign(string secret, string method, string path, long expires)",
+        "{",
+        "    var data = Encoding.UTF8.GetBytes($\"{method}\\n{path}\\n{expires}\");",
+        "    var mac = HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), data);",
+        "    return Convert.ToHexString(mac).ToLowerInvariant();",
+        "}",
+        "",
+        "string Presign(string secret, string method, string path, long expires)",
+        "    => $\"https://files.example.com{path}?expires={expires}&sig={Sign(secret, method, path, expires)}\";",
+        "",
+        "bool Verify(string secret, string method, string url, long now)",
+        "{",
+        "    var uri = new Uri(url);",
+        "    var query = new Dictionary<string, string>();",
+        "    foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))",
+        "    {",
+        "        var eq = pair.IndexOf('=');",
+        "        if (eq > 0) query[pair[..eq]] = pair[(eq + 1)..];",
+        "    }",
+        "    if (!query.TryGetValue(\"expires\", out var exp) || !long.TryParse(exp, out var expires)) return false;",
+        "    if (!query.TryGetValue(\"sig\", out var sig)) return false;",
+        "    if (now > expires) return false;",
+        "    var expected = Encoding.UTF8.GetBytes(Sign(secret, method, uri.AbsolutePath, expires));",
+        "    return CryptographicOperations.FixedTimeEquals(expected, Encoding.UTF8.GetBytes(sig));",
+        "}"
+      ],
+      "hints": [
+        "`HMACSHA256.HashData(key, data)` returns the MAC bytes; `Convert.ToHexString(...).ToLowerInvariant()` makes the hex.",
+        "In `Verify`, `new Uri(url)` gives `AbsolutePath` and `Query`; split the query on `&` and `=`, then re-sign and compare."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoKey = \"test-signing-key\";",
+        "var dojoExpected = Convert.ToHexString(System.Security.Cryptography.HMACSHA256.HashData(Encoding.UTF8.GetBytes(dojoKey), Encoding.UTF8.GetBytes(\"PUT\\n/users/42/9f3c.jpg\\n1800000900\"))).ToLowerInvariant();",
+        "Dojo.Eq(\"Sign uses method, path and expiry in that order\", dojoExpected, Sign(dojoKey, \"PUT\", \"/users/42/9f3c.jpg\", 1800000900));",
+        "var dojoUrl = Presign(dojoKey, \"PUT\", \"/users/42/9f3c.jpg\", 1800000900);",
+        "Dojo.Eq(\"Presign builds the URL\", \"https://files.example.com/users/42/9f3c.jpg?expires=1800000900&sig=\" + dojoExpected, dojoUrl);",
+        "Dojo.Check(\"a fresh URL verifies\", Verify(dojoKey, \"PUT\", dojoUrl, 1800000000));",
+        "Dojo.Check(\"it still works at the expiry second\", Verify(dojoKey, \"PUT\", dojoUrl, 1800000900));",
+        "Dojo.Check(\"an expired URL is refused\", !Verify(dojoKey, \"PUT\", dojoUrl, 1800000901));",
+        "Dojo.Check(\"a PUT URL cannot be used for DELETE\", !Verify(dojoKey, \"DELETE\", dojoUrl, 1800000000));",
+        "Dojo.Check(\"another key (path) is refused\", !Verify(dojoKey, \"PUT\", dojoUrl.Replace(\"9f3c\", \"0000\"), 1800000000));",
+        "Dojo.Check(\"a stretched expiry is refused\", !Verify(dojoKey, \"PUT\", dojoUrl.Replace(\"1800000900\", \"1900000900\"), 1800000000));",
+        "Dojo.Check(\"a different secret is refused\", !Verify(\"other-key\", \"PUT\", dojoUrl, 1800000000));",
+        "Dojo.Check(\"no signature is refused\", !Verify(dojoKey, \"PUT\", \"https://files.example.com/users/42/9f3c.jpg?expires=1800000900\", 1800000000));"
+      ],
+      "require": [
+        {
+          "pattern": "FixedTimeEquals",
+          "message": "Compares signatures in constant time"
+        }
+      ]
+    }
+  ]
+}

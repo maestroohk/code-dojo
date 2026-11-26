@@ -1,0 +1,360 @@
+{
+  "title": "Going async: queues in the design",
+  "summary": "When a queue belongs in the request path and what it costs, queue or log at design level, why consumers beyond the partition count sit idle, and how to size partitions and drain a backlog.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Move work out of the request",
+      "body": [
+        "A synchronous chain is only as fast and as available as its slowest, flakiest link. A queue cuts the chain:",
+        "",
+        "```text",
+        "sync:   client ──> API ──> payments ──> email ──> search      every hop must be up, now",
+        "",
+        "async:  client ──> API ──> [ queue ] ──> email worker          the API answers 202 Accepted",
+        "                                 └────> search indexer        workers catch up at their own pace",
+        "```",
+        "",
+        "Go async when the caller does not need the result to carry on: emails, thumbnails, search updates,",
+        "fan-out to followers, analytics. Three things you buy:",
+        "",
+        "- **Decoupling**: email can be down for ten minutes and no order fails.",
+        "- **Load levelling**: a spike becomes a backlog that drains later, not a wall of 503s.",
+        "- **Fan-out**: one event, many independent consumers.",
+        "",
+        "And the bill: results arrive **later** (the UI must say \"processing\"), messages are delivered **at least once**",
+        "(so duplicates happen), order is only kept per key, and you now run and watch a broker.",
+        "The **Messaging** topic covers RabbitMQ and Kafka in depth; here we decide *where* a queue goes and *how big*."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "For an online shop, which work stays in the request and which goes behind a queue?",
+      "buckets": [
+        "Keep it synchronous",
+        "Put it behind a queue"
+      ],
+      "items": [
+        [
+          "Check the password at login",
+          0
+        ],
+        [
+          "Authorise the card before showing \"order placed\"",
+          0
+        ],
+        [
+          "Show the cart total",
+          0
+        ],
+        [
+          "Send the order confirmation email",
+          1
+        ],
+        [
+          "Resize an uploaded photo into thumbnails",
+          1
+        ],
+        [
+          "Update the search index after a product edit",
+          1
+        ],
+        [
+          "Fan a new post out to followers' timelines",
+          1
+        ]
+      ],
+      "explain": "If the next screen depends on the answer (logged in or not, card accepted or not, the total), keep it in the request. If the user can carry on without it, a queue makes the request faster and protects it from that dependency's outages."
+    },
+    {
+      "type": "learn",
+      "title": "Queue or log, at design level",
+      "body": [
+        "| | Queue (RabbitMQ, SQS) | Log (Kafka, Kinesis, Pulsar) |",
+        "|---|---|---|",
+        "| A message is | work to do, deleted when acked | a record kept for its retention time |",
+        "| Many readers | competing consumers share one queue | each consumer group reads everything at its own offset |",
+        "| Replay last week | no, it is gone | yes, reset the group's offset |",
+        "| Order | per queue, lost with many consumers | per partition (so per key) |",
+        "| Scale reads by | adding consumers | adding partitions, then consumers |",
+        "",
+        "Rule of thumb: **tasks** (send this email, resize this photo) fit a queue. **Facts** that several teams read,",
+        "or that you may need to replay (orders placed, prices changed), fit a log.",
+        "",
+        "> **Tip:** in a design interview, name which one and say why in one sentence. \"Orders go to a log keyed by",
+        "> order id, so billing, search and analytics each get a consumer group and we can replay.\""
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Billing, the search indexer and the analytics team all need every `OrderPlaced` event. Analytics also wants to re-read the last seven days after fixing a bug. What fits best?",
+      "options": [
+        "A log topic with 7+ days of retention and one consumer group per team",
+        "One work queue that all three teams consume from",
+        "Three queues, with the API publishing to each one",
+        "Synchronous HTTP calls from the order API to each team"
+      ],
+      "answer": 0,
+      "explain": "Competing consumers on one queue would split the events between the teams. Three queues work but cannot replay and make the API know every reader. A log keeps the facts, and each group keeps its own position."
+    },
+    {
+      "type": "learn",
+      "title": "Consumers never beat partitions",
+      "body": [
+        "In a log, each partition is read by **at most one consumer per group**. Extra consumers sit idle. So",
+        "throughput is capped by the partition count, not the pod count:",
+        "",
+        "```text",
+        "active consumers = min(consumers, partitions)",
+        "drain rate       = active consumers × rate per consumer",
+        "partitions       = max(peak × headroom / per-partition limit,",
+        "                       peak × headroom / per-consumer rate)",
+        "```",
+        "",
+        "Pick the partition count up front with headroom: adding partitions later changes which partition a key",
+        "hashes to, which breaks per-key ordering during the switch. Step through ten consumers on six partitions:",
+        "the four extra pods do nothing, and the burst still takes two intervals to drain."
+      ],
+      "trace": {
+        "code": [
+          "int[] arrivals = { 3000, 9000, 9000, 3000, 3000 };",
+          "var partitions = 6;",
+          "var consumers = 10;",
+          "var perConsumer = 1000;",
+          "var active = Math.Min(consumers, partitions);",
+          "var backlog = 0;",
+          "foreach (var a in arrivals)",
+          "{",
+          "    backlog += a;",
+          "    backlog -= Math.Min(backlog, active * perConsumer);",
+          "    Console.WriteLine($\"in {a}  backlog {backlog}\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "Four partitions, eight consumers, each consumer handles 1,000 messages per interval. What does this print?",
+      "code": [
+        "var partitions = 4;",
+        "var consumers = 8;",
+        "var active = Math.Min(consumers, partitions);",
+        "var backlog = 0;",
+        "foreach (var a in new[] { 2000, 7000, 2000 })",
+        "{",
+        "    backlog += a;",
+        "    backlog -= Math.Min(backlog, active * 1000);",
+        "    Console.Write(backlog + \" \");",
+        "}"
+      ],
+      "answer": "0 3000 1000",
+      "explain": "Only four consumers can work, so the drain rate is 4,000 per interval. 7,000 arriving leaves 3,000; then 3,000 + 2,000 = 5,000 minus 4,000 leaves 1,000."
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "**Symptom first.** The thumbnail pipeline is 40 minutes behind after a marketing push. Someone scaled the",
+        "workers from 6 to 12 pods an hour ago and nothing improved. You run:"
+      ],
+      "code": [
+        "$ kafka-consumer-groups.sh --bootstrap-server kafka.example.com:9092 --describe --group thumbnails",
+        "GROUP       TOPIC    PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG     CONSUMER-ID",
+        "thumbnails  uploads  0          8812204         8901630         89426   thumbnails-7f9c-1",
+        "thumbnails  uploads  1          8790115         8880902         90787   thumbnails-7f9c-2",
+        "thumbnails  uploads  2          8803377         8893010         89633   thumbnails-7f9c-3",
+        "thumbnails  uploads  3          8799020         8889514         90494   thumbnails-7f9c-4",
+        "thumbnails  uploads  4          8801731         8891105         89374   thumbnails-7f9c-5",
+        "thumbnails  uploads  5          8807468         8897250         89782   thumbnails-7f9c-6",
+        "(6 more members have no partitions assigned)"
+      ],
+      "options": [
+        "The topic has 6 partitions, so the 6 new pods are idle: raise the partition count (planning for the key remapping) or make each consumer faster",
+        "The broker is overloaded: add brokers",
+        "The consumers are crashing: look at their logs",
+        "Lag is spread evenly, so everything is fine and it will catch up"
+      ],
+      "answer": 0,
+      "explain": "Six partitions, six members with assignments, six members with none. Lag is even across partitions, so it is a throughput limit, not a hot key or a stuck consumer. More pods cannot help until there are more partitions, or each consumer does more per second (batching, more threads per partition with care for order)."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each situation to what the design should do.",
+      "pairs": [
+        [
+          "A consumer crashes after writing to the DB but before committing its offset",
+          "The message comes again: dedupe on its message id"
+        ],
+        [
+          "50,000 orders arrive in one minute",
+          "The queue absorbs it and workers drain at their own rate"
+        ],
+        [
+          "Ten consumers, six partitions, lag growing",
+          "Four consumers are idle: more partitions or faster consumers"
+        ],
+        [
+          "The next screen needs the result",
+          "Keep that call synchronous"
+        ],
+        [
+          "Billing and analytics both need every event",
+          "One consumer group each on a log"
+        ]
+      ],
+      "explain": "At-least-once delivery means every consumer must be idempotent (Messaging, Delivery guarantees). Everything else is sizing and choosing the right shape."
+    },
+    {
+      "type": "learn",
+      "title": "Fan-out patterns",
+      "body": [
+        "Three shapes cover most designs:",
+        "",
+        "- **Work queue**: N workers compete for tasks. Scale by adding workers. Thumbnails, emails.",
+        "- **Publish-subscribe**: one event, a copy per subscriber (an exchange to several queues, or one consumer group",
+        "  per team on a log). Order placed → billing, search, analytics.",
+        "- **Fan-out to users**: one post becomes a write to each follower's timeline. The work is",
+        "  `posts × followers`, so a celebrity post is millions of writes. *Classic designs* covers fan-out on write",
+        "  versus on read.",
+        "",
+        "Whatever the shape, **at-least-once plus an idempotent consumer** is the default. Store the message id with",
+        "the side effect in one transaction, or make the write naturally idempotent (`UPSERT` by a business key)."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "How many partitions?",
+      "prompt": [
+        "Write `int PartitionsNeeded(int peakPerSec, int perPartitionPerSec, int perConsumerPerSec, double headroom)`:",
+        "",
+        "- the target rate is `peakPerSec × headroom`;",
+        "- you need enough partitions for the **partition limit** (`target / perPartitionPerSec`, rounded up)",
+        "  and enough for the **consumers** to keep up (`target / perConsumerPerSec`, rounded up), because each",
+        "  partition has at most one consumer;",
+        "- return the larger of the two, and **at least 1**;",
+        "- `headroom` below `1` throws `ArgumentOutOfRangeException`.",
+        "",
+        "`PartitionsNeeded(10000, 1000, 500, 1.5)` is `30`: the partitions could take 15, but slow consumers need 30."
+      ],
+      "starter": [
+        "int PartitionsNeeded(int peakPerSec, int perPartitionPerSec, int perConsumerPerSec, double headroom)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int PartitionsNeeded(int peakPerSec, int perPartitionPerSec, int perConsumerPerSec, double headroom)",
+        "{",
+        "    if (headroom < 1) throw new ArgumentOutOfRangeException(nameof(headroom));",
+        "    var target = peakPerSec * headroom;",
+        "    var byPartition = (int)Math.Ceiling(target / perPartitionPerSec);",
+        "    var byConsumer = (int)Math.Ceiling(target / perConsumerPerSec);",
+        "    return Math.Max(1, Math.Max(byPartition, byConsumer));",
+        "}"
+      ],
+      "hints": [
+        "Work in doubles: `var target = peakPerSec * headroom;` then `Math.Ceiling(target / perPartitionPerSec)`.",
+        "Return `Math.Max(1, Math.Max(byPartition, byConsumer))`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"slow consumers decide: 30\", 30, PartitionsNeeded(10000, 1000, 500, 1.5));",
+        "Dojo.Eq(\"the partition limit decides: 25\", 25, PartitionsNeeded(20000, 1000, 2500, 1.25));",
+        "Dojo.Eq(\"round up, not down\", 11, PartitionsNeeded(10001, 1000, 5000, 1.0));",
+        "Dojo.Eq(\"tiny traffic still needs one\", 1, PartitionsNeeded(900, 1000, 1000, 1.0));",
+        "Dojo.Eq(\"no traffic: still one partition\", 1, PartitionsNeeded(0, 1000, 1000, 2.0));",
+        "Dojo.Throws<ArgumentOutOfRangeException>(\"headroom below 1 is a mistake\", () => PartitionsNeeded(100, 10, 10, 0.5));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Watch the backlog",
+      "prompt": [
+        "Write `int[] Backlog(int[] arrivals, int partitions, int consumers, int perConsumer)` that returns the backlog",
+        "**after** each interval:",
+        "",
+        "- only `min(consumers, partitions)` consumers can work;",
+        "- in each interval, add the arrivals, then remove up to `active × perConsumer` messages (never below 0).",
+        "",
+        "Then write `int IntervalsToDrain(int[] arrivals, int partitions, int consumers, int perConsumer)`: the",
+        "1-based number of the first interval, **at or after the last interval with arrivals**, whose backlog is 0. If",
+        "the backlog is not 0 by then, keep simulating intervals with **no arrivals**. If nothing can ever drain it",
+        "(no active consumers and a backlog), return `-1`.",
+        "",
+        "With `{ 3000, 9000, 9000, 3000, 3000 }`, 6 partitions, 10 consumers and 1,000 each: the backlog is",
+        "`0, 3000, 6000, 3000, 0` and `IntervalsToDrain` is `5`."
+      ],
+      "starter": [
+        "int[] Backlog(int[] arrivals, int partitions, int consumers, int perConsumer)",
+        "{",
+        "    return new int[arrivals.Length];",
+        "}",
+        "",
+        "int IntervalsToDrain(int[] arrivals, int partitions, int consumers, int perConsumer)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "int[] Backlog(int[] arrivals, int partitions, int consumers, int perConsumer)",
+        "{",
+        "    var active = Math.Min(consumers, partitions);",
+        "    var result = new int[arrivals.Length];",
+        "    var backlog = 0;",
+        "    for (var i = 0; i < arrivals.Length; i++)",
+        "    {",
+        "        backlog += arrivals[i];",
+        "        backlog -= Math.Min(backlog, active * perConsumer);",
+        "        result[i] = backlog;",
+        "    }",
+        "    return result;",
+        "}",
+        "",
+        "int IntervalsToDrain(int[] arrivals, int partitions, int consumers, int perConsumer)",
+        "{",
+        "    var active = Math.Min(consumers, partitions);",
+        "    var rate = active * perConsumer;",
+        "    var levels = Backlog(arrivals, partitions, consumers, perConsumer);",
+        "    if (levels.Length == 0) return 0;",
+        "    var lastArrival = -1;",
+        "    for (var i = 0; i < arrivals.Length; i++) if (arrivals[i] > 0) lastArrival = i;",
+        "    if (lastArrival < 0) return 0;",
+        "    for (var i = lastArrival; i < levels.Length; i++) if (levels[i] == 0) return i + 1;",
+        "    var backlog = levels[^1];",
+        "    if (rate <= 0) return -1;",
+        "    var extra = (backlog + rate - 1) / rate;",
+        "    return levels.Length + extra;",
+        "}"
+      ],
+      "hints": [
+        "`var active = Math.Min(consumers, partitions);` and the same two lines as the trace, storing the backlog each time.",
+        "After the arrays run out, each extra interval removes `active × perConsumer`: that is a rounded-up division."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"the trace: ten consumers, six partitions\", new[] { 0, 3000, 6000, 3000, 0 }, Backlog(new[] { 3000, 9000, 9000, 3000, 3000 }, 6, 10, 1000));",
+        "Dojo.Eq(\"drains in interval 5\", 5, IntervalsToDrain(new[] { 3000, 9000, 9000, 3000, 3000 }, 6, 10, 1000));",
+        "Dojo.Eq(\"more pods than partitions changes nothing\", Backlog(new[] { 3000, 9000, 9000 }, 6, 6, 1000), Backlog(new[] { 3000, 9000, 9000 }, 6, 60, 1000));",
+        "Dojo.Eq(\"more partitions with enough pods drain faster\", new[] { 0, 0, 0 }, Backlog(new[] { 3000, 9000, 9000 }, 12, 12, 1000));",
+        "Dojo.Eq(\"10,000 at 4,000 per interval: drained in interval 3\", 3, IntervalsToDrain(new[] { 10000 }, 4, 4, 1000));",
+        "Dojo.Eq(\"backlog of 6000 at 4000 per interval needs two quiet intervals\", 4, IntervalsToDrain(new[] { 0, 10000 }, 2, 2, 2000));",
+        "Dojo.Eq(\"no consumers: never drains\", -1, IntervalsToDrain(new[] { 500 }, 4, 0, 1000));",
+        "Dojo.Eq(\"no arrivals at all: already drained\", 0, IntervalsToDrain(new[] { 0, 0 }, 4, 4, 1000));"
+      ]
+    },
+    {
+      "type": "lab",
+      "lab": "sysdesign",
+      "challenge": "write-burst",
+      "title": "Build it: absorb the write burst",
+      "prompt": [
+        "In the **System design board**, open *Absorb the write burst*. A ticket on-sale sends a burst of writes",
+        "that the database cannot take synchronously. Put a **queue** and **workers** in the write path so the API",
+        "answers 202 quickly, keep the database under its limit, and drain the backlog in time. Remember: workers",
+        "beyond the partition count do nothing."
+      ],
+      "explain": "The queue turns a write spike into a backlog, the workers set the pace the database can take, and the partition count caps how many workers can help. The cost is that the user sees \"processing\" for a little while."
+    }
+  ]
+}
