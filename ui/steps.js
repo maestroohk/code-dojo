@@ -129,9 +129,34 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
+}
+
+/**
+ * A senior's toolkit: the commands (or APIs) someone experienced reaches for, each with what it is for,
+ * the flags that matter and a real example, with a copy button. Entries:
+ *   { "cmd": "git log --oneline --graph --all", "what": "...", "flags": [["--graph", "draw the branch lines"]],
+ *     "example": "git log -S'retryCount' --oneline", "when": "optional: the situation it is for", "lang": "bash" }
+ */
+function toolkitCard(entries) {
+  const copy = (text, btn) => {
+    navigator.clipboard?.writeText(text).then(() => { btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy'; }, 1200); }).catch(() => {});
+  };
+  return h('div.toolkit',
+    h('div.toolkit-head', h('span.toolkit-badge', 'Senior’s toolkit'), h('span.muted.small', 'What experienced people type, and why. Copy any line.')),
+    entries.map(e => {
+      const lang = e.lang || 'bash';
+      const ex = e.example ?? e.cmd;
+      const btn = h('button.mini', { type: 'button', title: 'Copy the example', onclick: () => copy(ex, btn) }, 'Copy');
+      return h('div.toolkit-item',
+        h('div.toolkit-cmd', h('code', { html: highlight(e.cmd, lang) }), btn),
+        h('div.toolkit-what', { html: inline(e.what || '') }),
+        e.when && h('div.toolkit-when.muted.small', { html: inline('When: ' + e.when) }),
+        e.flags?.length && h('dl.toolkit-flags', e.flags.map(([flag, meaning]) => [h('dt', h('code', flag)), h('dd', { html: inline(meaning) })])),
+        e.example && e.example !== e.cmd && h('pre.code.toolkit-ex', h('code', { html: highlight(e.example, lang) })));
+    }));
 }
 
 // ---------------------------------------------------------------- mcq
