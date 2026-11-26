@@ -1,0 +1,277 @@
+{
+  "title": "Reading a hung process",
+  "summary": "Take a dump, find the threads that wait on each other with clrstack and syncblk, and fix the call-out-under-lock that caused it.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: a hang",
+      "body": "A service that is alive but answers nothing, with CPU near zero: take evidence first, then restart.",
+      "toolkit": [
+        {
+          "cmd": "dotnet-dump collect -p <pid>",
+          "what": "A full dump of the hung process. In Kubernetes, run it inside the pod (or a debug container sharing its process namespace).",
+          "flags": [["--type Full", "everything, needed for SOS commands"], ["-o", "where to write it"]],
+          "example": "kubectl exec -it orders-7d9f -- dotnet-dump collect -p 1 -o /tmp/orders.dmp",
+          "when": "before you restart anything"
+        },
+        {
+          "cmd": "dotnet-dump analyze <dump>",
+          "what": "An SOS prompt over the dump. The commands below run inside it.",
+          "flags": [["-c <command>", "run commands non-interactively"]],
+          "example": "dotnet-dump analyze orders.dmp -c \"syncblk\" -c \"clrstack -all\"",
+          "when": "always, then the commands below"
+        },
+        {
+          "cmd": "syncblk",
+          "what": "Every Monitor (lock statement on an object) that is held: owner thread and how many wait. MonitorHeld = 1 for the owner + 2 per waiter.",
+          "flags": [["-all", "also free sync blocks"]],
+          "example": "syncblk",
+          "when": "a hang with low CPU in code that uses lock"
+        },
+        {
+          "cmd": "clrstack -all",
+          "what": "The managed stack of every thread. `pstacks` (parallelstacks) merges identical stacks into a tree.",
+          "flags": [["-all", "every thread"], ["setthread <n> then clrstack", "one thread"], ["pstacks", "grouped view, like Visual Studio's Parallel Stacks"]],
+          "example": "pstacks",
+          "when": "find what each blocked thread is waiting for, and where in your code"
+        },
+        {
+          "cmd": "dumpasync",
+          "what": "Async state machines that are not finished, with what each awaits. Async deadlocks hold no thread, so only this shows them.",
+          "flags": [["--coalesce", "group identical await chains"], ["--stats", "counts per state machine type"]],
+          "example": "dumpasync --coalesce",
+          "when": "requests hang but clrstack shows idle pool threads"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the symptom to the first command you run in `dotnet-dump analyze`.",
+      "pairs": [
+        ["Hang, low CPU, the code uses `lock`", "`syncblk`"],
+        ["200 threads, many look the same", "`pstacks`"],
+        ["Requests hang, but no thread is blocked anywhere", "`dumpasync`"],
+        ["What exactly is thread 12 doing?", "`setthread 12` then `clrstack`"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The evidence",
+      "body": [
+        "The orders service hung at 14:02. From the dump:",
+        "",
+        "```text",
+        "> syncblk",
+        "Index         SyncBlock MonitorHeld Recursion Owning Thread Info          SyncBlock Owner",
+        "   11 000001E3C2A1B0C8            3         1 000001E3C0F2D9A0 3a1c  12   000001e3c4a3f1d0 System.Object",
+        "   14 000001E3C2A1B120            3         1 000001E3C0F31C50 41f8  17   000001e3c4a3f1e8 System.Object",
+        "",
+        "> setthread 12",
+        "> clrstack",
+        "OS Thread Id: 0x3a1c (12)",
+        "        Child SP               IP Call Site",
+        "000000A1B2C7E3F0 00007ffd3c1a5f44 [HelperMethodFrame_1OBJ: 000000a1b2c7e3f0] System.Threading.Monitor.ReliableEnter(System.Object, Boolean ByRef)",
+        "000000A1B2C7E520 00007ffcd1d84a12 Orders.Pricing.PriceBook.Touch(System.String)",
+        "000000A1B2C7E590 00007ffcd1d84811 Orders.Stock.Inventory.Reserve(System.String)",
+        "",
+        "> setthread 17",
+        "> clrstack",
+        "OS Thread Id: 0x41f8 (17)",
+        "000000A1B3D8E3F0 00007ffd3c1a5f44 [HelperMethodFrame_1OBJ: 000000a1b3d8e3f0] System.Threading.Monitor.ReliableEnter(System.Object, Boolean ByRef)",
+        "000000A1B3D8E520 00007ffcd1d85b30 Orders.Stock.Inventory.Count(System.String)",
+        "000000A1B3D8E590 00007ffcd1d859f7 Orders.Pricing.PriceBook.Reprice(System.String)",
+        "```",
+        "",
+        "Read it: two locks are held, each with **one waiter** (MonitorHeld 3 = owner + 2 for one waiter). Thread 12 is inside `Reserve`",
+        "(holding the stock lock) and waits in `PriceBook.Touch` for the price lock. Thread 17 is inside `Reprice` (holding the price lock)",
+        "and waits in `Inventory.Count` for the stock lock. A cycle.",
+        "",
+        "Note: locks on the .NET 9 `System.Threading.Lock` type are not Monitors, so they do **not** appear in `syncblk`; find them by the",
+        "threads whose stacks stop inside `System.Threading.Lock` methods."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is the root cause in this code?",
+      "options": [
+        "Each class calls into the other while holding its own lock, so the two locks are taken in opposite orders",
+        "`Monitor.ReliableEnter` is buggy",
+        "The thread pool is starved",
+        "`Inventory` should use `ConcurrentDictionary`"
+      ],
+      "answer": 0,
+      "explain": "Neither class looks wrong on its own. The deadlock exists only in how they call each other: a call out while holding a lock. Fix the design: do not hold your lock while calling the other class."
+    },
+    {
+      "type": "learn",
+      "title": "The same bug, live",
+      "body": [
+        "Here are the two classes from the dump. Run **Try every interleaving** and find the deadlock, then step through it: watch which",
+        "lock each thread holds (the bands under the lanes) when they get stuck."
+      ],
+      "interleave": {
+        "code": [
+          "class Inventory",
+          "{",
+          "    readonly object _stockLock = new();",
+          "    int _stock = 5;",
+          "    public PriceBook Prices = null!;",
+          "",
+          "    public void Reserve(string sku)",
+          "    {",
+          "        lock (_stockLock)",
+          "        {",
+          "            _stock--;",
+          "            Prices.Touch(sku);",
+          "        }",
+          "    }",
+          "",
+          "    public int Count(string sku) { lock (_stockLock) return _stock; }",
+          "}",
+          "",
+          "class PriceBook",
+          "{",
+          "    readonly object _priceLock = new();",
+          "    int _version;",
+          "    public Inventory Stock = null!;",
+          "",
+          "    public void Touch(string sku) { lock (_priceLock) _version++; }",
+          "",
+          "    public void Reprice(string sku)",
+          "    {",
+          "        lock (_priceLock)",
+          "        {",
+          "            if (Stock.Count(sku) < 10) _version++;",
+          "        }",
+          "    }",
+          "}"
+        ],
+        "setup": ["var inventory = new Inventory();", "var prices = new PriceBook();", "inventory.Prices = prices;", "prices.Stock = inventory;"],
+        "threads": [
+          { "name": "T1", "code": ["inventory.Reserve(\"A1\");"] },
+          { "name": "T2", "code": ["prices.Reprice(\"A1\");"] }
+        ],
+        "watch": ["inventory.Count(\"A1\")"],
+        "result": "inventory.Count(\"A1\")",
+        "expect": "4",
+        "outcomes": ["4", "deadlock"]
+      }
+    },
+    {
+      "type": "order",
+      "prompt": "Put the response to the 14:02 hang in order.",
+      "lines": [
+        "Take a dump of the hung process (`dotnet-dump collect`)",
+        "Restart the instance to restore service",
+        "`syncblk` and `clrstack` in the dump: two threads, two locks, a cycle",
+        "Fix the code so neither class calls the other while holding its lock",
+        "Add a test that forces the interleaving, and a lock-wait timeout alert"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Break the cycle",
+      "prompt": [
+        "Fix **`Inventory`** and **`PriceBook`** (the classes from the dump) so they can never deadlock, **without** a lock shared by both",
+        "classes. Keep every member's name and behaviour: `Reserve` takes one item from stock and touches the price book; `Reprice` bumps",
+        "the version if fewer than 10 are in stock.",
+        "",
+        "**Checked:** `Reserve` and `Reprice` run at the same time under every interleaving. No deadlock, and the stock ends at 4."
+      ],
+      "starter": [
+        "class Inventory",
+        "{",
+        "    readonly object _stockLock = new();",
+        "    int _stock = 5;",
+        "    public PriceBook Prices = null!;",
+        "",
+        "    public void Reserve(string sku)",
+        "    {",
+        "        lock (_stockLock)",
+        "        {",
+        "            _stock--;",
+        "            Prices.Touch(sku);",
+        "        }",
+        "    }",
+        "",
+        "    public int Count(string sku) { lock (_stockLock) return _stock; }",
+        "}",
+        "",
+        "class PriceBook",
+        "{",
+        "    readonly object _priceLock = new();",
+        "    int _version;",
+        "    public Inventory Stock = null!;",
+        "",
+        "    public void Touch(string sku) { lock (_priceLock) _version++; }",
+        "",
+        "    public void Reprice(string sku)",
+        "    {",
+        "        lock (_priceLock)",
+        "        {",
+        "            if (Stock.Count(sku) < 10) _version++;",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class Inventory",
+        "{",
+        "    readonly object _stockLock = new();",
+        "    int _stock = 5;",
+        "    public PriceBook Prices = null!;",
+        "",
+        "    public void Reserve(string sku)",
+        "    {",
+        "        lock (_stockLock)",
+        "        {",
+        "            _stock--;",
+        "        }",
+        "        Prices.Touch(sku);          // call out after releasing our lock",
+        "    }",
+        "",
+        "    public int Count(string sku) { lock (_stockLock) return _stock; }",
+        "}",
+        "",
+        "class PriceBook",
+        "{",
+        "    readonly object _priceLock = new();",
+        "    int _version;",
+        "    public Inventory Stock = null!;",
+        "",
+        "    public void Touch(string sku) { lock (_priceLock) _version++; }",
+        "",
+        "    public void Reprice(string sku)",
+        "    {",
+        "        var count = Stock.Count(sku);   // ask the other class first, holding nothing",
+        "        lock (_priceLock)",
+        "        {",
+        "            if (count < 10) _version++;",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "interleavings": {
+        "title": "Reserve and Reprice at once",
+        "setup": ["var inventory = new Inventory();", "var prices = new PriceBook();", "inventory.Prices = prices;", "prices.Stock = inventory;"],
+        "threads": [
+          { "name": "T1", "code": ["inventory.Reserve(\"A1\");"] },
+          { "name": "T2", "code": ["prices.Reprice(\"A1\");"] }
+        ],
+        "watch": ["inventory.Count(\"A1\")"],
+        "result": "inventory.Count(\"A1\")",
+        "expect": "4"
+      },
+      "hints": [
+        "A deadlock needs a thread holding one lock while waiting for the other. Can each method finish with its own lock before calling the other class?",
+        "In `Reserve`, call `Prices.Touch(sku)` after the `lock` block. In `Reprice`, read `Stock.Count(sku)` into a local before taking `_priceLock`."
+      ],
+      "explain": [
+        "Reading the count before taking the lock means the decision may use a slightly old value. Here that is fine (repricing is",
+        "best effort); when it is not, you need one lock over both pieces of state, or a single owner of the data (an actor, a channel",
+        "consumer)."
+      ]
+    }
+  ]
+}

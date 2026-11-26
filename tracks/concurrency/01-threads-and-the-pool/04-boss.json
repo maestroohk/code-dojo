@@ -1,0 +1,245 @@
+{
+  "title": "Boss: the checkout API that stalls at lunchtime",
+  "summary": "From counters and stacks to three fixes: an async price client, a concurrent cache warm-up, and a refresh loop that never blocks a pool thread.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**INC-4471: checkout p99 at 9 s between 12:00 and 13:00, CPU 20%.**",
+        "",
+        "```text",
+        "$ dotnet-counters monitor -n Checkout --counters System.Runtime",
+        "    dotnet.process.cpu.count ({cpu})                                   8",
+        "    dotnet.thread_pool.queue.length ({work_item})                  2,412",
+        "    dotnet.thread_pool.thread.count ({thread})                       164",
+        "",
+        "$ dotnet-stack report -n Checkout | grep -A1 GetResultCore | grep Checkout! | sort | uniq -c",
+        "    131   Checkout!Checkout.Pricing.PriceClient.GetPrice(class System.String)",
+        "     22   Checkout!Checkout.Startup.CacheWarmer.Warm()",
+        "      8   Checkout!Checkout.Jobs.RatesRefresher.Tick(class System.Object)",
+        "```",
+        "",
+        "Three places block pool threads on tasks. Fix all three. Each check holds the fake dependency's answer until the test says so, so",
+        "blocking code cannot pass by luck."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "1. The price client",
+      "prompt": [
+        "Replace `decimal GetPrice(string sku)` with **`Task<decimal> GetPriceAsync(string sku, CancellationToken ct)`** on `PriceClient`.",
+        "",
+        "- Await `api.GetCentsAsync(sku, ct)`, and pass the **same token** on, so an aborted request also stops the call.",
+        "- Return the price in currency units: cents / 100 as a `decimal` (1999 cents is `19.99m`).",
+        "- Never block."
+      ],
+      "starter": [
+        "class PriceClient(PriceApi api)",
+        "{",
+        "    public decimal GetPrice(string sku)",
+        "    {",
+        "        var cents = api.GetCentsAsync(sku, CancellationToken.None).Result;",
+        "        return cents / 100m;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class PriceClient(PriceApi api)",
+        "{",
+        "    public async Task<decimal> GetPriceAsync(string sku, CancellationToken ct)",
+        "    {",
+        "        var cents = await api.GetCentsAsync(sku, ct);",
+        "        return cents / 100m;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoApi = new PriceApi();",
+        "var dojoClient = new PriceClient(dojoApi);",
+        "using var dojoCts = new CancellationTokenSource();",
+        "var dojoTask = dojoClient.GetPriceAsync(\"SKU-1\", dojoCts.Token);",
+        "Dojo.Check(\"GetPriceAsync returns while the price service is working\", !dojoTask.IsCompleted,",
+        "    \"It only returned after the price service answered: something blocks the thread.\");",
+        "Dojo.Check(\"The request's token is passed on to the price service\", dojoApi.LastToken == dojoCts.Token,",
+        "    \"Pass ct to api.GetCentsAsync(sku, ct): when the caller gives up, the call to the price service should stop too.\");",
+        "dojoApi.Answer(1999);",
+        "Dojo.Eq(\"1999 cents is 19.99\", 19.99m, await dojoTask);",
+        "{{CODE}}",
+        "class PriceApi",
+        "{",
+        "    readonly TaskCompletionSource<int> _answer = new(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "    public CancellationToken LastToken;",
+        "    public PriceApi() => _ = Task.Delay(2000).ContinueWith(_ => Answer(0));",
+        "    public Task<int> GetCentsAsync(string sku, CancellationToken ct) { LastToken = ct; return _answer.Task; }",
+        "    public void Answer(int cents) => _answer.TrySetResult(cents);",
+        "}"
+      ],
+      "forbid": [
+        { "pattern": "\\.Result\\b|\\.Wait\\(|GetResult\\(", "message": "Does not block on the task" }
+      ],
+      "hints": [
+        "Make the method `async Task<decimal>`, take a `CancellationToken ct`, and `await api.GetCentsAsync(sku, ct)`.",
+        "`public async Task<decimal> GetPriceAsync(string sku, CancellationToken ct) { var cents = await api.GetCentsAsync(sku, ct); return cents / 100m; }`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "2. The cache warmer",
+      "prompt": [
+        "At startup (and, it turns out, on the first request of every new pod) `Warm` loads the product counts of three regions,",
+        "`\"eu\"`, `\"us\"` and `\"ap\"`, one after the other, blocking each time with `Task.Run(...).Result`.",
+        "",
+        "Write **`static async Task<int> WarmAsync(Regions regions)`** that loads all three **at the same time** with",
+        "`regions.LoadAsync(name)` (a `Task<int>`) and returns the sum. The fake only answers once all three loads are in flight."
+      ],
+      "starter": [
+        "static int Warm(Regions regions)",
+        "{",
+        "    var total = 0;",
+        "    foreach (var name in new[] { \"eu\", \"us\", \"ap\" })",
+        "        total += Task.Run(() => regions.LoadAsync(name)).Result;",
+        "    return total;",
+        "}"
+      ],
+      "solution": [
+        "static async Task<int> WarmAsync(Regions regions)",
+        "{",
+        "    var loads = new[] { \"eu\", \"us\", \"ap\" }.Select(name => regions.LoadAsync(name));",
+        "    var counts = await Task.WhenAll(loads);",
+        "    return counts.Sum();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRegions = new Regions();",
+        "var dojoTask = WarmAsync(dojoRegions);",
+        "Dojo.Check(\"WarmAsync returns while the regions are loading\", !dojoTask.IsCompleted, \"It only returned after the loads finished: something blocks.\");",
+        "var dojoDone = await Task.WhenAny(dojoTask, Task.Delay(3000));",
+        "Dojo.Check(\"All three regions load at the same time\", dojoDone == dojoTask && dojoRegions.AllAtOnce,",
+        "    \"The fake answers only when all three loads are in flight. Start all three, then await Task.WhenAll.\");",
+        "Dojo.Eq(\"The regions were eu, us and ap\", \"ap,eu,us\", string.Join(\",\", dojoRegions.Names.Order()));",
+        "if (dojoDone == dojoTask) Dojo.Eq(\"WarmAsync returns 10 + 20 + 30\", 60, await dojoTask);",
+        "",
+        "class Regions",
+        "{",
+        "    int _started;",
+        "    public bool AllAtOnce;",
+        "    public System.Collections.Concurrent.ConcurrentBag<string> Names = new();",
+        "    readonly TaskCompletionSource _open = new(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "    public Regions() => _ = Task.Delay(2000).ContinueWith(_ => _open.TrySetResult());",
+        "    public async Task<int> LoadAsync(string name)",
+        "    {",
+        "        Names.Add(name);",
+        "        if (Interlocked.Increment(ref _started) == 3 && !_open.Task.IsCompleted) { AllAtOnce = true; _open.TrySetResult(); }",
+        "        await _open.Task;",
+        "        return name switch { \"eu\" => 10, \"us\" => 20, \"ap\" => 30, _ => 0 };",
+        "    }",
+        "}"
+      ],
+      "forbid": [
+        { "pattern": "\\.Result\\b|\\.Wait\\(|GetResult\\(", "message": "Does not block on a task" }
+      ],
+      "hints": [
+        "Start the three loads first (a `Select` or three variables), then `await Task.WhenAll(...)`, which gives you an `int[]`.",
+        "`var counts = await Task.WhenAll(names.Select(n => regions.LoadAsync(n))); return counts.Sum();`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "3. The rates refresher",
+      "prompt": [
+        "`RatesRefresher` refreshes exchange rates every few seconds with a `System.Threading.Timer` whose callback does",
+        "`refresh(ct).Wait()`: a blocked pool thread on every tick, and one exception kills it silently.",
+        "",
+        "Write **`static async Task RunRefreshLoopAsync(Func<CancellationToken, Task> refresh, TimeSpan every, CancellationToken ct)`**:",
+        "",
+        "- use a **`PeriodicTimer`** (`await timer.WaitForNextTickAsync(ct)`) and call `await refresh(ct)` on every tick;",
+        "- if a refresh throws, print `refresh failed: {message}` and **keep going**;",
+        "- when `ct` is cancelled, **return quietly** (no exception out of the method).",
+        "",
+        "The tests use a 10 ms period: the second refresh throws, the third cancels the token."
+      ],
+      "starter": [
+        "static async Task RunRefreshLoopAsync(Func<CancellationToken, Task> refresh, TimeSpan every, CancellationToken ct)",
+        "{",
+        "    while (!ct.IsCancellationRequested)",
+        "    {",
+        "        Thread.Sleep(every);",
+        "        refresh(ct).Wait();",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "static async Task RunRefreshLoopAsync(Func<CancellationToken, Task> refresh, TimeSpan every, CancellationToken ct)",
+        "{",
+        "    using var timer = new PeriodicTimer(every);",
+        "    try",
+        "    {",
+        "        while (await timer.WaitForNextTickAsync(ct))",
+        "        {",
+        "            try",
+        "            {",
+        "                await refresh(ct);",
+        "            }",
+        "            catch (OperationCanceledException) when (ct.IsCancellationRequested)",
+        "            {",
+        "                throw;",
+        "            }",
+        "            catch (Exception e)",
+        "            {",
+        "                Console.WriteLine($\"refresh failed: {e.Message}\");",
+        "            }",
+        "        }",
+        "    }",
+        "    catch (OperationCanceledException) when (ct.IsCancellationRequested)",
+        "    {",
+        "        // shutting down: not an error",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoOut = new StringWriter();",
+        "var dojoReal = Console.Out;",
+        "Console.SetOut(dojoOut);",
+        "using var dojoCts = new CancellationTokenSource();",
+        "var dojoCalls = 0;",
+        "Exception? dojoError = null;",
+        "async Task DojoRefresh(CancellationToken ct)",
+        "{",
+        "    await Task.Yield();",
+        "    var n = Interlocked.Increment(ref dojoCalls);",
+        "    if (n == 2) throw new InvalidOperationException(\"rates service down\");",
+        "    if (n == 3) dojoCts.Cancel();",
+        "}",
+        "var dojoLoop = RunRefreshLoopAsync(DojoRefresh, TimeSpan.FromMilliseconds(10), dojoCts.Token);",
+        "var dojoFinished = await Task.WhenAny(dojoLoop, Task.Delay(3000)) == dojoLoop;",
+        "if (dojoFinished) { try { await dojoLoop; } catch (Exception e) { dojoError = e; } }",
+        "Console.SetOut(dojoReal);",
+        "Dojo.Check(\"The loop stops once the token is cancelled\", dojoFinished, \"It was still running 3 seconds after cancellation.\");",
+        "Dojo.Check(\"Cancellation ends the loop quietly\", dojoFinished && dojoError is null, \"It threw \" + dojoError?.GetType().Name + \": catch OperationCanceledException when ct is cancelled.\");",
+        "Dojo.Eq(\"Exactly three refreshes ran (it kept going after the failure)\", 3, dojoCalls);",
+        "Dojo.Check(\"The failure was reported\", dojoOut.ToString().Contains(\"refresh failed: rates service down\"), \"Print: refresh failed: {e.Message}\");"
+      ],
+      "require": [
+        { "pattern": "PeriodicTimer", "message": "Uses a PeriodicTimer" }
+      ],
+      "forbid": [
+        { "pattern": "\\.Wait\\(\\)|Thread\\.Sleep|\\.Result\\b", "message": "Does not block a thread" }
+      ],
+      "hints": [
+        "`using var timer = new PeriodicTimer(every); while (await timer.WaitForNextTickAsync(ct)) { ... }` and put `await refresh(ct)` in a try/catch inside the loop.",
+        "`WaitForNextTickAsync(ct)` throws `OperationCanceledException` when `ct` is cancelled: wrap the whole loop in `try { ... } catch (OperationCanceledException) when (ct.IsCancellationRequested) { }`."
+      ],
+      "explain": [
+        "`PeriodicTimer` (.NET 6+) never overlaps ticks: if a refresh takes longer than the period, the next tick waits. A `System.Threading.Timer`",
+        "callback fires on schedule even while the last one is still running, which is how a slow dependency turns into a pile of blocked threads.",
+        "The `when (ct.IsCancellationRequested)` filter matters: a timeout *inside* `refresh` also throws `OperationCanceledException`, and that",
+        "one is a failure to report, not a shutdown."
+      ]
+    }
+  ]
+}

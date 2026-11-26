@@ -1,0 +1,183 @@
+{
+  "title": "Throttling with SemaphoreSlim and Parallel.ForEachAsync",
+  "summary": "Limit how much runs at once, always give the slot back, and pick between a semaphore and Parallel.ForEachAsync.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A semaphore is a counter of free slots",
+      "body": [
+        "`new SemaphoreSlim(2)` starts with **two slots**. `Wait()` (or `await WaitAsync(ct)`) takes a slot, or waits until one is free;",
+        "`Release()` gives one back. Unlike a lock, any number up to the count may be inside at once, and it is **not owned** by a thread",
+        "(another thread may release).",
+        "",
+        "In the card, three threads share two slots. Step until T3 tries to enter: its lane turns into the red *blocked* hatch until",
+        "someone releases. **Try every interleaving**: `peak` (the most threads inside at once) is never 3."
+      ],
+      "interleave": {
+        "setup": ["var gate = new SemaphoreSlim(2);", "var stats = new object();", "int inside = 0, peak = 0;"],
+        "threads": [
+          { "name": "T1", "code": ["gate.Wait();", "lock (stats) { inside++; peak = Math.Max(peak, inside); }", "lock (stats) { inside--; }", "gate.Release();"] },
+          { "name": "T2", "code": ["gate.Wait();", "lock (stats) { inside++; peak = Math.Max(peak, inside); }", "lock (stats) { inside--; }", "gate.Release();"] },
+          { "name": "T3", "code": ["gate.Wait();", "lock (stats) { inside++; peak = Math.Max(peak, inside); }", "lock (stats) { inside--; }", "gate.Release();"] }
+        ],
+        "watch": ["inside", "peak"],
+        "result": "peak",
+        "outcomes": ["1", "2"]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why must `Release()` go in a `finally`?",
+      "code": [
+        "await _gate.WaitAsync(ct);",
+        "try { return await _vendor.QuoteAsync(sku, ct); }",
+        "finally { _gate.Release(); }"
+      ],
+      "options": [
+        "If the call throws (or is cancelled) without it, the slot is never given back; after a few failures every caller waits forever",
+        "`Release` is only allowed inside `finally`",
+        "It makes the call faster",
+        "So that the exception is swallowed"
+      ],
+      "answer": 0,
+      "explain": "A leaked slot is a slow-motion deadlock: the service works until enough calls have failed, then hangs. Note `WaitAsync` is *outside* the `try`: if waiting is cancelled you never got a slot, so you must not release one."
+    },
+    {
+      "type": "order",
+      "prompt": "Arrange the lines into a throttled call that is safe when the call fails or is cancelled.",
+      "lines": [
+        "public async Task<Quote> GetQuoteAsync(string sku, CancellationToken ct)",
+        "{",
+        "    await _gate.WaitAsync(ct);",
+        "    try",
+        "    {",
+        "        return await _vendor.QuoteAsync(sku, ct);",
+        "    }",
+        "    finally",
+        "    {",
+        "        _gate.Release();",
+        "    }",
+        "}"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Parallel.ForEachAsync for a known list",
+      "body": [
+        "For \"process this list, at most N at a time\", .NET 6+ has it built in:",
+        "",
+        "```csharp fragment",
+        "await Parallel.ForEachAsync(files,",
+        "    new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },",
+        "    async (file, token) => await UploadAsync(file, token));",
+        "```",
+        "",
+        "- `MaxDegreeOfParallelism` defaults to `Environment.ProcessorCount` for `ForEachAsync`: set it to what the *dependency* can take.",
+        "- The first exception **cancels the token** given to the other bodies and is rethrown when the loop ends.",
+        "- Results: collect into a `ConcurrentBag`, or into an array slot per index (each body writes its own slot, no race).",
+        "",
+        "Use a **shared `SemaphoreSlim`** instead when the limit is about a resource shared by **many requests** (\"at most 10 calls to the",
+        "vendor from this whole process\"), not about one loop."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Pick the tool for each job.",
+      "buckets": ["`Parallel.ForEachAsync`", "A shared `SemaphoreSlim`", "`Task.WhenAll`"],
+      "items": [
+        ["Upload 2,000 files from a nightly job, 8 at a time", 0],
+        ["Every request may call a fragile partner API; the process must never have more than 5 calls in flight", 1],
+        ["Load a user, their orders and their settings at the same time, then combine", 2],
+        ["Resize 300 images from a queue message, 4 at a time", 0],
+        ["Allow at most 2 concurrent exports per tenant across all endpoints", 1],
+        ["Call three independent pricing services once each", 2]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var s = new SemaphoreSlim(2);",
+        "s.Wait();",
+        "Console.WriteLine(s.CurrentCount);",
+        "Console.WriteLine(s.Wait(0));",
+        "Console.WriteLine(s.Wait(0));",
+        "s.Release();",
+        "Console.WriteLine(s.CurrentCount);"
+      ],
+      "answer": ["1", "True", "False", "1"],
+      "explain": "`Wait(0)` tries without waiting: it takes the last slot (True), then finds none (False). One `Release` frees one slot."
+    },
+    {
+      "type": "code",
+      "title": "Fetch everything, at most N at a time",
+      "prompt": [
+        "Write **`static async Task<List<string>> FetchAllAsync(IReadOnlyList<string> urls, Func<string, CancellationToken, Task<string>> fetch, int maxConcurrent, CancellationToken ct)`**:",
+        "",
+        "- call `fetch` for every url, with **at most `maxConcurrent`** calls in flight, and do use all of them;",
+        "- return the results **in the same order as `urls`**;",
+        "- pass `ct` on.",
+        "",
+        "Use a `SemaphoreSlim` or `Parallel.ForEachAsync`. The tests hold every fetch until they have counted how many are in flight."
+      ],
+      "starter": [
+        "static async Task<List<string>> FetchAllAsync(IReadOnlyList<string> urls, Func<string, CancellationToken, Task<string>> fetch, int maxConcurrent, CancellationToken ct)",
+        "{",
+        "    var tasks = urls.Select(u => fetch(u, ct));",
+        "    return (await Task.WhenAll(tasks)).ToList();",
+        "}"
+      ],
+      "solution": [
+        "static async Task<List<string>> FetchAllAsync(IReadOnlyList<string> urls, Func<string, CancellationToken, Task<string>> fetch, int maxConcurrent, CancellationToken ct)",
+        "{",
+        "    using var gate = new SemaphoreSlim(maxConcurrent);",
+        "    var tasks = urls.Select(async url =>",
+        "    {",
+        "        await gate.WaitAsync(ct);",
+        "        try",
+        "        {",
+        "            return await fetch(url, ct);",
+        "        }",
+        "        finally",
+        "        {",
+        "            gate.Release();",
+        "        }",
+        "    });",
+        "    return (await Task.WhenAll(tasks)).ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "int dojoInFlight = 0, dojoPeak = 0, dojoCalls = 0;",
+        "var dojoLock = new object();",
+        "async Task<string> DojoFetch(string url, CancellationToken ct)",
+        "{",
+        "    lock (dojoLock) { dojoCalls++; dojoInFlight++; dojoPeak = Math.Max(dojoPeak, dojoInFlight); }",
+        "    await dojoGate.Task;",
+        "    lock (dojoLock) dojoInFlight--;",
+        "    return \"page \" + url;",
+        "}",
+        "var dojoUrls = new[] { \"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\" };",
+        "var dojoTask = FetchAllAsync(dojoUrls, DojoFetch, 3, CancellationToken.None);",
+        "for (var i = 0; i < 200 && Volatile.Read(ref dojoInFlight) < 3; i++) await Task.Delay(10);",
+        "await Task.Delay(50);",
+        "Dojo.Eq(\"Three fetches are in flight while they wait\", 3, Volatile.Read(ref dojoInFlight));",
+        "dojoGate.SetResult();",
+        "var dojoResults = await dojoTask;",
+        "Dojo.Eq(\"Never more than 3 at once\", 3, dojoPeak);",
+        "Dojo.Eq(\"Every url is fetched\", 7, dojoCalls);",
+        "Dojo.Eq(\"Results come back in the order of the urls\", dojoUrls.Select(u => \"page \" + u).ToList(), dojoResults);"
+      ],
+      "hints": [
+        "A `SemaphoreSlim(maxConcurrent)`: each url's task awaits `WaitAsync(ct)`, fetches inside `try`, releases in `finally`. `Task.WhenAll` keeps the order.",
+        "`var tasks = urls.Select(async url => { await gate.WaitAsync(ct); try { return await fetch(url, ct); } finally { gate.Release(); } });`"
+      ],
+      "explain": [
+        "`Task.WhenAll` returns results in the order of the tasks you gave it, not the order they finished, which is why the results line up",
+        "with `urls`. With `Parallel.ForEachAsync`, write each result into `results[index]` instead."
+      ]
+    }
+  ]
+}

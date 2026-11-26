@@ -1,0 +1,205 @@
+{
+  "title": "Boss: three async bugs from code review",
+  "summary": "A connection disposed too early, a fan-out that hides all but one failure, and a fire-and-forget that loses its errors.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The review",
+      "body": [
+        "You are reviewing a pull request in the reporting service. Production logs from the last release:",
+        "",
+        "```text",
+        "fail: Reports.Api[0] System.ObjectDisposedException: Cannot access a disposed object. Object name: 'DbConn'.",
+        "         at Reports.Data.DbConn.QueryAsync(String sql)",
+        "warn: Reports.Jobs[0] nightly export: 1 of 3 shards failed: shard-b timed out",
+        "      (support says shard-c was also broken that night; nothing in the logs)",
+        "crit: Reports.Api[0] Unhandled exception. System.InvalidOperationException: audit store unavailable",
+        "      Application is shutting down...",
+        "```",
+        "",
+        "Each line is one classic async mistake. Fix them one by one."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "1. Disposed before it finished",
+      "prompt": [
+        "`CountAsync` opens a connection, starts a query and returns the query's task **without awaiting it**. The `using` disposes the",
+        "connection as soon as the method returns, while the query is still running.",
+        "",
+        "Fix **`static Task<int> CountAsync(Func<DbConn> open, string table)`** so the connection stays open until the query has finished,",
+        "and is still disposed afterwards. It returns the result of `conn.QueryAsync($\"select count(*) from {table}\")`."
+      ],
+      "starter": [
+        "static Task<int> CountAsync(Func<DbConn> open, string table)",
+        "{",
+        "    using var conn = open();",
+        "    return conn.QueryAsync($\"select count(*) from {table}\");",
+        "}"
+      ],
+      "solution": [
+        "static async Task<int> CountAsync(Func<DbConn> open, string table)",
+        "{",
+        "    using var conn = open();",
+        "    return await conn.QueryAsync($\"select count(*) from {table}\");",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoConn = new DbConn();",
+        "var dojoTask = CountAsync(() => dojoConn, \"orders\");",
+        "Dojo.Check(\"The connection is still open while the query runs\", !dojoConn.Disposed, \"The connection was disposed before the query finished.\");",
+        "dojoConn.Finish(42);",
+        "int dojoCount = -1;",
+        "await Dojo.TryAsync(\"The query completes\", async () => { dojoCount = await dojoTask; });",
+        "Dojo.Eq(\"CountAsync returns the query's result\", 42, dojoCount);",
+        "Dojo.Check(\"The connection is disposed afterwards\", dojoConn.Disposed, \"Keep the using: the connection must still be closed when the query is done.\");",
+        "Dojo.Eq(\"The SQL names the table\", \"select count(*) from orders\", dojoConn.Sql);",
+        "",
+        "class DbConn : IDisposable",
+        "{",
+        "    readonly TaskCompletionSource<int> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "    public bool Disposed;",
+        "    public string? Sql;",
+        "    public Task<int> QueryAsync(string sql) { Sql = sql; return Run(); }",
+        "    async Task<int> Run() { var n = await _result.Task; if (Disposed) throw new ObjectDisposedException(\"DbConn\"); return n; }",
+        "    public void Finish(int n) => _result.TrySetResult(n);",
+        "    public void Dispose() => Disposed = true;",
+        "}"
+      ],
+      "hints": [
+        "Returning a task from inside a `using` without awaiting it ends the `using` scope immediately.",
+        "Make the method `async` and `return await conn.QueryAsync(...)`: the `using` then ends after the query completes."
+      ],
+      "explain": [
+        "\"Eliding\" `async`/`await` (returning the task directly) saves a state machine, and it is fine for a one-line pass-through. It is a",
+        "bug as soon as the method has a `using`, a `try`/`catch`/`finally`, or a lock around the call: all of those end at the `return`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "2. Every failure, not just the first",
+      "prompt": [
+        "The nightly export runs one job per shard with `await Task.WhenAll(jobs)`. When two shards fail, the log shows only one:",
+        "`await` rethrows only the **first** exception of the combined task.",
+        "",
+        "Write **`static async Task<List<string>> RunAllAsync(IEnumerable<Func<Task>> jobs)`** that starts every job, waits for **all** of",
+        "them (even when some fail), and returns the `Message` of **every** failure, in the order the jobs were given. No failures: an empty",
+        "list. It must not throw."
+      ],
+      "starter": [
+        "static async Task<List<string>> RunAllAsync(IEnumerable<Func<Task>> jobs)",
+        "{",
+        "    var errors = new List<string>();",
+        "    try",
+        "    {",
+        "        await Task.WhenAll(jobs.Select(job => job()));",
+        "    }",
+        "    catch (Exception e)",
+        "    {",
+        "        errors.Add(e.Message);",
+        "    }",
+        "    return errors;",
+        "}"
+      ],
+      "solution": [
+        "static async Task<List<string>> RunAllAsync(IEnumerable<Func<Task>> jobs)",
+        "{",
+        "    var tasks = jobs.Select(job => job()).ToList();",
+        "    var all = Task.WhenAll(tasks);",
+        "    try",
+        "    {",
+        "        await all;",
+        "    }",
+        "    catch",
+        "    {",
+        "        // all.Exception holds every failure; the catch only stops the first one from escaping",
+        "    }",
+        "    return tasks.Where(t => t.IsFaulted).Select(t => t.Exception!.InnerException!.Message).ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "async Task DojoOk() { await Task.Yield(); }",
+        "async Task DojoFail(string m) { await Task.Yield(); throw new TimeoutException(m); }",
+        "var dojoErrors = await RunAllAsync(new Func<Task>[] { DojoOk, () => DojoFail(\"shard-b timed out\"), () => DojoFail(\"shard-c timed out\") });",
+        "Dojo.Eq(\"Both failures are reported, in order\", new List<string> { \"shard-b timed out\", \"shard-c timed out\" }, dojoErrors);",
+        "var dojoNone = await RunAllAsync(new Func<Task>[] { DojoOk, DojoOk });",
+        "Dojo.Eq(\"No failures gives an empty list\", new List<string>(), dojoNone);"
+      ],
+      "hints": [
+        "Keep the list of tasks. After `await Task.WhenAll(...)` (inside a try/catch), each task knows whether it faulted.",
+        "`tasks.Where(t => t.IsFaulted).Select(t => t.Exception!.InnerException!.Message)`; or read `all.Exception.InnerExceptions` from the WhenAll task."
+      ],
+      "explain": [
+        "The `Task` returned by `WhenAll` keeps an `AggregateException` with **all** the failures; `await` just rethrows the first. Logging",
+        "only the caught exception is how incidents lose half their evidence."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "3. Fire-and-forget that does not crash the process",
+      "prompt": [
+        "After each request the API writes an audit record without waiting for it, using `async void Audit(...)`. When the audit store is",
+        "down, the exception escapes on the thread pool and **the whole process exits**.",
+        "",
+        "Write **`static Task FireAndForget(Func<Task> work, Action<Exception> onError)`**: it starts `work`, returns a task that **never",
+        "faults**, and passes any exception from `work` to `onError` (exactly once). It must not block, and must not wait for `work` before",
+        "returning when `work` is still running."
+      ],
+      "starter": [
+        "static async void FireAndForget(Func<Task> work, Action<Exception> onError)",
+        "{",
+        "    await work();",
+        "}"
+      ],
+      "solution": [
+        "static Task FireAndForget(Func<Task> work, Action<Exception> onError)",
+        "{",
+        "    return Run();",
+        "",
+        "    async Task Run()",
+        "    {",
+        "        try",
+        "        {",
+        "            await work();",
+        "        }",
+        "        catch (Exception e)",
+        "        {",
+        "            onError(e);",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "var dojoErrors = new List<string>();",
+        "async Task DojoAudit() { await dojoGate.Task; throw new InvalidOperationException(\"audit store unavailable\"); }",
+        "Task dojoTask = FireAndForget(DojoAudit, e => dojoErrors.Add(e.Message));",
+        "Dojo.Check(\"FireAndForget returns while the work is still running\", !dojoTask.IsCompleted, \"It waited for the work to finish.\");",
+        "dojoGate.SetResult();",
+        "var dojoFaulted = false;",
+        "try { await dojoTask; } catch { dojoFaulted = true; }",
+        "Dojo.Check(\"The returned task never faults\", !dojoFaulted, \"The exception escaped: catch it inside and hand it to onError.\");",
+        "Dojo.Eq(\"onError got the exception once\", new List<string> { \"audit store unavailable\" }, dojoErrors);",
+        "var dojoOkErrors = 0;",
+        "await FireAndForget(async () => await Task.Yield(), _ => dojoOkErrors++);",
+        "Dojo.Eq(\"Successful work reports no error\", 0, dojoOkErrors);"
+      ],
+      "forbid": [
+        { "pattern": "async\\s+void", "message": "Uses no async void" }
+      ],
+      "hints": [
+        "Return a `Task` from an async method that wraps `await work()` in try/catch.",
+        "`static Task FireAndForget(Func<Task> work, Action<Exception> onError) { return Run(); async Task Run() { try { await work(); } catch (Exception e) { onError(e); } } }`"
+      ],
+      "explain": [
+        "In a real service, prefer not to fire and forget at all: hand the work to a `Channel` read by a `BackgroundService` (module 7), so it",
+        "survives a slow store, is drained on shutdown, and has backpressure. When you must fire and forget, at least observe and log the error."
+      ]
+    }
+  ]
+}

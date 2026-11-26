@@ -1,0 +1,200 @@
+{
+  "title": "Boss: work nobody is waiting for",
+  "summary": "A report that ignores cancellation, a legacy client with no token, and a hedged request that cancels the loser.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**PERF-912: database CPU stays at 90% for minutes after a traffic spike ends.**",
+        "",
+        "```text",
+        "info: Microsoft.AspNetCore.Hosting.Diagnostics[2] Request finished HTTP/1.1 GET /reports/yearly - 499 - 30001ms",
+        "info: Reports[0] yearly report computed in 212004 ms (client already gone)",
+        "warn: Legacy.Ftp[0] transfer still running 15 min after request was cancelled",
+        "info: Search[0] p99 4.8 s; 2% of calls to search-eu take > 4 s; the rest finish in 40 ms",
+        "```",
+        "",
+        "`499` is the client closing the connection. The work went on anyway. Make every piece stop when nobody is waiting, and cut the",
+        "search tail latency with a **hedged** request."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "1. A CPU loop that listens",
+      "prompt": [
+        "Write **`static long SumOfSquares(IEnumerable<int> values, CancellationToken ct)`** returning the sum of `v * v` (as `long`).",
+        "",
+        "- Check the token **before the first item and then every 1,024 items** with `ct.ThrowIfCancellationRequested()`;",
+        "  checking on every item is wasteful, checking never ignores the client.",
+        "",
+        "The tests cancel the token while the 2,000th item is produced and count how far your loop read after that."
+      ],
+      "starter": [
+        "static long SumOfSquares(IEnumerable<int> values, CancellationToken ct)",
+        "{",
+        "    long sum = 0;",
+        "    foreach (var v in values) sum += (long)v * v;",
+        "    return sum;",
+        "}"
+      ],
+      "solution": [
+        "static long SumOfSquares(IEnumerable<int> values, CancellationToken ct)",
+        "{",
+        "    long sum = 0;",
+        "    var i = 0;",
+        "    foreach (var v in values)",
+        "    {",
+        "        if (i++ % 1024 == 0) ct.ThrowIfCancellationRequested();",
+        "        sum += (long)v * v;",
+        "    }",
+        "    return sum;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"1² + 2² + 3² = 14\", 14L, SumOfSquares(new[] { 1, 2, 3 }, CancellationToken.None));",
+        "using var dojoCts = new CancellationTokenSource();",
+        "var dojoRead = 0;",
+        "IEnumerable<int> DojoValues() { for (var i = 1; i <= 100_000; i++) { dojoRead = i; if (i == 2000) dojoCts.Cancel(); yield return i; } }",
+        "Dojo.Throws<OperationCanceledException>(\"Cancelling mid-way stops the loop\", () => SumOfSquares(DojoValues(), dojoCts.Token));",
+        "Dojo.Check(\"It stops within 1,024 items of the cancellation\", dojoRead <= 2000 + 1025, $\"It read {dojoRead} items.\");",
+        "using var dojoEarly = new CancellationTokenSource();",
+        "dojoEarly.Cancel();",
+        "var dojoTouched = 0;",
+        "IEnumerable<int> DojoCount() { for (var i = 0; i < 5000; i++) { dojoTouched++; yield return i; } }",
+        "Dojo.Throws<OperationCanceledException>(\"An already cancelled token stops it before any work\", () => SumOfSquares(DojoCount(), dojoEarly.Token));",
+        "Dojo.Check(\"Checks before the first item\", dojoTouched <= 1, $\"It read {dojoTouched} items first.\");"
+      ],
+      "hints": [
+        "Keep a counter `i`; when `i % 1024 == 0`, check the token. With `i++` inside the condition, item 0 is checked too.",
+        "`if (i++ % 1024 == 0) ct.ThrowIfCancellationRequested();` at the top of the loop body."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "2. A legacy client without tokens",
+      "prompt": [
+        "`LegacyClient.ReadAsync()` takes no token, but it has `Abort()`, which makes the pending read fail with",
+        "`IOException(\"aborted\")`.",
+        "",
+        "Write **`static async Task<string> ReadAsync(LegacyClient client, CancellationToken ct)`**:",
+        "",
+        "- on cancellation call `client.Abort()` (use `ct.Register`), and throw `OperationCanceledException` (not the `IOException`);",
+        "- **dispose the registration** when the read is over, so a later cancellation does not abort the next read on the same client;",
+        "- otherwise return the text read."
+      ],
+      "starter": [
+        "static async Task<string> ReadAsync(LegacyClient client, CancellationToken ct)",
+        "{",
+        "    return await client.ReadAsync();",
+        "}"
+      ],
+      "solution": [
+        "static async Task<string> ReadAsync(LegacyClient client, CancellationToken ct)",
+        "{",
+        "    using var registration = ct.Register(client.Abort);",
+        "    try",
+        "    {",
+        "        return await client.ReadAsync();",
+        "    }",
+        "    catch (IOException) when (ct.IsCancellationRequested)",
+        "    {",
+        "        throw new OperationCanceledException(\"read cancelled\", ct);",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoClient = new LegacyClient();",
+        "using var dojoCts = new CancellationTokenSource();",
+        "var dojoRead = ReadAsync(dojoClient, dojoCts.Token);",
+        "dojoCts.Cancel();",
+        "await Dojo.ThrowsAsync<OperationCanceledException>(\"Cancelling aborts the read with OperationCanceledException\", () => dojoRead);",
+        "Dojo.Eq(\"Abort was called once\", 1, dojoClient.Aborts);",
+        "var dojoClient2 = new LegacyClient();",
+        "using var dojoCts2 = new CancellationTokenSource();",
+        "var dojoOk = ReadAsync(dojoClient2, dojoCts2.Token);",
+        "dojoClient2.Complete(\"report.csv\");",
+        "Dojo.Eq(\"A read that is not cancelled returns the text\", \"report.csv\", await dojoOk);",
+        "dojoCts2.Cancel();",
+        "Dojo.Eq(\"After the read, cancelling no longer aborts the client\", 0, dojoClient2.Aborts);",
+        "",
+        "class LegacyClient",
+        "{",
+        "    readonly TaskCompletionSource<string> _read = new(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "    public int Aborts;",
+        "    public Task<string> ReadAsync() => _read.Task;",
+        "    public void Complete(string text) => _read.TrySetResult(text);",
+        "    public void Abort() { Aborts++; _read.TrySetException(new IOException(\"aborted\")); }",
+        "}"
+      ],
+      "hints": [
+        "`using var registration = ct.Register(client.Abort);` before awaiting: the `using` disposes it when the method ends.",
+        "Wrap the await in `try { ... } catch (IOException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(\"read cancelled\", ct); }`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "3. A hedged request",
+      "prompt": [
+        "Two replicas serve search. Most calls are fast; a few hang for seconds. **Hedging** cuts that tail: if the primary has not answered",
+        "after a short delay, ask the secondary too, take whichever answers first, and cancel the other.",
+        "",
+        "Write **`static async Task<string> HedgedAsync(Func<CancellationToken, Task<string>> primary, Func<CancellationToken, Task<string>> secondary, TimeSpan hedgeAfter, CancellationToken ct)`**:",
+        "",
+        "- start `primary`; if it finishes within `hedgeAfter`, return its result and **never call** `secondary`;",
+        "- otherwise start `secondary` as well and return the result of whichever finishes first;",
+        "- **cancel the other one** (give both calls a token you cancel at the end);",
+        "- if `ct` is cancelled, the calls are cancelled too."
+      ],
+      "starter": [
+        "static async Task<string> HedgedAsync(Func<CancellationToken, Task<string>> primary, Func<CancellationToken, Task<string>> secondary, TimeSpan hedgeAfter, CancellationToken ct)",
+        "{",
+        "    var a = primary(ct);",
+        "    var b = secondary(ct);",
+        "    return await await Task.WhenAny(a, b);",
+        "}"
+      ],
+      "solution": [
+        "static async Task<string> HedgedAsync(Func<CancellationToken, Task<string>> primary, Func<CancellationToken, Task<string>> secondary, TimeSpan hedgeAfter, CancellationToken ct)",
+        "{",
+        "    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);",
+        "    var first = primary(cts.Token);",
+        "    if (await Task.WhenAny(first, Task.Delay(hedgeAfter, cts.Token)) == first)",
+        "        return await first;",
+        "    var second = secondary(cts.Token);",
+        "    var winner = await Task.WhenAny(first, second);",
+        "    cts.Cancel();   // stop the loser",
+        "    return await winner;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSecondaryCalls = 0;",
+        "CancellationToken dojoPrimaryToken = default;",
+        "Task<string> DojoFast(CancellationToken ct) => Task.FromResult(\"from primary\");",
+        "async Task<string> DojoHang(CancellationToken ct) { dojoPrimaryToken = ct; await Task.Delay(Timeout.Infinite, ct); return \"never\"; }",
+        "Task<string> DojoSecondary(CancellationToken ct) { dojoSecondaryCalls++; return Task.FromResult(\"from secondary\"); }",
+        "Dojo.Eq(\"A fast primary answers\", \"from primary\", await HedgedAsync(DojoFast, DojoSecondary, TimeSpan.FromSeconds(2), CancellationToken.None));",
+        "Dojo.Eq(\"The secondary is not called when the primary is fast\", 0, dojoSecondaryCalls);",
+        "Dojo.Eq(\"A hanging primary is hedged by the secondary\", \"from secondary\", await HedgedAsync(DojoHang, DojoSecondary, TimeSpan.FromMilliseconds(20), CancellationToken.None));",
+        "Dojo.Check(\"The losing primary is cancelled\", dojoPrimaryToken.IsCancellationRequested, \"Give the calls a token from a linked source and cancel it once there is a winner.\");",
+        "using var dojoCaller = new CancellationTokenSource();",
+        "var dojoTask = HedgedAsync(DojoHang, DojoHang, TimeSpan.FromSeconds(5), dojoCaller.Token);",
+        "dojoCaller.Cancel();",
+        "await Dojo.ThrowsAsync<OperationCanceledException>(\"Cancelling the caller cancels the calls\", () => dojoTask);"
+      ],
+      "hints": [
+        "Use a linked `CancellationTokenSource` for both calls. `await Task.WhenAny(first, Task.Delay(hedgeAfter, token))` tells you whether the primary was fast.",
+        "After starting the secondary: `var winner = await Task.WhenAny(first, second); cts.Cancel(); return await winner;`."
+      ],
+      "explain": [
+        "Hedging trades a little extra load (only for slow calls) for much better tail latency. Only hedge **idempotent** reads: a hedged",
+        "payment could charge twice. `Microsoft.Extensions.Http.Resilience` has a ready-made hedging handler (`AddStandardHedgingHandler`)."
+      ]
+    }
+  ]
+}

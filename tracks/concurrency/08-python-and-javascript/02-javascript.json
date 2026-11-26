@@ -1,0 +1,140 @@
+{
+  "title": "JavaScript: promises, the microtask queue and workers",
+  "summary": "One thread and two queues, Promise.all versus allSettled, bounded concurrency and timeouts with AbortSignal, and worker_threads with SharedArrayBuffer and Atomics.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One thread, two queues",
+      "body": [
+        "Node and browsers run your JavaScript on **one thread**, like asyncio. Work waits in two queues:",
+        "",
+        "- the **microtask** queue: promise callbacks (`.then`, the code after an `await`) and `queueMicrotask`. It is emptied completely",
+        "  after every piece of synchronous code;",
+        "- the **macrotask** (task) queue: timers (`setTimeout`), I/O callbacks, `setImmediate`. One is taken per turn of the loop.",
+        "",
+        "The card is recorded from a real Node run: step through it and watch `timeout` wait until the microtasks are done, even with a",
+        "delay of 0."
+      ],
+      "eventloop": {
+        "code": [
+          "console.log('A');",
+          "setTimeout(() => console.log('timeout'), 0);",
+          "Promise.resolve().then(() => console.log('microtask'));",
+          "queueMicrotask(() => console.log('queueMicrotask'));",
+          "console.log('B');"
+        ],
+        "expect": ["A", "B", "microtask", "queueMicrotask", "timeout"]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Node API handler runs a synchronous loop that takes 400 ms to build a report. What happens to the other requests during those 400 ms?",
+      "options": [
+        "They all wait: nothing else runs on the event loop until the loop finishes",
+        "They run on other threads in parallel",
+        "Node pauses the loop to serve them",
+        "Only timers are delayed; HTTP requests still run"
+      ],
+      "answer": 0,
+      "explain": "Same as a blocking call in asyncio. Move CPU-heavy work to a `worker_threads` Worker (or a separate service), or break it into chunks that yield to the loop."
+    },
+    {
+      "type": "learn",
+      "title": "Promise.all fails fast; allSettled waits for everyone",
+      "body": [
+        "`Promise.all` rejects as soon as **one** promise rejects (the others keep running; JavaScript promises cannot be cancelled).",
+        "`Promise.allSettled` waits for all and tells you each outcome. `Promise.any` takes the first success; `Promise.race` the first to",
+        "settle either way. This card runs both, for real."
+      ],
+      "eventloop": {
+        "code": [
+          "const ok = (v: string, ms: number) => new Promise<string>(r => setTimeout(() => r(v), ms));",
+          "const down = (ms: number) => new Promise<string>((_, reject) => setTimeout(() => reject(new Error('down')), ms));",
+          "",
+          "async function main() {",
+          "  try {",
+          "    await Promise.all([ok('prices', 5), down(1)]);",
+          "  } catch (e) {",
+          "    console.log('all rejected: ' + (e as Error).message);",
+          "  }",
+          "  const results = await Promise.allSettled([ok('prices', 2), down(1)]);",
+          "  console.log(results.map(r => r.status).join(','));",
+          "}",
+          "main();"
+        ],
+        "expect": ["all rejected: down", "fulfilled,rejected"]
+      }
+    },
+    {
+      "type": "match",
+      "prompt": "Match the combinator to its rule.",
+      "pairs": [
+        ["`Promise.all`", "every one fulfils, or it rejects with the first rejection"],
+        ["`Promise.allSettled`", "waits for all and reports each status"],
+        ["`Promise.any`", "the first to fulfil; rejects only if all reject"],
+        ["`Promise.race`", "the first to settle, fulfilled or rejected"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Timeouts, limits and real threads",
+      "body": [
+        "- **Timeouts and cancellation**: pass an `AbortSignal` (`fetch(url, { signal: AbortSignal.timeout(2000) })`, Node 18+ and browsers).",
+        "  Combine signals with `AbortSignal.any([userSignal, AbortSignal.timeout(2000)])` (Node 20+). It is .NET's linked token, in JavaScript.",
+        "- **Bounded concurrency**: there is no built-in semaphore; teams use a small pool (the `p-limit` package) or start N workers that",
+        "  pull from a shared array index. `Promise.all(urls.map(fetch))` over 5,000 urls opens 5,000 sockets at once.",
+        "- **Real parallelism**: `worker_threads` (Node) and Web Workers (browsers) run JavaScript on other threads, each with its own",
+        "  heap. They talk by message passing (`postMessage`, data is copied), or share memory through a `SharedArrayBuffer`, where the",
+        "  races are back, and `Atomics.add`, `Atomics.compareExchange` and `Atomics.wait` play the role of `Interlocked` and `Monitor`."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "In a Node service, what is the right tool?",
+      "buckets": ["`async`/`await` on the main thread", "A `worker_threads` Worker"],
+      "items": [
+        ["Calling three REST APIs and combining the results", 0],
+        ["Resizing a 40 MB image", 1],
+        ["Reading a file and streaming it to the response", 0],
+        ["Hashing passwords with a pure-JavaScript bcrypt", 1],
+        ["Waiting for a database query", 0],
+        ["Parsing a 300 MB CSV into objects", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Microtasks can starve the loop too",
+      "body": [
+        "Because the microtask queue is emptied completely before the next macrotask, a promise chain that keeps queuing more microtasks",
+        "delays every timer and every I/O callback. Here the timer was due first, but four awaited steps run before it."
+      ],
+      "eventloop": {
+        "code": [
+          "setTimeout(() => console.log('timer'), 0);",
+          "",
+          "async function chain(n: number) {",
+          "  for (let i = 1; i <= n; i++) {",
+          "    await null;",
+          "    console.log('step ' + i);",
+          "  }",
+          "}",
+          "chain(4);"
+        ],
+        "expect": ["step 1", "step 2", "step 3", "step 4", "timer"]
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "Two Workers increment the same `Int32Array` over a `SharedArrayBuffer` with `counter[0]++`, a million times each. What do you expect?",
+      "options": [
+        "Fewer than two million: `counter[0]++` is read, add, write, and the workers race. Use `Atomics.add(counter, 0, 1)`",
+        "Exactly two million: JavaScript is single-threaded",
+        "A `TypeError`: shared memory cannot be written",
+        "Two million, because Workers take turns automatically"
+      ],
+      "answer": 0,
+      "explain": "Workers are real threads. Shared memory brings back module 4 in full: lost updates, the need for atomics, and for visibility guarantees."
+    }
+  ]
+}

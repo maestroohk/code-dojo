@@ -112,6 +112,40 @@ callbacks, resumption after `await`, `queueMicrotask`), the macrotask queue (`se
 ```
 `dojo validate` runs every visualizer card and fails it if the code crashes (`"expectError": true` allows that).
 
+**`"interleave"` — Threads in motion (C#).** Runs real threads under a deterministic scheduler (`server/Interleave.cs`) and draws
+them as swim lanes over time, like a profiler: each step a thread took (read, write, lock, unlock, atomic, statement), when it was
+blocked on a lock or semaphore, which locks it held, and the shared values as a row under the lanes. The learner plays and scrubs,
+picks which thread runs next at any step (the program re-runs with that schedule), picks a preset schedule, and presses **Try every
+interleaving** to see every outcome the code can produce with an example of each. Deadlocks are detected and described. The thread
+bodies and `code` are rewritten with Roslyn so that every statement, loop test, `lock` enter/exit, `SemaphoreSlim.Wait()`/`Release()`
+and the read and the write of a read-modify-write on shared state (`count++`, `balance -= x`, `total = total + x`) are switch points;
+statements that touch only locals are not branched on when exploring (partial-order reduction), and when there are too many schedules
+the search falls back to "up to 2 preemptions", as CHESS and Coyote do. It cannot show CPU memory reordering; say so when it matters.
+```json
+"interleave": {
+  "setup": ["int count = 0;"],                       // shared state, runs first (top-level locals the threads capture)
+  "threads": [ { "name": "T1", "code": ["count++;"] }, { "name": "T2", "code": ["count++;"] } ],   // 1 to 4 threads
+  "code": ["class Counter { ... }"],                 // optional types and methods the threads call (also instrumented)
+  "watch": ["count"],                                // optional; default: the setup locals that are not lock objects
+  "result": "count", "expect": "2",                  // the outcome shown at the end; expect colours good and bad outcomes
+  "resultLabel": "the count",                        // optional words for the result (use it when result is $"..." text)
+  "schedules": [ { "name": "Lost update", "pick": [0, 1, 0, 1], "expect": "1" } ],   // presets: thread index per step
+  "outcomes": ["1", "2"]                             // optional: dojo validate checks exploring finds exactly these
+}
+```
+Thread bodies are synchronous (no `await`); a thread that blocks on something the scheduler does not model (a raw `Monitor.Enter`,
+I/O) is reported as stuck. Keep examples small: 240 steps per run at most.
+
+**`"interleavings"` on a code step — graded under every interleaving.** The learner writes the shared class (`code`); the step's
+scenario runs it on the threads above under every interleaving, and the step passes when every outcome is in `expect` (a string or an
+array) and none deadlocks. A failure shows the breaking interleaving as text and draws it on the timeline in the results. Give an
+array of scenarios to check several. `coldOf` copies `interleavings` too. Make the racy starter fail (validate warns if it passes).
+```json
+"interleavings": { "title": "Two hits at once", "setup": ["var counter = new HitCounter();"],
+  "threads": [ { "name": "T1", "code": ["counter.Record();"] }, { "name": "T2", "code": ["counter.Record();"] } ],
+  "result": "counter.Total", "expect": "2" }
+```
+
 **`"linq"` — LINQ in motion.** Runs a query with every operator tapped and replays items flowing
 through each stage, showing streaming (`Where`, `Select`) against buffering (`OrderBy`, `GroupBy`).
 ```json

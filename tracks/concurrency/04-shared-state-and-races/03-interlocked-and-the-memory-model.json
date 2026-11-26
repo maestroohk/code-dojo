@@ -1,0 +1,230 @@
+{
+  "title": "Interlocked, compare-and-swap and the memory model",
+  "summary": "Atomic operations, the compare-and-swap retry loop, why a plain flag can be invisible to another thread, and what volatile really promises.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One CPU instruction instead of a lock",
+      "body": [
+        "`Interlocked` turns a read-modify-write on **one** variable into a single atomic CPU instruction (`lock xadd`, `lock cmpxchg` on x64;",
+        "`ldadd`/`cas` or an `ldxr`/`stxr` loop on ARM64). No thread can get between the read and the write, and no thread ever blocks.",
+        "",
+        "- `Interlocked.Increment(ref n)`, `Decrement`, `Add(ref n, k)`: counters and sequence numbers.",
+        "- `Interlocked.Exchange(ref x, v)`: swap in a new value, get the old one (hand-offs, \"take the batch\").",
+        "- `Interlocked.CompareExchange(ref x, newValue, expected)`: write `newValue` **only if** `x` still equals `expected`; always returns",
+        "  what `x` was. That one primitive (compare-and-swap, CAS) builds everything else lock-free.",
+        "",
+        "In the card, the increments are atomic (the green **A**): every interleaving gives 2."
+      ],
+      "interleave": {
+        "setup": ["int count = 0;"],
+        "threads": [
+          { "name": "T1", "code": ["Interlocked.Increment(ref count);"] },
+          { "name": "T2", "code": ["Interlocked.Increment(ref count);"] }
+        ],
+        "result": "count",
+        "expect": "2",
+        "outcomes": ["2"]
+      }
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "int x = 5;",
+        "int seen = Interlocked.CompareExchange(ref x, 9, 5);",
+        "Console.WriteLine($\"{seen} {x}\");",
+        "seen = Interlocked.CompareExchange(ref x, 1, 5);",
+        "Console.WriteLine($\"{seen} {x}\");"
+      ],
+      "answer": ["5 9", "9 9"],
+      "explain": "The first call finds 5 as expected, writes 9, and returns the 5 it saw. The second expects 5 but finds 9: it writes nothing and returns 9. Comparing the return value with `expected` tells you whether your write happened."
+    },
+    {
+      "type": "learn",
+      "title": "The compare-and-swap loop",
+      "body": [
+        "To apply any function atomically to one variable: read it, compute the new value, and CAS it in; if someone changed it meanwhile,",
+        "**retry** with the fresh value.",
+        "",
+        "```csharp fragment",
+        "public void Offer(int score)",
+        "{",
+        "    int seen = Volatile.Read(ref _best);",
+        "    while (score > seen)",
+        "    {",
+        "        int actual = Interlocked.CompareExchange(ref _best, score, seen);",
+        "        if (actual == seen) return;      // our write won",
+        "        seen = actual;                   // someone else wrote first: look again",
+        "    }",
+        "}",
+        "```",
+        "",
+        "Lock-free code never blocks, but it is easy to get subtly wrong and it does not compose: two variables that must change together",
+        "need a lock (or one immutable object swapped as a whole, next lesson). Use it for hot counters and single references; prefer `lock`",
+        "everywhere else."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put one attempt of the compare-and-swap loop in order.",
+      "lines": [
+        "Read the current value into `seen`",
+        "Compute the new value from `seen`",
+        "`CompareExchange(ref field, newValue, seen)`",
+        "If it returned `seen`, the write happened: stop",
+        "Otherwise use the returned value as the new `seen` and go round again"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Memory model basics: visibility and reordering",
+      "body": [
+        "Atomicity is half the story. The other half: **when does another thread see a write**, and in what order?",
+        "",
+        "The C# compiler, the JIT and the CPU may **reorder** and **cache** memory operations as long as the *current* thread cannot tell.",
+        "Another thread can. The classic bug:",
+        "",
+        "```csharp fragment",
+        "bool _stop;                          // set to true by another thread",
+        "void Worker() { while (!_stop) { } } // the JIT may read _stop once and loop forever",
+        "```",
+        "",
+        "- `volatile bool _stop;` or `Volatile.Read(ref _stop)` forces a fresh read each time and keeps later reads from moving before it.",
+        "- `lock`, `Interlocked.*`, `Volatile.*`, `Task`/`await` hand-offs and `SemaphoreSlim` all include the **memory barriers** needed, so code",
+        "  that uses them correctly does not need `volatile` too.",
+        "- x64 CPUs reorder little (a store can pass a later load); **ARM64** (Graviton and Ampere servers, Apple silicon, Windows on Arm)",
+        "  reorders much more. Lock-free code \"tested on my laptop\" can fail the week you move to ARM servers.",
+        "",
+        "The interleaving card cannot show reordering: it runs one step at a time, in order. That is why the advice is to use `lock`,",
+        "`Interlocked`, `Lazy<T>` and the concurrent collections, and to treat hand-written lock-free code as an expert job."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each tool to what it guarantees.",
+      "pairs": [
+        ["`lock` / `Lock`", "one thread at a time in the block, and its writes are visible to the next owner"],
+        ["`Interlocked.Increment`", "an atomic read-add-write on one variable"],
+        ["`Volatile.Read`", "a fresh read that later reads and writes cannot move before"],
+        ["`Lazy<T>` (default mode)", "the factory runs once, and every thread sees the finished object"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A background worker polls `while (!_cancelled) DoChunk();` where `_cancelled` is a plain `bool` field set by `Stop()` on another thread. In Release builds it sometimes never stops. Which fix is best?",
+      "options": [
+        "Replace the flag with a `CancellationToken` and check `ct.IsCancellationRequested` (or throw)",
+        "Add `Thread.Sleep(1)` inside the loop",
+        "Build in Debug mode",
+        "Make `_cancelled` a `static` field"
+      ],
+      "answer": 0,
+      "explain": "`CancellationToken` is built for exactly this: correct visibility, and the same token stops awaits and I/O. `volatile bool` also fixes the visibility bug, but a token is the idiomatic .NET answer. `Sleep` only happens to hide the bug."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: shared state",
+      "body": "The APIs seniors reach for when state is shared, roughly in order of preference.",
+      "toolkit": [
+        {
+          "cmd": "lock (_gate) { ... }   // private readonly Lock _gate = new();",
+          "what": "Protects any invariant over several fields. Short bodies, no await, no foreign code inside.",
+          "flags": [["Lock (.NET 9+)", "the dedicated lock type; `object` works on older runtimes"], ["SemaphoreSlim(1, 1)", "when you must await inside"]],
+          "example": "lock (_gate) { if (_balance < amount) return false; _balance -= amount; return true; }",
+          "when": "default choice",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "Interlocked.Increment(ref _count) / CompareExchange(ref _x, next, seen)",
+          "what": "Atomic operations on a single int, long or reference; CAS for retry loops.",
+          "flags": [["Exchange", "swap and return the old value"], ["Add", "add any amount"]],
+          "example": "var id = Interlocked.Increment(ref _nextId);",
+          "when": "hot counters, ids, swapping one reference",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new Lazy<T>(factory)   // LazyThreadSafetyMode.ExecutionAndPublication",
+          "what": "Run an initialiser once, on first use, safely. Wrap Task<T> for async: Lazy<Task<T>>.",
+          "flags": [["PublicationOnly", "factory may run several times, first result wins"], ["None", "single-threaded use only"]],
+          "example": "static readonly Lazy<Settings> _settings = new(() => Settings.Load());",
+          "when": "singletons, expensive clients, caches of one item",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "ImmutableInterlocked.Update(ref _snapshot, s => s.Add(item))",
+          "what": "Copy-on-write: readers take the current immutable snapshot with no lock; writers CAS in a new one.",
+          "flags": [["ImmutableDictionary / ImmutableList", "System.Collections.Immutable"], ["FrozenDictionary", ".NET 8+, fastest reads, built once"]],
+          "example": "var routes = Volatile.Read(ref _routes); // readers",
+          "when": "read-mostly data: config, routing tables, feature flags",
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A lock-free high score",
+      "prompt": [
+        "Write a class **`HighScore`** with **`void Offer(int score)`**, which keeps the highest score offered so far, and **`int Best`**",
+        "(starts at 0). Use a **compare-and-swap loop** (`Interlocked.CompareExchange`), not a lock.",
+        "",
+        "**How it is checked:** three threads offer 7, 9 and 3 under every interleaving; `Best` must end at 9."
+      ],
+      "starter": [
+        "class HighScore",
+        "{",
+        "    private int _best;",
+        "",
+        "    public void Offer(int score)",
+        "    {",
+        "        if (score > _best) _best = score;",
+        "    }",
+        "",
+        "    public int Best => _best;",
+        "}"
+      ],
+      "solution": [
+        "class HighScore",
+        "{",
+        "    private int _best;",
+        "",
+        "    public void Offer(int score)",
+        "    {",
+        "        int seen = Volatile.Read(ref _best);",
+        "        while (score > seen)",
+        "        {",
+        "            int actual = Interlocked.CompareExchange(ref _best, score, seen);",
+        "            if (actual == seen) return;",
+        "            seen = actual;",
+        "        }",
+        "    }",
+        "",
+        "    public int Best => Volatile.Read(ref _best);",
+        "}"
+      ],
+      "interleavings": {
+        "title": "Three offers at once",
+        "setup": ["var score = new HighScore();"],
+        "threads": [
+          { "name": "T1", "code": ["score.Offer(7);"] },
+          { "name": "T2", "code": ["score.Offer(9);"] },
+          { "name": "T3", "code": ["score.Offer(3);"] }
+        ],
+        "watch": ["score.Best"],
+        "result": "score.Best",
+        "expect": "9"
+      },
+      "forbid": [
+        { "pattern": "\\block\\s*\\(", "message": "Uses compare-and-swap, not a lock" }
+      ],
+      "require": [
+        { "pattern": "CompareExchange", "message": "Uses Interlocked.CompareExchange" }
+      ],
+      "hints": [
+        "Read the current best into `seen`. While your score is higher, try `CompareExchange(ref _best, score, seen)`.",
+        "If it returns `seen`, you won; otherwise set `seen` to what it returned and loop again (the loop ends when someone wrote a higher score)."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+{
+  "title": "Timeouts done right",
+  "summary": "CancelAfter versus WaitAsync, HttpClient's own timeout, testable time with TimeProvider, and a time budget that degrades gracefully.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two kinds of timeout",
+      "body": [
+        "**Cancel the work** (`CancelAfter` on a token you pass in): the operation itself stops, releasing the connection, the lock, the",
+        "database query. This is what you want almost always.",
+        "",
+        "**Stop waiting for the work** (`task.WaitAsync(TimeSpan)`, .NET 6+): *you* get a `TimeoutException` after the time, but the",
+        "operation **keeps running** in the background, still holding whatever it holds. Use it only for operations that take no token.",
+        "",
+        "```csharp fragment",
+        "using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));",
+        "await client.GetAsync(url, cts.Token);            // the request is aborted at 2 s",
+        "",
+        "await legacy.ComputeAsync().WaitAsync(TimeSpan.FromSeconds(2));   // we stop waiting; ComputeAsync goes on",
+        "```",
+        "",
+        "`HttpClient` has its own `Timeout` (default **100 seconds**, far too long for a service-to-service call): when it fires you get a",
+        "`TaskCanceledException` whose `InnerException` is a `TimeoutException`. In production, set timeouts per call with a resilience",
+        "pipeline (`Microsoft.Extensions.Http.Resilience`, `AddStandardResilienceHandler()`): a total timeout, a per-attempt timeout and retries."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var finished = false;",
+        "async Task SlowAsync() { await Task.Delay(1500); finished = true; }",
+        "",
+        "var work = SlowAsync();",
+        "try { await work.WaitAsync(TimeSpan.FromMilliseconds(5)); }",
+        "catch (TimeoutException) { Console.WriteLine(\"gave up waiting\"); }",
+        "Console.WriteLine(finished);",
+        "await work;",
+        "Console.WriteLine(finished);"
+      ],
+      "answer": ["gave up waiting", "False", "True"],
+      "explain": "`WaitAsync` abandoned the wait, not the work. `SlowAsync` kept running and finished later. In a server that is invisible load: work nobody is waiting for."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A repository call takes a `CancellationToken`. You want it to give up after 300 ms. Which is right?",
+      "options": [
+        "`using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct); cts.CancelAfter(300); await repo.LoadAsync(id, cts.Token);`",
+        "`await repo.LoadAsync(id, ct).WaitAsync(TimeSpan.FromMilliseconds(300));`",
+        "`await Task.WhenAny(repo.LoadAsync(id, ct), Task.Delay(300));`",
+        "`Thread.Sleep(300); ct.ThrowIfCancellationRequested();`"
+      ],
+      "answer": 0,
+      "explain": "The linked source keeps the caller's cancellation *and* adds the deadline, and the query itself is cancelled. `WaitAsync` and `WhenAny` with a delay both leave the query running."
+    },
+    {
+      "type": "learn",
+      "title": "Testable time: TimeProvider",
+      "body": [
+        "Tests that really wait for timeouts are slow and flaky. .NET 8 added `TimeProvider`, an abstraction over the clock and timers that",
+        "the BCL accepts in the right places:",
+        "",
+        "```csharp fragment",
+        "public sealed class Budget(TimeProvider time)",
+        "{",
+        "    public CancellationTokenSource Start(TimeSpan limit) => new(limit, time);   // CTS that uses this clock",
+        "    public Task Pause(TimeSpan d, CancellationToken ct) => Task.Delay(d, time, ct);",
+        "}",
+        "",
+        "// production: new Budget(TimeProvider.System)",
+        "// tests:      var fake = new FakeTimeProvider();   (Microsoft.Extensions.TimeProvider.Testing)",
+        "//             fake.Advance(TimeSpan.FromSeconds(3)); // the timeout fires now, no waiting",
+        "```",
+        "",
+        "`PeriodicTimer`, `CancellationTokenSource`, `Task.Delay` and `Task.WaitAsync` all have `TimeProvider` overloads. Inject it like any",
+        "other dependency (`services.AddSingleton(TimeProvider.System)`)."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each API to what happens when its time is up.",
+      "pairs": [
+        ["`cts.CancelAfter(t)` + token passed in", "the operation is cancelled and throws `OperationCanceledException`"],
+        ["`task.WaitAsync(t)`", "the caller gets `TimeoutException`; the task keeps running"],
+        ["`HttpClient.Timeout`", "`TaskCanceledException` with an inner `TimeoutException`"],
+        ["`new CancellationTokenSource(t, timeProvider)`", "the token is cancelled when *that* clock says so (a fake one in tests)"]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A time budget with a fallback",
+      "prompt": [
+        "The product page asks the recommendations service for suggestions. It is nice to have, so it gets a **time budget**; if the budget",
+        "runs out, show `\"(no recommendations)\"`. But if the **client** disconnected, do not bother: let the cancellation propagate.",
+        "",
+        "Write **`static async Task<string> WithBudgetAsync(Func<CancellationToken, Task<string>> call, TimeSpan budget, CancellationToken requestAborted)`**:",
+        "",
+        "- run `call` with a token that is cancelled when **either** `requestAborted` is cancelled **or** `budget` elapses, and return its result;",
+        "- if it was cancelled because the **budget** ran out (and the request was not aborted), return `\"(no recommendations)\"`;",
+        "- if `requestAborted` was cancelled, let the `OperationCanceledException` out;",
+        "- dispose what you create."
+      ],
+      "starter": [
+        "static async Task<string> WithBudgetAsync(Func<CancellationToken, Task<string>> call, TimeSpan budget, CancellationToken requestAborted)",
+        "{",
+        "    try",
+        "    {",
+        "        return await call(requestAborted).WaitAsync(budget);",
+        "    }",
+        "    catch (Exception)",
+        "    {",
+        "        return \"(no recommendations)\";",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "static async Task<string> WithBudgetAsync(Func<CancellationToken, Task<string>> call, TimeSpan budget, CancellationToken requestAborted)",
+        "{",
+        "    using var cts = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);",
+        "    cts.CancelAfter(budget);",
+        "    try",
+        "    {",
+        "        return await call(cts.Token);",
+        "    }",
+        "    catch (OperationCanceledException) when (!requestAborted.IsCancellationRequested)",
+        "    {",
+        "        return \"(no recommendations)\";",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "// A call that waits until its token is cancelled, and records that it saw the cancellation.",
+        "var dojoStopped = false;",
+        "async Task<string> DojoHang(CancellationToken ct)",
+        "{",
+        "    try { await Task.Delay(Timeout.Infinite, ct); return \"never\"; }",
+        "    catch (OperationCanceledException) { dojoStopped = true; throw; }",
+        "}",
+        "Dojo.Eq(\"A quick answer is returned\", \"books, pens\", await WithBudgetAsync(_ => Task.FromResult(\"books, pens\"), TimeSpan.FromSeconds(5), CancellationToken.None));",
+        "Dojo.Eq(\"When the budget runs out, the fallback is shown\", \"(no recommendations)\", await WithBudgetAsync(DojoHang, TimeSpan.FromMilliseconds(30), CancellationToken.None));",
+        "Dojo.Check(\"The call itself was cancelled, not just abandoned\", dojoStopped, \"Pass a token that the budget cancels into call(...); WaitAsync leaves the call running.\");",
+        "using var dojoClient = new CancellationTokenSource();",
+        "var dojoTask = WithBudgetAsync(DojoHang, TimeSpan.FromSeconds(5), dojoClient.Token);",
+        "dojoClient.Cancel();",
+        "await Dojo.ThrowsAsync<OperationCanceledException>(\"When the client disconnects, the cancellation propagates\", () => dojoTask);",
+        "await Dojo.ThrowsAsync<InvalidOperationException>(\"Other errors are not swallowed\",",
+        "    () => WithBudgetAsync(_ => Task.FromException<string>(new InvalidOperationException(\"boom\")), TimeSpan.FromSeconds(5), CancellationToken.None));"
+      ],
+      "hints": [
+        "`CancellationTokenSource.CreateLinkedTokenSource(requestAborted)` then `CancelAfter(budget)`, and pass its token to `call`.",
+        "Catch only `OperationCanceledException` and only `when (!requestAborted.IsCancellationRequested)`."
+      ],
+      "explain": [
+        "This shape (linked token, `CancelAfter`, exception filter on *which* token fired) is the core of every production timeout. Note the",
+        "starter's two bugs: `WaitAsync` left the call running, and `catch (Exception)` turned real failures into \"no recommendations\", which",
+        "hides outages from your dashboards."
+      ]
+    }
+  ]
+}

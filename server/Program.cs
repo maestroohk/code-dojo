@@ -183,6 +183,8 @@ app.MapPost("/api/intel", async (CodeIntel.Request req) => Results.Json(await Co
 
 // Code in motion: run a program with every statement traced (line, variables, call stack, output).
 app.MapPost("/api/trace", async (CodeTrace.Request req) => Results.Json(await CodeTrace.Run(runner, req), json));
+// Threads in motion: real threads under a deterministic scheduler, one interleaving or all of them (Interleave.cs).
+Interleave.Map(app, runner, json);
 // The same for Python and TypeScript (names, objects and references), and the TypeScript event loop (PolyViz.cs).
 PolyViz.Map(app, langs, json);
 

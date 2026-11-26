@@ -1,0 +1,145 @@
+{
+  "title": "Task or ValueTask?",
+  "summary": "What ValueTask saves, the rules that make it dangerous, and a cache that completes synchronously on a hit.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "ValueTask: no allocation when the answer is already there",
+      "body": [
+        "Every `async Task<T>` that completes asynchronously allocates a `Task<T>` object (a few dozen bytes). On a hot path that is called",
+        "millions of times and **usually completes synchronously** (a cache hit, a buffered read), those allocations add GC pressure.",
+        "",
+        "`ValueTask<T>` is a struct that holds **either** a ready result **or** a `Task<T>` (or a pooled `IValueTaskSource<T>`). A",
+        "synchronous result costs nothing:",
+        "",
+        "```csharp fragment",
+        "public ValueTask<decimal> GetAsync(string sku) =>",
+        "    _cache.TryGetValue(sku, out var price)",
+        "        ? new ValueTask<decimal>(price)        // done, nothing allocated",
+        "        : new ValueTask<decimal>(LoadAsync(sku));   // the slow path wraps a Task",
+        "```",
+        "",
+        "The price is strict rules, because the underlying object may be **pooled and reused** once you have consumed it:",
+        "",
+        "- await it **once**; never await it twice or from two places at once;",
+        "- do not call `.Result` / `.GetAwaiter().GetResult()` unless `IsCompletedSuccessfully` is true;",
+        "- if you need to do any of that, call `.AsTask()` once and use the `Task`.",
+        "",
+        "Default to `Task`. Use `ValueTask` for hot paths whose results are usually synchronous, or when an interface must allow pooling",
+        "(`Stream.ReadAsync(Memory<byte>)`, `IAsyncEnumerator.MoveNextAsync`, `Channel` readers all return `ValueTask`)."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "`var vt = cache.GetAsync(\"A1\");` returns a `ValueTask<decimal>`. Which uses are safe?",
+      "buckets": ["Safe", "Breaks the rules"],
+      "items": [
+        ["`var p = await cache.GetAsync(\"A1\");`", 0],
+        ["`await vt; await vt;`", 1],
+        ["`var t = vt.AsTask(); await t; await t;`", 0],
+        ["`await Task.WhenAll(vt.AsTask(), other.AsTask());`", 0],
+        ["`var p = vt.Result;` straight after the call", 1],
+        ["`if (vt.IsCompletedSuccessfully) p = vt.Result; else p = await vt;`", 0],
+        ["Storing `vt` in a field and awaiting it from two requests", 1]
+      ],
+      "explain": "A `ValueTask` is consumed once. `AsTask()` turns it into an ordinary `Task` you can await many times or combine. Reading `.Result` is fine only when it already completed successfully."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var cache = new Dictionary<string, int> { [\"A1\"] = 5 };",
+        "",
+        "ValueTask<int> Get(string key) =>",
+        "    cache.TryGetValue(key, out var v) ? new ValueTask<int>(v) : new ValueTask<int>(Slow());",
+        "",
+        "async Task<int> Slow() { await Task.Delay(10); return 0; }",
+        "",
+        "var hit = Get(\"A1\");",
+        "var miss = Get(\"B2\");",
+        "Console.WriteLine(hit.IsCompletedSuccessfully);",
+        "Console.WriteLine(miss.IsCompletedSuccessfully);",
+        "Console.WriteLine(await hit + await miss);"
+      ],
+      "answer": ["True", "False", "5"],
+      "explain": "The hit wraps a plain value: complete at once, no `Task` allocated. The miss wraps the `Task` from `Slow()`, which is still waiting on its delay."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A repository method always goes to the database (never cached), and it is called a few hundred times a second. Should it return `ValueTask<Order>`?",
+      "options": [
+        "No: it always completes asynchronously, so a Task is allocated anyway; ValueTask only adds rules",
+        "Yes: ValueTask is always faster",
+        "Yes: ValueTask avoids the database round trip",
+        "No: ValueTask cannot carry a result"
+      ],
+      "answer": 0,
+      "explain": "ValueTask pays off when completion is *usually synchronous*. When it always waits, the async method still produces a Task (or you need a pooled IValueTaskSource, which is specialist work). Measure with BenchmarkDotNet's `[MemoryDiagnoser]` before switching."
+    },
+    {
+      "type": "code",
+      "title": "A price cache that answers hits synchronously",
+      "prompt": [
+        "Write a class **`PriceCache`** with a constructor `PriceCache(Func<string, Task<decimal>> load)` and a method",
+        "**`ValueTask<decimal> GetAsync(string sku)`**:",
+        "",
+        "- a **hit** returns an already completed `ValueTask` (no `Task` involved);",
+        "- a **miss** calls `load(sku)`, stores the price when it arrives, and returns it;",
+        "- `load` is called **once** per sku when calls do not overlap.",
+        "",
+        "The tests hold the loader's answer, so they can check that a miss is not complete yet and a later hit is."
+      ],
+      "starter": [
+        "class PriceCache(Func<string, Task<decimal>> load)",
+        "{",
+        "    public async Task<decimal> GetAsync(string sku)",
+        "    {",
+        "        return await load(sku);",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class PriceCache(Func<string, Task<decimal>> load)",
+        "{",
+        "    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, decimal> _prices = new();",
+        "",
+        "    public ValueTask<decimal> GetAsync(string sku) =>",
+        "        _prices.TryGetValue(sku, out var price)",
+        "            ? new ValueTask<decimal>(price)",
+        "            : new ValueTask<decimal>(LoadAndStoreAsync(sku));",
+        "",
+        "    private async Task<decimal> LoadAndStoreAsync(string sku)",
+        "    {",
+        "        var price = await load(sku);",
+        "        _prices[sku] = price;",
+        "        return price;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoCalls = 0;",
+        "var dojoGate = new TaskCompletionSource<decimal>(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "Task<decimal> DojoLoad(string sku) { dojoCalls++; return dojoGate.Task; }",
+        "var dojoCache = new PriceCache(DojoLoad);",
+        "ValueTask<decimal> dojoFirst = dojoCache.GetAsync(\"A1\");",
+        "Dojo.Check(\"A miss is not complete while the loader works\", !dojoFirst.IsCompleted, \"The first call should wait for the loader.\");",
+        "dojoGate.SetResult(9.5m);",
+        "Dojo.Eq(\"The miss returns the loaded price\", 9.5m, await dojoFirst);",
+        "ValueTask<decimal> dojoSecond = dojoCache.GetAsync(\"A1\");",
+        "Dojo.Check(\"A hit is complete at once\", dojoSecond.IsCompletedSuccessfully, \"After the first load, GetAsync(\\\"A1\\\") should answer synchronously.\");",
+        "Dojo.Eq(\"The hit returns the cached price\", 9.5m, await dojoSecond);",
+        "Dojo.Eq(\"The loader ran once\", 1, dojoCalls);",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Keep the prices in a dictionary. On a hit, `return new ValueTask<decimal>(price);`. On a miss, wrap a `Task` from a private async method that loads and stores.",
+        "`public ValueTask<decimal> GetAsync(string sku) => _prices.TryGetValue(sku, out var p) ? new ValueTask<decimal>(p) : new ValueTask<decimal>(LoadAndStoreAsync(sku));`"
+      ],
+      "explain": [
+        "Two concurrent misses for the same sku still call `load` twice here. That is the *cache stampede*, and module 4 fixes it with",
+        "`Lazy<Task<T>>` in a `ConcurrentDictionary`. Production code would also expire entries (`HybridCache` in .NET 9+ does both)."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,221 @@
+{
+  "title": "Thread-pool starvation: symptoms, tools, fix",
+  "summary": "Read the counters of a starving service, find the blocked threads with dotnet-stack, and fix the sync-over-async that caused it.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What starvation looks like from the outside",
+      "body": [
+        "The on-call alert says: *p99 latency 8 s, CPU 15%, no errors*. Slow but idle is the signature of threads that are **waiting**, not",
+        "working. On .NET 9 and later, `dotnet-counters monitor -n Orders` shows the runtime's `System.Runtime` meter. During the incident:",
+        "",
+        "```text",
+        "[System.Runtime]",
+        "    dotnet.monitor.lock_contentions ({contention})                 2,114",
+        "    dotnet.process.cpu.count ({cpu})                                   8",
+        "    dotnet.thread_pool.queue.length ({work_item})                  1,870",
+        "    dotnet.thread_pool.thread.count ({thread})                       112",
+        "    dotnet.thread_pool.work_item.count ({work_item})             41,032",
+        "```",
+        "",
+        "Read it like a senior:",
+        "",
+        "- `thread.count` is **112 on 8 cores** and has been creeping up one or two a second: the pool keeps adding threads because the ones it",
+        "  has are not coming back.",
+        "- `queue.length` is large: work is queued with no thread free to run it.",
+        "- `work_item.count` (completed items, a running total) grows slowly: little is getting done.",
+        "- CPU is low: those 112 threads are blocked, not busy.",
+        "",
+        "Healthy, the same service sits at about 8 to 16 threads and a queue near 0. On runtimes before .NET 9 the names are the older",
+        "EventCounters: `threadpool-thread-count`, `threadpool-queue-length`, `threadpool-completed-items-count`, `monitor-lock-contention-count`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Another service shows `dotnet.thread_pool.thread.count` = 10 on 8 cores, `queue.length` = 0, CPU 98%, and slow responses. Is this thread-pool starvation?",
+      "options": [
+        "No: the threads are busy computing; this is CPU saturation, so profile the hot code",
+        "Yes: raise the minimum thread count",
+        "Yes: the queue is empty because the threads are blocked",
+        "No: it is a deadlock"
+      ],
+      "answer": 0,
+      "explain": [
+        "Starvation is *many threads, low CPU, growing queue*. Few threads at full CPU with an empty queue means the work itself is expensive.",
+        "More threads would only add context switches. Reach for `dotnet-trace collect --profile cpu-sampling` or a profiler instead."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: starvation",
+      "body": "When a .NET service is slow but not busy, these tell you which threads are stuck and where.",
+      "toolkit": [
+        {
+          "cmd": "dotnet-counters monitor -n <name> --counters System.Runtime",
+          "what": "Live runtime metrics: thread count, queue length, completed items, lock contentions, GC.",
+          "flags": [["-n / -p", "process name or id"], ["--counters", "which meters (comma-separated); System.Runtime is the runtime's own"], ["--refresh-interval", "seconds between updates"]],
+          "example": "dotnet-counters monitor -p 4812 --counters System.Runtime,Microsoft.AspNetCore.Hosting",
+          "when": "first look at a slow service"
+        },
+        {
+          "cmd": "dotnet-stack report -p <pid>",
+          "what": "Prints the managed stack of every thread, right now. Look for many pool threads stopped in the same wait.",
+          "flags": [["-p / -n", "process id or name"]],
+          "example": "dotnet-stack report -n Orders > stacks.txt",
+          "when": "the problem is happening now and is steady"
+        },
+        {
+          "cmd": "dotnet-trace collect --clrevents waithandle --clreventlevel verbose",
+          "what": "Records WaitHandleWait events (.NET 9+) with stacks: every place a thread blocked on .Result, .Wait(), lock or SemaphoreSlim.Wait.",
+          "flags": [["--duration", "how long to record, hh:mm:ss"], ["-n / -p", "the process"]],
+          "example": "dotnet-trace collect -n Orders --clrevents waithandle --clreventlevel verbose --duration 00:00:30",
+          "when": "the stalls come and go; open the .nettrace in PerfView or .NET Events Viewer"
+        },
+        {
+          "cmd": "dotnet-dump collect -p <pid>",
+          "what": "Writes a full memory dump to analyse later (dotnet-dump analyze, Visual Studio Parallel Stacks).",
+          "flags": [["--type", "Full, Heap, Mini"], ["-o", "output file"]],
+          "example": "dotnet-dump collect -p 4812 --type Full -o orders.dmp",
+          "when": "you must restart the service now but want the evidence"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the question to the tool that answers it.",
+      "pairs": [
+        ["Is the pool growing and the queue backing up?", "`dotnet-counters monitor`"],
+        ["Where are the threads stuck right now?", "`dotnet-stack report`"],
+        ["Which call sites block now and then, over 30 seconds?", "`dotnet-trace collect --clrevents waithandle`"],
+        ["I must restart; how do I keep the evidence?", "`dotnet-dump collect`"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The stack that gives it away",
+      "body": [
+        "`dotnet-stack report -n Orders` prints hundreds of threads. Most of them end like this (top of the stack first):",
+        "",
+        "```text",
+        "Thread (0x3f1c):",
+        "  System.Private.CoreLib.il!System.Threading.ManualResetEventSlim.Wait(int32,value class System.Threading.CancellationToken)",
+        "  System.Private.CoreLib.il!System.Threading.Tasks.Task.SpinThenBlockingWait(int32,value class System.Threading.CancellationToken)",
+        "  System.Private.CoreLib.il!System.Threading.Tasks.Task.InternalWaitCore(int32,value class System.Threading.CancellationToken)",
+        "  System.Private.CoreLib.il!System.Threading.Tasks.Task`1[System.__Canon].GetResultCore(bool)",
+        "  Orders!Orders.Pricing.PriceClient.GetPrice(class System.String)",
+        "  Orders!Orders.Api.CheckoutHandler.Handle(class Orders.Api.CheckoutRequest)",
+        "  ...",
+        "  System.Private.CoreLib.il!System.Threading.ThreadPoolWorkQueue.Dispatch()",
+        "  System.Private.CoreLib.il!System.Threading.PortableThreadPool+WorkerThread.WorkerThreadStart()",
+        "```",
+        "",
+        "- The bottom two frames: this is a **pool** thread.",
+        "- `GetResultCore` is `Task<T>.Result`; `SpinThenBlockingWait` is the thread going to sleep on it.",
+        "- The first frame of *your* code, `PriceClient.GetPrice`, is the culprit: a synchronous method calling an async one and blocking.",
+        "",
+        "The fix is **async all the way**: `GetPriceAsync` returning `Task<decimal>`, awaited by `HandleAsync`, up to the endpoint."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "The team proposes fixes for the starvation above. Which fix the cause, and which only hide it?",
+      "buckets": ["Fixes the cause", "Band-aid"],
+      "items": [
+        ["Make `GetPrice` async and await it all the way up", 0],
+        ["`ThreadPool.SetMinThreads(500, 500)` at startup", 1],
+        ["Wrap the call: `Task.Run(() => GetPriceAsync(sku)).Result`", 1],
+        ["Replace the blocking `HttpClient` call with `await client.GetFromJsonAsync(...)`", 0],
+        ["Add more pods behind the load balancer", 1],
+        ["Replace `semaphore.Wait()` with `await semaphore.WaitAsync(ct)`", 0]
+      ],
+      "explain": [
+        "Raising the minimum threads makes the pool create blocked threads faster (each one 1 MB of stack and scheduler time); it moves the",
+        "cliff, it does not remove it. `Task.Run(...).Result` still blocks the calling thread *and* uses a second one. Scaling out multiplies",
+        "the cost. Only removing the synchronous wait gives the thread back."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the incident steps in the order a senior on call would take them.",
+      "lines": [
+        "Confirm the symptom: high latency with low CPU on the dashboards",
+        "`dotnet-counters monitor` shows thread count climbing and a long queue",
+        "`dotnet-stack report` (or a dump) shows pool threads blocked in `GetResultCore` under `PriceClient.GetPrice`",
+        "Mitigate: scale out or restart to buy time, keeping a dump as evidence",
+        "Fix: make `GetPrice` async all the way up, then load-test the fix"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Async all the way, both calls at once",
+      "prompt": [
+        "`SummaryAsync` builds an order summary from two services. It was written in a hurry: it blocks on both calls, one after the other.",
+        "",
+        "Rewrite it so that it:",
+        "",
+        "1. never blocks (no `.Result`, `.Wait()`, `GetAwaiter().GetResult()`);",
+        "2. **starts both calls before awaiting either**, so the waits overlap;",
+        "3. returns `\"{customer}: {count} items\"`.",
+        "",
+        "The tests hold both services' answers until both calls have started, so a version that awaits the first before starting the second",
+        "never gets its first answer (the tests give up after two seconds)."
+      ],
+      "starter": [
+        "static Task<string> SummaryAsync(Customers customers, Orders orders, int id)",
+        "{",
+        "    var name = customers.NameAsync(id).Result;",
+        "    var count = orders.CountAsync(id).GetAwaiter().GetResult();",
+        "    return Task.FromResult($\"{name}: {count} items\");",
+        "}"
+      ],
+      "solution": [
+        "static async Task<string> SummaryAsync(Customers customers, Orders orders, int id)",
+        "{",
+        "    var nameTask = customers.NameAsync(id);",
+        "    var countTask = orders.CountAsync(id);",
+        "    await Task.WhenAll(nameTask, countTask);",
+        "    return $\"{nameTask.Result}: {countTask.Result} items\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoBoth = new Both();",
+        "var dojoTask = SummaryAsync(new Customers(dojoBoth), new Orders(dojoBoth), 3);",
+        "Dojo.Check(\"SummaryAsync returns while the services are still working\", !dojoTask.IsCompleted,",
+        "    \"It only returned after the services answered: something blocks the thread.\");",
+        "var dojoDone = await Task.WhenAny(dojoTask, Task.Delay(3000));",
+        "Dojo.Check(\"Both calls are started before either is awaited\", dojoDone == dojoTask && dojoBoth.OpenedTogether,",
+        "    \"The services only answer once both calls are in flight. Start both tasks first, then await them.\");",
+        "if (dojoDone == dojoTask) Dojo.Eq(\"SummaryAsync(..., 3) gives the summary\", \"Ada: 5 items\", await dojoTask);",
+        "",
+        "class Both",
+        "{",
+        "    int _started;",
+        "    public bool OpenedTogether;",
+        "    readonly TaskCompletionSource _open = new(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "    public Both() => _ = Task.Delay(2000).ContinueWith(_ => _open.TrySetResult());",
+        "    public async Task<T> Call<T>(T value)",
+        "    {",
+        "        if (Interlocked.Increment(ref _started) == 2 && !_open.Task.IsCompleted) { OpenedTogether = true; _open.TrySetResult(); }",
+        "        await _open.Task;",
+        "        return value;",
+        "    }",
+        "}",
+        "class Customers(Both both) { public Task<string> NameAsync(int id) => both.Call(\"Ada\"); }",
+        "class Orders(Both both) { public Task<int> CountAsync(int id) => both.Call(5); }"
+      ],
+      "forbid": [
+        { "pattern": "GetResult\\(|\\.Wait\\(", "message": "Does not block on a task" }
+      ],
+      "hints": [
+        "Call both methods first and keep the tasks in variables. Await afterwards.",
+        "`var a = customers.NameAsync(id); var b = orders.CountAsync(id); await Task.WhenAll(a, b);` then `await a` and `await b` (or `.Result`, safe once they are complete)."
+      ],
+      "explain": [
+        "Reading `.Result` *after* `await Task.WhenAll(...)` is fine: the tasks are complete, so it does not block. Many teams still prefer",
+        "`var name = await nameTask;` for the same effect, because it unwraps exceptions the same way as everywhere else."
+      ]
+    }
+  ]
+}

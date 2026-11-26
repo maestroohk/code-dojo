@@ -1,0 +1,206 @@
+{
+  "title": "ConcurrentDictionary traps and immutability",
+  "summary": "Why GetOrAdd can run your factory twice, the Lazy<Task<T>> fix for caches, compound operations that are not atomic, and immutable snapshots for read-mostly data.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Each call is atomic; your sequence of calls is not",
+      "body": [
+        "`ConcurrentDictionary<TKey, TValue>` makes every **single** operation thread-safe: `TryAdd`, `TryGetValue`, `TryRemove`, `TryUpdate`,",
+        "`GetOrAdd`, `AddOrUpdate`. It does **not** make two calls in a row atomic, and it does **not** run your delegates under its lock.",
+        "",
+        "`GetOrAdd(key, factory)` looks up the key; if it is missing it calls `factory` **outside** any lock, then tries to add the result. Two",
+        "threads that miss at the same time **both run the factory**; one value is stored and both callers get that one, but the other",
+        "factory's work (a connection opened, an HTTP call made) is wasted or leaked.",
+        "",
+        "The card runs `GetOrAdd` for real on two threads. The factory counts its calls with `Interlocked`. Find an interleaving where",
+        "`created` is 2, or press **Try every interleaving**."
+      ],
+      "interleave": {
+        "setup": [
+          "var cache = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();",
+          "int created = 0;"
+        ],
+        "threads": [
+          { "name": "T1", "code": ["cache.GetOrAdd(\"db\", key =>", "{", "    Interlocked.Increment(ref created);", "    return 42;", "});"] },
+          { "name": "T2", "code": ["cache.GetOrAdd(\"db\", key =>", "{", "    Interlocked.Increment(ref created);", "    return 42;", "});"] }
+        ],
+        "watch": ["created", "cache.Count"],
+        "result": "created",
+        "outcomes": ["1", "2"]
+      }
+    },
+    {
+      "type": "sort",
+      "prompt": "Each line runs on many threads against one shared `ConcurrentDictionary<string, int> stock`. Atomic, or a race?",
+      "buckets": ["Atomic", "Race"],
+      "items": [
+        ["`stock.TryAdd(\"A1\", 5);`", 0],
+        ["`if (!stock.ContainsKey(\"A1\")) stock[\"A1\"] = 5;`", 1],
+        ["`stock[\"A1\"] = stock[\"A1\"] - 1;`", 1],
+        ["`stock.AddOrUpdate(\"A1\", 1, (_, n) => n + 1);`", 0],
+        ["`if (stock.TryGetValue(\"A1\", out var n)) stock.TryUpdate(\"A1\", n - 1, n);` (checking the result)", 0],
+        ["`var n = stock[\"A1\"]; if (n > 0) stock[\"A1\"] = n - 1;`", 1]
+      ],
+      "explain": [
+        "`AddOrUpdate` retries its update delegate until its compare-and-swap succeeds, so the *result* is atomic (the delegate may run more",
+        "than once: keep it pure). `TryUpdate(key, new, expected)` is a compare-and-swap; it is correct when you check its result and retry.",
+        "A read followed by a separate write is a race, however safe each call is."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Lazy<Task<T>>: one factory call per key",
+      "body": [
+        "Store a **`Lazy<Task<T>>`** instead of the value. Creating a `Lazy` is cheap and has no side effects, so it does not matter if two",
+        "threads create one each: only the stored `Lazy` is ever *started*, and every caller awaits the same task.",
+        "",
+        "```csharp fragment",
+        "readonly ConcurrentDictionary<string, Lazy<Task<Conn>>> _conns = new();",
+        "",
+        "public async Task<Conn> GetAsync(string host)",
+        "{",
+        "    var lazy = _conns.GetOrAdd(host, h => new Lazy<Task<Conn>>(() => _open(h)));",
+        "    try { return await lazy.Value; }",
+        "    catch",
+        "    {",
+        "        _conns.TryRemove(KeyValuePair.Create(host, lazy));   // do not cache a failure forever",
+        "        throw;",
+        "    }",
+        "}",
+        "```",
+        "",
+        "The `TryRemove(KeyValuePair)` overload removes the entry **only if** it is still that same `Lazy`, so a retry that already replaced",
+        "it is not thrown away."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var d = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();",
+        "Console.WriteLine(d.TryAdd(\"a\", 1));",
+        "Console.WriteLine(d.TryAdd(\"a\", 2));",
+        "Console.WriteLine(d.TryUpdate(\"a\", 3, 2));",
+        "Console.WriteLine(d.TryUpdate(\"a\", 3, 1));",
+        "Console.WriteLine(d[\"a\"]);"
+      ],
+      "answer": ["True", "False", "False", "True", "3"],
+      "explain": "`TryAdd` never overwrites. `TryUpdate(key, newValue, comparisonValue)` is a compare-and-swap: it writes only when the current value equals the comparison value (1 here, not 2)."
+    },
+    {
+      "type": "learn",
+      "title": "Immutability: share it, never change it",
+      "body": [
+        "The safest shared state is state nobody can modify. For **read-mostly** data (configuration, routing tables, price lists, feature",
+        "flags), build a new immutable object and swap the reference:",
+        "",
+        "```csharp fragment",
+        "private FrozenDictionary<string, Route> _routes = FrozenDictionary<string, Route>.Empty;",
+        "",
+        "public Route? Find(string path) => Volatile.Read(ref _routes).GetValueOrDefault(path);   // readers: no lock",
+        "",
+        "public void Reload(IEnumerable<Route> routes) =>                                        // writers: build, then swap",
+        "    Volatile.Write(ref _routes, routes.ToFrozenDictionary(r => r.Path));",
+        "```",
+        "",
+        "Readers always see a complete, consistent table, never a half-updated one. With several writers, use `ImmutableInterlocked.Update`",
+        "(a CAS loop for you). Records with `init` properties and `with` expressions make immutable domain objects cheap to write."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A pricing service reads its price table on every request (thousands per second) and reloads it every five minutes. Which design fits best?",
+      "options": [
+        "Build a new `FrozenDictionary` on reload and swap the reference; readers use whatever reference they read",
+        "A `Dictionary` protected by a `lock` taken on every read",
+        "A `ConcurrentDictionary` that the reload clears and refills key by key",
+        "A `ReaderWriterLockSlim` held for the whole reload"
+      ],
+      "answer": 0,
+      "explain": "Reads take no lock and always see one complete table. Clearing and refilling a shared dictionary lets readers see an empty or half-filled table mid-reload."
+    },
+    {
+      "type": "code",
+      "title": "A connection cache that opens each host once",
+      "prompt": [
+        "Write a class **`ConnectionCache`** with a constructor `ConnectionCache(Func<string, Task<Conn>> open)` and",
+        "**`Task<Conn> GetAsync(string host)`**:",
+        "",
+        "- concurrent callers for the same host share **one** call to `open` and get the **same** `Conn`;",
+        "- if `open` fails, the caller gets the exception and the **next** call tries again (the failure is not cached).",
+        "",
+        "Write the dictionary type in full, `System.Collections.Concurrent.ConcurrentDictionary<...>` (this editor has no `using` line).",
+        "The tests hold `open`'s answer until both callers are waiting, so a version that can open twice is caught every time."
+      ],
+      "starter": [
+        "class ConnectionCache(Func<string, Task<Conn>> open)",
+        "{",
+        "    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Conn> _conns = new();",
+        "",
+        "    public async Task<Conn> GetAsync(string host)",
+        "    {",
+        "        if (_conns.TryGetValue(host, out var conn)) return conn;",
+        "        conn = await open(host);",
+        "        _conns[host] = conn;",
+        "        return conn;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class ConnectionCache(Func<string, Task<Conn>> open)",
+        "{",
+        "    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<Task<Conn>>> _conns = new();",
+        "",
+        "    public async Task<Conn> GetAsync(string host)",
+        "    {",
+        "        var lazy = _conns.GetOrAdd(host, h => new Lazy<Task<Conn>>(() => open(h)));",
+        "        try",
+        "        {",
+        "            return await lazy.Value;",
+        "        }",
+        "        catch",
+        "        {",
+        "            _conns.TryRemove(KeyValuePair.Create(host, lazy));",
+        "            throw;",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoOpens = 0;",
+        "var dojoGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "async Task<Conn> DojoOpen(string host)",
+        "{",
+        "    Interlocked.Increment(ref dojoOpens);",
+        "    await dojoGate.Task;",
+        "    if (host == \"bad\") throw new IOException(\"connection refused\");",
+        "    return new Conn(host);",
+        "}",
+        "var dojoCache = new ConnectionCache(DojoOpen);",
+        "var dojoA = dojoCache.GetAsync(\"db1\");",
+        "var dojoB = dojoCache.GetAsync(\"db1\");",
+        "dojoGate.SetResult();",
+        "var dojoConnA = await dojoA;",
+        "var dojoConnB = await dojoB;",
+        "Dojo.Eq(\"Two concurrent callers open db1 once\", 1, dojoOpens);",
+        "Dojo.Check(\"Both callers get the same connection\", ReferenceEquals(dojoConnA, dojoConnB), \"They got different Conn objects.\");",
+        "await Dojo.ThrowsAsync<IOException>(\"A failed open reaches the caller\", () => dojoCache.GetAsync(\"bad\"));",
+        "await Dojo.ThrowsAsync<IOException>(\"The next call tries again\", () => dojoCache.GetAsync(\"bad\"));",
+        "Dojo.Eq(\"The failure was not cached: open ran again\", 3, dojoOpens);",
+        "{{CODE}}",
+        "record Conn(string Host);"
+      ],
+      "hints": [
+        "Store `Lazy<Task<Conn>>` in the dictionary and await `lazy.Value`.",
+        "Wrap the await in try/catch; in the catch, `_conns.TryRemove(KeyValuePair.Create(host, lazy));` then `throw;`."
+      ],
+      "explain": [
+        "Notice the test: both callers start before `open` is allowed to finish. That *forces* the dangerous interleaving instead of hoping",
+        "for it, and it is how you should write tests for your own caches. `HybridCache` (Microsoft.Extensions.Caching.Hybrid) gives you",
+        "the same stampede protection out of the box, plus expiry and a distributed second level."
+      ]
+    }
+  ]
+}

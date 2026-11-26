@@ -1,0 +1,259 @@
+{
+  "title": "Boss: the notification service that ate its memory",
+  "summary": "A bounded mail queue that says no in time, a partner limit that never leaks a slot, and an import that stops at the first failure.",
+  "minutes": 28,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**INC-5120: notifications pod OOMKilled three times during the partner outage.**",
+        "",
+        "```text",
+        "$ dotnet-counters monitor -n Notify --counters System.Runtime",
+        "    dotnet.gc.last_collection.heap.size (By)   gen2   3.9e+09",
+        "    dotnet.process.memory.working_set (By)            4.2e+09",
+        "$ kubectl describe pod notify-7d9f -n prod | grep -A2 'Last State'",
+        "    Last State:  Terminated   Reason: OOMKilled   Exit Code: 137",
+        "warn: Partner[0] 429 Too Many Requests (in flight: 61)",
+        "warn: Partner[0] in flight: 5 of 5 ... in flight: 5 of 5 ... (all requests now waiting)",
+        "fail: Import[0] file 2 of 400 failed: bad header; import kept going and wrote 398 partial files",
+        "```",
+        "",
+        "Three coordination bugs: an unbounded queue, a concurrency limit that leaks slots on errors, and a batch that ignores its first",
+        "failure."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "1. A queue that says no in time",
+      "prompt": [
+        "Write a class **`MailQueue(int capacity)`** backed by a **bounded** `Channel<string>` (full mode `Wait`):",
+        "",
+        "- **`ValueTask<bool> TryEnqueueAsync(string mail, TimeSpan wait, CancellationToken ct)`**: write the mail, waiting at most `wait`",
+        "  for room; return `true` if it was queued, `false` if the queue stayed full (the endpoint then answers 503). If `ct` is cancelled,",
+        "  let the `OperationCanceledException` out.",
+        "- **`IAsyncEnumerable<string> ReadAllAsync(CancellationToken ct)`** for the sender, and **`void Complete()`**.",
+        "",
+        "Write the channel types with their namespace: `System.Threading.Channels.Channel`, `...BoundedChannelOptions`,",
+        "`...BoundedChannelFullMode`."
+      ],
+      "starter": [
+        "class MailQueue(int capacity)",
+        "{",
+        "    private readonly System.Threading.Channels.Channel<string> _channel =",
+        "        System.Threading.Channels.Channel.CreateUnbounded<string>();",
+        "",
+        "    public async ValueTask<bool> TryEnqueueAsync(string mail, TimeSpan wait, CancellationToken ct)",
+        "    {",
+        "        await _channel.Writer.WriteAsync(mail, ct);",
+        "        return true;",
+        "    }",
+        "",
+        "    public IAsyncEnumerable<string> ReadAllAsync(CancellationToken ct) => _channel.Reader.ReadAllAsync(ct);",
+        "",
+        "    public void Complete() => _channel.Writer.Complete();",
+        "}"
+      ],
+      "solution": [
+        "class MailQueue(int capacity)",
+        "{",
+        "    private readonly System.Threading.Channels.Channel<string> _channel =",
+        "        System.Threading.Channels.Channel.CreateBounded<string>(new System.Threading.Channels.BoundedChannelOptions(capacity)",
+        "        {",
+        "            FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait,",
+        "        });",
+        "",
+        "    public async ValueTask<bool> TryEnqueueAsync(string mail, TimeSpan wait, CancellationToken ct)",
+        "    {",
+        "        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);",
+        "        timeout.CancelAfter(wait);",
+        "        try",
+        "        {",
+        "            await _channel.Writer.WriteAsync(mail, timeout.Token);",
+        "            return true;",
+        "        }",
+        "        catch (OperationCanceledException) when (!ct.IsCancellationRequested)",
+        "        {",
+        "            return false;",
+        "        }",
+        "    }",
+        "",
+        "    public IAsyncEnumerable<string> ReadAllAsync(CancellationToken ct) => _channel.Reader.ReadAllAsync(ct);",
+        "",
+        "    public void Complete() => _channel.Writer.Complete();",
+        "}"
+      ],
+      "template": [
+        "var dojoQ = new MailQueue(2);",
+        "Dojo.Check(\"The first mail is queued\", await dojoQ.TryEnqueueAsync(\"a\", TimeSpan.FromMilliseconds(30), CancellationToken.None), \"\");",
+        "Dojo.Check(\"The second mail is queued\", await dojoQ.TryEnqueueAsync(\"b\", TimeSpan.FromMilliseconds(30), CancellationToken.None), \"\");",
+        "Dojo.Check(\"A third mail is refused once the queue stays full\", !await dojoQ.TryEnqueueAsync(\"x\", TimeSpan.FromMilliseconds(30), CancellationToken.None),",
+        "    \"The queue accepted a third mail with capacity 2: it is not bounded (or ignores the wait).\");",
+        "var dojoReader = dojoQ.ReadAllAsync(CancellationToken.None).GetAsyncEnumerator();",
+        "await dojoReader.MoveNextAsync();",
+        "Dojo.Eq(\"The sender reads the oldest mail first\", \"a\", dojoReader.Current);",
+        "Dojo.Check(\"After a read there is room again\", await dojoQ.TryEnqueueAsync(\"c\", TimeSpan.FromSeconds(2), CancellationToken.None), \"\");",
+        "using var dojoGone = new CancellationTokenSource();",
+        "dojoGone.Cancel();",
+        "await Dojo.ThrowsAsync<OperationCanceledException>(\"A cancelled caller gets OperationCanceledException, not false\",",
+        "    async () => await dojoQ.TryEnqueueAsync(\"y\", TimeSpan.FromSeconds(2), dojoGone.Token));",
+        "dojoQ.Complete();",
+        "var dojoRest = new List<string>();",
+        "while (await dojoReader.MoveNextAsync()) dojoRest.Add(dojoReader.Current);",
+        "Dojo.Eq(\"After Complete, the sender drains what is left\", new List<string> { \"b\", \"c\" }, dojoRest);",
+        "{{CODE}}"
+      ],
+      "require": [
+        { "pattern": "CreateBounded", "message": "Uses a bounded channel" }
+      ],
+      "hints": [
+        "Create the channel with `Channel.CreateBounded<string>(new BoundedChannelOptions(capacity) { FullMode = BoundedChannelFullMode.Wait })`.",
+        "For the wait: a linked `CancellationTokenSource` with `CancelAfter(wait)`, passed to `WriteAsync`; catch `OperationCanceledException` `when (!ct.IsCancellationRequested)` and return false."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "2. A partner limit that never leaks",
+      "prompt": [
+        "The partner allows 5 calls in flight from us. `PartnerClient` enforces that with a `SemaphoreSlim`, but releases the slot only after a",
+        "**successful** call: every failed call leaks a slot, and after five failures every request waits forever.",
+        "",
+        "Fix **`PartnerClient(Func<string, CancellationToken, Task<string>> call, int maxInFlight)`** and its",
+        "**`Task<string> GetAsync(string id, CancellationToken ct)`** so that a slot is always given back, failures still reach the caller,",
+        "and at most `maxInFlight` calls run at once across **all** callers."
+      ],
+      "starter": [
+        "class PartnerClient(Func<string, CancellationToken, Task<string>> call, int maxInFlight)",
+        "{",
+        "    private readonly SemaphoreSlim _slots = new(maxInFlight);",
+        "",
+        "    public async Task<string> GetAsync(string id, CancellationToken ct)",
+        "    {",
+        "        await _slots.WaitAsync(ct);",
+        "        var result = await call(id, ct);",
+        "        _slots.Release();",
+        "        return result;",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class PartnerClient(Func<string, CancellationToken, Task<string>> call, int maxInFlight)",
+        "{",
+        "    private readonly SemaphoreSlim _slots = new(maxInFlight);",
+        "",
+        "    public async Task<string> GetAsync(string id, CancellationToken ct)",
+        "    {",
+        "        await _slots.WaitAsync(ct);",
+        "        try",
+        "        {",
+        "            return await call(id, ct);",
+        "        }",
+        "        finally",
+        "        {",
+        "            _slots.Release();",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "int dojoInFlight = 0, dojoPeak = 0;",
+        "var dojoLock = new object();",
+        "var dojoGates = new Dictionary<string, TaskCompletionSource<string>>();",
+        "foreach (var dojoId in new[] { \"p1\", \"p2\", \"p3\", \"p4\" }) dojoGates[dojoId] = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "async Task<string> DojoCall(string id, CancellationToken ct)",
+        "{",
+        "    lock (dojoLock) { dojoInFlight++; dojoPeak = Math.Max(dojoPeak, dojoInFlight); }",
+        "    try { return await dojoGates[id].Task; }",
+        "    finally { lock (dojoLock) dojoInFlight--; }",
+        "}",
+        "var dojoClient = new PartnerClient(DojoCall, 2);",
+        "var dojoTasks = new[] { \"p1\", \"p2\", \"p3\", \"p4\" }.Select(id => dojoClient.GetAsync(id, CancellationToken.None)).ToArray();",
+        "await Task.Delay(30);",
+        "Dojo.Eq(\"Only two calls run at once\", 2, Volatile.Read(ref dojoInFlight));",
+        "dojoGates[\"p1\"].SetException(new InvalidOperationException(\"partner returned 500\"));",
+        "dojoGates[\"p2\"].SetException(new InvalidOperationException(\"partner returned 500\"));",
+        "await Dojo.ThrowsAsync<InvalidOperationException>(\"A failed call reaches the caller\", () => dojoTasks[0]);",
+        "dojoGates[\"p3\"].SetResult(\"ok-3\");",
+        "dojoGates[\"p4\"].SetResult(\"ok-4\");",
+        "var dojoAfter = await Task.WhenAny(Task.WhenAll(dojoTasks[2], dojoTasks[3]), Task.Delay(2000));",
+        "Dojo.Check(\"After two failures, waiting calls still get a slot\", dojoTasks[2].IsCompleted && dojoTasks[3].IsCompleted,",
+        "    \"Calls 3 and 4 never started: the failed calls kept their slots. Release in finally.\");",
+        "if (dojoTasks[3].IsCompletedSuccessfully) Dojo.Eq(\"Later calls return their results\", \"ok-4\", await dojoTasks[3]);",
+        "Dojo.Eq(\"Never more than two at once\", 2, dojoPeak);",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "The release must run whether the call succeeds or throws.",
+        "`await _slots.WaitAsync(ct); try { return await call(id, ct); } finally { _slots.Release(); }`"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "3. Stop at the first failure",
+      "prompt": [
+        "Write **`static async Task ImportAsync(IReadOnlyList<string> files, Func<string, CancellationToken, Task> import, int maxParallel, CancellationToken ct)`**",
+        "with `Parallel.ForEachAsync`:",
+        "",
+        "- at most `maxParallel` imports at once;",
+        "- pass each import the loop's token, so that **the first failure cancels the imports still running** and no new ones start;",
+        "- the failure's exception comes out of `ImportAsync`."
+      ],
+      "starter": [
+        "static async Task ImportAsync(IReadOnlyList<string> files, Func<string, CancellationToken, Task> import, int maxParallel, CancellationToken ct)",
+        "{",
+        "    foreach (var file in files)",
+        "    {",
+        "        try { await import(file, ct); }",
+        "        catch (Exception e) { Console.WriteLine($\"{file} failed: {e.Message}\"); }",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "static async Task ImportAsync(IReadOnlyList<string> files, Func<string, CancellationToken, Task> import, int maxParallel, CancellationToken ct)",
+        "{",
+        "    var options = new ParallelOptions { MaxDegreeOfParallelism = maxParallel, CancellationToken = ct };",
+        "    await Parallel.ForEachAsync(files, options, async (file, token) => await import(file, token));",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "int dojoStarted = 0, dojoInFlight = 0, dojoPeak = 0, dojoCancelled = 0;",
+        "var dojoLock = new object();",
+        "var dojoTwoRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "async Task DojoImport(string file, CancellationToken ct)",
+        "{",
+        "    lock (dojoLock) { dojoStarted++; dojoInFlight++; dojoPeak = Math.Max(dojoPeak, dojoInFlight); if (dojoInFlight == 2) dojoTwoRunning.TrySetResult(); }",
+        "    try",
+        "    {",
+        "        if (file == \"file-1\") { await dojoTwoRunning.Task; throw new InvalidDataException(\"bad header\"); }",
+        "        await Task.Delay(Timeout.Infinite, ct);",
+        "    }",
+        "    catch (OperationCanceledException) { Interlocked.Increment(ref dojoCancelled); throw; }",
+        "    finally { lock (dojoLock) dojoInFlight--; }",
+        "}",
+        "var dojoFiles = Enumerable.Range(0, 10).Select(i => $\"file-{i}\").ToList();",
+        "var dojoRun = ImportAsync(dojoFiles, DojoImport, 2, CancellationToken.None);",
+        "var dojoEnded = await Task.WhenAny(dojoRun, Task.Delay(3000)) == dojoRun;",
+        "Dojo.Check(\"The import ends after the first failure\", dojoEnded, \"It was still running 3 seconds later: the other imports were not cancelled.\");",
+        "if (dojoEnded) await Dojo.ThrowsAsync<InvalidDataException>(\"The failure comes out of ImportAsync\", () => dojoRun);",
+        "Dojo.Check(\"The import still running was cancelled\", dojoCancelled >= 1, \"Pass the loop's token to import(file, token).\");",
+        "Dojo.Check(\"No more than 2 ran at once\", dojoPeak <= 2, $\"Peak was {dojoPeak}.\");",
+        "Dojo.Check(\"Most files were never started\", dojoStarted <= 3, $\"{dojoStarted} of 10 were started.\");"
+      ],
+      "require": [
+        { "pattern": "Parallel\\.ForEachAsync", "message": "Uses Parallel.ForEachAsync" }
+      ],
+      "hints": [
+        "`new ParallelOptions { MaxDegreeOfParallelism = maxParallel, CancellationToken = ct }`.",
+        "`await Parallel.ForEachAsync(files, options, async (file, token) => await import(file, token));`: use the `token` the loop gives you, not `ct`."
+      ],
+      "explain": [
+        "`Parallel.ForEachAsync` cancels the token it passes to bodies as soon as one throws, stops handing out new items, waits for the",
+        "running ones to finish, then throws. Passing the outer `ct` instead of the loop's token is the common mistake: the siblings then",
+        "never hear about the failure."
+      ]
+    }
+  ]
+}

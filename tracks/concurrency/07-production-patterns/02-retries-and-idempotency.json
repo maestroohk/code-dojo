@@ -1,0 +1,162 @@
+{
+  "title": "Retries with jitter, and idempotency",
+  "summary": "Which failures to retry, exponential backoff with full jitter, retry storms, and making a retried operation safe with idempotency keys.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Retry the right things, the right way",
+      "body": [
+        "**Transient** failures (a timeout, a dropped connection, HTTP 503, 429, 408) may succeed if you try again. **Permanent** ones (400,",
+        "401, 404, a validation error, a bug) never will; retrying them only adds load.",
+        "",
+        "Retrying immediately, in a tight loop, is how a short blip becomes an outage: every client hammers the recovering service at once",
+        "(a **retry storm**). Seniors use:",
+        "",
+        "- **Exponential backoff**: wait base, 2×base, 4×base... up to a cap;",
+        "- **Full jitter**: wait a *random* time between 0 and that value, so that thousands of clients spread out instead of retrying in",
+        "  lockstep;",
+        "- **A small attempt limit** (3 to 5) and an overall deadline; honour `Retry-After` when the server sends it;",
+        "- **One layer of retries.** If the gateway, the client and the database driver each retry 3 times, one failure becomes 27 calls.",
+        "",
+        "In .NET you rarely write this by hand: `Microsoft.Extensions.Http.Resilience` (`AddStandardResilienceHandler()`, built on Polly v8)",
+        "gives retries with jitter, timeouts and a circuit breaker. Writing it once yourself is how you learn what those settings mean."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Should a client retry this failure automatically?",
+      "buckets": ["Retry (with backoff)", "Do not retry"],
+      "items": [
+        ["HTTP 503 Service Unavailable", 0],
+        ["HTTP 400 Bad Request: `email is invalid`", 1],
+        ["`TimeoutException` on a GET", 0],
+        ["HTTP 429 Too Many Requests with `Retry-After: 2`", 0],
+        ["HTTP 401 Unauthorized", 1],
+        ["`NullReferenceException` in our own code", 1]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "1,000 clients lose their connection at the same instant and all retry with plain exponential backoff (1 s, 2 s, 4 s, no jitter). What does the recovering server see?",
+      "options": [
+        "Spikes of 1,000 requests at exactly 1 s, 3 s and 7 s, which can knock it over again",
+        "A smooth trickle of retries",
+        "No retries until it is healthy",
+        "One request per second"
+      ],
+      "answer": 0,
+      "explain": "Backoff alone keeps the clients synchronised. Jitter (a random delay up to the backoff) spreads those 1,000 retries across each window."
+    },
+    {
+      "type": "learn",
+      "title": "Idempotency: safe to do twice",
+      "body": [
+        "A retry is only safe if doing the operation twice has the same effect as doing it once. Reads are; `PUT` of a whole resource is;",
+        "`POST /payments` is **not**: the first attempt may have succeeded and only its *response* was lost.",
+        "",
+        "The standard fix is an **idempotency key**: the client generates a unique key per logical operation and sends it with every retry",
+        "(`Idempotency-Key: 8c1f...`, as Stripe and many payment APIs do). The server stores the key with the result of the first",
+        "successful run, and for a repeated key returns the stored result instead of charging again.",
+        "",
+        "- The key store must handle two **concurrent** requests with the same key (one runs, the other waits for its result): the",
+        "  `Lazy<Task<T>>` pattern from module 4, or a unique index in the database.",
+        "- Store failures differently from successes: usually a failure is not cached, so a later retry can succeed.",
+        "- Expire keys after a while (24 hours is common)."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each technique to the problem it solves.",
+      "pairs": [
+        ["exponential backoff", "give a struggling service more time with each attempt"],
+        ["jitter", "stop many clients from retrying at the same moment"],
+        ["idempotency key", "make a retried POST not charge twice"],
+        ["circuit breaker", "stop calling a service that keeps failing, and fail fast for a while"]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Retry with backoff and full jitter",
+      "prompt": [
+        "Write **`static async Task<T> RetryAsync<T>(Func<CancellationToken, Task<T>> op, int maxAttempts, TimeSpan baseDelay, TimeSpan maxDelay, Random rng, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken ct)`**:",
+        "",
+        "- call `op(ct)`; on success return its result;",
+        "- on `TimeoutException` or `IOException` (transient), if attempts remain, wait and try again; after `maxAttempts` attempts, let",
+        "  the last exception out; any other exception goes out **immediately**;",
+        "- before retry number *n* (n = 1 after the first failure), wait `delay(d, ct)` where",
+        "  `cap = min(maxDelay, baseDelay × 2^(n−1))` and `d = TimeSpan.FromTicks((long)(cap.Ticks * rng.NextDouble()))` (full jitter;",
+        "  exactly one `NextDouble()` per retry).",
+        "",
+        "`delay` is passed in so the tests can record the waits instead of sleeping."
+      ],
+      "starter": [
+        "static async Task<T> RetryAsync<T>(Func<CancellationToken, Task<T>> op, int maxAttempts, TimeSpan baseDelay, TimeSpan maxDelay, Random rng, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken ct)",
+        "{",
+        "    while (true)",
+        "    {",
+        "        try { return await op(ct); }",
+        "        catch (Exception) { }",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "static async Task<T> RetryAsync<T>(Func<CancellationToken, Task<T>> op, int maxAttempts, TimeSpan baseDelay, TimeSpan maxDelay, Random rng, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken ct)",
+        "{",
+        "    for (var attempt = 1; ; attempt++)",
+        "    {",
+        "        try",
+        "        {",
+        "            return await op(ct);",
+        "        }",
+        "        catch (Exception e) when (e is TimeoutException or IOException && attempt < maxAttempts)",
+        "        {",
+        "            var exp = baseDelay.Ticks * Math.Pow(2, attempt - 1);",
+        "            var cap = TimeSpan.FromTicks((long)Math.Min(maxDelay.Ticks, exp));",
+        "            var d = TimeSpan.FromTicks((long)(cap.Ticks * rng.NextDouble()));",
+        "            await delay(d, ct);",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoWaits = new List<TimeSpan>();",
+        "Task DojoDelay(TimeSpan d, CancellationToken ct) { dojoWaits.Add(d); return Task.CompletedTask; }",
+        "List<TimeSpan> DojoExpected(int retries, TimeSpan b, TimeSpan max, int seed)",
+        "{",
+        "    var r = new Random(seed); var list = new List<TimeSpan>();",
+        "    for (var n = 1; n <= retries; n++)",
+        "    {",
+        "        var cap = TimeSpan.FromTicks((long)Math.Min(max.Ticks, b.Ticks * Math.Pow(2, n - 1)));",
+        "        list.Add(TimeSpan.FromTicks((long)(cap.Ticks * r.NextDouble())));",
+        "    }",
+        "    return list;",
+        "}",
+        "var dojoCalls = 0;",
+        "Task<string> DojoFlaky(CancellationToken ct) => ++dojoCalls < 4 ? Task.FromException<string>(new TimeoutException(\"slow\")) : Task.FromResult(\"ok\");",
+        "Dojo.Eq(\"It succeeds on the 4th attempt\", \"ok\", await RetryAsync(DojoFlaky, 5, TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1), new Random(42), DojoDelay, CancellationToken.None));",
+        "Dojo.Eq(\"Three waits, with backoff and full jitter\", DojoExpected(3, TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1), 42), dojoWaits);",
+        "dojoWaits.Clear(); dojoCalls = 0;",
+        "Task<string> DojoAlwaysIo(CancellationToken ct) { dojoCalls++; return Task.FromException<string>(new IOException(\"reset\")); }",
+        "await Dojo.ThrowsAsync<IOException>(\"After maxAttempts, the last error comes out\", () => RetryAsync(DojoAlwaysIo, 3, TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1), new Random(7), DojoDelay, CancellationToken.None));",
+        "Dojo.Eq(\"maxAttempts = 3 means 3 calls\", 3, dojoCalls);",
+        "dojoWaits.Clear();",
+        "await Dojo.ThrowsAsync<IOException>(\"A capped run\", () => RetryAsync(DojoAlwaysIo, 4, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(150), new Random(9), DojoDelay, CancellationToken.None));",
+        "Dojo.Eq(\"Waits never exceed maxDelay\", DojoExpected(3, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(150), 9), dojoWaits);",
+        "dojoCalls = 0;",
+        "Task<string> DojoBad(CancellationToken ct) { dojoCalls++; return Task.FromException<string>(new ArgumentException(\"bad input\")); }",
+        "await Dojo.ThrowsAsync<ArgumentException>(\"A permanent error is not retried\", () => RetryAsync(DojoBad, 5, TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1), new Random(1), DojoDelay, CancellationToken.None));",
+        "Dojo.Eq(\"...it was called once\", 1, dojoCalls);"
+      ],
+      "hints": [
+        "Count attempts in a `for` loop. Catch only `TimeoutException` or `IOException`, and only while `attempt < maxAttempts` (an exception filter with `when`).",
+        "`var cap = TimeSpan.FromTicks((long)Math.Min(maxDelay.Ticks, baseDelay.Ticks * Math.Pow(2, attempt - 1)));` then `await delay(TimeSpan.FromTicks((long)(cap.Ticks * rng.NextDouble())), ct);`."
+      ],
+      "explain": [
+        "Passing `Random` and the delay function in is what makes this testable without sleeping; in production, `Random.Shared` and",
+        "`Task.Delay` (or a `TimeProvider`) go in. The exception filter (`when`) keeps the stack trace of the final failure intact."
+      ]
+    }
+  ]
+}
