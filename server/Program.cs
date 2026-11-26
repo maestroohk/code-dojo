@@ -145,6 +145,13 @@ app.MapPost("/api/run", async (RunRequest req) =>
         var (typesOnly, typeDiags) = runner.Compile(wrapped, null, runWeb, efCore: runEf, extra: playground);
         if (typesOnly is not null) (program, diags) = (typesOnly, typeDiags.Where(d => d.Severity != "error").ToList());
     }
+    // A sample that declares a type and then uses it (CS8803): C# wants the statements first. Free runs move the
+    // statements above the types, which is what the learner would do in a real file.
+    if (program is null && req.Template is null && diags.Any(d => d.Id == "CS8803") && CSharpRunner.StatementsFirst(req.Code ?? "") is { } reordered)
+    {
+        var (moved, movedDiags) = runner.Compile(reordered, null, runWeb, efCore: runEf, extra: playground);
+        if (moved is not null) (program, diags) = (moved, movedDiags.Where(d => d.Severity != "error").ToList());
+    }
     if (program is null) return Results.Json(new { compiled = false, diagnostics = diags }, json);
     using (program)
     {

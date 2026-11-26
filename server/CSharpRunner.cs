@@ -702,6 +702,21 @@ public sealed class CSharpRunner
         }
         """;
 
+    /// <summary>
+    /// The same program with its top-level statements moved above its type declarations (usings stay first),
+    /// or null when there is nothing to move.
+    /// </summary>
+    public static string? StatementsFirst(string code)
+    {
+        var root = CSharpSyntaxTree.ParseText(code, Parse).GetCompilationUnitRoot();
+        var statements = root.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax>().ToList();
+        var others = root.Members.Where(m => m is not Microsoft.CodeAnalysis.CSharp.Syntax.GlobalStatementSyntax).ToList();
+        if (statements.Count == 0 || others.Count == 0) return null;
+        var head = string.Concat(root.Externs.Select(e => e.ToFullString())) + string.Concat(root.Usings.Select(u => u.ToFullString()))
+                 + string.Concat(root.AttributeLists.Select(a => a.ToFullString()));
+        return head + string.Concat(statements.Select(s => s.ToFullString())) + "\n" + string.Concat(others.Select(o => o.ToFullString()));
+    }
+
     /// <summary>Extra global usings for free runs only (never graded): the namespaces lesson samples use most.</summary>
     public static readonly (string Path, string Text)[] PlaygroundUsings =
     [("Playground.cs", """
