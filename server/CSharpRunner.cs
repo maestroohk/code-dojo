@@ -143,6 +143,11 @@ public sealed class CSharpRunner
             var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..12].ToLowerInvariant();
             var dir = Path.Combine(Path.GetTempPath(), "code-dojo", "testlibs-" + hash);
             var ready = Path.Combine(dir, ".ready");
+            // Temp cleaners can delete the DLLs and leave the marker (as with EfLib): check the files too.
+            if (File.Exists(ready) && files.Any(f => !File.Exists(Path.Combine(dir, Path.GetFileName(f)))))
+            {
+                try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
             if (!File.Exists(ready))
             {
                 var staging = dir + "-" + Guid.NewGuid().ToString("N")[..8];
