@@ -215,6 +215,35 @@ public class XunitCheckTests
     }
 
     [Fact]
+    public void TestViz_check_finds_a_mutant_on_the_wrong_line()
+    {
+        var step = Step("""
+            { "type": "learn", "body": "x", "testviz": { "kind": "mutation", "code": ["a >= b", "return c;"],
+              "mutants": [ { "line": 2, "from": ">=", "to": ">", "status": "killed" } ] } }
+            """);
+        Assert.Contains(TestViz.Check(step), m => m.Contains("is not on that line"));
+        Assert.Empty(TestViz.Check(Step("""{ "type": "learn", "body": "x", "testviz": { "kind": "pyramid" } }""")));
+    }
+
+    [Fact]
+    public void A_module_can_run_another_language_than_its_track()
+    {
+        var root = Directory.CreateTempSubdirectory("dojo-lang-");
+        try
+        {
+            var module = Path.Combine(root.FullName, "tracks", "t", "02-py");
+            Directory.CreateDirectory(module);
+            File.WriteAllText(Path.Combine(root.FullName, "tracks", "t", "track.json"), """{ "title": "T", "language": "csharp" }""");
+            File.WriteAllText(Path.Combine(module, "module.json"), """{ "title": "P", "language": "python" }""");
+            var content = new Content(root.FullName);
+            Assert.Equal("python", content.Language("t", "02-py"));
+            Assert.Equal("csharp", content.Language("t", "01-missing"));
+            Assert.Equal("csharp", content.Language("t"));
+        }
+        finally { root.Delete(true); }
+    }
+
+    [Fact]
     public void Lint_reports_a_mutant_that_does_not_apply()
     {
         var step = Step("""
