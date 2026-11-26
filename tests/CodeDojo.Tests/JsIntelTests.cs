@@ -3,7 +3,7 @@ using static CodeDojo.CodeIntel;
 
 namespace CodeDojo.Tests;
 
-/// <summary>JavaScript / TypeScript intelligence (server/JsIntel*.cs): no Node needed.</summary>
+/// <summary>JavaScript / TypeScript intelligence (server/JsIntel*.cs): no Node needed. TypeScript's own engine is in TsIntelTests.</summary>
 public class JsIntelTests
 {
     static readonly CSharpRunner Runner = new();
@@ -13,7 +13,7 @@ public class JsIntelTests
         var pos = code.IndexOf("$$", StringComparison.Ordinal);
         Assert.True(pos >= 0, "marker $$ not found");
         var lang = path.EndsWith(".ts") ? "typescript" : "javascript";
-        return RunAny(Runner, new(action, [new(path, code.Replace("$$", "")), .. more], path, pos, null, lang)).GetAwaiter().GetResult();
+        return RunAny(Runner, new(action, [new(path, code.Replace("$$", "")), .. more], path, pos, null, lang, Engine: "basic")).GetAwaiter().GetResult();
     }
 
     static List<string> Labels(Response r) => r.Items?.Select(i => i.Label).ToList() ?? [];

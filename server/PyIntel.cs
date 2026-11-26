@@ -24,7 +24,8 @@ public static class PyIntel
 
     static bool IsPython(string path) => path.EndsWith(".py", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".pyw", StringComparison.OrdinalIgnoreCase);
 
-    public static async Task<CodeIntel.Response> Run(CodeIntel.Request req)
+    /// <summary><paramref name="projectDir"/>: the code space the files come from (Jedi then sees its .venv).</summary>
+    public static async Task<CodeIntel.Response> Run(CodeIntel.Request req, string? projectDir = null)
     {
         var all = req.Files ?? [];
         var me = all.FirstOrDefault(f => f.Path == req.Path);
@@ -36,13 +37,16 @@ public static class PyIntel
         var pos = Math.Clamp(req.Position, 0, code.Length);
         var before = code[..pos];
         pos = pos - CountOf(before, "\r\n") - before.Count(char.IsLowSurrogate);
-        var payload = JsonSerializer.Serialize(new { action = req.Action, files, path = req.Path, position = pos }, Json);
+        var site = projectDir is null ? null : CodeSpaces.SitePackages(projectDir);
+        var payload = JsonSerializer.Serialize(new { action = req.Action, files, path = req.Path, position = pos, engine = req.Engine ?? "auto", site, root = projectDir }, Json);
 
         var line = await Ask(payload);
         if (line is null) return Empty;
         try
         {
-            var r = JsonSerializer.Deserialize<CodeIntel.Response>(line, Json);
+            var node = System.Text.Json.Nodes.JsonNode.Parse(line);
+            if ((bool?)node?["jediMissing"] == true) _ = StartJediInstall();
+            var r = node.Deserialize<CodeIntel.Response>(Json);
             if (r is null) return Empty;
             // Columns back to UTF-16 for files with characters outside the BMP.
             CodeIntel.Location Fix(CodeIntel.Location l)
@@ -116,7 +120,7 @@ public static class PyIntel
                 UseShellExecute = false, CreateNoWindow = true,
                 StandardInputEncoding = new UTF8Encoding(false), StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
             };
-            foreach (var a in new[] { "-I", "-X", "utf8", "-u", script }) psi.ArgumentList.Add(a);
+            foreach (var a in new[] { "-I", "-X", "utf8", "-u", script, "--tools", JediTarget }) psi.ArgumentList.Add(a);
             psi.Environment["MPLBACKEND"] = "Agg";
             var p = Process.Start(psi)!;
             try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
@@ -135,6 +139,56 @@ public static class PyIntel
         if (p is null) return;
         try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
         p.Dispose();
+    }
+
+    // ---------------------------------------------------------------- Jedi
+
+    static readonly object InstallGate = new();
+    static Task? jediInstall;
+    static DateTime jediFailed = DateTime.MinValue;
+
+    /// <summary>
+    /// Where Jedi goes when the dojo has no Python environment of its own: a folder the helper adds to its
+    /// path, so the system Python's packages are left alone.
+    /// </summary>
+    static string JediTarget => Path.Combine(TsIntel.ToolsDir, "python");
+
+    /// <summary>
+    /// Install Jedi in the background: into the dojo's Python environment when there is one (as its data
+    /// science setup does), else into the tools folder. Once, and again after 10 minutes if it failed.
+    /// </summary>
+    public static Task? StartJediInstall()
+    {
+        lock (InstallGate)
+        {
+            if (jediInstall is { IsCompleted: false }) return jediInstall;
+            if (DateTime.UtcNow - jediFailed < TimeSpan.FromMinutes(10)) return null;
+            if (jediInstall is { IsCompletedSuccessfully: true } && jediFailed == DateTime.MinValue) return null;   // installed; the helper picks it up
+            return jediInstall = Task.Run(InstallJedi);
+        }
+    }
+
+    static async Task InstallJedi()
+    {
+        try
+        {
+            var env = LangRunner.PyEnvPython();
+            string[] args = env is not null
+                ? ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "jedi"]
+                : ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "--upgrade", "--target", JediTarget, "jedi"];
+            var psi = new ProcessStartInfo(env ?? "python") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+            psi.Environment["PIP_NO_INPUT"] = "1";
+            using var p = Process.Start(psi)!;
+            try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
+            var drain = Task.WhenAll(p.StandardOutput.ReadToEndAsync(), p.StandardError.ReadToEndAsync());
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+            try { await p.WaitForExitAsync(cts.Token); }
+            catch (OperationCanceledException) { try { p.Kill(true); } catch { } }
+            await drain;
+            jediFailed = p.HasExited && p.ExitCode == 0 ? DateTime.MinValue : DateTime.UtcNow;
+        }
+        catch { jediFailed = DateTime.UtcNow; }
     }
 
     /// <summary>The analyser ships inside the server assembly; it is written out once per version.</summary>

@@ -266,6 +266,7 @@ function ide(page, space) {
           assist: true,
           files: () => intelFiles(tab.path),
           references: () => intelRefs(tab.path),
+          space: () => (poly() ? space : null),
           onNavigate: (p, line, col, len) => { if (!/\/?obj\//.test(p)) openFile(p, { line, col, len }); },
           onChange: v => {
             if (isSource(tab.path)) sources.set(tab.path, v);

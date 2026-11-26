@@ -3,7 +3,8 @@ using static CodeDojo.CodeIntel;
 
 namespace CodeDojo.Tests;
 
-/// <summary>Python intelligence (server/intel/pyintel.py). Each test only runs when Python is installed.</summary>
+/// <summary>Python intelligence (server/intel/pyintel.py's own analyser; Jedi is in JediIntelTests). Each test only runs when Python is installed.</summary>
+[Collection("Python intel")]   // one Python helper serves both this class and JediIntelTests: one at a time
 public class PyIntelTests
 {
     static readonly CSharpRunner Runner = new();
@@ -13,7 +14,7 @@ public class PyIntelTests
     {
         var pos = code.IndexOf("$$", StringComparison.Ordinal);
         Assert.True(pos >= 0, "marker $$ not found");
-        return await RunAny(Runner, new(action, [new("main.py", code.Replace("$$", "")), .. more], "main.py", pos, null, "python"));
+        return await RunAny(Runner, new(action, [new("main.py", code.Replace("$$", "")), .. more], "main.py", pos, null, "python", Engine: "basic"));
     }
 
     static List<string> Labels(Response r) => r.Items?.Select(i => i.Label).ToList() ?? [];

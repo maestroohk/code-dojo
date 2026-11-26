@@ -99,7 +99,7 @@ public sealed partial class CodeSpaces
 
     public static string VenvPython(string dir) => Path.Combine(dir, ".venv", Win ? "Scripts" : "bin", Win ? "python.exe" : "python");
 
-    static string? SitePackages(string dir)
+    internal static string? SitePackages(string dir)
     {
         var venv = Path.Combine(dir, ".venv");
         if (Win) { var p = Path.Combine(venv, "Lib", "site-packages"); return Directory.Exists(p) ? p : null; }
