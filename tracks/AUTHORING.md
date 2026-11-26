@@ -309,15 +309,17 @@ runs the step's checks inside the container against whatever state they left beh
 | `solution` | The commands an expert would type, one per line. Shown by "Show answer", each with a **Type it** button; `dojo validate` runs them. |
 | `hints`, `explain`, `title` | As on every step. Hints are expected (the validator warns without them). |
 
-The machine: Debian slim with `git` (identity "Dojo Learner", default branch `main`), `vim`, `nano`, `less`, `curl`, `jq`,
-`rg` (ripgrep), `fd`, `tree`, `procps`, `iproute2`, `lsof`, `strace`, `sysstat`, `psmisc`, `file`, `unzip`, `python3`, `sqlite3`,
-`man`, `tmux`, `ssh`, `dig`, `make`, a learner user with password-less `sudo`, and a prompt with the Git branch. The
+The machine: Debian 13 (trixie) slim with `git` 2.47 (identity "Dojo Learner", default branch `main`), `vim` 9.1, `nano`, `less`,
+`curl`, `jq`, `rg` (ripgrep), `fd`, `tree`, `procps`, `iproute2`, `lsof`, `strace`, `sysstat`, `psmisc`, `file`, `unzip`,
+`python3`, `sqlite3`, `man`, `tmux`, `ssh`, `dig`, `make`, `shellcheck`, `crontab` (it checks the syntax on install), `systemd-analyze`
+(`calendar` and `verify` work offline; there is no running systemd or journald), `setfacl`/`getfacl`, `column`, a learner user with password-less `sudo`, and a prompt with the Git branch. The
 dockerfile is `netlabs/images/shell/Dockerfile`.
 
 Writing good scenarios:
 
-- **Write the scenario as a script** in the module's `files/` folder (`files/lib.sh` in the Git module has helpers for
-  commits with fixed dates and teammate authors). Keep values the checks need (a hash to get back to) **outside** the
+- **Write the scenario as a script** in the module's `files/` folder (`files/lib.sh` in every Git module has helpers for
+  commits with fixed dates and teammate authors, `publish` for a bare `origin` in `/srv/git`, and `teammate` for a
+  second clone that pushes behind the learner's back). Keep values the checks need (a hash to get back to) **outside** the
   learner's home, in `/opt/dojo/state/`.
 - **Check the result, not the keystrokes.** Compare with what the right command gives on the same data
   (`diff <(sort data | uniq -c | sort -rn) ~/answers/top.txt`), or with Git's real state (`git rev-parse`, `git log
@@ -326,7 +328,9 @@ Writing good scenarios:
 - The in-page terminal is line based: full-screen programs (`vim`, `nano`, `less`, `top`, `tmux`) do not draw in it.
   In the dojo shell they print a short note instead (`less` and `man` print plain text), and Git never opens an
   editor (a prepared message is kept; a plain `git commit` asks for `-m`). Write prompts whose edits are commands:
-  `sed -i`, `cat > file <<'EOF'`, `git checkout --ours`.
+  `sed -i`, `cat > file <<'EOF'`, `git checkout --ours`, real Vim in Ex mode (`vim -es -c '%s/a/b/g' -c x file` runs; plain
+  `vim` does not), and `GIT_SEQUENCE_EDITOR=:` (or a `sed -i` on the todo list) for `git rebase -i`. `git add -p` works:
+  its questions are line based. Keystroke practice for Vim and nano belongs in the trainer: a `lab` step with `"lab": "vim"`.
 - A `solution` is typed one line at a time, like the learner would, so a command that stops on purpose (a revert
   that conflicts) does not end it.
 
@@ -360,9 +364,10 @@ learner has done it there.
   "title": "Mission: pipes and plumbing", "prompt": "In the mission **Pipes and plumbing**, answer ...", "explain": "..." }
 ```
 
-- **Visual labs** (`"lab"`): `netbuild`, `archbuild`, `composebuild`, `kubebuild`, `pipebuild` or `pki`, and a
+- **Visual labs** (`"lab"`): `netbuild`, `archbuild`, `composebuild`, `kubebuild`, `pipebuild`, `pki` or `vim`, and a
   `challenge` id from that lab's `CHALLENGES` list (in `ui/netsim.js`, `archsim.js`, `composesim.js`, `kubesim.js`,
-  `pipesim.js`, `lab-pki.js`). The lab opens **inline** in the step, on that challenge (its full-screen button still works),
+  `pipesim.js`, `lab-pki.js`), or for `vim` a level id from `VIM_LEVELS` / `NANO_LEVELS` in `ui/vim-levels.js` (graded by real
+  keystrokes on the emulator in `ui/vim-core.js`; replay each new level's `solution` through it in Node). The lab opens **inline** in the step, on that challenge (its full-screen button still works),
   and the step passes as soon as the lab's saved progress marks the challenge solved. Sandbox challenges (no XP) cannot
   be required.
 - **Live labs** (`"live"`): a lab folder under `netlabs/labs` and a `task` id from its `lab.json` (or an array of
