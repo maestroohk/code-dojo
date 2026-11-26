@@ -131,6 +131,11 @@ public sealed class CSharpRunner
             var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..12].ToLowerInvariant();
             var dir = Path.Combine(Path.GetTempPath(), "code-dojo", "efcore-" + hash);
             var ready = Path.Combine(dir, ".ready");
+            // Temp cleaners (Storage Sense, disk cleanup) can delete the DLLs and leave the marker: check the files too.
+            if (File.Exists(ready) && managed.Concat(native).Any(f => !File.Exists(Path.Combine(dir, Path.GetFileName(f)))))
+            {
+                try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
             if (!File.Exists(ready))
             {
                 // Build beside the final folder and move it into place, so two processes (the server and the tests) never see half a cache.
