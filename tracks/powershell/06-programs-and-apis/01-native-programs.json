@@ -1,0 +1,181 @@
+{
+  "title": "Native programs and exit codes",
+  "summary": "Call git, tar, robocopy or any .exe from PowerShell correctly: the call operator, arguments, $LASTEXITCODE versus $?, Start-Process, and making a script fail when a program fails.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Running programs from PowerShell",
+      "body": [
+        "Any program on the PATH runs by name: `git status`, `tar -czf a.tgz dir`, `robocopy src dst /MIR`. Its output comes",
+        "back as **strings**, one per line, so you can pipe it (`git branch | Select-String feature`) or capture it",
+        "(`$branch = git rev-parse --abbrev-ref HEAD`).",
+        "",
+        "- **`&`** (the call operator) runs a command whose name is in a variable or has spaces:",
+        "  `& 'C:\\Program Files\\7-Zip\\7z.exe' a backup.7z .\\data`, or `& $tool @args`.",
+        "- **Arguments** are passed one per item: a variable with spaces is one argument, an array is several",
+        "  (`tar -czf $archive @folders`). Since PowerShell 7.3 quoting rules for native programs are predictable",
+        "  (`$PSNativeCommandArgumentPassing`); in 5.1, embedded quotes were famously broken.",
+        "- **stderr**: in PowerShell 7, a program's stderr lines are shown but are **not** errors. `2>$null` drops them,",
+        "  `2>&1` merges them into the output.",
+        "",
+        "**The exit code is the only reliable signal**, and PowerShell keeps it in **`$LASTEXITCODE`**:",
+        "",
+        "```powershell",
+        "git fetch origin",
+        "if ($LASTEXITCODE -ne 0) { throw \"git fetch failed with exit code $LASTEXITCODE\" }",
+        "```",
+        "",
+        "`$?` is `$true`/`$false` for the last command of any kind; `$LASTEXITCODE` is the number from the last **program**.",
+        "Note that `$ErrorActionPreference = 'Stop'` does **not** stop on a failing program by default. Since PowerShell 7.4,",
+        "`$PSNativeCommandUseErrorActionPreference = $true` makes a non-zero exit code a real error."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A script starts with `$ErrorActionPreference = 'Stop'`. Then `tar -czf backup.tgz ./missing` fails with exit code 2. What happens next?",
+      "options": [
+        "The script carries on with the next line: `'Stop'` only applies to PowerShell errors unless `$PSNativeCommandUseErrorActionPreference` is `$true`",
+        "The script stops with an error",
+        "PowerShell retries tar once",
+        "`$LASTEXITCODE` stays 0"
+      ],
+      "answer": 0,
+      "explain": "Programs report failure through their exit code, which PowerShell stores in `$LASTEXITCODE` without treating it as an error. Check it after every program that matters, or turn on the 7.4+ preference variable."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "backup complete (it was not)",
+      "prompt": [
+        "`~/scripts/backup.ps1` archives folders with `tar`. Last night a folder was missing, tar failed, and the script still",
+        "said `backup complete` and exited 0. Reproduce it:",
+        "",
+        "```powershell",
+        "pwsh -File ~/scripts/backup.ps1 -Folder ~/app/missing; \"exit $LASTEXITCODE\"",
+        "```",
+        "",
+        "Fix the script so a failing `tar` makes it **exit non-zero** without printing `backup complete`. A normal run must",
+        "still create the archive and exit 0."
+      ],
+      "setup": ["native.sh"],
+      "checks": [
+        { "name": "a failing tar fails the script",
+          "cmd": "out=$(pwsh -NoProfile -NonInteractive -File ~/scripts/backup.ps1 -Folder ~/app/missing 2>&1); rc=$?; echo \"$out\"; echo \"exit $rc\"; test $rc -ne 0 && ! echo \"$out\" | grep -q 'backup complete'",
+          "fail": "With a missing folder the script must exit non-zero and not say `backup complete`." },
+        { "name": "a normal run still archives both folders",
+          "cmd": "rm -f ~/backup/*; pwsh -NoProfile -NonInteractive -File ~/scripts/backup.ps1 >/dev/null 2>&1; rc=$?; f=$(ls ~/backup/*.tar.gz | head -n1); test $rc = 0 && tar -tzf \"$f\" | grep -q customers.csv && tar -tzf \"$f\" | grep -q app.json",
+          "fail": "A normal run should exit 0 and write an archive in `~/backup` containing `app.json` and `customers.csv`." }
+      ],
+      "hints": [
+        "After the `tar` line, `$LASTEXITCODE` holds tar's exit code (2 here).",
+        "Add `if ($LASTEXITCODE -ne 0) { throw \"tar failed with exit code $LASTEXITCODE\" }` right after the tar line. An uncaught `throw` in `pwsh -File` exits with 1.",
+        "Or add `$PSNativeCommandUseErrorActionPreference = $true` next to `$ErrorActionPreference = 'Stop'` (PowerShell 7.4+)."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/backup.ps1 -Folder ~/app/missing; \"exit $LASTEXITCODE\"",
+        "(Get-Content ~/scripts/backup.ps1 -Raw).Replace('tar -czf $archive @Folder', \"tar -czf `$archive @Folder`nif (`$LASTEXITCODE -ne 0) { throw `\"tar failed with exit code `$LASTEXITCODE`\" }\") | Set-Content ~/scripts/backup.ps1 -NoNewline",
+        "Get-Content ~/scripts/backup.ps1",
+        "pwsh -File ~/scripts/backup.ps1 -Folder ~/app/missing; \"exit $LASTEXITCODE\"",
+        "pwsh -File ~/scripts/backup.ps1; \"exit $LASTEXITCODE\""
+      ],
+      "explain": [
+        "Learn the exit codes of the programs you script: `robocopy` returns **0 to 7 for success** (8 and above are",
+        "failures), `msiexec` returns 3010 for \"success, reboot needed\", `grep` returns 1 for \"no match\". A blanket",
+        "`-ne 0` is wrong for those, so check the documented ranges."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Start-Process, and when not to use it",
+      "body": [
+        "Calling a program directly (`git ...`, `& $exe ...`) is the default: it waits, its output is yours, and",
+        "`$LASTEXITCODE` is set. **`Start-Process`** is for the other cases:",
+        "",
+        "```powershell",
+        "$p = Start-Process msiexec.exe -ArgumentList '/i', 'agent.msi', '/qn', '/norestart' -Wait -PassThru",
+        "$p.ExitCode                                                 # 0, or 3010 = reboot needed",
+        "Start-Process pwsh -Verb RunAs                               # Windows: a new elevated window (UAC prompt)",
+        "Start-Process notepad.exe -ArgumentList 'report.txt'        # start a GUI program and do not wait",
+        "```",
+        "",
+        "- Without `-Wait` it returns at once; without `-PassThru` you get no process object (and no exit code).",
+        "- Its output does **not** come back to your pipeline; use `-RedirectStandardOutput file.txt` if you need it.",
+        "- `-NoNewWindow` keeps a console program in the current window (Windows).",
+        "",
+        "So: `git`, `tar`, `kubectl`, `az`: call directly. Installers, elevation, GUI apps, other users: `Start-Process`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Which way of running it?",
+      "pairs": [
+        ["`git log -1` and use the output", "call it directly: `git log -1 --format=%s`"],
+        ["A tool in `C:\\Program Files\\...`", "`& 'C:\\Program Files\\Tool\\tool.exe' args`"],
+        ["An installer, then read its exit code", "`Start-Process ... -Wait -PassThru`"],
+        ["Run elevated (UAC)", "`Start-Process pwsh -Verb RunAs`"],
+        ["Hide a program's warnings on stderr", "`program 2>$null`"]
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "A git helper: every repo at a glance",
+      "prompt": [
+        "You have a dozen repos checked out and want one command that says which branch each is on and whether it has",
+        "uncommitted changes. Write `~/scripts/Get-RepoStatus.ps1 -Path <folder>`:",
+        "",
+        "- for each **Git repository** directly under `-Path` (sorted by name), output an object with `Repo` (the folder",
+        "  name), `Branch` and `Changes` (the number of lines in `git status --porcelain`);",
+        "- folders that are not repositories are **skipped silently** (no git error on screen).",
+        "",
+        "Try it on `~/repos`."
+      ],
+      "setup": ["native.sh"],
+      "checks": [
+        { "name": "one object per repo with branch and changes",
+          "cmd": "pwsh -NoProfile -c '& ~/scripts/Get-RepoStatus.ps1 -Path ~/repos | ForEach-Object { \"$($_.Repo) $($_.Branch) $($_.Changes)\" }'",
+          "expectOutput": ["billing main 0", "portal feature/sso 2", "reports release/2026.11 3"],
+          "fail": "Expected `billing main 0`, `portal feature/sso 2` and `reports release/2026.11 3`, in that order." },
+        { "name": "non-repositories are skipped silently",
+          "cmd": "pwsh -NoProfile -c '& ~/scripts/Get-RepoStatus.ps1 -Path ~/repos' 2>&1 | grep -Ei 'fatal|not a git|not-a-repo' && exit 1; exit 0",
+          "fail": "`~/repos/not-a-repo` should produce neither an object nor a `fatal: not a git repository` message. Send git's stderr to `$null` and check `$LASTEXITCODE`." }
+      ],
+      "hints": [
+        "`git -C <folder> rev-parse --abbrev-ref HEAD` prints the branch, and exits with 128 in a folder that is not a repository.",
+        "`$changes = @(git -C $dir.FullName status --porcelain)`: the `@()` makes zero lines an empty array with `.Count` 0.",
+        "`foreach ($dir in Get-ChildItem -LiteralPath $Path -Directory | Sort-Object Name) { $branch = git -C $dir.FullName rev-parse --abbrev-ref HEAD 2>$null; if ($LASTEXITCODE -ne 0) { continue }; ... [pscustomobject]@{ Repo = $dir.Name; Branch = $branch; Changes = $changes.Count } }`"
+      ],
+      "solution": [
+        "git -C ~/repos/portal status --porcelain",
+        "@'",
+        "[CmdletBinding()]",
+        "param([Parameter(Mandatory)] [string] $Path)",
+        "foreach ($dir in Get-ChildItem -LiteralPath $Path -Directory | Sort-Object Name) {",
+        "    $branch = git -C $dir.FullName rev-parse --abbrev-ref HEAD 2>$null",
+        "    if ($LASTEXITCODE -ne 0) { continue }",
+        "    $changes = @(git -C $dir.FullName status --porcelain)",
+        "    [pscustomobject]@{ Repo = $dir.Name; Branch = $branch; Changes = $changes.Count }",
+        "}",
+        "'@ | Set-Content ~/scripts/Get-RepoStatus.ps1",
+        "~/scripts/Get-RepoStatus.ps1 -Path ~/repos | Format-Table",
+        "~/scripts/Get-RepoStatus.ps1 -Path ~/repos | Where-Object Changes -gt 0"
+      ],
+      "explain": [
+        "Wrapping a CLI in a function that returns objects is one of the highest-value things PowerShell does: now",
+        "`Where-Object Changes -gt 0`, `Export-Csv` and `Sort-Object Branch` all work on git's answers. Use the CLI's",
+        "machine-readable output (`--porcelain`, `--format`, `-o json`), never the human one, which changes between versions."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "On Linux, what does this print?",
+      "lang": "powershell",
+      "code": ["ls /no/such/folder 2>$null", "\"`$? is $? and the exit code is $LASTEXITCODE\""],
+      "answer": "$? is False and the exit code is 2",
+      "verify": false,
+      "explain": "GNU `ls` exits with 2 for a missing file; `2>$null` only hides its message. `$?` is `$false` because the last program failed. In a double-quoted string, the backtick keeps the first `$?` literal."
+    }
+  ]
+}
