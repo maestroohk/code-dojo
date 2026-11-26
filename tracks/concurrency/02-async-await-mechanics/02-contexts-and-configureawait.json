@@ -1,0 +1,222 @@
+{
+  "title": "SynchronizationContext and ConfigureAwait",
+  "summary": "Where a continuation runs, the classic UI deadlock, why ASP.NET Core has no context, and when ConfigureAwait(false) still matters.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Where does the code after await run?",
+      "body": [
+        "When `await` has to wait, it captures the **current context** and later asks it to run the continuation:",
+        "",
+        "- If `SynchronizationContext.Current` is set, the continuation is **posted** to it. WPF, WinForms and MAUI install one that runs",
+        "  everything on the **UI thread**, which is why you can touch controls after an `await` in a click handler. Classic ASP.NET",
+        "  (System.Web, .NET Framework) had one per request.",
+        "- Otherwise, if the code runs on a custom `TaskScheduler`, it goes there.",
+        "- Otherwise it runs on a **thread-pool thread**.",
+        "",
+        "**ASP.NET Core has no SynchronizationContext**, and neither do console apps or worker services. In them, continuations simply run on",
+        "the pool, and the context question disappears. In a UI app, or in a library that a UI app might call, it is very much alive.",
+        "",
+        "`await task.ConfigureAwait(false)` says: *do not capture the context; continue on the pool*. .NET 8 added",
+        "`ConfigureAwait(ConfigureAwaitOptions)` for `Task` with `None`, `ContinueOnCapturedContext`, `SuppressThrowing` and `ForceYielding`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "This runs as a console app. What does it print?",
+      "code": [
+        "Console.WriteLine(SynchronizationContext.Current is null);",
+        "await Task.Delay(1);",
+        "Console.WriteLine(SynchronizationContext.Current is null);"
+      ],
+      "answer": ["True", "True"],
+      "explain": "Console apps (like ASP.NET Core and worker services) have no SynchronizationContext. After the await, the code continues on a pool thread."
+    },
+    {
+      "type": "learn",
+      "title": "The deadlock everyone hits once",
+      "body": [
+        "A WPF button handler calls a library synchronously:",
+        "",
+        "```csharp fragment",
+        "void OnSave(object s, RoutedEventArgs e)",
+        "{",
+        "    var id = repo.SaveAsync(doc).Result;   // blocks the UI thread",
+        "}",
+        "",
+        "// in the library",
+        "public async Task<int> SaveAsync(Doc d)",
+        "{",
+        "    await http.PostAsJsonAsync(\"/docs\", d);   // captures the UI context",
+        "    return 42;                                 // wants to run on the UI thread",
+        "}",
+        "```",
+        "",
+        "1. The UI thread blocks in `.Result`, waiting for `SaveAsync`.",
+        "2. The HTTP call finishes; the continuation is **posted to the UI thread**.",
+        "3. The UI thread is blocked waiting for that very continuation. Nothing moves. The window freezes forever.",
+        "",
+        "The real fix is **async all the way**: `async void OnSave` with `await repo.SaveAsync(doc)`. The defensive fix, for library authors,",
+        "is `ConfigureAwait(false)` on **every** await in the library, so its continuations never need the caller's thread."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Should this `await` use `ConfigureAwait(false)`?",
+      "buckets": ["Yes", "No (not needed or wrong)"],
+      "items": [
+        ["Inside a NuGet library that any kind of app may call", 0],
+        ["In an ASP.NET Core controller action", 1],
+        ["In a WPF click handler that sets `label.Content` after the await", 1],
+        ["In a shared SDK client used by a WinForms app and a web API", 0],
+        ["In a console tool's `Main`", 1]
+      ],
+      "explain": [
+        "Library code does not know who calls it, so it should not depend on (or block) the caller's context. App code in ASP.NET Core and",
+        "console apps has no context, so it changes nothing there (many teams leave it out for readability). UI code that touches controls",
+        "after the await *needs* the context: `ConfigureAwait(false)` there makes it crash with a cross-thread exception."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A library method has two awaits. The first awaits a value from an in-memory cache that is usually already complete. Only the second one has `ConfigureAwait(false)`. Is that enough to avoid the UI deadlock?",
+      "options": [
+        "Yes: the first await usually completes synchronously, so it stays on the UI thread, and the second one does not capture it",
+        "No: every await must have it, because whichever await first really waits must not capture the context",
+        "No: `ConfigureAwait(false)` only works on the first await",
+        "Yes, but only in .NET 8 and later"
+      ],
+      "answer": 1,
+      "explain": [
+        "The trap: `ConfigureAwait(false)` on an **already completed** task changes nothing (the fast path never leaves the thread). So the",
+        "code after a completed first await is still on the UI thread, with the context. If the *first* await that really waits lacks",
+        "`ConfigureAwait(false)`, it captures the UI context and deadlocks. On a cache miss that is the first one here. The rule is simple and",
+        "safe: in library code, put it on every await."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: async correctness",
+      "body": "Analyzers find most async mistakes at build time; these find the rest at run time.",
+      "toolkit": [
+        {
+          "cmd": "dotnet build -warnaserror:CS4014,CA2012,CA1849",
+          "what": "Fail the build on an unawaited call (CS4014), a misused ValueTask (CA2012), and a blocking call inside an async method (CA1849).",
+          "flags": [["-warnaserror:<ids>", "turn just these warnings into errors"]],
+          "example": "dotnet build -c Release -warnaserror:CS4014,CA2012,CA1849,CA2007",
+          "when": "in CI; CA2007 (missing ConfigureAwait) only for library projects"
+        },
+        {
+          "cmd": "dotnet add package Microsoft.VisualStudio.Threading.Analyzers",
+          "what": "The VSTHRD rules: VSTHRD002 synchronous waits, VSTHRD100 async void, VSTHRD110 unobserved results, VSTHRD200 Async suffix.",
+          "flags": [["--version", "pin the analyzer version"]],
+          "example": "dotnet add src/Orders.Api package Microsoft.VisualStudio.Threading.Analyzers",
+          "when": "any codebase with a lot of async code"
+        },
+        {
+          "cmd": "dotnet-dump analyze <dump> then dumpasync",
+          "what": "Lists async state machines in a dump and the chain of what each one is awaiting: the async equivalent of a call stack.",
+          "flags": [["dumpasync --stats", "count state machines by type"], ["dumpasync --coalesce", "group identical chains"]],
+          "example": "dotnet-dump analyze orders.dmp  >  dumpasync --coalesce",
+          "when": "requests hang and the thread stacks show nothing (awaiting code is on no thread)"
+        },
+        {
+          "cmd": "Visual Studio: Debug > Windows > Parallel Stacks (Tasks view)",
+          "what": "Draws threads, or async tasks, as merged call graphs; works on a live process or a dump.",
+          "flags": [["Threads / Tasks", "switch between thread stacks and logical async stacks"]],
+          "example": "Open the .dmp in Visual Studio, Debug with Managed Only, then Parallel Stacks",
+          "when": "hundreds of threads or tasks that look alike",
+          "lang": "powershell"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each warning to the mistake it catches.",
+      "pairs": [
+        ["CS4014", "a call to an async method whose task is never awaited"],
+        ["CA2012", "a ValueTask awaited twice, or stored and misused"],
+        ["CA1849", "a blocking call (like `.Result` or `Thread.Sleep`) inside an async method"],
+        ["VSTHRD100", "an `async void` method that is not an event handler"]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Make the library safe to call from a UI thread",
+      "prompt": [
+        "`ReportClient.FetchAsync` is a library method. A desktop app calls it from its UI thread with `.Wait()` (we cannot change the app this",
+        "release), and the window freezes.",
+        "",
+        "Fix the **library** so that its continuations never need the caller's context. Keep the signature and the result",
+        "(`\"{title}: {rows} rows\"`).",
+        "",
+        "The tests call `FetchAsync` from a thread that has a UI-like `SynchronizationContext` and then block it with `.Wait(2000)`, exactly like",
+        "the app. In the tests, `GetTitleAsync` answers from a cache (already complete) and `CountRowsAsync` really waits."
+      ],
+      "starter": [
+        "static class ReportClient",
+        "{",
+        "    public static async Task<string> FetchAsync(Source source)",
+        "    {",
+        "        var title = await source.GetTitleAsync();",
+        "        var rows = await source.CountRowsAsync();",
+        "        return $\"{title}: {rows} rows\";",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "static class ReportClient",
+        "{",
+        "    public static async Task<string> FetchAsync(Source source)",
+        "    {",
+        "        var title = await source.GetTitleAsync().ConfigureAwait(false);",
+        "        var rows = await source.CountRowsAsync().ConfigureAwait(false);",
+        "        return $\"{title}: {rows} rows\";",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "bool dojoFinished = false;",
+        "string? dojoResult = null;",
+        "var dojoUi = new Thread(() =>",
+        "{",
+        "    SynchronizationContext.SetSynchronizationContext(new UiLikeContext());",
+        "    var t = ReportClient.FetchAsync(new Source());",
+        "    dojoFinished = t.Wait(2000);   // the app blocks its UI thread, as in the bug report",
+        "    if (dojoFinished) dojoResult = t.Result;",
+        "});",
+        "dojoUi.Start();",
+        "dojoUi.Join();",
+        "Dojo.Check(\"FetchAsync completes while the calling UI thread is blocked\", dojoFinished,",
+        "    \"It deadlocked: a continuation was posted to the blocked UI thread. Which await captured the context?\");",
+        "Dojo.Eq(\"FetchAsync returns the report line\", \"Sales: 12 rows\", dojoResult);",
+        "",
+        "{{CODE}}",
+        "",
+        "/// A context like WPF's: posted work runs only when the UI thread pumps messages. This one never pumps, because the thread is blocked.",
+        "sealed class UiLikeContext : SynchronizationContext",
+        "{",
+        "    public override void Post(SendOrPostCallback d, object? state) { /* queued for the UI thread, which is blocked */ }",
+        "    public override SynchronizationContext CreateCopy() => this;",
+        "}",
+        "sealed class Source",
+        "{",
+        "    public Task<string> GetTitleAsync() => Task.FromResult(\"Sales\");   // cache hit: already complete",
+        "    public async Task<int> CountRowsAsync() { await Task.Delay(20).ConfigureAwait(false); return 12; }",
+        "}"
+      ],
+      "require": [
+        { "pattern": "ConfigureAwait\\(false\\).*ConfigureAwait\\(false\\)", "message": "Every await in the library has ConfigureAwait(false) (a cache miss makes the first one wait too)" }
+      ],
+      "hints": [
+        "The deadlock comes from an await that captures the context and then really waits. Which await waits here?",
+        "Add `.ConfigureAwait(false)` to **every** await in the library method, including the one on the cache, whose task is already complete."
+      ],
+      "explain": [
+        "With the fix on only the first await, the test still deadlocks: that task is already complete, so the code continues on the UI thread",
+        "and the second await captures the context. That is why the rule for library code is *every* await, not the first one."
+      ]
+    }
+  ]
+}

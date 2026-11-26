@@ -1,0 +1,152 @@
+{
+  "title": "Threads and the thread pool",
+  "summary": "What a thread costs, how the pool hands threads out and grows, and why a pool thread must never sit and wait.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A thread is expensive; the pool shares them",
+      "body": [
+        "A **thread** is the operating system's unit of execution: its own stack (1 MB reserved by default on Windows), its own registers,",
+        "and a slot in the OS scheduler. Creating one costs tens of microseconds; switching between threads costs a few microseconds each time.",
+        "A web service cannot afford a new thread per request.",
+        "",
+        "So .NET keeps a **thread pool**: a small set of worker threads that take **work items** off a queue and run them. `Task.Run`, the",
+        "continuation after an `await`, ASP.NET Core request handling and timer callbacks are all work items on that pool.",
+        "",
+        "```csharp",
+        "Console.WriteLine(Thread.CurrentThread.IsThreadPoolThread);   // False: Main runs on its own thread",
+        "await Task.Run(() => Console.WriteLine(Thread.CurrentThread.IsThreadPoolThread));   // True",
+        "```",
+        "",
+        "How many workers? The pool starts with **one per CPU core** (`ThreadPool.GetMinThreads`). Up to that minimum it creates a thread",
+        "immediately when work is waiting. Above it, a *hill-climbing* algorithm adds threads slowly, about **one or two per second**, and only",
+        "when the queue is not draining. That slowness is deliberate: more threads than cores usually means more switching, not more work done."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each term to what it means.",
+      "pairs": [
+        ["work item", "a piece of code queued for a pool thread to run"],
+        ["minimum threads", "the number the pool creates at once, without waiting (one per core by default)"],
+        ["hill climbing", "the pool adding threads slowly while the queue is not draining"],
+        ["context switch", "the OS saving one thread's registers and loading another's"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Waiting is not working",
+      "body": [
+        "A request handler spends most of its time **waiting**: for the database, an HTTP call, a file. What matters is what the thread does",
+        "while it waits.",
+        "",
+        "- **Blocking** (`Thread.Sleep`, `.Result`, `.Wait()`, `GetAwaiter().GetResult()`, a synchronous database call): the thread sits",
+        "  there, doing nothing, and no other work item can use it.",
+        "- **Awaiting** (`await db.QueryAsync()`): the method returns its thread to the pool. When the result arrives, a pool thread (any one)",
+        "  picks the method up again where it left off.",
+        "",
+        "With awaiting, eight threads can serve thousands of requests that are mostly waiting. With blocking, each waiting request holds a",
+        "thread, and the 9th request waits for the pool to grow, one thread per second or so. That is **thread-pool starvation**."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A pool thread runs `var customer = repo.GetCustomerAsync(id).Result;` and the database takes 400 ms. What is that thread doing for those 400 ms?",
+      "options": [
+        "Nothing useful: it is blocked, and no other work item can run on it",
+        "It runs other requests until the result arrives, then comes back",
+        "It returns to the pool, like `await` does",
+        "It spins at 100% CPU checking the task"
+      ],
+      "answer": 0,
+      "explain": [
+        "`.Result` blocks the calling thread until the task completes (after a brief spin, it sleeps on an event). The thread is held for the",
+        "whole 400 ms. `await` is what gives the thread back."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "Console.WriteLine(Thread.CurrentThread.IsThreadPoolThread);",
+        "var onPool = await Task.Run(() => Thread.CurrentThread.IsThreadPoolThread);",
+        "Console.WriteLine(onPool);"
+      ],
+      "answer": ["False", "True"],
+      "explain": "The program's main thread is not a pool thread. `Task.Run` queues the lambda as a work item, so it runs on a pool worker."
+    },
+    {
+      "type": "sort",
+      "prompt": "Inside an ASP.NET Core request handler: does this hold the thread while it waits?",
+      "buckets": ["Holds (blocks) the thread", "Gives the thread back"],
+      "items": [
+        ["`var r = client.GetStringAsync(url).Result;`", 0],
+        ["`await client.GetStringAsync(url);`", 1],
+        ["`Thread.Sleep(200);`", 0],
+        ["`await Task.Delay(200, ct);`", 1],
+        ["`task.Wait();`", 0],
+        ["`task.GetAwaiter().GetResult();`", 0],
+        ["`await semaphore.WaitAsync(ct);`", 1],
+        ["`semaphore.Wait();`", 0]
+      ],
+      "explain": "Anything that waits synchronously (`.Result`, `.Wait()`, `GetAwaiter().GetResult()`, `Thread.Sleep`, `SemaphoreSlim.Wait`) keeps the thread. The `...Async` version awaited gives it back."
+    },
+    {
+      "type": "code",
+      "title": "Give the thread back while the database works",
+      "prompt": [
+        "This handler looks up a customer's name and blocks on `.Result` while it waits. Under load it is the reason the service stalls.",
+        "",
+        "Rewrite `HandleAsync(Db db, int id)` so that it **awaits** `db.LoadNameAsync(id)` instead of blocking, and returns",
+        "`\"customer {id}: {name}\"`.",
+        "",
+        "The tests call `HandleAsync` while the fake database has not answered yet. A version that blocks cannot return until the database",
+        "answers (the tests give up after two seconds); a version that awaits returns an unfinished task straight away."
+      ],
+      "starter": [
+        "static Task<string> HandleAsync(Db db, int id)",
+        "{",
+        "    var name = db.LoadNameAsync(id).Result;",
+        "    return Task.FromResult($\"customer {id}: {name}\");",
+        "}"
+      ],
+      "solution": [
+        "static async Task<string> HandleAsync(Db db, int id)",
+        "{",
+        "    var name = await db.LoadNameAsync(id);",
+        "    return $\"customer {id}: {name}\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoDb = new Db();",
+        "var dojoTask = HandleAsync(dojoDb, 7);",
+        "Dojo.Check(\"HandleAsync returns while the database is still working\", !dojoTask.IsCompleted,",
+        "    \"It only returned after the database answered: something blocks the thread (.Result, .Wait(), GetAwaiter().GetResult()).\");",
+        "dojoDb.Answer();",
+        "Dojo.Eq(\"HandleAsync(db, 7) gives the customer line\", \"customer 7: Dana\", await dojoTask);",
+        "",
+        "class Db",
+        "{",
+        "    readonly TaskCompletionSource<string> _answer = new(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "    public Db() => _ = Task.Delay(2000).ContinueWith(_ => Answer());   // a blocked caller is released after 2 s",
+        "    public Task<string> LoadNameAsync(int id) => _answer.Task;",
+        "    public void Answer() => _answer.TrySetResult(\"Dana\");",
+        "}"
+      ],
+      "forbid": [
+        { "pattern": "\\.Result\\b|\\.Wait\\(|GetResult\\(", "message": "Does not block on the task" }
+      ],
+      "hints": [
+        "Mark the method `async` and use `await` where it now uses `.Result`.",
+        "`static async Task<string> HandleAsync(Db db, int id) { var name = await db.LoadNameAsync(id); return $\"customer {id}: {name}\"; }`"
+      ],
+      "explain": [
+        "Notice how the test is built: the fake database does not answer until the test says so. That makes \"does it block?\" a deterministic",
+        "question instead of a timing guess. You will use the same trick (a `TaskCompletionSource` as a gate) to test concurrent code all through",
+        "this topic."
+      ]
+    }
+  ]
+}

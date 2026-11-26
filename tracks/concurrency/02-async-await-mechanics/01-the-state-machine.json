@@ -1,0 +1,185 @@
+{
+  "title": "The state machine behind await",
+  "summary": "What the compiler turns an async method into, when it runs synchronously, where exceptions go, and how to validate arguments eagerly.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "An async method is a state machine",
+      "body": [
+        "The compiler rewrites every `async` method into a small **state machine**: a struct with your locals as fields, a `state` number,",
+        "and a `MoveNext()` method holding your code cut into pieces at each `await`. Roughly:",
+        "",
+        "```csharp fragment",
+        "// await LoadAsync() becomes:",
+        "var awaiter = LoadAsync().GetAwaiter();",
+        "if (!awaiter.IsCompleted)                    // not finished yet?",
+        "{",
+        "    state = 1;                               // remember where we are",
+        "    builder.AwaitUnsafeOnCompleted(ref awaiter, ref this);   // call MoveNext again when it finishes",
+        "    return;                                  // give the thread back to the caller",
+        "}",
+        "resume1:",
+        "var result = awaiter.GetResult();           // the value, or the exception rethrown",
+        "```",
+        "",
+        "Three consequences you will use every week:",
+        "",
+        "1. The method runs **synchronously until the first `await` of something not yet finished**. An `await` on a completed task does",
+        "   not give the thread up at all (the *fast path*).",
+        "2. The *rest* of the method is a **continuation**: it runs later, on whatever thread the completion schedules it on.",
+        "3. Exceptions are **stored in the returned Task** and rethrown by `GetResult()` at the `await`, not at the call."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "`Task.CompletedTask` is already finished. What does this print?",
+      "code": [
+        "static async Task<int> Fast()",
+        "{",
+        "    Console.WriteLine(\"A\");",
+        "    await Task.CompletedTask;",
+        "    Console.WriteLine(\"B\");",
+        "    return 1;",
+        "}",
+        "",
+        "var t = Fast();",
+        "Console.WriteLine(\"C\");",
+        "Console.WriteLine(await t);"
+      ],
+      "answer": ["A", "B", "C", "1"],
+      "explain": "The awaited task is already complete, so `IsCompleted` is true and the method keeps running on the same thread: A and B print before `Fast()` even returns. Only an incomplete task makes the method return early."
+    },
+    {
+      "type": "order",
+      "prompt": "`var json = await http.GetStringAsync(url);` and the response takes 80 ms. Put what happens in order.",
+      "lines": [
+        "The method runs on the caller's thread up to the `await`",
+        "`GetAwaiter().IsCompleted` is false: the request is still in flight",
+        "The state is saved, a continuation is registered, and the method returns an unfinished `Task`",
+        "The caller's thread goes on with other work (or back to the pool)",
+        "The response arrives and the continuation is scheduled",
+        "`MoveNext` runs again from the saved state; `GetResult()` hands over the string"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Where exceptions go",
+      "body": [
+        "An exception inside an `async Task` method never escapes the call. It is caught by the state machine and stored in the task, which",
+        "becomes **Faulted**. It is thrown again where the task is awaited.",
+        "",
+        "- `await` rethrows the **first** inner exception, with its original stack trace.",
+        "- `.Wait()` and `.Result` wrap everything in an `AggregateException` (one more reason not to use them).",
+        "- An `async void` method has no task to store the exception in, so it is raised on the thread pool and **crashes the process**.",
+        "  Use `async void` only for UI event handlers, and catch everything inside.",
+        "- A task that faults and is never awaited loses its exception silently (`TaskScheduler.UnobservedTaskException` fires later, at GC).",
+        "",
+        "This has a surprising side effect: argument checks in an `async` method do not throw at the call either."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "static async Task Save(string? name)",
+        "{",
+        "    ArgumentException.ThrowIfNullOrEmpty(name);",
+        "    await Task.Delay(1);",
+        "}",
+        "",
+        "var t = Save(null);",
+        "Console.WriteLine(\"called\");",
+        "try { await t; }",
+        "catch (ArgumentException) { Console.WriteLine(\"caught at await\"); }"
+      ],
+      "answer": ["called", "caught at await"],
+      "explain": "The check runs synchronously, but the exception lands in the returned task. The caller only sees it when it awaits, possibly much later and far from the bad call."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A public library method must throw `ArgumentNullException` at the call site, before any work starts. Which shape does that?",
+      "code": [
+        "public Task<Report> BuildAsync(Query query)",
+        "{",
+        "    ArgumentNullException.ThrowIfNull(query);",
+        "    return Core(query);",
+        "",
+        "    async Task<Report> Core(Query q) { /* awaits here */ }",
+        "}"
+      ],
+      "options": [
+        "This one: the outer method is not `async`, so its check throws directly; the async work is in a local function",
+        "Mark `BuildAsync` itself `async` and keep the check at the top",
+        "Put the check after the first `await`",
+        "Wrap the body in `Task.Run`"
+      ],
+      "answer": 0,
+      "explain": "Only a non-async method throws straight to the caller. The local async function does the awaiting. The BCL uses this pattern for its own argument checks."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the eager-validation pattern.",
+      "code": [
+        "public Task<int> CountAsync(string path)",
+        "{",
+        "    ArgumentException.ThrowIfNullOrEmpty(path);",
+        "    return __1__(path);",
+        "",
+        "    static __2__ Task<int> Core(string p)",
+        "    {",
+        "        var text = __3__ File.ReadAllTextAsync(p);",
+        "        return text.Length;",
+        "    }",
+        "}"
+      ],
+      "blanks": ["Core", "async", "await"],
+      "bank": ["Task.Run", "void", "yield"]
+    },
+    {
+      "type": "code",
+      "title": "Fail fast at the call",
+      "prompt": [
+        "Write **`static Task<string> LoadAsync(string? key, Store store)`**:",
+        "",
+        "- if `key` is null or empty, throw `ArgumentException` **immediately, at the call** (not inside the returned task);",
+        "- otherwise return the value of `await store.GetAsync(key)` with `\"value of \"` in front of it.",
+        "",
+        "The tests call `LoadAsync(null, store)` *without awaiting it* and expect the exception right there."
+      ],
+      "starter": [
+        "static async Task<string> LoadAsync(string? key, Store store)",
+        "{",
+        "    ArgumentException.ThrowIfNullOrEmpty(key);",
+        "    var value = await store.GetAsync(key);",
+        "    return \"value of \" + value;",
+        "}"
+      ],
+      "solution": [
+        "static Task<string> LoadAsync(string? key, Store store)",
+        "{",
+        "    ArgumentException.ThrowIfNullOrEmpty(key);",
+        "    return Core(key, store);",
+        "",
+        "    static async Task<string> Core(string k, Store s)",
+        "    {",
+        "        var value = await s.GetAsync(k);",
+        "        return \"value of \" + value;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoStore = new Store();",
+        "Dojo.Throws<ArgumentException>(\"LoadAsync(null, ...) throws at the call\", () => { _ = LoadAsync(null, dojoStore); });",
+        "Dojo.Throws<ArgumentException>(\"LoadAsync(\\\"\\\", ...) throws at the call\", () => { _ = LoadAsync(\"\", dojoStore); });",
+        "Dojo.Eq(\"LoadAsync(\\\"k1\\\") returns the stored value\", \"value of v1\", await LoadAsync(\"k1\", dojoStore));",
+        "class Store { public async Task<string> GetAsync(string key) { await Task.Yield(); return \"v\" + key[1..]; } }"
+      ],
+      "hints": [
+        "The outer method must not be `async`: only then does its exception reach the caller directly.",
+        "Validate, then `return Core(key, store);` where `Core` is a local `static async Task<string>` function that does the await."
+      ]
+    }
+  ]
+}
