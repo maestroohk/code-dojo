@@ -76,18 +76,37 @@ export function terminalStep(step, ctx) {
   async function open(action = 'open') {
     clearTimeout(retry);
     setState(state, true);
-    if (state !== 'ready') banner('info', action === 'reset' ? 'Setting the scenario up again…' : 'Starting your machine…',
-      'A fresh Linux container just for this step. The first time takes a few seconds.');
+    const title = action === 'reset' ? 'Setting the scenario up again…' : 'Starting your machine…';
+    const progress = h('p.ts-progress.muted.small', { 'aria-live': 'off' });
+    if (state !== 'ready') banner('info', title, 'A fresh Linux container just for this step. The first time takes a few seconds.', progress);
     else status.textContent = 'Setting the scenario up again…';
+    // Docker and Kubernetes machines take longer (a cluster starts inside): say what is starting, and how far it got.
+    let polling = true;
+    (async () => {
+      while (polling && !dead) {
+        await new Promise(res => setTimeout(res, 1000));
+        if (!polling || dead) break;
+        let p;
+        try { p = await api('termstep/progress', where); } catch { continue; }
+        if (!polling || dead || !p?.ok) continue;
+        const text = [p.line, p.seconds != null ? `${p.seconds} s` : ''].filter(Boolean).join(' · ');
+        if (state !== 'ready') {
+          const b = notice.querySelector('.nl-banner p');
+          if (b && p.starting) b.textContent = p.starting;
+          progress.textContent = text;
+        } else status.textContent = `Setting the scenario up again… ${text}`;
+      }
+    })();
     let r;
     try { r = await api(`termstep/${action}`, where); }
     catch { r = { ok: false, state: 'failed', msg: 'Could not reach the dojo server. Is it still running?' }; }
+    polling = false;
     if (dead) return;
     status.textContent = '';
     if (r.ok) {
       notice.replaceChildren(h('p.ts-note.muted.small',
-        h('span.ts-dot', { 'aria-hidden': 'true' }), 'Your own Debian machine for this step',
-        r.imageBytes ? ` (shell image ${mb(r.imageBytes)})` : '', `: you are learner (sudo works), ${step.network ? 'with' : 'without'} network. `,
+        h('span.ts-dot', { 'aria-hidden': 'true' }), r.machine || 'Your own Debian machine for this step',
+        r.imageBytes ? ` (image ${mb(r.imageBytes)})` : '', `: you are learner (sudo works), ${step.network ? 'with' : 'without'} network. `,
         'It is thrown away when you leave the step.'));
       setState('ready');
       attach(action === 'reset' || r.fresh);
@@ -143,7 +162,8 @@ export function terminalStep(step, ctx) {
 
   const el = h('div.term-step', { onkeydown: onKeyAnywhere },
     coldBanner,
-    h('div.code-head', step.title && h('h2', step.title), h('span.tag.web', '⌨ Real shell')),
+    h('div.code-head', step.title && h('h2', step.title),
+      h('span.tag.web', step.image === 'k8s' ? '⌨ Real Kubernetes cluster' : step.image === 'docker' ? '⌨ Real Docker Engine' : '⌨ Real shell')),
     promptEl(step),
     notice,
     termHost,

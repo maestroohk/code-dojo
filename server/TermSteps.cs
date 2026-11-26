@@ -47,6 +47,28 @@ public sealed partial class TermSteps : IAsyncDisposable
 
     public sealed record Spec(string Key, string Image, bool Network, string Setup, string? FilesDir, IReadOnlyList<Check> Checks, string Solution);
 
+    /// <summary>
+    /// How an image folder's containers run, from its optional netlabs/images/&lt;image&gt;/dojo-step.json. Only the
+    /// image folders (not lessons) can ask for this: the Docker and Kubernetes images run a container runtime inside
+    /// the step's container, which needs <c>privileged</c> (still with no network), more memory and processes, and
+    /// <c>exclusive</c>: at most one such container at a time on the laptop. <c>Machine</c> and <c>Starting</c> are
+    /// what the page says about the machine while it starts and once it is ready.
+    /// </summary>
+    public sealed record Machine(bool Privileged = false, string? Memory = null, string? Cpus = null, int? Pids = null, bool Exclusive = false,
+        string Name = "Your own Debian machine for this step", string Starting = "A fresh Linux container just for this step. The first time takes a few seconds.",
+        int SetupSeconds = 180);
+
+    public Machine MachineFor(string image)
+    {
+        return _machines.GetOrAdd(image, i =>
+        {
+            var file = Path.Combine(_imagesDir, i, "dojo-step.json");
+            if (!File.Exists(file)) return new Machine();
+            try { return JsonSerializer.Deserialize<Machine>(File.ReadAllText(file), new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new Machine(); }
+            catch (JsonException e) { throw new InvalidDataException($"netlabs/images/{i}/dojo-step.json: {e.Message}"); }
+        });
+    }
+
     public sealed record CheckRow(string Name, bool Pass, string? Detail);
 
     static string? Str(JsonObject o, string k) => o[k] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
@@ -131,10 +153,11 @@ public sealed partial class TermSteps : IAsyncDisposable
 
     // ---------------------------------------------------------------- sessions
 
-    sealed class Session(string key, string name)
+    sealed class Session(string key, string name, bool exclusive = false)
     {
         public string Key { get; } = key;
         public string Name { get; } = name;
+        public bool Exclusive { get; } = exclusive;
         public DateTime Created { get; } = DateTime.UtcNow;
         public DateTime LastActive = DateTime.UtcNow;
         public DateTime? Detached;
@@ -147,6 +170,8 @@ public sealed partial class TermSteps : IAsyncDisposable
     readonly ConcurrentDictionary<string, Session> _sessions = new();
     readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
     readonly ConcurrentDictionary<string, DockerImage> _images = new();
+    readonly ConcurrentDictionary<string, Machine> _machines = new();
+    readonly ConcurrentDictionary<string, (DateTime Since, string Line)> _progress = new();   // setup output while a step starts
     readonly SemaphoreSlim _create = new(1, 1);     // one container start at a time: easy on a hot laptop
     readonly Timer? _sweeper;
     int _disposed;
@@ -176,20 +201,27 @@ public sealed partial class TermSteps : IAsyncDisposable
     public IReadOnlyList<(string Key, string Name, int Terminals, DateTime LastActive)> List() =>
         _sessions.Values.Select(s => (s.Key, s.Name, s.Terminals, s.LastActive)).OrderBy(s => s.Key, StringComparer.Ordinal).ToList();
 
-    public sealed record OpenResult(string State, string Message, object? Build = null, long? ImageBytes = null, bool Fresh = false)
+    public sealed record OpenResult(string State, string Message, object? Build = null, long? ImageBytes = null, bool Fresh = false, string? Machine = null)
     {
         public bool Ok => State == "ready";
     }
 
     static string Tail(string s, int n) => s.Length <= n ? s.Trim() : "..." + s[^n..].Trim();
 
-    Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, params string[] env)
+    Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, params string[] env) =>
+        Exec(name, user, script, seconds, null, env);
+
+    Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, Action<string>? onLine, params string[] env)
     {
         var args = new List<string> { "exec", "-u", user, "-w", Home, "-e", "HOME=" + (user == "root" ? "/root" : Home), "-e", "DOJO_FILES=" + FilesIn };
         foreach (var e in env) { args.Add("-e"); args.Add(e); }
         args.AddRange([name, "bash", "-c", script]);
-        return NetLabs.Docker(args, TimeSpan.FromSeconds(seconds));
+        return NetLabs.Docker(args, TimeSpan.FromSeconds(seconds), onLine: onLine);
     }
+
+    /// <summary>While a step starts: how long it has been starting and the last line its setup printed (dojo-cluster prints its phases).</summary>
+    public (int Seconds, string Line)? Progress(string key) =>
+        _progress.TryGetValue(key, out var p) ? ((int)(DateTime.UtcNow - p.Since).TotalSeconds, p.Line) : null;
 
     /// <summary>
     /// Make sure the step's container is up, starting and setting it up when needed. With <paramref name="fresh"/>,
@@ -206,11 +238,13 @@ public sealed partial class TermSteps : IAsyncDisposable
             if (!ImageExists(spec.Image)) return new("failed", $"There is no image folder netlabs/images/{spec.Image}.");
             if (!waitForImage)
             {
-                if (image.State == "failed") return new("failed", "The shell image build failed. Press Try again; the log is below.", image.Info());
+                if (image.State == "failed") return new("failed", $"The {spec.Image} image build failed. Press Try again; the log is below.", image.Info());
                 image.StartBuild();
-                return new("building", "Building the shell image (first time only: a few minutes, it downloads Debian and the tools).", image.Info());
+                return new("building", spec.Image == "shell"
+                    ? "Building the shell image (first time only: a few minutes, it downloads Debian and the tools)."
+                    : $"Building the {spec.Image} image (first time only: a few minutes, it downloads the tools and the images the lessons run).", image.Info());
             }
-            if (!await image.Ensure()) return new("failed", "The shell image build failed.", image.Info());
+            if (!await image.Ensure()) return new("failed", $"The {spec.Image} image build failed.", image.Info());
         }
         var gate = LockOf(spec.Key);
         await gate.WaitAsync();
@@ -218,7 +252,7 @@ public sealed partial class TermSteps : IAsyncDisposable
         {
             if (!fresh && _sessions.TryGetValue(spec.Key, out var have))
             {
-                if (await Running(have.Name)) { have.Touch(); return new("ready", "The scenario is ready.", null, await image.Size()); }
+                if (await Running(have.Name)) { have.Touch(); return new("ready", "The scenario is ready.", null, await image.Size(), Machine: MachineFor(spec.Image).Name); }
                 _sessions.TryRemove(spec.Key, out _);
             }
             if (_sessions.TryRemove(spec.Key, out var old)) await RemoveContainer(old.Name);
@@ -233,6 +267,8 @@ public sealed partial class TermSteps : IAsyncDisposable
     async Task<OpenResult> Create(Spec spec, DockerImage image)
     {
         await _create.WaitAsync();
+        var machine = MachineFor(spec.Image);
+        _progress[spec.Key] = (DateTime.UtcNow, "");
         try
         {
             // The cap: the least recently used container with no terminal attached makes room.
@@ -243,19 +279,30 @@ public sealed partial class TermSteps : IAsyncDisposable
                     return new("busy", $"{_opt.MaxContainers} terminal steps are already open in other tabs. Close one of them, then press Retry.");
                 await Remove(victim.Key);
             }
+            // A heavy machine (its own Docker Engine or Kubernetes cluster) runs alone: the other one makes room,
+            // unless someone is typing in it.
+            if (machine.Exclusive)
+                foreach (var other in _sessions.Values.Where(s => s.Exclusive && s.Key != spec.Key).ToList())
+                {
+                    if (other.Terminals > 0)
+                        return new("busy", "Another Docker or Kubernetes step is open in another tab, and only one of these heavier machines runs at a time (it keeps the laptop cool). Close that tab, then press Retry.");
+                    await Remove(other.Key);
+                }
             var name = ContainerName(spec.Key);
             await RemoveContainer(name);   // a leftover from a crash (only when it carries our label)
+            var memory = machine.Memory ?? _opt.Memory;
             var args = new List<string>
             {
                 "run", "-d", "--name", name, "--label", $"{Label}={_instance}", "--label", $"{StepLabel}={spec.Key}",
-                "--hostname", "dojo", "--init", "--memory", _opt.Memory, "--memory-swap", _opt.Memory, "--cpus", _opt.Cpus,
-                "--pids-limit", _opt.Pids.ToString(),
+                "--hostname", "dojo", "--init", "--memory", memory, "--memory-swap", memory, "--cpus", machine.Cpus ?? _opt.Cpus,
+                "--pids-limit", (machine.Pids ?? _opt.Pids).ToString(),
             };
+            if (machine.Privileged) args.Add("--privileged");
             if (!spec.Network) args.AddRange(["--network", "none"]);
             args.AddRange([image.Tag, "sleep", "infinity"]);
             var run = await NetLabs.Docker(args, TimeSpan.FromMinutes(2));
             if (!run.Ok) return new("failed", "Could not start the container:\n" + Tail(run.Err, 1200));
-            var session = new Session(spec.Key, name);
+            var session = new Session(spec.Key, name, machine.Exclusive);
             _sessions[spec.Key] = session;
 
             if (spec.FilesDir is { } dir)
@@ -263,9 +310,12 @@ public sealed partial class TermSteps : IAsyncDisposable
                 var cp = await NetLabs.Docker(["cp", dir + Path.DirectorySeparatorChar + ".", $"{name}:{FilesIn}"], TimeSpan.FromMinutes(1));
                 if (!cp.Ok) { await Remove(spec.Key); return new("failed", "Could not copy the lesson's files into the container:\n" + Tail(cp.Err, 800)); }
             }
-            // Setup runs as root in the learner's home; then the home folder is handed to the learner.
+            // Setup runs as root in the learner's home; then the home folder is handed to the learner. Its output
+            // lines are the progress the page shows while a cluster starts.
             var script = "set -e -o pipefail\nchmod -R a+rX " + FilesIn + " 2>/dev/null || true\ncd ~\n" + spec.Setup;
-            var setup = await Exec(name, "root", script, 180, "HOME=" + Home);
+            var setup = await Exec(name, "root", script, machine.SetupSeconds,
+                line => { if (line.StartsWith("dojo: ", StringComparison.Ordinal)) _progress[spec.Key] = (_progress.TryGetValue(spec.Key, out var p) ? p.Since : DateTime.UtcNow, line[6..]); },
+                "HOME=" + Home);
             if (!setup.Ok)
             {
                 await Remove(spec.Key);
@@ -274,9 +324,9 @@ public sealed partial class TermSteps : IAsyncDisposable
             var own = await Exec(name, "root", $"chown -R {User}:{User} {Home}", 60);
             if (!own.Ok) { await Remove(spec.Key); return new("failed", "Could not prepare the home folder:\n" + Tail(own.Err, 800)); }
             session.Touch();
-            return new("ready", "The scenario is ready.", null, await image.Size(), Fresh: true);
+            return new("ready", "The scenario is ready.", null, await image.Size(), Fresh: true, Machine: machine.Name);
         }
-        finally { _create.Release(); }
+        finally { _progress.TryRemove(spec.Key, out _); _create.Release(); }
     }
 
     static async Task<bool> Running(string name) =>
@@ -381,7 +431,7 @@ public sealed partial class TermSteps : IAsyncDisposable
             if (spec.Solution.Trim().Length == 0) { problems.Add("missing 'solution' (the commands an expert would type)"); return problems; }
             // Typed one line at a time, like the learner would: a command that stops on purpose (a revert that
             // conflicts) does not end the script. The checks afterwards decide.
-            var sol = await Exec(name, User, "cd ~\n" + spec.Solution, 180, "GIT_EDITOR=true", "EDITOR=true", "DOJO_LINE_TERM=1");
+            var sol = await Exec(name, User, "cd ~\n" + spec.Solution, Math.Max(180, MachineFor(spec.Image).SetupSeconds), "GIT_EDITOR=true", "EDITOR=true", "DOJO_LINE_TERM=1");
             var after = await ChecksOn(name, spec);
             foreach (var row in after.Where(r => !r.Pass))
                 problems.Add($"after the solution, check \"{row.Name}\" fails: {row.Detail?.Replace("\n", " | ")}");
@@ -464,7 +514,7 @@ public sealed partial class TermSteps : IAsyncDisposable
         _ = Task.Run(steps.RemoveAll);
         app.Lifetime.ApplicationStopping.Register(() => steps.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(25)));
 
-        IResult Reply(OpenResult r) => Results.Json(new { ok = r.Ok, state = r.State, msg = r.Message, build = r.Build, imageBytes = r.ImageBytes, fresh = r.Fresh }, json);
+        IResult Reply(OpenResult r) => Results.Json(new { ok = r.Ok, state = r.State, msg = r.Message, build = r.Build, imageBytes = r.ImageBytes, fresh = r.Fresh, machine = r.Machine }, json);
         IResult NotFound(string? error) => error is null ? Results.NotFound() : Results.Json(new { ok = false, state = "failed", msg = "This step is broken: " + error }, json);
 
         app.MapGet("/api/termstep", async () => Results.Json(new
@@ -476,6 +526,15 @@ public sealed partial class TermSteps : IAsyncDisposable
             Find(content, req, out var err) is { } spec ? Reply(await steps.Open(spec)) : NotFound(err));
         app.MapPost("/api/termstep/reset", async (StepRequest req) =>
             Find(content, req, out var err) is { } spec ? Reply(await steps.Reset(spec)) : NotFound(err));
+        // While open/reset is still running: what kind of machine is starting, for how long, and its setup's last
+        // "dojo: ..." line (the Kubernetes image prints the cluster's phases).
+        app.MapPost("/api/termstep/progress", (StepRequest req) =>
+        {
+            if (Find(content, req, out var err) is not { } spec) return NotFound(err);
+            var m = steps.MachineFor(spec.Image);
+            var p = steps.Progress(spec.Key);
+            return Results.Json(new { ok = true, starting = m.Starting, machine = m.Name, seconds = p?.Seconds, line = p?.Line }, json);
+        });
         app.MapPost("/api/termstep/close", async (StepRequest req) =>
             Find(content, req, out var err) is { } spec ? Results.Json(new { ok = await steps.Remove(spec.Key) }, json) : NotFound(err));
         app.MapPost("/api/termstep/check", async (StepRequest req) =>

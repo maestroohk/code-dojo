@@ -155,60 +155,63 @@
       "explain": "`pgdata` (no slash) is a volume name. `./init.sql` starts with `.`, so it is a bind mount of a host file. `init.sql` without `./` would be treated as a volume *name*."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Classify a -v value",
+      "type": "terminal",
+      "title": "Move a database's data into a volume",
+      "image": "docker",
       "prompt": [
-        "Write `string ClassifyMount(string spec)` for a `-v` value (Linux-style paths only):",
+        "This terminal has a **real Docker Engine**. The container `db` keeps the shop's orders in `/data/orders.txt`, inside",
+        "its **own writable layer**: a `docker rm db` would delete them. Look: `docker exec db cat /data/orders.txt`.",
         "",
-        "1. Split on `:`. If there are at least two parts and the last is `ro` or `rw`, remove it; `ro` makes the mount read-only.",
-        "2. One part left → `anonymous volume -> TARGET`.",
-        "3. Otherwise SOURCE is the first part and TARGET the second. A SOURCE starting with `/`, `.` or `~` gives `bind mount SOURCE -> TARGET`; any other gives `named volume SOURCE -> TARGET`.",
-        "4. Append ` (read-only)` for `ro`.",
+        "1. Create a named volume `orders-data` and get the existing orders into it (do not retype them).",
+        "2. Replace `db` with a new container, also named `db`, from `busybox:1.37` running `sleep 1d`, that mounts",
+        "   `orders-data` at `/data` and the host folder `~/config` **read-only** at `/etc/shop`.",
         "",
-        "| spec | result |",
-        "|---|---|",
-        "| `pgdata:/var/lib/postgresql/data` | `named volume pgdata -> /var/lib/postgresql/data` |",
-        "| `./src:/app/src:ro` | `bind mount ./src -> /app/src (read-only)` |",
-        "| `/cache` | `anonymous volume -> /cache` |"
+        "Afterwards `docker exec db cat /data/orders.txt` shows the same three orders."
       ],
-      "starter": [
-        "string ClassifyMount(string spec)",
-        "{",
-        "    // your code here",
-        "    return \"\";",
-        "}"
+      "setup": [
+        "volumes.sh"
       ],
-      "solution": [
-        "string ClassifyMount(string spec)",
-        "{",
-        "    var parts = spec.Split(':').ToList();",
-        "    bool readOnly = false;",
-        "    if (parts.Count >= 2 && (parts[^1] == \"ro\" || parts[^1] == \"rw\"))",
-        "    {",
-        "        readOnly = parts[^1] == \"ro\";",
-        "        parts.RemoveAt(parts.Count - 1);",
-        "    }",
-        "    string suffix = readOnly ? \" (read-only)\" : \"\";",
-        "    if (parts.Count == 1) return $\"anonymous volume -> {parts[0]}{suffix}\";",
-        "    string source = parts[0], target = parts[1];",
-        "    bool isPath = source.StartsWith(\"/\") || source.StartsWith(\".\") || source.StartsWith(\"~\");",
-        "    return $\"{(isPath ? \"bind mount\" : \"named volume\")} {source} -> {target}{suffix}\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"named volume\", \"named volume pgdata -> /var/lib/postgresql/data\", ClassifyMount(\"pgdata:/var/lib/postgresql/data\"));",
-        "Dojo.Eq(\"relative bind, read-only\", \"bind mount ./src -> /app/src (read-only)\", ClassifyMount(\"./src:/app/src:ro\"));",
-        "Dojo.Eq(\"absolute bind\", \"bind mount /home/me/logs -> /logs\", ClassifyMount(\"/home/me/logs:/logs\"));",
-        "Dojo.Eq(\"home bind, rw\", \"bind mount ~/certs -> /certs\", ClassifyMount(\"~/certs:/certs:rw\"));",
-        "Dojo.Eq(\"anonymous\", \"anonymous volume -> /cache\", ClassifyMount(\"/cache\"));",
-        "Dojo.Eq(\"a file name without ./ is a volume name\", \"named volume init.sql -> /docker-entrypoint-initdb.d/init.sql\", ClassifyMount(\"init.sql:/docker-entrypoint-initdb.d/init.sql\"));"
+      "checks": [
+        {
+          "name": "db mounts the orders-data volume at /data",
+          "cmd": "docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}} {{.Destination}} {{.RW}}{{\"\\n\"}}{{end}}' db | grep -qx 'volume orders-data .* /data true'",
+          "fail": "The running `db` does not mount the named volume `orders-data` at `/data` (read-write). `-v orders-data:/data`."
+        },
+        {
+          "name": "~/config is mounted read-only at /etc/shop",
+          "cmd": "docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}} {{.Destination}} {{.RW}}{{\"\\n\"}}{{end}}' db | grep -qx 'bind  /home/learner/config /etc/shop false'",
+          "fail": "`~/config` is not bind-mounted read-only at `/etc/shop`. `-v ~/config:/etc/shop:ro` (a bind mount needs an absolute host path; `~` expands to one)."
+        },
+        {
+          "name": "the three orders are in the volume itself",
+          "cmd": "docker run --rm -v orders-data:/v busybox:1.37 cat /v/orders.txt | grep -c '^order 100[123]:'",
+          "expectOutput": "3",
+          "fail": "The volume `orders-data` does not hold the three original orders. Copy them out with `docker cp db:/data/. DIR`, then into the volume."
+        },
+        {
+          "name": "db is running and sees them",
+          "cmd": "docker exec db cat /data/orders.txt | grep -c '^order'",
+          "expectOutput": "3",
+          "fail": "The new `db` is not running, or does not see the orders in `/data`."
+        }
       ],
       "hints": [
-        "Turn the split into a `List<string>` so you can remove the `ro`/`rw` suffix.",
-        "Decide bind versus named only by the first character of SOURCE."
-      ]
+        "`docker cp db:/data/. ~/orders-backup` copies the files out of the old container to this machine.",
+        "To put files into a volume, mount it in a helper: `docker create --name helper -v orders-data:/data busybox:1.37`, `docker cp ~/orders-backup/. helper:/data/`, `docker rm helper`.",
+        "Then `docker rm -f db` and `docker run -d --name db -v orders-data:/data -v ~/config:/etc/shop:ro busybox:1.37 sleep 1d`."
+      ],
+      "solution": [
+        "docker volume create orders-data",
+        "docker cp db:/data/. ~/orders-backup",
+        "docker create --name helper -v orders-data:/data busybox:1.37",
+        "docker cp ~/orders-backup/. helper:/data/",
+        "docker rm helper",
+        "docker rm -f db",
+        "docker run -d --name db -v orders-data:/data -v ~/config:/etc/shop:ro busybox:1.37 sleep 1d",
+        "docker exec db cat /data/orders.txt",
+        "docker inspect -f '{{json .Mounts}}' db | jq"
+      ],
+      "explain": "A container's writable layer lives and dies with the container; a named volume has its own life (`docker volume ls`), so the next `db` simply mounts it again. The bind mount is the other kind: a host folder, shared live, here read-only so the container cannot change the config. `docker cp` works on stopped containers too, which makes it the rescue tool when data was left in the wrong place."
     }
   ]
 }

@@ -335,6 +335,29 @@ The machine: Debian 13 (trixie) slim with `git` 2.47 (identity "Dojo Learner", d
 (`calendar` and `verify` work offline; there is no running systemd or journald), `setfacl`/`getfacl`, `column`, a learner user with password-less `sudo`, and a prompt with the Git branch. The
 dockerfile is `netlabs/images/shell/Dockerfile`.
 
+**Docker and Kubernetes machines.** Three more image folders run a real container runtime *inside* the step's
+container. They are privileged (the runtime needs it) but still have **no network**, so every image a scenario uses is
+pre-seeded in the image folder's Dockerfile. Each folder's `dojo-step.json` sets the container's limits (memory, CPUs,
+processes), `privileged`, `exclusive` (only one such machine runs at a time; another one opening makes the idle one
+go away) and the text the page shows while it starts.
+
+| `image` | What runs inside | Startup | Seeded images |
+|---|---|---|---|
+| `docker` | Docker Engine 29 with Compose v5 and Buildx (Docker-in-Docker, Alpine-based learner shell) | ~2 s | `alpine:3.24`, `busybox:1.37` |
+| `docker-dotnet` | the same, for the .NET project steps | 10-30 s (loads the SDK) | plus `mcr.microsoft.com/dotnet/sdk:10.0-alpine`, `aspnet:10.0-alpine`, `postgres:17-alpine` |
+| `k8s` | a one-node Kubernetes 1.37 cluster (k3s) with `kubectl` (alias `k`), CoreDNS, NetworkPolicy enforcement and local-path storage; Gateway API v1.7 CRDs on request | ~12 s | `busybox:1.37`, `traefik/whoami:v1.11` |
+
+- Docker scenarios start with `dojo-docker-up` (the modules' `files/lib.sh` does it); `docker-dotnet` scenarios set
+  `DOJO_SEEDS="dotnet-sdk dotnet-aspnet postgres"` (only what they need) before sourcing `lib.sh`.
+- Kubernetes scenarios start the cluster with `dojo-cluster up` (`lib.sh` again; set `DOJO_CLUSTER_ARGS=--gateway-api`
+  first for the Gateway API CRDs). Lines the setup prints as `dojo: ...` are shown on the page as start-up progress.
+- Write checks against real state with `docker inspect -f`, `docker compose config --format json | jq`,
+  `kubectl get -o jsonpath`, `kubectl auth can-i` and the like, and give each one a `fail` message that names the
+  command to look with. Wait inside a check (`kubectl rollout status --timeout=30s`, `curl --retry`) rather than
+  hoping the state has settled: a check has 30 seconds.
+- A pod that crashes quickly still has `kubectl logs --previous` (the cluster keeps three dead containers per
+  container). There is no metrics-server, so `kubectl top` and HPA scaling cannot be shown live.
+
 Writing good scenarios:
 
 - **Write the scenario as a script** in the module's `files/` folder (`files/lib.sh` in every Git module has helpers for

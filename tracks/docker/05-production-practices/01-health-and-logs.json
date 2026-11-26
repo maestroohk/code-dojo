@@ -130,47 +130,63 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Simulate the health status",
+      "type": "terminal",
+      "title": "Give the image a HEALTHCHECK",
+      "image": "docker",
       "prompt": [
-        "Write `List<string> Health(List<bool> probes, int retries)`: given the results of successive probes (`true` = passed), return the status after each one.",
+        "This terminal has a **real Docker Engine**. `~/api` is an API that takes about 3 seconds to warm up and then answers",
+        "`GET /health` on port 8000. Its image has no healthcheck, so `docker ps` says `Up` while it is still warming up.",
         "",
-        "- It starts as `starting`.",
-        "- A pass makes it `healthy` and resets the failure count.",
-        "- A failure increases the count of consecutive failures; when it reaches `retries`, the status becomes `unhealthy`. Below that, the status does not change."
+        "1. Add a `HEALTHCHECK` to `~/api/Dockerfile` that probes `http://localhost:8000/health` every 2 seconds, with a",
+        "   **start period** long enough for the warm-up, and build it as `shop/api:1.2`.",
+        "2. Run it as a container named `api` and wait until `docker ps` shows `(healthy)`.",
+        "3. Write the exit code of the **last probe** Docker ran into `~/answers/probe.txt` (Docker keeps each probe's result)."
       ],
-      "starter": [
-        "List<string> Health(List<bool> probes, int retries)",
-        "{",
-        "    var states = new List<string>();",
-        "    // your code here",
-        "    return states;",
-        "}"
+      "setup": [
+        "health.sh"
+      ],
+      "checks": [
+        {
+          "name": "shop/api:1.2 has a healthcheck that probes /health",
+          "cmd": "docker image inspect -f '{{json .Config.Healthcheck.Test}}' shop/api:1.2 | grep -q 'localhost:8000/health'",
+          "fail": "`shop/api:1.2` has no `HEALTHCHECK` that probes `http://localhost:8000/health`."
+        },
+        {
+          "name": "it probes every 2 s, with a start period of at least 3 s",
+          "cmd": "docker image inspect shop/api:1.2 | jq -r '.[0].Config.Healthcheck | if .Interval == 2000000000 and (.StartPeriod // 0) >= 3000000000 then \"ok\" else \"interval \\((.Interval // 0) / 1e9) s, start period \\((.StartPeriod // 0) / 1e9) s\" end'",
+          "expectOutput": "ok",
+          "fail": "Use `--interval=2s` and a `--start-period` that covers the warm-up (3 s or more)."
+        },
+        {
+          "name": "api is healthy",
+          "cmd": "docker inspect -f '{{.Config.Image}} {{.State.Health.Status}}' api",
+          "expectOutput": "shop/api:1.2 healthy",
+          "fail": "The container `api` from `shop/api:1.2` is not `healthy` (yet?). `docker ps` shows its health."
+        },
+        {
+          "name": "probe.txt has the last probe's exit code",
+          "cmd": "test \"$(xargs < ~/answers/probe.txt)\" = \"$(docker inspect api | jq '.[0].State.Health.Log[-1].ExitCode')\"",
+          "fail": "Not the last probe's exit code. `docker inspect -f '{{json .State.Health}}' api | jq '.Log[-1]'`."
+        }
+      ],
+      "hints": [
+        "`HEALTHCHECK --interval=2s --timeout=2s --start-period=5s --retries=3 CMD wget -qO- http://localhost:8000/health || exit 1` (busybox has `wget`).",
+        "During the start period, failed probes do not count against the container.",
+        "`docker inspect -f '{{json .State.Health}}' api | jq` shows `Status`, `FailingStreak` and the last probes in `Log`."
       ],
       "solution": [
-        "List<string> Health(List<bool> probes, int retries)",
-        "{",
-        "    var states = new List<string>();",
-        "    string state = \"starting\";",
-        "    int failures = 0;",
-        "    foreach (bool ok in probes)",
-        "    {",
-        "        if (ok) { state = \"healthy\"; failures = 0; }",
-        "        else if (++failures >= retries) state = \"unhealthy\";",
-        "        states.Add(state);",
-        "    }",
-        "    return states;",
-        "}"
+        "cd ~/api",
+        "cat >> Dockerfile <<'EOF'",
+        "HEALTHCHECK --interval=2s --timeout=2s --start-period=5s --retries=3 CMD wget -qO- http://localhost:8000/health || exit 1",
+        "EOF",
+        "docker build -t shop/api:1.2 .",
+        "docker run -d --name api shop/api:1.2",
+        "sleep 6",
+        "docker ps",
+        "docker inspect -f '{{json .State.Health}}' api | jq '.Log[-1]'",
+        "docker inspect api | jq '.[0].State.Health.Log[-1].ExitCode' > ~/answers/probe.txt"
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"pass, then three failures\", new List<string> { \"healthy\", \"healthy\", \"healthy\", \"unhealthy\" }, Health(new List<bool> { true, false, false, false }, 3));",
-        "Dojo.Eq(\"failures while starting\", new List<string> { \"starting\", \"starting\", \"healthy\" }, Health(new List<bool> { false, false, true }, 3));",
-        "Dojo.Eq(\"recovers\", new List<string> { \"starting\", \"unhealthy\", \"healthy\", \"healthy\" }, Health(new List<bool> { false, false, true, false }, 2));",
-        "Dojo.Eq(\"non-consecutive failures never trip\", new List<string> { \"healthy\", \"healthy\", \"healthy\", \"healthy\", \"healthy\" }, Health(new List<bool> { true, false, true, false, true }, 2));",
-        "Dojo.Eq(\"retries of 1\", new List<string> { \"unhealthy\" }, Health(new List<bool> { false }, 1));"
-      ]
+      "explain": "A healthcheck turns \"the process exists\" into \"the app answers\", and Compose (`service_healthy`), Swarm and your own scripts can act on it. The start period stops a slow starter from being declared unhealthy while it warms up. `.State.Health.Log` keeps the last probes' exit codes and output: the first place to look when a container is stuck at `unhealthy`."
     }
   ]
 }
