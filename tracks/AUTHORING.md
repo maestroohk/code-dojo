@@ -64,6 +64,21 @@ Every exercise step may carry `"explain"` (shown after answering) and `"hints": 
 ```
 Keep cards short: one idea, one code sample. Follow each card with exercises that use it.
 
+**`"toolkit"` — a senior's toolkit card.** Every module should have one (see docs/QUALITY.md, rule 2): the
+commands or APIs someone experienced reaches for, each with what it is for, the flags that matter and a real
+example. It renders as a card with a copy button per entry. Follow it with quick drills (match a flag to its
+meaning, fill in a command, predict its output) so the commands stick.
+
+```json
+{ "type": "learn", "title": "Senior's toolkit: history", "body": "One sentence on when you reach for these.",
+  "toolkit": [
+    { "cmd": "git log --oneline --graph --all", "what": "See every branch and how they join.",
+      "flags": [["--graph", "draw the branch lines"], ["--all", "every ref, not just HEAD"]],
+      "example": "git log --oneline --graph --all --since=2.weeks", "when": "before a rebase or merge", "lang": "bash" } ] }
+```
+
+`lang` (default `bash`) picks the highlighting: `bash`, `powershell`, `csharp`, `python`, `typescript`, `sql`, `yaml`.
+
 A learn card can carry a visualizer that runs for real under the text. `dojo validate` runs each one
 and fails the lesson if it does not compile or run.
 

@@ -122,6 +122,7 @@ export function highlight(code, lang) {
   const L = lang || document.documentElement.dataset.codeLang;
   if (MARKUP_LANGS.has(L)) return highlightMarkup(code);
   if (L === 'css') return highlightCss(code);
+  if (SHELL_LANGS.has(L)) return highlightShell(code);
   const [TOKEN, KEYWORDS] = LANGS[L] || [CS_TOKEN, CS_KEYWORDS];
   const ctx = { depth: 0 };
   if (JSX_LANGS.has(L)) return highlightJs(code, 0, false, ctx)[0];
@@ -371,6 +372,34 @@ function highlightMarkup(code) {
     while (k < code.length && code[k] !== '<' && code[k] !== '&') k++;
     out += `<span class="t-text">${esc(code.slice(i, k))}</span>`;
     i = k;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- shell (bash, PowerShell, CLI one-liners)
+
+const SHELL_LANGS = new Set(['bash', 'sh', 'shell', 'zsh', 'console', 'powershell', 'ps', 'ps1', 'pwsh', 'cmd']);
+const SHELL_KW = new Set('if then else elif fi for in do done while until case esac function return export local sudo foreach param'.split(' '));
+const SHELL_TOKEN = /(#[^\n]*)|("(?:\\.|[^"\\])*"?|'[^']*'?)|(\$\{?[A-Za-z_][\w]*\}?|\$\(|%[A-Za-z_]+%)|(--?[A-Za-z][\w-]*(?:=[^\s|;&]*)?)|(\|\||&&|[|;&<>]+)|([A-Za-z_][\w.+:/-]*)|(\d+)|(\s+)|([\s\S])/g;
+
+/** Commands: the program at the start of each command (after |, ;, && or a newline) is a function,
+ *  options are attributes, variables are types, strings and comments as everywhere else. */
+function highlightShell(code) {
+  let out = '', start = true, m;
+  SHELL_TOKEN.lastIndex = 0;
+  while ((m = SHELL_TOKEN.exec(code))) {
+    const [text, comment, string, variable, flag, op, word, num, space] = m;
+    if (comment && (start || /\s$/.test(out.replace(/<[^>]+>/g, '').slice(-1)) || !out)) { out += `<span class="t-com">${esc(text)}</span>`; continue; }
+    if (space) { out += text; if (text.includes('\n')) start = true; continue; }
+    if (string) out += `<span class="t-str">${esc(text)}</span>`;
+    else if (variable) out += `<span class="t-type">${esc(text)}</span>`;
+    else if (flag && !start) out += `<span class="t-attr">${esc(text)}</span>`;
+    else if (op) { out += `<span class="t-punct">${esc(text)}</span>`; if (/[|;&]/.test(text)) { start = true; continue; } }
+    else if (word) out += start ? `<span class="${SHELL_KW.has(text) ? 't-kw' : 't-fn'}">${esc(text)}</span>` : esc(text);
+    else if (num) out += `<span class="t-num">${text}</span>`;
+    else out += esc(text);
+    // After do/then/else/sudo the next word is a command again; after for/case/function it is a name.
+    if (!(word && /^(do|then|else|elif|while|until|if|sudo|!)$/.test(text))) start = false;
   }
   return out;
 }
