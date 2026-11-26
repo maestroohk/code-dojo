@@ -7,7 +7,12 @@
     {
       "type": "learn",
       "title": "The scene",
-      "body": "A teammate claims *\"Git is magic.\"* You will show them it is four object formats and SHA-1. Using only what you built in this module, you will turn a folder into a real Git tree id, chain real commits, and catch a tampered object, matching what `git` itself prints."
+      "body": [
+        "A teammate claims *\"Git is magic.\"* You will show them it is four object formats and SHA-1. Using only what you built",
+        "in this module, you will turn a folder into a real Git tree id and chain real commits, matching what `git` itself prints.",
+        "",
+        "Then the real thing: a repository on your machine whose object store was damaged. You find and repair it with Git's own tools."
+      ]
     },
     {
       "type": "code",
@@ -188,43 +193,56 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Detect tampering",
-      "prompt": "`git fsck` verifies that every object's content still hashes to its name. Write `Corrupt(Dictionary<string, (string Type, string Content)> store)` returning the ids (sorted ordinal) whose stored content does **not** hash to the id. The hash is SHA-1 of `\"<type> <byte length>\\0\" + content` (types here are `blob` and `commit`, stored as text).",
-      "starter": [
-        "static List<string> Corrupt(Dictionary<string, (string Type, string Content)> store)",
-        "{",
-        "    return new List<string>();",
-        "}"
-      ],
-      "solution": [
-        "static string ObjectId(string type, string content)",
-        "{",
-        "    var body = Encoding.UTF8.GetBytes(content);",
-        "    var header = Encoding.UTF8.GetBytes($\"{type} {body.Length}\\0\");",
-        "    return Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(header.Concat(body).ToArray())).ToLowerInvariant();",
-        "}",
+      "type": "terminal",
+      "title": "A damaged object",
+      "prompt": [
+        "In `~/shop`, `git log` still works, but CI says the build has the wrong VAT, and a colleague got this from `git fsck`:",
         "",
-        "static List<string> Corrupt(Dictionary<string, (string Type, string Content)> store)",
-        "{",
-        "    return store.Where(kv => ObjectId(kv.Value.Type, kv.Value.Content) != kv.Key)",
-        "                .Select(kv => kv.Key).OrderBy(k => k, StringComparer.Ordinal).ToList();",
-        "}"
+        "```text",
+        "error: ec8bba26...: hash-path mismatch, found at: .git/objects/d9/9cd4...",
+        "```",
+        "",
+        "1. Run `git fsck --full` and find the id of the damaged object. Save it in `~/answers/bad.txt`.",
+        "2. Repair it: remove the damaged file and store the object again from the good copy on the server (`/srv/git/shop.git`).",
+        "3. Finish with `git fsck --full` reporting nothing."
+      ],
+      "setup": [
+        "corrupt.sh"
+      ],
+      "checks": [
+        {
+          "name": "bad.txt names the damaged object",
+          "cmd": "test \"$(tr -d '[:space:]' < ~/answers/bad.txt)\" = \"$(cat /opt/dojo/state/bad)\"",
+          "fail": "`~/answers/bad.txt` should hold the full id of the damaged object: its name is its path under `.git/objects` (two characters, slash, 38 characters), which `git fsck` also reports as `missing blob <id>`."
+        },
+        {
+          "name": "git fsck is clean",
+          "cmd": "cd ~/shop && git fsck --full --no-dangling 2>&1 | tee /tmp/fsck.out >/dev/null; ! grep -qiE 'error|mismatch|missing|corrupt' /tmp/fsck.out",
+          "fail": "`git fsck --full` still reports a problem."
+        },
+        {
+          "name": "Price.cs has the right content again",
+          "cmd": "cd ~/shop && git show HEAD:src/Price.cs | grep -q '0.21m'",
+          "fail": "`src/Price.cs` in the last commit should say `0.21m` again. Store the server's copy with `git -C /srv/git/shop.git cat-file blob <id> | git hash-object -w --stdin`."
+        }
       ],
       "hints": [
-        "Generalise `BlobId` to take the type.",
-        "Compare the recomputed id with the key."
+        "`git fsck --full` prints `<hash of the bytes>: hash-path mismatch, found at: .git/objects/d9/9cd4...`. The object's name is the path without the slash; `missing blob <id>` says the same.",
+        "Remove the damaged file: its path is `.git/objects/` + the first two characters + `/` + the rest. It is read-only, so use `rm -f`.",
+        "Then `git -C /srv/git/shop.git cat-file blob <id> | git hash-object -w --stdin` writes a good copy, under the same id."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoStore = new Dictionary<string, (string Type, string Content)> {",
-        "    [\"ce013625030ba8dba906f756967f9e9ca394464a\"] = (\"blob\", \"hello\\n\"),",
-        "    [\"32f95c0d1244a78b2be1bab8de17906fabb2c4a8\"] = (\"blob\", \"hi!\"),",
-        "    [\"b0313dbfea675ba0583498b791d496a6786d5f5f\"] = (\"commit\", \"tree aaa96ced2d9a1c8e72c56b253a0e2fe78393feb7\\nauthor Ada <ada@example.com> 1700000000 +0000\\ncommitter Ada <ada@example.com> 1700000000 +0000\\n\\nAdd hello\\n\"),",
-        "    [\"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"] = (\"blob\", \" \") };",
-        "Dojo.Eq(\"two tampered objects\", new List<string> { \"32f95c0d1244a78b2be1bab8de17906fabb2c4a8\", \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" }, Corrupt(dojoStore));"
-      ]
+      "solution": [
+        "cd ~/shop",
+        "git fsck --full",
+        "mkdir -p ~/answers",
+        "git fsck --full 2>&1 | grep -oE 'missing blob [0-9a-f]{40}' | head -n 1 | cut -d' ' -f3 > ~/answers/bad.txt",
+        "id=$(cat ~/answers/bad.txt)",
+        "rm -f .git/objects/${id:0:2}/${id:2}",
+        "git -C /srv/git/shop.git cat-file blob \"$id\" | git hash-object -w --stdin",
+        "git fsck --full",
+        "git show HEAD:src/Price.cs"
+      ],
+      "explain": "Content addressing is also an integrity check: an object whose bytes no longer hash to its name is provably damaged, and any good copy anywhere (a teammate's clone, the server) can replace it, because the id says exactly what the content must be. That is why `git fsck` and `transfer.fsckObjects = true` catch silent disk corruption and tampering, and why a clone is a full backup."
     }
   ]
 }
