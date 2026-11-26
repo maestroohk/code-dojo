@@ -8,6 +8,8 @@ import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
 import { sqlGrid } from './sqlgrid.js';
 import { overTime, clock } from './pacing.js';
+// "terminal" (a real shell in a container) and "lab" (a visual or live lab challenge): labsteps.js.
+import { EXTRA_STEPS, EXTRA_LABELS } from './labsteps.js';
 
 export const DRAG_TYPES = new Set(['order', 'blanks', 'match', 'sort']);
 
@@ -15,11 +17,13 @@ export const TYPE_LABEL = {
   learn: 'Learn', mcq: 'Quiz', predict: 'Predict the output', order: 'Put in order',
   blanks: 'Fill the gaps', match: 'Match', sort: 'Sort', code: 'Code',
 };
+Object.assign(TYPE_LABEL, EXTRA_LABELS);
 
 const rich = text => (/\n|```/.test(text) ? md(text) : inline(text));
 const prompt = step => h('div.prompt', { html: md(step.prompt || '') });
 
 export function renderStep(step, ctx) {
+  if (EXTRA_STEPS[step.type]) return EXTRA_STEPS[step.type](step, ctx);
   const make = { learn, mcq, predict, order, blanks, match, sort, code }[step.type];
   if (!make) return { el: h('div.callout.warn', `Unknown step type "${step.type}".`), ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {} };
   return make(step, ctx);

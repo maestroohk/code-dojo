@@ -212,9 +212,12 @@ public static class Pacing
 
     // ================================================================ cold steps
 
-    /// <summary>A code step that is a cold rebuild: "cold": true on the step, or on the whole lesson.</summary>
+    /// <summary>Step types that can be cold rebuilds: code, and terminal (a real shell scenario done from memory, TermSteps.cs).</summary>
+    public static bool CanBeCold(string? type) => type is "code" or "terminal";
+
+    /// <summary>A code (or terminal) step that is a cold rebuild: "cold": true on the step, or on the whole lesson.</summary>
     public static bool IsCold(JsonObject step, JsonObject? lesson = null) =>
-        (string?)step["type"] == "code" && ((bool?)(step["cold"] as JsonValue) == true || step["coldOf"] is JsonValue || (lesson is not null && (bool?)(lesson["cold"] as JsonValue) == true));
+        CanBeCold((string?)step["type"]) &&((bool?)(step["cold"] as JsonValue) == true || step["coldOf"] is JsonValue || (lesson is not null && (bool?)(lesson["cold"] as JsonValue) == true));
 
     /// <summary>Indices of the cold code steps of a lesson file (for the map, without loading every lesson).</summary>
     public static JsonArray ColdSteps(JsonObject lesson)
@@ -227,7 +230,8 @@ public static class Pacing
     }
 
     /// <summary>Fields a "coldOf" step borrows from the step it re-proves, so the two never drift apart.</summary>
-    static readonly string[] ColdOfKeys = ["tests", "template", "require", "forbid", "setup", "check", "stateQuery", "framework", "stdin", "solution", "uses"];
+    static readonly string[] ColdOfKeys = ["tests", "template", "require", "forbid", "setup", "check", "stateQuery", "framework", "stdin", "solution", "uses",
+        "checks", "image", "network"];   // the last three: terminal steps
 
     /// <summary>
     /// "coldOf": "track/module/lesson#N" (N is the 1-based step number): copy the grading of that step onto this one.
@@ -238,7 +242,10 @@ public static class Pacing
         foreach (var step in (lesson["steps"] as JsonArray ?? []).OfType<JsonObject>())
         {
             if (step["coldOf"] is not JsonValue cv || !cv.TryGetValue<string>(out var target)) continue;
-            if (ColdSource(content, target, target.StartsWith(trackId + "/", StringComparison.Ordinal) ? dream : null) is not { } src) { step["coldOfMissing"] = target; continue; }
+            if (ColdSource(content, target, target.StartsWith(trackId + "/", StringComparison.Ordinal) ? dream : null) is not { } src
+                || (string?)src["type"] != ((string?)step["type"] ?? "code")) { step["coldOfMissing"] = target; continue; }
+            // A terminal scenario's setup scripts live in its own module's files/ folder.
+            if ((string?)src["type"] == "terminal" && step["filesOf"] is null) step["filesOf"] = string.Join('/', target.Split('/').Take(2));
             foreach (var k in ColdOfKeys)
                 if (step[k] is null && (k == "uses" ? src["uses"] ?? (src["build"] as JsonObject)?["uses"] : src[k]) is { } v) step[k] = v.DeepClone();
             step["prompt"] ??= src["prompt"]?.DeepClone();
@@ -255,7 +262,7 @@ public static class Pacing
         var parts = target[..hash].Split('/');
         if (parts.Length != 3) return null;
         var src = content.Lesson(parts[0], parts[1], parts[2], dream, coldOf: false);
-        return (src?["steps"] as JsonArray)?.ElementAtOrDefault(n - 1) is JsonObject s && (string?)s["type"] == "code" && s["coldOf"] is null ? s : null;
+        return (src?["steps"] as JsonArray)?.ElementAtOrDefault(n - 1) is JsonObject s && CanBeCold((string?)s["type"]) && s["coldOf"] is null ? s : null;
     }
 
     /// <summary>
@@ -282,12 +289,12 @@ public static class Pacing
         var issues = new List<Builds.Issue>();
         var type = (string?)step["type"];
         foreach (var k in new[] { "cold", "timeLimit", "coldOf" })
-            if (step[k] is not null && type != "code") issues.Add(new(true, where, $"\"{k}\" only works on code steps"));
+            if (step[k] is not null && !CanBeCold(type)) issues.Add(new(true, where, $"\"{k}\" only works on code steps (and terminal steps)"));
         if (step["cold"] is { } c && (c is not JsonValue cvv || !cvv.TryGetValue<bool>(out _))) issues.Add(new(true, where, "\"cold\" must be true or false"));
         if (step["timeLimit"] is { } tl && (tl is not JsonValue tv || !tv.TryGetValue<double>(out var secs) || secs < 10 || secs > 3600))
             issues.Add(new(true, where, "\"timeLimit\" must be a number of seconds between 10 and 3600"));
         if (step["timeLimit"] is not null && !IsCold(step, lesson)) issues.Add(new(false, where, "\"timeLimit\" is only shown on a cold step"));
-        if (step["coldOfMissing"] is { } miss) issues.Add(new(true, where, $"\"coldOf\": \"{miss}\" is not a code step (write \"track/module/lesson#N\", N counting from 1)"));
+        if (step["coldOfMissing"] is { } miss) issues.Add(new(true, where, $"\"coldOf\": \"{miss}\" is not a step of the same type (a code or terminal step; write \"track/module/lesson#N\", N counting from 1)"));
         if (IsCold(step, lesson) && step["hints"] is JsonArray { Count: > 0 }) issues.Add(new(false, where, "a cold step hides its hints; remove them or drop \"cold\""));
         foreach (var node in new[] { (step["build"] as JsonObject)?["uses"], step["uses"] })
             if (node is not null and not JsonArray) issues.Add(new(true, where, "\"uses\" must be an array of file paths"));

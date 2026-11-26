@@ -170,18 +170,20 @@ const SGR = { 30: '#5c6370', 31: 'var(--bad)', 32: 'var(--good)', 33: 'var(--war
  * A small line-mode terminal: an output area that understands \r, \b and basic SGR colours
  * (other escape sequences are dropped) and an input line with history. The container runs bash
  * under a pty, so the shell echoes what you send and Ctrl+C really interrupts.
+ * Also used by "terminal" lesson steps (steps.js): `url` then names their WebSocket, `onKey(e)` sees every key
+ * first (return true to swallow it), and `label` names the terminal for screen readers.
  */
-function terminal(labId, node, { onStatus } = {}) {
-  const out = h('pre.nl-term-out');
-  const input = h('input.nl-term-in', { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: `command on ${node}, Enter to run` });
+export function terminal(labId, node, { onStatus, url, onKey, label } = {}) {
+  const out = h('pre.nl-term-out', { role: 'log', 'aria-live': 'polite', 'aria-label': label || `Terminal output on ${node}`, tabindex: 0 });
+  const input = h('input.nl-term-in', { type: 'text', spellcheck: false, autocomplete: 'off', autocapitalize: 'off', 'aria-label': `Command on ${node}`, placeholder: `command on ${node}, Enter to run` });
   const el = h('div.nl-term', { onclick: e => { if (e.target === out && !getSelection().toString()) input.focus(); } }, out,
     h('div.nl-term-bar', h('span.nl-term-prompt', '›'), input,
       h('button.btn.ghost.small', { type: 'button', title: 'Send Ctrl+C (interrupt)', onclick: () => send('\x03') }, 'Ctrl+C'),
       h('button.btn.ghost.small', { type: 'button', title: 'Clear the screen', onclick: () => { out.replaceChildren(); line = newLine(); } }, 'Clear'),
       h('span.nl-term-sep'),
-      h('button.btn.ghost.small', { type: 'button', title: 'Smaller text', onclick: () => termSize(-1) }, 'A−'),
-      h('button.btn.ghost.small', { type: 'button', title: 'Bigger text', onclick: () => termSize(+1) }, 'A+'),
-      h('button.btn.ghost.small', { type: 'button', title: 'Fill the screen with this terminal (Esc to come back)', onclick: () => toggleMax() }, '⛶')));
+      h('button.btn.ghost.small', { type: 'button', title: 'Smaller text', 'aria-label': 'Smaller text', onclick: () => termSize(-1) }, 'A−'),
+      h('button.btn.ghost.small', { type: 'button', title: 'Bigger text', 'aria-label': 'Bigger text', onclick: () => termSize(+1) }, 'A+'),
+      h('button.btn.ghost.small', { type: 'button', title: 'Fill the screen with this terminal (Esc to come back)', 'aria-label': 'Full screen terminal', onclick: () => toggleMax() }, '⛶')));
   // Terminal text size is remembered across labs and visits.
   function termSize(delta) {
     const now = Number(localStorage.getItem('termSize') || 16);
@@ -258,13 +260,14 @@ function terminal(labId, node, { onStatus } = {}) {
   function connect() {
     closed = false;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/api/netlabs/${encodeURIComponent(labId)}/term/${encodeURIComponent(node)}`);
+    ws = new WebSocket(`${proto}://${location.host}${url || `/api/netlabs/${encodeURIComponent(labId)}/term/${encodeURIComponent(node)}`}`);
     onStatus?.('connecting');
     ws.onopen = () => { onStatus?.('open'); input.focus(); };
     ws.onmessage = e => write(String(e.data));
     ws.onclose = () => { onStatus?.('closed'); if (!closed) write('\r\n[disconnected: press Enter to reconnect]\r\n'); ws = null; };
   }
   input.addEventListener('keydown', e => {
+    if (onKey?.(e)) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       if (!ws) { connect(); return; }
@@ -294,6 +297,8 @@ function terminal(labId, node, { onStatus } = {}) {
     el, node,
     focus: () => input.focus(),
     type: text => { input.value = text; input.focus(); },
+    write: text => write(text),
+    connected: () => ws?.readyState === 1,
     close: () => { closed = true; ws?.close(); },
     reconnect: () => { closed = true; ws?.close(); out.replaceChildren(); line = newLine(); connect(); },
   };
@@ -304,7 +309,12 @@ function terminal(labId, node, { onStatus } = {}) {
 function labPage(page, id, cleanups, kind) {
   const root = h('div.nl-lab', loader('the lab'));
   const back = kind === 'linux' ? ['#/labs/linux', 'All Linux missions'] : ['#/labs/net', 'All network labs'];
-  page('labs', h('a.back-link', { href: back[0] }, '← ' + back[1]), root);
+  // Opened from a "lab" step of a lesson (steps.js): offer the way back to that exact step.
+  let fromLesson = null;
+  try { const d = JSON.parse(sessionStorage.getItem('detour') || 'null'); if (d?.lab === id) fromLesson = d; } catch { }
+  page('labs', fromLesson
+    ? h('div.detour-bar', h('span', 'Opened from the lesson ', h('b', fromLesson.title)), h('a.btn.primary.small', { href: fromLesson.back }, '← Back to the lesson'))
+    : h('a.back-link', { href: back[0] }, '← ' + back[1]), root);
   const terms = new Map();   // node -> terminal
   let active = null, lab = null, busy = false;
   cleanups.push(() => terms.forEach(t => t.close()));

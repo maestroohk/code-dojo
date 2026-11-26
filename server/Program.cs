@@ -26,7 +26,9 @@ var progressLock = new object();
 
 if (args.Length > 0 && args[0] == "validate")
     return await Validator.Run(content, checker, runner, langs,
-        args.Skip(1).FirstOrDefault(a => !a.StartsWith("--")), args.Contains("--puzzles"));
+        args.Skip(1).FirstOrDefault(a => !a.StartsWith("--")), args.Contains("--puzzles"),
+        // Terminal steps start real containers; CI machines without Docker skip them (a warning, not an error).
+        noDocker: args.Contains("--no-docker") || Environment.GetEnvironmentVariable("DOJO_NO_DOCKER") is "1" or "true");
 
 if (args.Length > 0 && args[0] == "stress")
 {
@@ -199,7 +201,9 @@ app.MapPost("/api/apps/{id}/send", async (string id, AppHost.SendRequest req) =>
 app.MapPost("/api/outline", (RunRequest req) => Results.Json(CodeOutline.Read(req.Code ?? ""), json));
 // Live network labs: Docker-based networking and security labs with an in-page terminal (NetLabs.cs).
 NetLabs.Map(app, root, stateDir);
-PyEnv.Map(app);   // one-click data science environment (numpy, pandas, matplotlib)
+// Terminal steps: a real shell in a throwaway container per lesson step, checked by real commands (TermSteps.cs).
+TermSteps.Map(app, content, root, Port);
+PyEnv.Map(app);  // one-click data science environment (numpy, pandas, matplotlib)
 // Code spaces: real multi-file .NET projects with NuGet packages, built and run with the dotnet CLI (CodeSpaces.cs).
 CodeSpaces.Map(app, runner);
 // Your builds: the real artifact each topic assembles from the learner's passing code (Builds.cs).
