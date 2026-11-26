@@ -45,6 +45,21 @@ public class TermStepsTests
     // ---------------------------------------------------------------- parsing and judging (no Docker)
 
     [Fact]
+    public void The_pwsh_image_types_solutions_into_PowerShell_and_the_others_into_bash()
+    {
+        var steps = new TermSteps(Path.Combine(Root(), "netlabs", "images"), "test-shell", sweep: false);
+        Assert.Equal("pwsh", steps.MachineFor("pwsh").Shell);
+        Assert.Equal("bash", steps.MachineFor("shell").Shell);
+        // The solution travels base64-encoded and is run one top-level statement at a time.
+        var script = "cd ~\n$x = 'it''s \"quoted\" `n'\nthrow 'on purpose'\n'still runs'";
+        var wrapped = TermSteps.PwshTyped(script);
+        var b64 = System.Text.RegularExpressions.Regex.Match(wrapped, "FromBase64String\\('([^']+)'\\)").Groups[1].Value;
+        Assert.Equal(script, System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(b64)));
+        Assert.Contains("EndBlock.Statements", wrapped);
+        Assert.Contains("catch", wrapped);
+    }
+
+    [Fact]
     public void Parses_a_terminal_step_and_runs_named_scripts_from_the_module_files()
     {
         var spec = TermSteps.Parse(Obj(Step), "t/m/l#0", Module(Seed));

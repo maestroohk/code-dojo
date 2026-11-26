@@ -130,6 +130,16 @@ open it in the full lab (`#/labs/regex`).
 `text` may be an array of lines. `replace` (optional) shows the replacement result. `dojo validate` fails a card whose
 pattern does not parse in .NET.
 
+**`"pspipe"` — the PowerShell object pipeline, stage by stage.** One command per stage; under it, the objects that flow out
+of it as cards with their type and properties. `reads` highlights the properties the command used, `dropped` shows the
+objects it filtered out (faded), and the optional `text` is what a text pipeline (bash) would carry instead. The data is
+not run: author it from real `pwsh` output (`ui/pspipe.js`).
+```json
+"pspipe": { "stages": [ { "cmd": "Get-ChildItem ./logs -File", "type": "System.IO.FileInfo", "objects": [ { "Name": "a.log", "Length": 512 } ] },
+                        { "cmd": "Where-Object Length -gt 1KB", "reads": ["Length"], "objects": [], "dropped": ["a.log"], "note": "..." } ],
+            "text": ["optional lines"] }
+```
+
 ### regex — write a pattern, checked by .NET
 The learner types a pattern (and may toggle flags, and type a replacement). While they type, every sample the
 checks use is shown with what .NET finds in it. **Run checks** grades it on the server with
@@ -191,7 +201,9 @@ backslash doubled (`"\\d+"` is the pattern `\d+`).
 `answer` must be the exact output (case matters; trailing whitespace does not). `accept` lists
 other answers to allow. `dojo validate` runs the code and fails if it does not print `answer`.
 If the code reads input, give it `"stdin"`. If the code is a fragment that cannot run on its own,
-add `"verify": false`.
+add `"verify": false`. On `predict` and `mcq` steps, `"lang"` (for example `"powershell"` or `"text"`) sets the
+highlighting of `code` when it is not the track's language; such answers are not run by `dojo validate`, so check them
+in the real tool yourself.
 
 ### order — drag lines into the right order
 ```json
@@ -403,6 +415,22 @@ the step says how to start Docker Desktop and waits for it; there is no imitatio
 learner does anything, the solution runs as the learner, and then every check must **pass**. The container is removed
 either way. On a machine without Docker (CI), `dojo validate --no-docker` (or `DOJO_NO_DOCKER=1`) lints the steps and
 skips the container part with a warning, not an error; without a running Docker it skips the same way.
+
+**PowerShell machines (`"image": "pwsh"`).** Debian 13 slim with PowerShell 7.6 LTS (the official package), Pester 6,
+PSScriptAnalyzer 1.25, SecretManagement and SecretStore saved into the image, the offline help (`Get-Help -Examples` works),
+`git`, `python3`, `jq`, `curl`, and `sshd` with the `powershell` subsystem (scenarios start it for remoting over SSH).
+`tracks/powershell` is the reference. Its `dojo-step.json` says `"shell": "pwsh"`:
+
+- the learner's terminal opens in **PowerShell**, through a line-based prompt (`netlabs/images/pwsh/dojo-repl.ps1`):
+  multi-line input continues with `>> ` like the real host, `nano`/`vim`/`code FILE` open the page's editor, progress bars
+  are hidden. Ctrl+C stops PowerShell and starts a fresh session (variables are lost, files stay); `exit` really exits;
+- `solution` lines are **PowerShell**, and `dojo validate` runs them in `pwsh` one top-level statement at a time (a statement
+  that throws reports its error and the next one still runs), like the learner typing them;
+- `setup` and `checks` stay **bash** (call `pwsh -NoProfile -NonInteractive -c '...'` or `-File` from a check). A check that
+  runs Pester should match the pass count with `expectContains`: `-WhatIf` messages and warnings go to stdout too.
+- Windows-only cmdlets (services, CIM, the event log, scheduled tasks, the registry) are practised test-first: the module's
+  Pester file defines an advanced-function stub when the command is missing (`function global:Get-WinEvent { [CmdletBinding()] param(...) }`)
+  and mocks it with `-ModuleName`. See `tracks/powershell/08-windows-administration`.
 
 A terminal step can be a **cold rebuild** like a code step: `"cold": true` with `"coldOf": "track/module/lesson#N"` pointing
 at a terminal step borrows its `setup`, `checks`, `image`, `network` and `solution` (and its module's `files/`), and hides
