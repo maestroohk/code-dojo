@@ -1,0 +1,92 @@
+# A solved version of the lab's routes. The image build runs it once so that every Camel
+# component a learner needs is downloaded into the image: the lab itself runs offline.
+
+- routeConfiguration:
+    errorHandler:
+      deadLetterChannel:
+        deadLetterUri: direct:dead-letter
+        useOriginalMessage: true
+    onException:
+      - onException:
+          exception:
+            - org.apache.camel.http.base.HttpOperationFailedException
+          onWhen:
+            simple: "${exception.statusCode} >= 500"
+          redeliveryPolicy:
+            maximumRedeliveries: 3
+            redeliveryDelay: 200
+            useExponentialBackOff: true
+            backOffMultiplier: 2
+            retryAttemptedLogLevel: WARN
+
+- route:
+    id: receive-order
+    from:
+      uri: platform-http:/orders
+      parameters:
+        httpMethodRestrict: POST
+      steps:
+        - log: "received order, headers: ${headers}"
+        - removeHeaders:
+            pattern: "*"
+        - unmarshal:
+            json: {}
+        - setHeader:
+            name: orderId
+            simple: "${body[orderId]}"
+        - choice:
+            when:
+              - simple: "${body[type]} == 'physical'"
+                steps:
+                  - to: direct:warehouse
+              - simple: "${body[type]} == 'digital'"
+                steps:
+                  - to: direct:payments
+            otherwise:
+              steps:
+                - setHeader:
+                    name: CamelHttpResponseCode
+                    constant: 400
+                - setBody:
+                    constant: '{"error":"unknown order type"}'
+
+- route:
+    id: to-warehouse
+    from:
+      uri: direct:warehouse
+      steps:
+        - transform:
+            jq: '{reference: .orderId, lines: [.items[] | {sku, qty: .quantity}]}'
+        - marshal:
+            json: {}
+        - to: http://warehouse:9000/shipments
+        - log: "order ${header.orderId}: warehouse replied ${body}"
+
+- route:
+    id: to-payments
+    from:
+      uri: direct:payments
+      steps:
+        - marshal:
+            json: {}
+        - to: http://payments:9100/charges
+
+- route:
+    id: dead-letter
+    from:
+      uri: direct:dead-letter
+      steps:
+        - log:
+            message: "exchange ${exchangeId} failed, parked in the dead letter folder: ${exception.message}"
+            loggingLevel: WARN
+        - to: file:/work/camel/dead-letter?fileName=${date:now:yyyyMMdd-HHmmss}-${exchangeId}.json
+        - removeHeaders:
+            pattern: "*"
+        - setHeader:
+            name: CamelHttpResponseCode
+            constant: 502
+        - setHeader:
+            name: Content-Type
+            constant: application/json
+        - setBody:
+            simple: '{"error":"order could not be processed","traceId":"${exchangeId}"}'

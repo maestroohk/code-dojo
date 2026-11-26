@@ -1,0 +1,86 @@
+# Solution file: the lab's orders route with the fixes up to task 6.
+# Everything stays in one file: live reload copes best with that.
+
+# Error handling for every route (task 6): failed exchanges go to the dead-letter route,
+# which parks the original message as a file and answers the caller with a 502.
+- routeConfiguration:
+    errorHandler:
+      deadLetterChannel:
+        deadLetterUri: direct:dead-letter
+        useOriginalMessage: true
+
+- route:
+    id: receive-order
+    from:
+      uri: platform-http:/orders
+      parameters:
+        httpMethodRestrict: POST
+      steps:
+        - log: "received order, headers: ${headers}"
+        - removeHeaders:
+            pattern: "*"
+        - unmarshal:
+            json: {}
+        - setHeader:
+            name: orderId
+            simple: "${body[orderId]}"
+        - choice:
+            when:
+              - simple: "${body[type]} == 'physical'"
+                steps:
+                  - to: direct:warehouse
+              - simple: "${body[type]} == 'digital'"
+                steps:
+                  - to: direct:payments
+            otherwise:
+              steps:
+                - log: "order ${header.orderId}: unknown order type, rejected"
+                - setHeader:
+                    name: CamelHttpResponseCode
+                    constant: 400
+                - setBody:
+                    constant: '{"error":"unknown order type"}'
+
+- route:
+    id: to-warehouse
+    from:
+      uri: direct:warehouse
+      steps:
+        - log: "order ${header.orderId}: sending to the warehouse"
+        - transform:
+            jq: '{reference: .orderId, lines: [.items[] | {sku, qty: .quantity}]}'
+        - marshal:
+            json: {}
+        - to: http://warehouse:9000/shipments
+        - log: "order ${header.orderId}: warehouse replied ${body}"
+
+- route:
+    id: to-payments
+    from:
+      uri: direct:payments
+      steps:
+        - log: "order ${header.orderId}: charging at the payments partner"
+        - marshal:
+            json: {}
+        - to: http://payments:9100/charges
+        - log: "order ${header.orderId}: payments replied ${body}"
+
+- route:
+    id: dead-letter
+    from:
+      uri: direct:dead-letter
+      steps:
+        - log:
+            message: "exchange ${exchangeId} failed, parked in the dead letter folder: ${exception.message}"
+            loggingLevel: WARN
+        - to: file:/work/camel/dead-letter?fileName=${date:now:yyyyMMdd-HHmmss}-${exchangeId}.json
+        - removeHeaders:
+            pattern: "*"
+        - setHeader:
+            name: CamelHttpResponseCode
+            constant: 502
+        - setHeader:
+            name: Content-Type
+            constant: application/json
+        - setBody:
+            simple: '{"error":"order could not be processed","traceId":"${exchangeId}"}'

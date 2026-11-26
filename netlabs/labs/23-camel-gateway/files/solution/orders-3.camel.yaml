@@ -1,0 +1,61 @@
+# Solution file: the lab's orders route with the fixes up to task 3.
+# Orders integration (Camel YAML DSL).
+# Partner shops POST orders to the gateway, the gateway passes them to this route.
+# Physical orders go to the warehouse, digital orders are charged at the payments partner.
+#
+# Camel watches this folder: save the file and the routes reload by themselves.
+# Watch it happen with: tail -f /work/logs/camel.log
+
+- route:
+    id: receive-order
+    from:
+      uri: platform-http:/orders
+      parameters:
+        httpMethodRestrict: POST
+      steps:
+        - log: "received order, headers: ${headers}"
+        - removeHeaders:
+            pattern: "*"
+        - unmarshal:
+            json: {}
+        - setHeader:
+            name: orderId
+            simple: "${body[orderId]}"
+        - choice:
+            when:
+              - simple: "${body[type]} == 'physical'"
+                steps:
+                  - to: direct:warehouse
+              - simple: "${body[type]} == 'digital'"
+                steps:
+                  - to: direct:payments
+            otherwise:
+              steps:
+                - log: "order ${header.orderId}: unknown order type, rejected"
+                - setHeader:
+                    name: CamelHttpResponseCode
+                    constant: 400
+                - setBody:
+                    constant: '{"error":"unknown order type"}'
+
+- route:
+    id: to-warehouse
+    from:
+      uri: direct:warehouse
+      steps:
+        - log: "order ${header.orderId}: sending to the warehouse"
+        - marshal:
+            json: {}
+        - to: http://warehouse:9000/shipments
+        - log: "order ${header.orderId}: warehouse replied ${body}"
+
+- route:
+    id: to-payments
+    from:
+      uri: direct:payments
+      steps:
+        - log: "order ${header.orderId}: charging at the payments partner"
+        - marshal:
+            json: {}
+        - to: http://payments:9100/charges
+        - log: "order ${header.orderId}: payments replied ${body}"

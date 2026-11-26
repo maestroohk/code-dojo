@@ -180,6 +180,37 @@ public class NetLabsTests
     }
 
     [Fact]
+    public void Every_lab_file_a_task_refers_to_exists()
+    {
+        foreach (var lab in Engine(out _).LoadLabs())
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(lab.Def.ToJsonString(), @"/lab/([A-Za-z0-9._/-]+\.[A-Za-z0-9]+)"))
+                Assert.True(File.Exists(Path.Combine(lab.Dir, "files", m.Groups[1].Value)), $"{lab.Id}: /lab/{m.Groups[1].Value} is missing");
+    }
+
+    [Fact]
+    public void Camel_gateway_lab_has_its_image_networks_and_startup_settings()
+    {
+        var lab = Engine(out _).FindLab("23-camel-gateway")!;
+        Assert.Equal("ops", (string?)lab.Def["default_node"]);
+        Assert.InRange((int)lab.Def["ready_seconds"]!, 46, 300);
+        Assert.Contains("MB", (string?)lab.Def["download"]);
+        Assert.True(File.Exists(Path.Combine(lab.Dir, "image", "Dockerfile")));
+        var topo = NetLabs.ParseTopology(File.ReadAllText(lab.ComposeFile), lab.Nodes, new Dictionary<string, string>());
+        Assert.Equal(["edge", "backend"], topo.Networks.Select(n => n.Name));
+        // the gateway is the only host on both networks: the partner cannot reach the backends
+        Assert.Equal(["gateway"], topo.Nodes.Where(n => n.Addrs.Count == 2).Select(n => n.Name));
+        Assert.Equal(["edge"], topo.Nodes.Single(n => n.Name == "client").Addrs.Select(a => a.Net));
+        // the starting route has the two planted bugs, the last solution file has neither
+        var seed = File.ReadAllText(Path.Combine(lab.Dir, "files", "camel", "orders.camel.yaml"));
+        Assert.Contains("${header.type} == 'physical'", seed);
+        Assert.DoesNotContain("removeHeaders", seed);
+        var done = File.ReadAllText(Path.Combine(lab.Dir, "files", "solution", "orders-7.camel.yaml"));
+        Assert.DoesNotContain("${header.type}", done);
+        Assert.Contains("removeHeaders", done);
+        Assert.Contains("deadLetterChannel", done);
+    }
+
+    [Fact]
     public void Last_line_ignores_blank_lines() =>
         Assert.Equal("02:42:0a", NetLabs.LastLine("noise\n02:42:0a \n\n"));
 }
