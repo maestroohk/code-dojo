@@ -1,10 +1,14 @@
 """code-dojo Python intelligence: go to definition, references, hover and completion.
 
-Standard library only. Run by the dojo server (server/PyIntel.cs) as a long-lived process that reads
-one JSON request per line on stdin and writes one JSON answer per line on stdout:
+Jedi answers when it is installed (see "Jedi, when it is installed" below); otherwise, and whenever Jedi
+is too slow or has nothing to say, the analyser in this file does, with the standard library only.
 
-  {"action": "complete"|"definition"|"references"|"hover", "files": [{"path", "code"}], "path", "position"}
-  -> {"items", "definition", "external", "references", "hover"}
+Run by the dojo server (server/PyIntel.cs) as a long-lived process that reads one JSON request per line
+on stdin and writes one JSON answer per line on stdout:
+
+  {"action": "complete"|"definition"|"references"|"hover", "files": [{"path", "code"}], "path", "position",
+   "engine": "auto"|"basic"|"jedi", "site": "<a code space's site-packages>"|null, "root": "<its folder>"|null}
+  -> {"items", "definition", "external", "references", "hover", "engine", "jediMissing"}
 
 The learner's code is only parsed (ast), never executed. Modules that are already installed (the
 standard library, numpy, pandas ...) are imported so their real members and signatures can be shown.
@@ -1657,16 +1661,278 @@ def do_complete(req):
 ACTIONS = {"complete": do_complete, "definition": do_definition, "hover": do_hover, "references": do_references}
 
 
+# ---------------------------------------------------------------- Jedi, when it is installed
+#
+# Jedi (a real Python analyser) answers first when it can be imported: from the dojo's Python environment,
+# or from the tools folder the server passes with --tools. It runs in one worker thread with a time budget,
+# so a slow answer (a big package being read for the first time) falls back to the analyser above instead
+# of keeping the learner waiting; the worker finishes in the background and is warm for the next request.
+
+JEDI = None
+JEDI_TRIED = 0.0
+JEDI_ENV = None
+TOOLS = None
+WORKER = None
+BUSY = None                 # the Future of a Jedi job that ran past its budget
+JEDI_BUDGET = 3.0
+PROJECTS = {}
+WRITTEN = {}
+
+
+def get_jedi():
+    """The jedi module, or None. A missing Jedi is looked for again now and then (the server may be installing it)."""
+    global JEDI, JEDI_TRIED, JEDI_ENV, WORKER
+    if JEDI is not None:
+        return JEDI
+    import time
+    if time.time() - JEDI_TRIED < 15:
+        return None
+    JEDI_TRIED = time.time()
+    if TOOLS and os.path.isdir(TOOLS) and TOOLS not in sys.path:
+        sys.path.append(TOOLS)
+    importlib.invalidate_caches()
+    try:
+        import jedi
+        JEDI_ENV = jedi.InterpreterEnvironment()     # in this process: no extra Python started per request
+    except BaseException:
+        # Half installed (pip is still writing it): forget the pieces so the next try starts clean.
+        for name in [m for m in sys.modules if m.split(".")[0] in ("jedi", "parso")]:
+            del sys.modules[name]
+        return None
+    import concurrent.futures
+    import threading
+    threading.stack_size(64 * 1024 * 1024)          # Jedi recurses deeply; the default thread stack is small
+    WORKER = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    JEDI = jedi
+    WORKER.submit(lambda: jedi.Script("''.up", environment=JEDI_ENV).complete(1, 5))   # load the builtins once, now
+    return JEDI
+
+
+def safe_rel(path):
+    rel = (path or "main.py").replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts or ":" in parts[0]:
+        return None
+    return "/".join(parts)
+
+
+def jedi_project(req):
+    """The request's files written to a folder of their own (Jedi reads the other modules from disk)."""
+    import hashlib
+    import tempfile
+    files = req["files"]
+    site = req.get("site") or None
+    key = hashlib.sha1(("|".join(sorted(f.get("path") or "" for f in files)) + "|" + (req.get("root") or "")).encode("utf-8")).hexdigest()[:12]
+    base = os.path.join(tempfile.gettempdir(), "code-dojo", "jedi", key)
+    written = WRITTEN.setdefault(key, {})
+    for f in files:
+        rel = safe_rel(f.get("path"))
+        code = (f.get("code") or "").replace("\r\n", "\n")
+        if rel is None or written.get(rel) == code:
+            continue
+        full = os.path.join(base, *rel.split("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(code)
+        written[rel] = code
+    pk = (key, site)
+    if pk not in PROJECTS:
+        # A code space's .venv: its packages are found as if the learner's program ran there.
+        PROJECTS[pk] = JEDI.Project(base, added_sys_path=[site] if site else [], smart_sys_path=True)
+    return base, PROJECTS[pk]
+
+
+def jedi_rel(base, module_path):
+    if module_path is None:
+        return None
+    try:
+        rel = os.path.relpath(str(module_path), base)
+    except ValueError:      # another drive
+        return None
+    if rel.startswith("..") or os.path.isabs(rel):
+        return None
+    return rel.replace("\\", "/")
+
+
+def jedi_location(req, rel, line, col, length):
+    code = next(((f.get("code") or "").replace("\r\n", "\n") for f in req["files"] if safe_rel(f.get("path")) == rel), "")
+    path = next((f.get("path") for f in req["files"] if safe_rel(f.get("path")) == rel), rel)
+    lines = code.split("\n")
+    text = lines[line - 1].strip() if 1 <= line <= len(lines) else ""
+    return {"path": path, "line": line, "column": col + 1, "length": length, "preview": text if len(text) <= 120 else text[:120] + "…"}
+
+
+def jedi_signature(n):
+    try:
+        sigs = n.get_signatures()
+    except BaseException:
+        sigs = []
+    if not sigs:
+        return None
+    try:
+        return sigs[0].to_string()
+    except BaseException:
+        return None
+
+
+def jedi_type(n):
+    try:
+        found = n.infer()
+    except BaseException:
+        return None
+    names = []
+    for t in found[:3]:
+        name = t.name if t.type != "module" else "module"
+        if name and name not in names:
+            names.append(name)
+    return " | ".join(names) or None
+
+
+def jedi_describe(n):
+    kind = n.type
+    parent = None
+    try:
+        parent = n.parent()
+    except BaseException:
+        pass
+    in_class = parent is not None and parent.type == "class"
+    doc = ""
+    if kind in ("function", "class", "module"):
+        try:
+            doc = first_line(n.docstring(raw=True))
+        except BaseException:
+            doc = ""
+    if kind == "function":
+        sig = jedi_signature(n) or n.name + "(...)"
+        head = ("(method) " + parent.name + "." if in_class else "(function) ") + "def " + sig
+    elif kind == "class":
+        head = "(class) class " + n.name
+    elif kind == "module":
+        head = "(module) " + (n.full_name or n.name)
+    elif kind == "param":
+        t = jedi_type(n)
+        head = "(parameter) " + n.name + (": " + t if t else "")
+    elif kind == "property":
+        t = jedi_type(n)
+        head = "(property) " + (parent.name + "." if in_class else "") + n.name + (": " + t if t else "")
+    else:
+        t = jedi_type(n)
+        head = ("(attribute) " + parent.name + "." if in_class else "(variable) ") + n.name + (": " + t if t else "")
+    return head + ("\n" + doc if doc else "")
+
+
+def jedi_answer(req):
+    base, project = jedi_project(req)
+    rel = safe_rel(req["path"])
+    me = next(f for f in req["files"] if f.get("path") == req["path"])
+    code = (me.get("code") or "").replace("\r\n", "\n")
+    pos = max(0, min(req.get("position", 0), len(code)))
+    line = code.count("\n", 0, pos) + 1
+    col = pos - (code.rfind("\n", 0, pos) + 1)
+    script = JEDI.Script(code, path=os.path.join(base, *rel.split("/")), project=project, environment=JEDI_ENV)
+    action = req["action"]
+
+    if action == "complete":
+        before = code[code.rfind("\n", 0, pos) + 1:pos]
+        prefix = re.search(r"\w*$", before).group()
+        attr = before[: len(before) - len(prefix)].rstrip().endswith(".")
+        items = []
+        for c in script.complete(line, col):
+            if c.name.startswith("__") and not prefix.startswith("_"):
+                continue
+            kind = {"module": "module", "class": "class", "function": "method" if attr else "function", "keyword": "keyword",
+                    "property": "property", "path": "module"}.get(c.type, "variable")
+            label = c.name_with_symbols if c.type == "param" else c.name
+            detail = None
+            if len(items) < 40:      # signatures and types cost a lookup each: only for the first ones the popup shows
+                if c.type in ("function", "class"):
+                    detail = jedi_signature(c)
+                elif c.type in ("instance", "statement", "param", "property"):
+                    t = jedi_type(c)
+                    detail = c.name + (": " + t if t else "")
+                elif c.type == "module":
+                    detail = "module " + (c.full_name or c.name)
+            items.append({"label": label, "kind": kind, "detail": detail})
+            if len(items) >= 300:
+                break
+        return {"items": items} if items else None
+
+    if action == "hover":
+        names = script.goto(line, col, follow_imports=True)
+        if not names:
+            names = script.infer(line, col)
+        return {"hover": jedi_describe(names[0])} if names else None
+
+    if action == "definition":
+        names = script.goto(line, col, follow_imports=True)
+        if not names:
+            return None
+        n = names[0]
+        hover = jedi_describe(n)
+        where = jedi_rel(base, n.module_path)
+        if where is not None:
+            if n.line is None:
+                return {"definition": jedi_location(req, where, 1, 0, 0), "hover": hover}
+            return {"definition": jedi_location(req, where, n.line, n.column, len(n.name)), "hover": hover}
+        return {"external": hover + "\n\nDeclared in " + (n.module_name or "a library") + " (no source to open)."}
+
+    if action == "references":
+        found, seen = [], set()
+        for r in script.get_references(line, col, include_builtins=False):
+            where = jedi_rel(base, r.module_path)
+            if where is None or r.line is None or (where, r.line, r.column) in seen:
+                continue
+            seen.add((where, r.line, r.column))
+            found.append(jedi_location(req, where, r.line, r.column, len(r.name)))
+        if not found:
+            return None
+        found.sort(key=lambda l: (l["path"] != req["path"], l["path"], l["line"], l["column"]))
+        return {"references": found}
+    return None
+
+
+def try_jedi(req, strict):
+    """Jedi's answer, or None (not installed, busy, too slow, nothing to say)."""
+    global BUSY
+    if get_jedi() is None or safe_rel(req.get("path")) is None:
+        return None
+    if BUSY is not None and not BUSY.done():
+        return None
+    BUSY = None
+    job = WORKER.submit(jedi_answer, req)
+    try:
+        return job.result(timeout=120 if strict else JEDI_BUDGET)
+    except BaseException as e:
+        import concurrent.futures
+        if isinstance(e, concurrent.futures.TimeoutError):
+            BUSY = job
+        return None
+
+
 def handle(req):
     fn = ACTIONS.get(req.get("action"))
     if fn is None:
         return {}
     if not any(f.get("path") == req.get("path") for f in req.get("files") or []):
         return {}
-    return fn(req)
+    engine = req.get("engine") or "auto"
+    if engine == "basic":
+        return dict(fn(req), engine="basic")
+    res = try_jedi(req, engine == "jedi")
+    missing = JEDI is None          # the server installs it in the background when it hears this
+    if res is not None:
+        return dict(res, engine="jedi")
+    if engine == "jedi":            # tests ask for Jedi alone, to know it answered
+        return {"engine": "unavailable" if missing else "none", "jediMissing": missing}
+    return dict(fn(req), engine="basic", jediMissing=missing)
 
 
 def main():
+    global TOOLS
+    if "--tools" in sys.argv[1:-1]:
+        TOOLS = sys.argv[sys.argv.index("--tools") + 1]
     for line in sys.stdin:
         line = line.strip()
         if not line:

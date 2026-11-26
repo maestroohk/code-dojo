@@ -13,17 +13,33 @@ namespace CodeDojo;
 public static class CodeIntel
 {
     public record FileText(string Path, string Code);
-    /// <summary>Language: csharp (the default), python, javascript or typescript.</summary>
-    public record Request(string Action, FileText[] Files, string Path, int Position, string[]? References, string? Language = null);
-    public record Item(string Label, string Kind, string? Detail);
+    /// <summary>
+    /// Language: csharp (the default), python, javascript or typescript. Space: the code space the files
+    /// belong to (its node_modules / .venv are then seen). Engine: null for the best available, "basic" for
+    /// the dojo's own analysers only.
+    /// </summary>
+    public record Request(string Action, FileText[] Files, string Path, int Position, string[]? References, string? Language = null,
+        string? Space = null, string? Engine = null);
+    /// <summary>Sort: lower comes first in the popup (locals before globals); null for no preference.</summary>
+    public record Item(string Label, string Kind, string? Detail, int? Sort = null);
     public record Location(string Path, int Line, int Column, int Length, string Preview);
-    public record Response(List<Item>? Items, Location? Definition, string? External, List<Location>? References, string? Hover);
+    /// <summary>Engine: which analyser answered (typescript, jedi, basic), when it is not Roslyn.</summary>
+    public record Response(List<Item>? Items, Location? Definition, string? External, List<Location>? References, string? Hover, string? Engine = null);
 
     static readonly ConcurrentDictionary<string, MetadataReference> ExtraRefs = new();
 
-    /// <summary>Answers for any language: C# here (Roslyn), Python in PyIntel, JavaScript/TypeScript in JsIntel.</summary>
-    public static async Task<Response> RunAny(CSharpRunner runner, Request req)
+    /// <summary>The folder of the code space a request names, when there is one.</summary>
+    static string? SpaceFolder(string? space) =>
+        CodeSpaces.ValidSpaceName(space) && Path.Combine(CodeSpaces.DefaultRoot(), space!) is var dir && Directory.Exists(dir) ? dir : null;
+
+    /// <summary>
+    /// Answers for any language: C# here (Roslyn); Python in PyIntel (Jedi when installed); JavaScript and
+    /// TypeScript from TypeScript's LanguageService (TsIntel) when it answers in time, else JsIntel.
+    /// <paramref name="projectDir"/> stands in for the request's code space (tests).
+    /// </summary>
+    public static async Task<Response> RunAny(CSharpRunner runner, Request req, string? projectDir = null)
     {
+        projectDir ??= SpaceFolder(req.Space);
         var lang = req.Language?.ToLowerInvariant() ?? (req.Path ?? "") switch
         {
             var p when p.EndsWith(".py", StringComparison.OrdinalIgnoreCase) => "python",
@@ -33,8 +49,8 @@ public static class CodeIntel
         };
         return lang switch
         {
-            "python" => await PyIntel.Run(req),
-            "javascript" or "typescript" or "js" or "ts" => JsIntel.Run(req),
+            "python" => await PyIntel.Run(req, projectDir),
+            "javascript" or "typescript" or "js" or "ts" => (req.Engine != "basic" ? await TsIntel.Run(req, projectDir) : null) ?? (JsIntel.Run(req) with { Engine = "basic" }),
             _ => Run(runner, req),
         };
     }

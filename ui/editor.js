@@ -24,7 +24,7 @@ export const setAutocomplete = on => localStorage.setItem('dojo-autocomplete', o
  *   onPopOut    replaces the built-in pop-out entirely (Code spaces makes its whole IDE full screen)
  *   false       no pop-out button
  */
-export function createEditor({ value = '', onChange, onRun, minLines = 6, language, assist = true, files, path = 'Program.cs', onNavigate, references, vocab, onGutterClick, popout = {} } = {}) {
+export function createEditor({ value = '', onChange, onRun, minLines = 6, language, assist = true, files, path = 'Program.cs', onNavigate, references, space, vocab, onGutterClick, popout = {} } = {}) {
   const gutter = h('div.ed-gutter', { 'aria-hidden': 'true' });
   const pre = h('pre.ed-pre', { 'aria-hidden': 'true' });
   const area = h('textarea.ed-area', {
@@ -76,13 +76,14 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
   });
 
   const lang = () => (typeof language === 'function' ? language() : language) || document.documentElement.dataset.codeLang || 'csharp';
-  // ---- code intelligence: C# (Roslyn), Python (server/intel/pyintel.py) and JavaScript/TypeScript (server/JsIntel.cs).
+  // ---- code intelligence: C# (Roslyn), Python (Jedi, else server/intel/pyintel.py) and JavaScript/TypeScript (TypeScript's
+  // LanguageService, else server/JsIntel.cs). space: the code space the files belong to, so its packages are seen.
   // The server reads the files and answers questions; the language goes with each request.
   const allFiles = () => {
     const list = (files ? files() : [{ path, code: area.value }]).map(f => (f.path === path ? { path, code: area.value } : f));
     return list.some(f => f.path === path) ? list : [...list, { path, code: area.value }];
   };
-  const intel = (action, position) => api('intel', { action, files: allFiles(), path, position, references: references?.(), language: lang() });
+  const intel = (action, position) => api('intel', { action, files: allFiles(), path, position, references: references?.(), language: lang(), space: space?.() || undefined });
   const hasIntel = () => INTEL_LANGS.has(lang());
   if (assist) attachAssist(area, {
     language: lang, enabled: autocompleteOn, insert: text => insert(text),
