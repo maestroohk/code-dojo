@@ -1,0 +1,131 @@
+{
+  "title": "Boss: it worked on my laptop",
+  "summary": "Three scripts written on Windows fail on the Linux build agents. Read the errors, find the cause, fix them so they run anywhere.",
+  "minutes": 16,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket BUILD-871",
+      "body": [
+        "*\"We moved the nightly jobs from my laptop to the Linux agents (PowerShell 7.6). Three of them broke. The scripts did",
+        "not change, so it must be the agents.\"*",
+        "",
+        "It is not the agents. Each script relies on something that only happened to be true on one machine: an alias, the",
+        "current folder, the console. Run each one, read the first line of the error (or the wrong output), fix it."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "ls: invalid option",
+      "prompt": [
+        "Run `pwsh -File ~/scripts/newest-logs.ps1`. It should print the names of the **three most recently changed `.log`",
+        "files** under `~/logs`, newest last. Make it work here (and still on Windows): every command and parameter spelt out."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "prints the three newest logs, newest last",
+          "cmd": "pwsh -NoProfile -File ~/scripts/newest-logs.ps1 2>&1",
+          "expectOutput": ["a.log", "app.log", "d.log"],
+          "fail": "It should print `a.log`, `app.log` and `d.log`, one per line. Compare with `Get-ChildItem ~/logs -Recurse -Filter *.log | Sort-Object LastWriteTime | Select-Object Name, LastWriteTime`." },
+        { "name": "no aliases left",
+          "cmd": "pwsh -NoProfile -c 'Invoke-ScriptAnalyzer -Path ~/scripts/newest-logs.ps1 -IncludeRule PSAvoidUsingCmdletAliases | ForEach-Object Message'; grep -Eq '(^|[|] *)(ls|sort|select|%) ' ~/scripts/newest-logs.ps1 && echo 'short names still in the script'",
+          "expectOutput": "",
+          "fail": "Spell out every command: `Get-ChildItem`, `Sort-Object`, `Select-Object`, `ForEach-Object`. (`ls` and `sort` are not even aliases on Linux, so the analyzer cannot see them.)" }
+      ],
+      "hints": [
+        "The error comes from `/usr/bin/ls`, the GNU program: on Linux, `ls` is not an alias of `Get-ChildItem`.",
+        "`sort` is the same story: `Get-Command sort` shows `/usr/bin/sort`.",
+        "`Get-ChildItem ~/logs -Recurse -Filter *.log | Sort-Object LastWriteTime | Select-Object -Last 3 | ForEach-Object { $_.Name }`"
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/newest-logs.ps1",
+        "Get-Command ls, sort",
+        "Set-Content ~/scripts/newest-logs.ps1 -Value '# newest-logs.ps1: the three most recently changed logs, newest last.', 'Get-ChildItem ~/logs -Recurse -Filter *.log | Sort-Object LastWriteTime | Select-Object -Last 3 | ForEach-Object { $_.Name }'",
+        "pwsh -File ~/scripts/newest-logs.ps1"
+      ],
+      "explain": "`Get-Command <name> -All` shows every command a name could mean and which one wins. When a script has to run on Linux agents too, test it there in CI (a `pwsh` job on an Ubuntu runner costs nothing) rather than finding out from the nightly run."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "The term 'Get-Greeting' is not recognized",
+      "prompt": [
+        "The scheduler starts jobs **from `/`**. Reproduce it: `Set-Location /; pwsh -File ~/scripts/nightly.ps1`. Read both errors.",
+        "",
+        "Fix `~/scripts/nightly.ps1` so it works from **any** current folder and prints",
+        "`Good night, platform. Backups start at 01:00.`"
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "works when started from /",
+          "cmd": "cd / && pwsh -NoProfile -File /home/learner/scripts/nightly.ps1 2>&1",
+          "expectOutput": "Good night, platform. Backups start at 01:00.",
+          "fail": "Started from `/`, the script should print only the greeting." },
+        { "name": "works when started from /tmp",
+          "cmd": "cd /tmp && pwsh -NoProfile -File /home/learner/scripts/nightly.ps1 2>&1",
+          "expectOutput": "Good night, platform. Backups start at 01:00.",
+          "fail": "Started from `/tmp`, the script should print only the greeting." }
+      ],
+      "hints": [
+        "First error: `./lib.ps1` means *the current folder*, which is `/` under the scheduler, not the script's folder. `$PSScriptRoot` is the folder the running script is in.",
+        "Second error: `& script.ps1` runs it in a **child scope**, so the functions it defines are gone when it returns. Dot-sourcing (`. script.ps1`) runs it in the caller's scope.",
+        "Replace `& ./lib.ps1` with `. \"$PSScriptRoot/lib.ps1\"`."
+      ],
+      "solution": [
+        "Set-Location /",
+        "pwsh -File ~/scripts/nightly.ps1",
+        "Set-Location ~",
+        "(Get-Content ~/scripts/nightly.ps1 -Raw).Replace('& ./lib.ps1', '. \"$PSScriptRoot/lib.ps1\"') | Set-Content ~/scripts/nightly.ps1 -NoNewline",
+        "Get-Content ~/scripts/nightly.ps1",
+        "Set-Location /; pwsh -File ~/scripts/nightly.ps1; Set-Location ~"
+      ],
+      "explain": [
+        "Two habits for every script: build paths from `$PSScriptRoot` (`Join-Path $PSScriptRoot 'config.json'`), never from",
+        "the current folder; and load helper files with `.` (or better, make them a module and `Import-Module` it: module 5).",
+        "`&` is for *running* something; `.` is for *loading* it into your scope."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Found 0 stale files",
+      "prompt": [
+        "`pwsh -File ~/scripts/stale.ps1` prints three paths and then `Found 0 stale files`, so the clean-up job that runs after",
+        "it never deletes anything. Run it with its output captured to see the problem: `$out = pwsh -File ~/scripts/stale.ps1`,",
+        "then `$out`.",
+        "",
+        "Fix `Get-StaleFile` so it **returns** the stale files instead of only showing them. The last line must become",
+        "`Found 3 stale files`."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "Found 3 stale files",
+          "cmd": "pwsh -NoProfile -File ~/scripts/stale.ps1 2>&1 | tail -n1",
+          "expectOutput": "Found 3 stale files",
+          "fail": "The last line should be `Found 3 stale files`." },
+        { "name": "the function returns objects, not screen text",
+          "cmd": "! grep -q 'Write-Host' ~/scripts/stale.ps1",
+          "fail": "`Write-Host` writes to the screen (the host), not to the pipeline. Output the file object (or `Write-Output $file`) instead." }
+      ],
+      "hints": [
+        "`$out` shows only `Found 0 stale files`: the three paths never reached the pipeline, they went straight to the console.",
+        "In PowerShell a function returns **everything it outputs**, not just what follows `return`. A bare `$file` on its own line outputs it.",
+        "Replace `Write-Host $file.FullName` with `$file` (or `Write-Output $file`)."
+      ],
+      "solution": [
+        "$out = pwsh -File ~/scripts/stale.ps1",
+        "$out",
+        "(Get-Content ~/scripts/stale.ps1 -Raw).Replace('Write-Host $file.FullName', '$file') | Set-Content ~/scripts/stale.ps1 -NoNewline",
+        "pwsh -File ~/scripts/stale.ps1"
+      ],
+      "explain": [
+        "`Write-Host` is for messages a human reads (and in PowerShell 5+ it goes to the *information* stream, number 6, so",
+        "`6>$null` hides it). Data goes to the *success* stream: just output it. Every value a function does not capture or",
+        "send to `$null` becomes part of its return value, which is also why stray output like a `.Add()` call's return",
+        "value can sneak into results: `[void]$list.Add($x)` or `$null = ...` silences it."
+      ]
+    }
+  ]
+}
