@@ -56,12 +56,8 @@ public sealed class CSharpRunner
     public CSharpRunner()
     {
         var coreDir = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
-        var tpa = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") ?? "")
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
         // Only the base runtime: learner programs run against Microsoft.NETCore.App alone.
-        _refs = tpa.Where(p => string.Equals(Path.GetDirectoryName(p), coreDir, StringComparison.OrdinalIgnoreCase))
-                   .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))
-                   .ToList();
+        _refs = FrameworkRefs.In(coreDir);
 
         var exe = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
         var guess = Path.GetFullPath(Path.Combine(coreDir, "..", "..", "..", exe));
@@ -79,8 +75,7 @@ public sealed class CSharpRunner
 
         // Project steps marked "framework": "web" also get ASP.NET Core, the same one this server runs on.
         var webDir = Path.GetDirectoryName(typeof(Microsoft.AspNetCore.Builder.WebApplication).Assembly.Location)!;
-        _webRefs = _refs.Concat(tpa.Where(p => string.Equals(Path.GetDirectoryName(p), webDir, StringComparison.OrdinalIgnoreCase))
-                                   .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))).ToList();
+        _webRefs = [.. _refs, .. FrameworkRefs.In(webDir)];
         _webRuntimeConfig = System.Text.Json.JsonSerializer.Serialize(new
         {
             runtimeOptions = new

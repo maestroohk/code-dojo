@@ -1000,12 +1000,12 @@ public sealed partial class CodeSpaces
                         "moduleResolution": "bundler",
                         "resolveJsonModule": true,
                         "isolatedModules": true,
-                        "jsx": "preserve",
+                        "jsx": "react-jsx",
                         "incremental": true,
                         "plugins": [{ "name": "next" }],
                         "paths": { "@/*": ["./*"] }
                       },
-                      "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+                      "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts", ".next/dev/types/**/*.ts"],
                       "exclude": ["node_modules"]
                     }
 
@@ -1167,13 +1167,26 @@ public sealed partial class CodeSpaces
                 if (code != 0) HintMissingModule(s, dir, "python");
                 return code;
             }
-            if (entry.StartsWith("script:")) return await Npm(s, job, dir, ["run", entry[7..]], null, port);
+            if (entry.StartsWith("script:")) return await Npm(s, job, dir, ["run", entry[7..], .. NextHostArgs(dir, entry[7..])], null, port);
             var exit = await Node(s, job, dir, ["--disable-warning=ExperimentalWarning", entry], null, port);
             if (exit != 0) HintMissingModule(s, dir, "node");
             return exit;
         }, web, kind);
         return job is null ? new { error } : new { started = true, job = Describe(job) };
     }
+
+    [GeneratedRegex(@"^\s*next\s+(dev|start)\b(?![^&|;]*(--hostname|\s-H\b))[^&|;]*$")] private static partial Regex NextServeRx();
+
+    /// <summary>
+    /// Extra arguments for an npm script that is a plain `next dev` / `next start`: listen on loopback only.
+    /// By default Next listens on every network interface, and since 15.2 its dev server refuses the
+    /// hot-reload socket and dev resources to any origin other than localhost or its own --hostname. The
+    /// dojo opens apps at 127.0.0.1, so without this the page renders but never becomes interactive.
+    /// </summary>
+    static string[] NextHostArgs(string dir, string script) =>
+        NpmScripts(ReadPackageJson(dir)).GetValueOrDefault(script) is { } cmd && NextServeRx().IsMatch(cmd)
+            ? ["--", "--hostname", "127.0.0.1"]
+            : [];
 
     /// <summary>After a failed run: a hint when the program imported a package that is not installed.</summary>
     void HintMissingModule(SpaceState s, string dir, string kind)

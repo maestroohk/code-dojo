@@ -34,7 +34,8 @@ public sealed partial class CodeSpaces : IDisposable
     readonly string _dotnet;
     readonly ConcurrentDictionary<string, SpaceState> _states = new(StringComparer.OrdinalIgnoreCase);
     readonly HttpClient _http = new(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(30) };
-    readonly HttpClient _nuget = new() { Timeout = TimeSpan.FromSeconds(15) };
+    // Registries (NuGet, npm, PyPI): connect IPv6 and IPv4 in parallel, so a dead IPv6 route cannot stall a lookup.
+    readonly HttpClient _nuget = new(HappyEyeballs.Handler()) { Timeout = TimeSpan.FromSeconds(15) };
     readonly Timer _reaper;
     readonly HashSet<string> _frameworkDlls;
     long _seq;
@@ -103,6 +104,8 @@ public sealed partial class CodeSpaces : IDisposable
         public string Status = "running";
         public int? ExitCode;
         public Process? Proc;
+        /// <summary>Proc and everything it started (npm's shell, next dev, its workers), so Stop ends all of it.</summary>
+        public ProcessTree? Tree;
         public int Port;
         public bool Web, Listening, Stopped;
         public DateTimeOffset Started = DateTimeOffset.UtcNow, Ended;
@@ -764,7 +767,12 @@ public sealed partial class CodeSpaces : IDisposable
     void Kill(SpaceState s, Job j)
     {
         j.Stopped = true;
-        try { if (j.Proc is { HasExited: false } p) { p.Kill(entireProcessTree: true); p.WaitForExit(5000); } } catch { }
+        try
+        {
+            j.Tree?.Kill();
+            if (j.Proc is { HasExited: false } p) { p.Kill(entireProcessTree: true); p.WaitForExit(5000); }
+        }
+        catch { }
     }
 
     ProcessStartInfo Psi(string cwd, IEnumerable<string> args, string? exe = null)
@@ -806,6 +814,9 @@ public sealed partial class CodeSpaces : IDisposable
         configure?.Invoke(psi);
         var p = Process.Start(psi)!;
         job.Proc = p;
+        // Run jobs (servers, dev servers) also end if this server stops; builds may leave compiler servers running.
+        using var tree = ProcessTree.Track(p, killOnClose: job.Kind == "run");
+        job.Tree = tree;
         try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
         if (job.Kind != "run") p.StandardInput.Close();
         var pumps = Task.WhenAll(Pump(s, job, p.StandardOutput, "out", dir), Pump(s, job, p.StandardError, "err", dir));
@@ -815,7 +826,7 @@ public sealed partial class CodeSpaces : IDisposable
         catch (OperationCanceledException)
         {
             Append(s, null, "sys", $"Stopped: it ran longer than {timeout!.Value.TotalMinutes:0} minutes.", dir);
-            try { p.Kill(entireProcessTree: true); } catch { }
+            tree.Kill();
             await p.WaitForExitAsync();
         }
         // Build servers can inherit the output pipes and keep them open: do not wait for them.

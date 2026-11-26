@@ -105,7 +105,9 @@ Open the printed URL and check the following:
 - **Confidentiality:** the integration/ESB track teaches generalized concepts only. Never add employer names, internal service names, hosts or credentials to this public repo.
 - **Untested:**
   - SQL Server and MySQL engines in Databases (these need Docker images).
-  - A full Next.js `npm install` / `next dev`: the npm registry was blocked on the work network.
+  - (Next.js is now verified, see below.)
+- **npm registry "blocked" on some networks:** it was IPv6, not a block. DNS gave IPv6 addresses that do not route, and .NET tried them one by one, so the dojo's 8-second check gave up while npm itself (Node tries IPv4 and IPv6 in parallel) worked. Registry calls now use `HappyEyeballs` (server/HappyEyeballs.cs). If a network still really blocks npm, the message says so and points at `npm config get registry` mirrors.
+- **Next.js:** verified end to end on 2026-11-26 (Next 16.4.6): install, `next dev` with hot reload, Stop, `next build` (TypeScript errors land in Problems), `next start`. The dojo passes `--hostname 127.0.0.1` to plain `next dev` / `next start` scripts: Next blocks its hot-reload socket for any origin other than localhost or its own hostname, and the default listens on every interface.
 
 ## 6. What comes next (the plan, in order)
 

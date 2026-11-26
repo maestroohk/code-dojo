@@ -81,10 +81,7 @@ public static class CodeDebugger
     {
         var coreDir = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
         var webDir = Path.GetDirectoryName(typeof(Microsoft.AspNetCore.Builder.WebApplication).Assembly.Location)!;
-        var tpa = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-        List<MetadataReference> In(string dir) => tpa.Where(p => string.Equals(Path.GetDirectoryName(p), dir, StringComparison.OrdinalIgnoreCase))
-            .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p)).ToList();
-        return (In(coreDir), In(webDir), webDir);
+        return (FrameworkRefs.In(coreDir), FrameworkRefs.In(webDir), webDir);
     });
 
     /// <summary>The usings an SDK console project gets from ImplicitUsings.</summary>
