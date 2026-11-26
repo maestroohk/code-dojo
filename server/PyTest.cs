@@ -26,7 +26,8 @@ namespace CodeDojo;
 /// </summary>
 public static partial class PyTest
 {
-    public static readonly string[] ToolPackages = ["pytest", "mypy"];
+    // hypothesis: property-based tests in the testing topic (tracks/testing/08-pytest-side-by-side).
+    public static readonly string[] ToolPackages = ["pytest", "mypy", "hypothesis"];
 
     static readonly object Gate = new();
     static readonly ConcurrentDictionary<string, (bool Ok, DateTime At)> Probed = new();
@@ -249,6 +250,11 @@ public static partial class PyTest
                 var where = PyWhere().Matches(cerr).LastOrDefault(m => Path.GetFileName(m.Groups["file"].Value) == testFile);
                 var line = where is null ? 0 : int.Parse(where.Groups["line"].Value);
                 var last = cerr.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Length > 0 && !l.StartsWith("=")) ?? cerr;
+                if (cerr.Contains("No module named 'hypothesis'"))
+                {
+                    StartInstall();
+                    last = "Hypothesis is not installed yet. The dojo installs it into its tools environment " + ToolsEnv + " (that needs a network); press Check again in a minute, or run `python -m pip install hypothesis` for the Python the dojo uses.";
+                }
                 return new(false, false, [new Diag("error", "pytest", $"pytest could not collect your tests: {last.TrimStart('E', ' ')}", line, 0, "")], results, output, "", false, sw.ElapsedMilliseconds);
             }
             var ran = good.Cases.Where(c => !c.Skipped).ToList();
