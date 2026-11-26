@@ -1,0 +1,146 @@
+{
+  "title": "Boss: monitoring you can trust",
+  "summary": "Rebuild a health check so its exit code means something, then fix a report that reads only one page and a token that never authenticates.",
+  "minutes": 22,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket MON-77",
+      "body": [
+        "*\"Last week notify was down for 40 minutes and nobody was paged. The morning report says there are 5 urgent tickets",
+        "(the board shows 12). And the capacity dashboard has shown no data since we rotated the API token.\"*",
+        "",
+        "Monitoring only looks at the exit code; people only read the first line. Make both honest."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "A health check with a meaningful exit code",
+      "prompt": [
+        "Run `pwsh -File ~/scripts/Test-ServiceHealth.ps1; \"exit $LASTEXITCODE\"`. Then rewrite it so that, for each service in",
+        "the config file (`-ConfigPath`, default `services.json` next to the script):",
+        "",
+        "- it prints exactly **`<name> ok`**, **`<name> degraded`** (the service answered but not with 200), or **`<name> down`**",
+        "  (no answer, or no answer within **3 seconds**);",
+        "- every service is checked, even after one fails;",
+        "- it exits **0 only if every service is `ok`**, and **1** otherwise."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "notify is down: reported, and exit 1",
+          "cmd": "echo ok > /opt/dojo/state/billing-health; out=$(timeout 25 pwsh -NoProfile -NonInteractive -File ~/scripts/Test-ServiceHealth.ps1 2>/dev/null); rc=$?; echo \"$out\"; test $rc = 1 && test \"$(echo \"$out\" | tr -d '\\r' | sort | tr '\\n' ' ')\" = 'billing ok notify down orders ok search ok '",
+          "fail": "With the default config: `orders ok`, `billing ok`, `search ok`, `notify down` (one line each, any order) and exit code 1." },
+        { "name": "billing degraded: reported, and exit 1",
+          "cmd": "c=$(mktemp); printf '[{\"name\":\"orders\",\"url\":\"http://127.0.0.1:8091/health\"},{\"name\":\"billing\",\"url\":\"http://127.0.0.1:8092/health\"}]' > $c; echo degraded > /opt/dojo/state/billing-health; out=$(timeout 25 pwsh -NoProfile -NonInteractive -File ~/scripts/Test-ServiceHealth.ps1 -ConfigPath $c 2>/dev/null); rc=$?; echo ok > /opt/dojo/state/billing-health; echo \"$out\"; test $rc = 1 && echo \"$out\" | grep -qx 'billing degraded' && echo \"$out\" | grep -qx 'orders ok'",
+          "fail": "When billing answers 503, print `billing degraded`, still check the rest, and exit 1." },
+        { "name": "all healthy: exit 0",
+          "cmd": "c=$(mktemp); printf '[{\"name\":\"orders\",\"url\":\"http://127.0.0.1:8091/health\"},{\"name\":\"search\",\"url\":\"http://127.0.0.1:8093/health\"}]' > $c; out=$(timeout 25 pwsh -NoProfile -NonInteractive -File ~/scripts/Test-ServiceHealth.ps1 -ConfigPath $c 2>&1); rc=$?; echo \"$out\"; test $rc = 0",
+          "fail": "When every service is ok, the exit code must be 0." },
+        { "name": "a hanging service is down within the timeout",
+          "cmd": "c=$(mktemp); printf '[{\"name\":\"reports\",\"url\":\"http://127.0.0.1:8088/slow\"}]' > $c; s=$(date +%s); out=$(timeout 20 pwsh -NoProfile -NonInteractive -File ~/scripts/Test-ServiceHealth.ps1 -ConfigPath $c 2>/dev/null); rc=$?; t=$(( $(date +%s) - s )); echo \"$out (exit $rc after ${t}s)\"; test $rc = 1 && test $t -lt 12 && echo \"$out\" | grep -qx 'reports down'",
+          "fail": "A service that does not answer must count as `down` after about 3 seconds (`-TimeoutSec 3`), not hang the check." }
+      ],
+      "hints": [
+        "Per service: `Invoke-RestMethod -Uri $s.url -TimeoutSec 3 -SkipHttpErrorCheck -StatusCodeVariable code`. With `-SkipHttpErrorCheck` a 503 does not throw; `$code` says what came back.",
+        "A connection refused or a timeout still throws: wrap the call in `try { } catch { $state = 'down' }`.",
+        "Count the failures in the loop, then `if ($bad -gt 0) { exit 1 }; exit 0`."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/Test-ServiceHealth.ps1; \"exit $LASTEXITCODE\"",
+        "@'",
+        "# Test-ServiceHealth.ps1: run every minute by the monitoring agent, which pages on-call when the exit code is not 0.",
+        "[CmdletBinding()]",
+        "param([string] $ConfigPath = \"$PSScriptRoot/services.json\")",
+        "$ErrorActionPreference = 'Stop'",
+        "$services = Get-Content -Raw -LiteralPath $ConfigPath | ConvertFrom-Json",
+        "$bad = 0",
+        "foreach ($s in $services) {",
+        "    try {",
+        "        $null = Invoke-RestMethod -Uri $s.url -TimeoutSec 3 -SkipHttpErrorCheck -StatusCodeVariable code",
+        "        $state = if ($code -eq 200) { 'ok' } else { 'degraded' }",
+        "    }",
+        "    catch {",
+        "        $state = 'down'",
+        "    }",
+        "    if ($state -ne 'ok') { $bad++ }",
+        "    \"$($s.name) $state\"",
+        "}",
+        "if ($bad -gt 0) { exit 1 }",
+        "exit 0",
+        "'@ | Set-Content ~/scripts/Test-ServiceHealth.ps1",
+        "pwsh -File ~/scripts/Test-ServiceHealth.ps1; \"exit $LASTEXITCODE\""
+      ],
+      "explain": [
+        "The old script exited 0 whenever its *last* statement succeeded, threw on the first problem (so the services after",
+        "it were never checked), and had no timeout, so a hung service hung the monitor too. Monitoring agents (Nagios-style",
+        "checks, Task Scheduler, CI health gates) all speak the same language: exit code 0 for healthy, anything else pages."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "5 urgent tickets (there are 12)",
+      "prompt": [
+        "`pwsh -File ~/scripts/urgent-report.ps1` prints `urgent: 5`. The board shows 12. Look at what one call returns",
+        "(`page`, `next`) and fix the script so it counts the urgent tickets across **all** pages."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "urgent: 12",
+          "cmd": "pwsh -NoProfile -NonInteractive -File ~/scripts/urgent-report.ps1 2>&1",
+          "expectOutput": "urgent: 12",
+          "fail": "The script should print `urgent: 12`." }
+      ],
+      "hints": [
+        "One call returns `items`, `page` and `next`: only the first 20 tickets.",
+        "Follow `next` until it is `$null`: `$uri = '...'; $tickets = while ($uri) { $p = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 10; $p.items; $uri = $p.next }`.",
+        "Replace the `$tickets = ...` line with that loop."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/urgent-report.ps1",
+        "$s = Get-Content ~/scripts/urgent-report.ps1 -Raw",
+        "$old = \"`$tickets = (Invoke-RestMethod -Uri 'http://127.0.0.1:8088/api/tickets' -Headers `$headers -TimeoutSec 10).items\"",
+        "$new = \"`$uri = 'http://127.0.0.1:8088/api/tickets'`n`$tickets = while (`$uri) { `$p = Invoke-RestMethod -Uri `$uri -Headers `$headers -TimeoutSec 10; `$p.items; `$uri = `$p.next }\"",
+        "Set-Content ~/scripts/urgent-report.ps1 -Value $s.Replace($old, $new) -NoNewline",
+        "pwsh -File ~/scripts/urgent-report.ps1"
+      ],
+      "explain": "When a count is \"suspiciously round\" or equals the page size, pagination is the first suspect. Many APIs also let you ask the server to filter (`?priority=urgent`), which is faster than downloading everything and filtering on your side."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "The format of value 'Bearer ...' is invalid",
+      "prompt": [
+        "Since the token was rotated, `pwsh -File ~/scripts/ticket-count.ps1` fails before it even reaches the server. Read",
+        "the error carefully (where does the quoted value end?), fix the script, and make it print `tickets: 47`."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "tickets: 47",
+          "cmd": "pwsh -NoProfile -NonInteractive -File ~/scripts/ticket-count.ps1 2>&1",
+          "expectOutput": "tickets: 47",
+          "fail": "The script should print `tickets: 47`." },
+        { "name": "the token stays out of the script",
+          "cmd": "! grep -q 'dojo-tk-' ~/scripts/ticket-count.ps1",
+          "fail": "Do not paste the token into the script: keep reading it from `~/.config/ops/api-token`." }
+      ],
+      "hints": [
+        "The error shows the header value with a line break before the closing quote: the token file ends with a newline, and `Get-Content -Raw` keeps it.",
+        "HTTP header values may not contain line breaks, so .NET refuses to send the request at all.",
+        "`$token = (Get-Content -Raw \"$HOME/.config/ops/api-token\").Trim()`"
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/ticket-count.ps1",
+        "(Get-Content ~/scripts/ticket-count.ps1 -Raw).Replace('$token = Get-Content -Raw \"$HOME/.config/ops/api-token\"', '$token = (Get-Content -Raw \"$HOME/.config/ops/api-token\").Trim()') | Set-Content ~/scripts/ticket-count.ps1 -NoNewline",
+        "pwsh -File ~/scripts/ticket-count.ps1"
+      ],
+      "explain": [
+        "The old token was written without a final newline; the new one, by a different tool, with one. `Get-Content` without",
+        "`-Raw` (one string per line) or `.Trim()` avoids it. The lasting fix is a secret store instead of a file: module 7",
+        "uses `Get-Secret`, which returns exactly the value that was stored."
+      ]
+    }
+  ]
+}

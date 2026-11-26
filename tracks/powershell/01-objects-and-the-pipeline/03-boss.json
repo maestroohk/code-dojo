@@ -1,0 +1,144 @@
+{
+  "title": "Boss: the reports that lied",
+  "summary": "Three scheduled reports run without an error and print the wrong answer. Find out why from what they print, and fix each one.",
+  "minutes": 16,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket OPS-2291",
+      "body": [
+        "*\"The morning disk report says nothing is big, the sales mail ranks Northwind above Contoso, and finance says the",
+        "revenue CSV is full of nonsense. Nothing failed in the scheduler. Please look before Monday.\"*",
+        "",
+        "Three scripts in `~/scripts`, three quiet bugs. Run each one, read what it prints, compare it with the data, fix it.",
+        "None of them throws an error: that is the point. Every check runs your fixed script for real."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Nothing is big?",
+      "prompt": [
+        "`pwsh -File ~/scripts/big-files.ps1` says `0 files over 5 MB`, but `~/data` clearly has bigger files",
+        "(`Get-ChildItem ~/data -Recurse -File | Sort-Object Length -Descending | Select-Object -First 5 Name, Length`).",
+        "",
+        "1. Find and fix the bug, so it reports the 4 files over 5 MB, biggest first.",
+        "2. Make the next bug like this one impossible to miss: add `Set-StrictMode -Version Latest` right **after** the",
+        "   `param(...)` line (a `param` block must stay the first statement of a script)."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "it reports 4 files over 5 MB",
+          "cmd": "pwsh -NoProfile -File ~/scripts/big-files.ps1 | head -n1",
+          "expectOutput": "4 files over 5 MB",
+          "fail": "The first line should be `4 files over 5 MB`." },
+        { "name": "biggest first",
+          "cmd": "pwsh -NoProfile -File ~/scripts/big-files.ps1 | sed -n 2p | grep -q 'db-2026-11-15.bak'",
+          "fail": "The second line should be the biggest file, `db-2026-11-15.bak`." },
+        { "name": "strict mode is on, after param()",
+          "cmd": "awk '/^param\\(/{p=NR} /Set-StrictMode +-Version +Latest/{s=NR} END{exit !(p && s > p)}' ~/scripts/big-files.ps1",
+          "fail": "Add `Set-StrictMode -Version Latest` on a line after `param(...)`." },
+        { "name": "strict mode now catches a misspelt property",
+          "cmd": "sed 's/\\$_\\.Length -gt/$_.Lenght -gt/' ~/scripts/big-files.ps1 > /tmp/typo.ps1; pwsh -NoProfile -File /tmp/typo.ps1 2>&1 | grep -qi 'cannot be found on this object'",
+          "fail": "With strict mode on, a misspelt property such as `$_.Lenght` must raise an error instead of quietly being `$null`." }
+      ],
+      "hints": [
+        "Read the `Where-Object` line letter by letter. What does PowerShell do when you ask an object for a property it does not have?",
+        "`$_.Lenght` does not exist, so it is `$null`, and `$null -gt 5MB` is false for every file. Fix the spelling to `Length`.",
+        "One way to edit: `$t = Get-Content ~/scripts/big-files.ps1 -Raw`, then `$t -replace 'Lenght', 'Length' -replace '(?m)^(param\\(.*\\))$', ('$1' + \"`nSet-StrictMode -Version Latest\")`, and `Set-Content` it back with `-NoNewline`. Or `nano ~/scripts/big-files.ps1`."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/big-files.ps1",
+        "Get-ChildItem ~/data -File -Recurse | Select-Object -First 1 | Get-Member -Name L*",
+        "$text = Get-Content ~/scripts/big-files.ps1 -Raw",
+        "$text = $text -replace 'Lenght', 'Length' -replace '(?m)^(param\\(.*\\))$', ('$1' + \"`nSet-StrictMode -Version Latest\")",
+        "Set-Content ~/scripts/big-files.ps1 -Value $text -NoNewline",
+        "pwsh -File ~/scripts/big-files.ps1"
+      ],
+      "explain": [
+        "By default PowerShell returns `$null` for a property that does not exist, and `$null` compares as false. One typo",
+        "and a report says \"nothing to do\" for months. `Set-StrictMode -Version Latest` turns that (and reading an unset",
+        "variable, and calling a function like a method) into errors. Put it at the top of every script you schedule."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Northwind above Contoso?",
+      "prompt": [
+        "`pwsh -File ~/scripts/top-customers.ps1` is meant to print the three customers with the **most revenue**. Compare its",
+        "output with `Import-Csv ~/data/sales.csv`. Fix the script so it prints, in this order:",
+        "",
+        "```text",
+        "Contoso Pharmacy: 104000",
+        "Wide World Importers: 98000",
+        "Adventure Works: 23500",
+        "```"
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "the top three by revenue, in order",
+          "cmd": "pwsh -NoProfile -File ~/scripts/top-customers.ps1",
+          "expectOutput": ["Contoso Pharmacy: 104000", "Wide World Importers: 98000", "Adventure Works: 23500"],
+          "fail": "The script should print the three biggest customers by revenue, biggest first." }
+      ],
+      "hints": [
+        "What type is `Revenue` after `Import-Csv`? Try `(Import-Csv ~/data/sales.csv)[0].Revenue.GetType().Name`.",
+        "Strings sort character by character, so `'9500'` beats `'104000'`. Sort by a number instead.",
+        "`Sort-Object { [int]$_.Revenue } -Descending`."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/top-customers.ps1",
+        "(Import-Csv ~/data/sales.csv)[0].Revenue.GetType().Name",
+        "(Get-Content ~/scripts/top-customers.ps1 -Raw).Replace('Sort-Object Revenue', 'Sort-Object { [int]$_.Revenue }') | Set-Content ~/scripts/top-customers.ps1 -NoNewline",
+        "pwsh -File ~/scripts/top-customers.ps1"
+      ],
+      "explain": "Anything read from text (CSV, `Get-Content`, environment variables, most query strings) is a string until you convert it. A cleaner fix for a real report converts once, right after reading: `Import-Csv ... | Select-Object Customer, @{ n = 'Revenue'; e = { [decimal]$_.Revenue } }`, so every later step gets numbers."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "A CSV full of nonsense",
+      "prompt": [
+        "Finance opens `~/reports/revenue.csv` from `~/scripts/export-report.ps1` and sees columns like",
+        "`ClassId2e4f51ef21dd47e99d3c952918aff9cd`. Run it and look: `pwsh -File ~/scripts/export-report.ps1; Get-Content ~/reports/revenue.csv`.",
+        "",
+        "Fix the script so the CSV has exactly the columns **`Customer`** and **`Revenue`**, one row per customer."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "revenue.csv has Customer and Revenue for every customer",
+          "cmd": ["rm -f ~/reports/revenue.csv; pwsh -NoProfile -File ~/scripts/export-report.ps1 >/dev/null 2>&1; python3 - <<'EOF'",
+                  "import csv, os, sys",
+                  "p = os.path.expanduser('~/reports/revenue.csv')",
+                  "if not os.path.exists(p): sys.exit('the script did not write ~/reports/revenue.csv')",
+                  "rows = list(csv.DictReader(open(p, encoding='utf-8-sig')))",
+                  "want = [(r['Customer'], r['Revenue']) for r in csv.DictReader(open(os.path.expanduser('~/data/sales.csv')))]",
+                  "cols = list(rows[0].keys()) if rows else []",
+                  "if cols != ['Customer', 'Revenue']: sys.exit(f'columns are {cols[:4]}, expected Customer, Revenue')",
+                  "got = [(r['Customer'], r['Revenue']) for r in rows]",
+                  "if sorted(got) != sorted(want): sys.exit(f'rows {got} do not match the sales data')",
+                  "print('ok')",
+                  "EOF"],
+          "fail": "The CSV should have the header `Customer,Revenue` and one row per customer from `~/data/sales.csv`." }
+      ],
+      "hints": [
+        "Look at what `Format-Table` outputs: `Import-Csv ~/data/sales.csv | Format-Table Customer, Revenue | Get-Member`.",
+        "`Format-Table` emits formatting objects for the screen. `Export-Csv` faithfully wrote *their* properties.",
+        "Replace `Format-Table` with `Select-Object` in the script."
+      ],
+      "solution": [
+        "Import-Csv ~/data/sales.csv | Format-Table Customer, Revenue | Get-Member | Select-Object -First 3",
+        "(Get-Content ~/scripts/export-report.ps1) -replace 'Format-Table', 'Select-Object' | Set-Content ~/scripts/export-report.ps1",
+        "pwsh -File ~/scripts/export-report.ps1",
+        "Get-Content ~/reports/revenue.csv"
+      ],
+      "explain": [
+        "The rule from the toolkit, learned the expensive way: `Format-*` only at the very end, for eyes. `Select-Object` picks",
+        "properties and keeps real objects that any next command (`Export-Csv`, `ConvertTo-Json`, `Where-Object`) understands.",
+        "The scheduler showed success because nothing failed: always look at a script's *output* once, not only its exit code."
+      ]
+    }
+  ]
+}

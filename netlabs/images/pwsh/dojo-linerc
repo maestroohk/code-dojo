@@ -1,0 +1,96 @@
+# code-dojo: stand-ins for full-screen programs in the dojo's line-based in-page terminal.
+# POSIX sh (bash, dash, BusyBox ash), so every lab host can use it:
+#   - terminal steps: the dojo-shell image's dojo-bashrc sources it (DOJO_LINE_TERM=1);
+#   - live labs: server/NetLabs.cs sends this file with every terminal it opens (bash --rcfile, or ENV= for sh).
+# With DOJO_EDITOR=page, nano / vim / vi / sudoedit open the page's file editor: the stand-in prints
+#   ESC ] dojo;edit;<absolute path> BEL      (sudoedit: dojo;sudoedit;... = save as root)
+# which ui/termmarks.js picks out of the output. Without it they explain what to do instead.
+
+export PAGER=cat GIT_PAGER=cat MANPAGER=cat SYSTEMD_PAGER= SYSTEMD_LESS= MANWIDTH=100
+unalias vi vim nano less more top htop man crontab sudo sudoedit 2>/dev/null
+
+_dojo_fullscreen() {
+  echo "dojo: '$1' needs a full-screen terminal, and this one is line based." >&2
+  echo "      $2" >&2
+  return 1
+}
+
+# _dojo_edit PROGRAM [options] FILE...: open FILE in the page's editor (the first one; options are ignored).
+_dojo_edit() {
+  _dojo_p=$1; shift
+  _dojo_kind=edit
+  [ "$_dojo_p" = sudoedit ] && _dojo_kind=sudoedit
+  _dojo_f=
+  for _dojo_a in "$@"; do
+    case $_dojo_a in -*|+*) ;; *) _dojo_f=$_dojo_a; break ;; esac
+  done
+  if [ "${DOJO_EDITOR:-}" != page ]; then
+    case $_dojo_p in
+      nano) _dojo_fullscreen nano "Edit with sed -i, or write the file with: cat > file <<'EOF' ... EOF" ;;
+      *) _dojo_fullscreen "$_dojo_p" "Run Vim's commands without the screen: vim -es -c '%s/old/new/g' -c x file (or use sed -i)." ;;
+    esac
+    return 1
+  fi
+  if [ -z "$_dojo_f" ]; then
+    echo "dojo: name the file to edit: $_dojo_p /path/to/file (it opens in an editor on the page)." >&2
+    return 1
+  fi
+  case $_dojo_f in /*) ;; *) _dojo_f="${PWD%/}/$_dojo_f" ;; esac
+  if [ -d "$_dojo_f" ]; then echo "dojo: $_dojo_f is a folder, not a file." >&2; return 1; fi
+  printf '\033]dojo;%s;%s\007' "$_dojo_kind" "$_dojo_f"
+  echo "dojo: $_dojo_p opened $_dojo_f in the editor on the page (this terminal is line based). Save there (Ctrl+S), then carry on here."
+}
+
+# Vim's Ex mode (-e / -es) and --version need no screen, so they run for real: vim -es -c '%s/a/b/g' -c x file
+vim() {
+  for _dojo_a in "$@"; do
+    case $_dojo_a in -e|-E|-es|-Es|-se|-sE|--version|-h|--help) command vim "$@"; return ;; esac
+  done
+  _dojo_edit vim "$@"
+}
+vi() { _dojo_edit vi "$@"; }
+nano() { _dojo_edit nano "$@"; }
+sudoedit() { _dojo_edit sudoedit "$@"; }
+tmux() { _dojo_fullscreen tmux "Run long jobs in the background with &, and check them with jobs."; }
+screen() { _dojo_fullscreen screen "Run long jobs in the background with &, and check them with jobs."; }
+top() { command top -b -n 1 "$@" | head -n 30; }
+htop() { top; }
+# less / more: print the files (or the input) as they are; options are ignored.
+less() {
+  _dojo_n=0
+  for _dojo_a in "$@"; do case $_dojo_a in -*|+*) ;; *) _dojo_n=1 ;; esac; done
+  if [ "$_dojo_n" = 0 ]; then cat; return; fi
+  _dojo_rc=0
+  for _dojo_a in "$@"; do case $_dojo_a in -*|+*) ;; *) cat -- "$_dojo_a" || _dojo_rc=1 ;; esac; done
+  return $_dojo_rc
+}
+more() { less "$@"; }
+crontab() {
+  for _dojo_a in "$@"; do
+    case $_dojo_a in
+      -e)
+        echo "dojo: 'crontab -e' opens a full-screen editor, and this terminal is line based. Change the crontab with a pipe:" >&2
+        echo "      crontab -l                                                   # what is installed now" >&2
+        echo "      ( crontab -l 2>/dev/null; echo '*/5 * * * * /usr/local/bin/job.sh' ) | crontab -   # add a line" >&2
+        echo "      crontab -l | grep -v 'job.sh' | crontab -                    # remove a line" >&2
+        echo "  or edit a copy:  crontab -l > /tmp/my.cron; nano /tmp/my.cron; crontab /tmp/my.cron" >&2
+        return 1 ;;
+    esac
+  done
+  command crontab "$@"
+}
+# sudo in front of an editor or pager: the same stand-ins (sudo itself would start the real, full-screen program).
+sudo() {
+  case ${1:-} in
+    vi|vim)
+      for _dojo_a in "$@"; do
+        case $_dojo_a in -e|-E|-es|-Es|-se|-sE|--version|-h|--help) command sudo "$@"; return ;; esac
+      done
+      shift; _dojo_edit sudoedit "$@" ;;
+    nano) shift; _dojo_edit sudoedit "$@" ;;
+    less|more) shift; command sudo sh -c 'for f; do case $f in -*|+*) ;; *) cat -- "$f" ;; esac; done' sh "$@" ;;
+    top|htop) command sudo top -b -n 1 | head -n 30 ;;
+    crontab) shift; for _dojo_a in "$@"; do [ "$_dojo_a" = -e ] && { crontab -e; return 1; }; done; command sudo crontab "$@" ;;
+    *) command sudo "$@" ;;
+  esac
+}

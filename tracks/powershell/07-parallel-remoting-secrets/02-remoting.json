@@ -1,0 +1,168 @@
+{
+  "title": "Remoting: run it on the servers",
+  "summary": "Invoke-Command over SSH and WinRM, fan-out to many hosts, sessions, $using:, and why remote results are deserialized snapshots without methods.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Invoke-Command: one command, many machines",
+      "body": [
+        "PowerShell remoting runs a script block **on** other machines and brings the **results** back as objects:",
+        "",
+        "```powershell",
+        "# Windows, in a domain: WinRM (ports 5985/5986), Kerberos, -ComputerName",
+        "Invoke-Command -ComputerName web01, web02 -ScriptBlock { Get-Service W3SVC }",
+        "",
+        "# Anywhere (Linux, macOS, Windows with OpenSSH Server): SSH, keys, -HostName",
+        "Invoke-Command -HostName web01, web02 -UserName deploy -ScriptBlock { Get-ChildItem /srv/logs/app -File }",
+        "```",
+        "",
+        "| | WinRM (`-ComputerName`) | SSH (`-HostName`) |",
+        "|---|---|---|",
+        "| Set up on the target | `Enable-PSRemoting` (admin), usually by Group Policy | sshd with `Subsystem powershell /usr/bin/pwsh -sshs` |",
+        "| Authentication | Kerberos in a domain, `-Credential` | SSH keys (`-KeyFilePath`) or a password |",
+        "| Works with | Windows PowerShell 5.1 and 7 on Windows | PowerShell 7 on every OS |",
+        "",
+        "- It runs on all hosts **at once** (`-ThrottleLimit`, default 32), and every result carries a **`PSComputerName`**",
+        "  property, so `Group-Object PSComputerName` or `Sort-Object PSComputerName` just works.",
+        "- **`Enter-PSSession web01`** gives an interactive remote prompt; `New-PSSession` keeps a connection open for",
+        "  several `Invoke-Command -Session $s` calls (much faster than reconnecting each time).",
+        "- Local variables are not visible remotely: pass them with **`$using:days`** (or `-ArgumentList`).",
+        "",
+        "This machine runs sshd with the PowerShell subsystem; the names `web01` and `web02` both point at it, so the",
+        "remoting is real, and both \"servers\" show the same files."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`$days = 30; Invoke-Command -HostName web01 { Get-ChildItem /srv/logs | Where-Object LastWriteTime -lt (Get-Date).AddDays(-$days) }` returns **every** file, even today's. Why?",
+      "options": [
+        "`$days` does not exist on web01, so it is `$null`, `AddDays(-$null)` is now, and every file is older than now: use `$using:days`",
+        "Remote clocks are in UTC",
+        "Where-Object does not work in remote sessions",
+        "`-HostName` ignores the script block's filter"
+      ],
+      "answer": 0,
+      "explain": "The script block runs in a new session on the remote machine with none of your variables. With `Set-StrictMode -Version Latest` inside the block it would have failed loudly instead. Imagine that line feeding `Remove-Item`."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Log usage across the web servers",
+      "prompt": [
+        "Using **remoting over SSH** (`Invoke-Command -HostName ... -UserName learner`, your key is already set up), collect",
+        "from **web01** and **web02** how many files `/srv/logs/app` holds and their total size, in one `Invoke-Command`.",
+        "",
+        "Export `~/answers/log-usage.csv` with the columns **`Server`**, **`Files`**, **`Bytes`**, one row per server, sorted",
+        "by `Server`."
+      ],
+      "setup": ["ssh.sh"],
+      "checks": [
+        { "name": "one row per server with files and bytes",
+          "cmd": ["python3 - <<'EOF'",
+                  "import csv, os, sys",
+                  "p = os.path.expanduser('~/answers/log-usage.csv')",
+                  "if not os.path.exists(p): sys.exit('~/answers/log-usage.csv does not exist yet')",
+                  "rows = list(csv.DictReader(open(p, encoding='utf-8-sig')))",
+                  "cols = list(rows[0].keys()) if rows else []",
+                  "if cols != ['Server', 'Files', 'Bytes']: sys.exit(f'columns are {cols}, expected Server, Files, Bytes')",
+                  "files = [os.path.join('/srv/logs/app', f) for f in os.listdir('/srv/logs/app')]",
+                  "want = [(s, str(len(files)), str(sum(os.path.getsize(f) for f in files))) for s in ('web01', 'web02')]",
+                  "got = [(r['Server'], r['Files'], r['Bytes'].split('.')[0]) for r in rows]",
+                  "if got != want: sys.exit(f'got {got}, expected {want}')",
+                  "print('ok', got)",
+                  "EOF"],
+          "fail": "Not quite (see what the check found)." },
+        { "name": "the data came over SSH remoting",
+          "cmd": "grep -q 'Accepted publickey for learner' /var/log/sshd.log",
+          "fail": "Use `Invoke-Command -HostName web01, web02 -UserName learner`." }
+      ],
+      "hints": [
+        "Try one first: `Invoke-Command -HostName web01 -UserName learner -ScriptBlock { Get-ChildItem /srv/logs/app -File }`.",
+        "Measure on the server, bring back only the numbers: `-ScriptBlock { Get-ChildItem /srv/logs/app -File | Measure-Object Length -Sum }` returns `Count` and `Sum`, plus `PSComputerName`.",
+        "`... | Sort-Object PSComputerName | Select-Object @{ n = 'Server'; e = { $_.PSComputerName } }, @{ n = 'Files'; e = { $_.Count } }, @{ n = 'Bytes'; e = { $_.Sum } } | Export-Csv ~/answers/log-usage.csv`"
+      ],
+      "solution": [
+        "Invoke-Command -HostName web01 -UserName learner -ScriptBlock { hostname; $PSVersionTable.PSVersion.ToString() }",
+        "$usage = Invoke-Command -HostName web01, web02 -UserName learner -ScriptBlock { Get-ChildItem /srv/logs/app -File | Measure-Object -Property Length -Sum }",
+        "$usage | Sort-Object PSComputerName | Select-Object @{ n = 'Server'; e = { $_.PSComputerName } }, @{ n = 'Files'; e = { $_.Count } }, @{ n = 'Bytes'; e = { $_.Sum } } | Export-Csv -Path ~/answers/log-usage.csv",
+        "Import-Csv ~/answers/log-usage.csv"
+      ],
+      "explain": [
+        "Do the filtering and measuring **remotely** and bring back small results: a `Measure-Object` row crosses the",
+        "network in bytes, while a list of 100,000 `FileInfo` objects is serialised one by one. Same idea as \"filter left\"",
+        "in module 1."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Remote results are snapshots",
+      "body": [
+        "Objects that come back from another machine are **serialised** to XML and rebuilt locally as",
+        "`Deserialized.System.IO.FileInfo` and friends: they have the **properties** (values at the time) but **no methods**",
+        "and no live connection to the remote object.",
+        "",
+        "```powershell",
+        "$files = Invoke-Command -HostName web01 { Get-ChildItem /srv/logs/app -File }",
+        "$files[0].Delete()",
+        "# Method invocation failed because [Deserialized.System.IO.FileInfo] does not contain a method named 'Delete'.",
+        "```",
+        "",
+        "So **act remotely**: put the `Remove-Item`, `Restart-Service` or `Stop-Process` *inside* the script block. And",
+        "`-WhatIf` goes in there too, so a dry run on 50 servers is one line:",
+        "",
+        "```powershell",
+        "Invoke-Command -HostName $servers -UserName deploy -ScriptBlock {",
+        "    Get-ChildItem /srv/logs/app -File | Where-Object LastWriteTime -lt (Get-Date).AddDays(-$using:days) |",
+        "        Remove-Item -WhatIf:$using:dryRun",
+        "}",
+        "```",
+        "",
+        "One Windows-only trap to know by name: the **Kerberos double hop**. From a WinRM session on server A you cannot",
+        "reach a file share on server B with your credentials (A is not allowed to pass them on). Use resource-based",
+        "constrained delegation, or connect to B directly."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Clean old logs on both servers, remotely",
+      "prompt": [
+        "On **web01 and web02**, delete the files in `/srv/logs/app` last changed more than **`$days` = 30** days ago, with",
+        "one `Invoke-Command` over SSH. Set `$days = 30` in your session and pass it with `$using:`. Do a `-WhatIf` run first",
+        "and read what it would delete. (Both names are this machine, so the second server finds the files already gone.)"
+      ],
+      "setup": ["ssh.sh"],
+      "checks": [
+        { "name": "only the recent logs are left",
+          "cmd": "ls /srv/logs/app | tr '\\n' ' '",
+          "expectOutput": "api-1.log api-2.log worker.log",
+          "fail": "`/srv/logs/app` should keep `api-1.log`, `api-2.log` and `worker.log` (3, 12 and 1 days old) and lose the three older than 30 days." }
+      ],
+      "hints": [
+        "`$days = 30`, then `Invoke-Command -HostName web01, web02 -UserName learner -ScriptBlock { Get-ChildItem /srv/logs/app -File | Where-Object LastWriteTime -lt (Get-Date).AddDays(-$using:days) }` lists them.",
+        "Add `| Remove-Item -WhatIf` inside the script block for the dry run.",
+        "Then the same without `-WhatIf`."
+      ],
+      "solution": [
+        "$days = 30",
+        "Invoke-Command -HostName web01, web02 -UserName learner -ScriptBlock { Get-ChildItem /srv/logs/app -File | Where-Object LastWriteTime -lt (Get-Date).AddDays(-$using:days) | Remove-Item -WhatIf }",
+        "Invoke-Command -HostName web01, web02 -UserName learner -ScriptBlock { Get-ChildItem /srv/logs/app -File | Where-Object LastWriteTime -lt (Get-Date).AddDays(-$using:days) | Remove-Item }",
+        "Invoke-Command -HostName web01 -UserName learner -ScriptBlock { Get-ChildItem /srv/logs/app }"
+      ],
+      "explain": "The `-WhatIf` output comes back from each server, so you review the plan for the whole fleet in one place. On Windows, Just Enough Administration (JEA) endpoints go a step further: a remoting endpoint that only allows a few named commands, run as a privileged virtual account, so operators can clean logs without being admins."
+    },
+    {
+      "type": "match",
+      "prompt": "Which tool for the job?",
+      "pairs": [
+        ["Run a command on 40 Windows servers in a domain", "`Invoke-Command -ComputerName`"],
+        ["Run a command on Linux hosts with SSH keys", "`Invoke-Command -HostName -UserName`"],
+        ["An interactive prompt on one server", "`Enter-PSSession`"],
+        ["Many calls to the same servers, fast", "`New-PSSession` + `-Session`"],
+        ["Pass a local value into the script block", "`$using:name`"]
+      ]
+    }
+  ]
+}

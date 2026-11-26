@@ -1,0 +1,137 @@
+{
+  "title": "Boss: text that is not what it seems",
+  "summary": "Reports that grep calls binary, a search that finds nothing, and a bulk rename that would have destroyed every photo name. Diagnose each from its symptom and fix it.",
+  "minutes": 18,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket OPS-2310",
+      "body": [
+        "*\"Three things from this week: (1) the Linux alerting job says the ops reports have no ERROR lines, but I can see",
+        "them; (2) the price-error counter says 0 and support says there were dozens; (3) before I run the photo rename on the",
+        "marketing share, can someone check it? The dry run looks odd.\"*",
+        "",
+        "All three are about text: how it is stored, how it is quoted, how a pattern is read. Start from what you can see."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "grep: binary file matches",
+      "prompt": [
+        "The alerting job runs `grep -c ERROR ~/reports/*.txt`. Run it (yes, `grep` works here: it is a native program).",
+        "Then compare with `Select-String -Path ~/reports/*.txt -Pattern ERROR`, and look at the first bytes:",
+        "`Format-Hex ~/reports/daily.txt | Select-Object -First 1`.",
+        "",
+        "Convert **every** `.txt` file in `~/reports` **in place** to UTF-8 without a BOM, so `grep -c ERROR` counts 2 in",
+        "`weekly.txt` and 1 in `daily.txt`."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "grep counts the errors",
+          "cmd": "cd ~/reports && grep -c ERROR daily.txt weekly.txt",
+          "expectOutput": ["daily.txt:1", "weekly.txt:2"],
+          "fail": "`grep -c ERROR` should find 1 line in `daily.txt` and 2 in `weekly.txt`." },
+        { "name": "plain UTF-8, no BOM, text intact",
+          "cmd": "for f in ~/reports/*.txt; do head -c2 \"$f\" | od -An -tx1 | grep -Eq 'ff fe|ef bb' && echo \"$f still has a BOM\"; done; tr -d '\\r' < ~/reports/weekly.txt | sed -n 4p",
+          "expectOutput": "ERROR disk 91% on fs02",
+          "fail": "The files should start with the text itself (no `FF FE` or `EF BB BF` bytes), and `weekly.txt` line 4 should read `ERROR disk 91% on fs02`." }
+      ],
+      "hints": [
+        "`FF FE` at the start means UTF-16 LE: every character takes two bytes, half of them zero, so grep sees a binary file. Windows PowerShell 5.1's `>` writes exactly this.",
+        "PowerShell 7's `Get-Content` reads the BOM and decodes UTF-16 correctly; its `Set-Content` writes UTF-8 without a BOM.",
+        "Read the whole file before writing it: `Get-ChildItem ~/reports -Filter *.txt | ForEach-Object { $text = Get-Content -LiteralPath $_.FullName; Set-Content -LiteralPath $_.FullName -Value $text }`"
+      ],
+      "solution": [
+        "grep -c ERROR ~/reports/*.txt",
+        "Format-Hex ~/reports/daily.txt | Select-Object -First 1",
+        "Get-ChildItem ~/reports -Filter *.txt | ForEach-Object { $text = Get-Content -LiteralPath $_.FullName; Set-Content -LiteralPath $_.FullName -Value $text }",
+        "grep -c ERROR ~/reports/*.txt"
+      ],
+      "explain": [
+        "`Get-Content x | Set-Content x` in one pipeline can wipe the file: `Set-Content` opens it for writing while lines are",
+        "still being read. Read into a variable (or wrap in parentheses: `(Get-Content x) | Set-Content x`) first. The",
+        "lasting fix is upstream: make the 5.1 job write `-Encoding utf8`, or run it in `pwsh`."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Zero price errors?",
+      "prompt": [
+        "`pwsh -File ~/scripts/count-price-errors.ps1` says `total 0`. Support counted many rejections with the message",
+        "`price: $5.00 (USD) not allowed` in `~/logs/*.log` (check: `grep -F 'price: $5.00 (USD)' ~/logs/*.log | head -3`).",
+        "",
+        "Fix the script so it prints one `<file> <count>` line per log and the right `total N`."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "the right total",
+          "cmd": "pwsh -NoProfile -File ~/scripts/count-price-errors.ps1 | tail -n1 | tr -d '\\r'",
+          "expectMatch": "^total [1-9][0-9]*$",
+          "fail": "The last line should be `total N` with the real count." },
+        { "name": "per-file counts match grep",
+          "cmd": "diff <(pwsh -NoProfile -File ~/scripts/count-price-errors.ps1 | tr -d '\\r' | sort) <( (cd ~/logs && grep -F -c 'price: $5.00 (USD)' *.log | tr ':' ' '; echo \"total $(cat ~/logs/*.log | grep -F -c 'price: $5.00 (USD)')\") | sort)",
+          "fail": "The script's counts should match `grep -F -c 'price: $5.00 (USD)'` per file, plus the total." }
+      ],
+      "hints": [
+        "Two separate things go wrong with `\"price: $5.00 (USD)\"`. Print the string on its own first: `\"price: $5.00 (USD)\"`.",
+        "In double quotes `$5` is a variable (empty), so the pattern became `price: .00 (USD)`. And even with single quotes, `-Pattern` is a regex: `$`, `.`, `(` and `)` mean something there.",
+        "Use `-Pattern 'price: $5.00 (USD)' -SimpleMatch` in both places."
+      ],
+      "solution": [
+        "\"price: $5.00 (USD)\"",
+        "(Get-Content ~/scripts/count-price-errors.ps1 -Raw).Replace('-Pattern \"price: $5.00 (USD)\"', \"-Pattern 'price: `$5.00 (USD)' -SimpleMatch\") | Set-Content ~/scripts/count-price-errors.ps1 -NoNewline",
+        "Get-Content ~/scripts/count-price-errors.ps1",
+        "pwsh -File ~/scripts/count-price-errors.ps1"
+      ],
+      "explain": "Rule of thumb: single quotes for anything that is not meant to expand, and `-SimpleMatch` (or `[regex]::Escape($text)`) when searching for text a user or a log gave you. `Set-StrictMode -Version Latest` at the top would have caught the first half: reading the never-set variable `$5` becomes an error instead of an empty string."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "The rename dry run looks odd",
+      "prompt": [
+        "Run `pwsh -File ~/scripts/rename-photos.ps1`. It has `-WhatIf`, so nothing changes yet. Read the new names it",
+        "would use.",
+        "",
+        "Fix the script, check the dry run again, then make it do the rename for real: every `IMG_YYYYMMDD_HHMMSS.jpg` in",
+        "`~/photos` becomes `YYYY-MM-DD_HHMMSS.jpg`. `cover.png` must stay as it is."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "the photos are renamed",
+          "cmd": "ls ~/photos | tr '\\n' ' '",
+          "expectOutput": "2026-11-03_141210.jpg 2026-11-03_141502.jpg 2026-11-04_090000.jpg 2026-11-12_183344.jpg cover.png",
+          "fail": "`~/photos` should hold `2026-11-03_141210.jpg`, `2026-11-03_141502.jpg`, `2026-11-04_090000.jpg`, `2026-11-12_183344.jpg` and `cover.png`." },
+        { "name": "contents untouched",
+          "cmd": "grep -q 20261103_141210 ~/photos/2026-11-03_141210.jpg && grep -q 20261112_183344 ~/photos/2026-11-12_183344.jpg",
+          "fail": "Each file should keep its own contents: rename, do not copy or recreate." },
+        { "name": "the script uses a literal replacement",
+          "cmd": "grep -q \"'\\$1-\\$2-\\$3_\\$4'\" ~/scripts/rename-photos.ps1",
+          "fail": "The replacement in the script should be `'$1-$2-$3_$4'` in single quotes, so the next run is right too." }
+      ],
+      "hints": [
+        "The dry run shows the target as `--.jpg`... In double quotes, what are `$1`, `$2` and `$3_` to PowerShell?",
+        "They are variables, expanded (to nothing) before `-replace` runs. Single quotes pass `$1` through to the regex engine.",
+        "Change `\"$1-$2-$3_$4\"` to `'$1-$2-$3_$4'`, run the dry run, then remove ` -WhatIf` and run it again."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/rename-photos.ps1",
+        "$s = (Get-Content ~/scripts/rename-photos.ps1 -Raw).Replace('\"$1-$2-$3_$4\"', \"'`$1-`$2-`$3_`$4'\")",
+        "Set-Content ~/scripts/rename-photos.ps1 -Value $s -NoNewline",
+        "pwsh -File ~/scripts/rename-photos.ps1",
+        "Set-Content ~/scripts/rename-photos.ps1 -Value $s.Replace(' -WhatIf', '') -NoNewline",
+        "pwsh -File ~/scripts/rename-photos.ps1",
+        "Get-ChildItem ~/photos"
+      ],
+      "explain": [
+        "Without the dry run, all four photos would have been renamed to the same `--.jpg`: the first rename wins and the",
+        "other three fail with *Cannot create a file when that file already exists*, or worse, on a tool that overwrites.",
+        "`-WhatIf` on `Rename-Item` costs nothing and is the single best habit for bulk changes. In module 4 you give your",
+        "own functions a `-WhatIf`."
+      ]
+    }
+  ]
+}

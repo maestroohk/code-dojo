@@ -1,0 +1,184 @@
+{
+  "title": "JSON and CSV without surprises",
+  "summary": "Edit a nested JSON config without flattening it, read the semicolon CSVs Excel writes in half of Europe, and turn text columns into real numbers.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "JSON in and out",
+      "body": [
+        "```powershell",
+        "$cfg = Get-Content ./appsettings.json -Raw | ConvertFrom-Json     # -Raw: the file as one string",
+        "$cfg.Logging.LogLevel.Default                                    # navigate with dots",
+        "$cfg.Logging.LogLevel.Default = 'Warning'                         # change a value",
+        "$cfg | ConvertTo-Json -Depth 10 | Set-Content ./appsettings.json  # write it back",
+        "```",
+        "",
+        "`ConvertFrom-Json` turns JSON objects into `PSCustomObject`s and arrays into arrays. With `-AsHashtable` you get",
+        "(ordered) hashtables instead, which also allows keys that differ only by case or are empty.",
+        "",
+        "**The trap: `ConvertTo-Json` stops at depth 2 by default.** Anything deeper is replaced by the text of the object,",
+        "such as `\"@{Enabled=False; Rollout=}\"` or `\"System.Collections.Hashtable\"`. PowerShell 7 prints a warning",
+        "(*Resulting JSON is truncated as serialization has exceeded the set depth of 2*); **Windows PowerShell 5.1 truncates",
+        "silently.** Always pass `-Depth` (up to 100) when writing anything nested.",
+        "",
+        "Other switches you will use: `-Compress` (one line, for APIs and logs), `-AsArray` (PowerShell 7: an array even",
+        "for one object), and `Test-Json` to check text against a JSON schema before you send it."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A deploy script reads `appsettings.json`, changes one value and writes it back. Afterwards the app fails to start, and the file contains `\"NewFlow\": \"@{Enabled=False; Rollout=}\"`. What went wrong?",
+      "options": [
+        "`ConvertTo-Json` ran with its default depth of 2, so deeper objects were written as their text",
+        "`ConvertFrom-Json` cannot read nested objects",
+        "The file was saved with the wrong encoding",
+        "`Set-Content` must be called with `-Raw`"
+      ],
+      "answer": 0,
+      "explain": "`@{Enabled=False; Rollout=}` is how a PSCustomObject looks as a string: proof that it was turned into text instead of JSON. `ConvertTo-Json -Depth 10` (or more) keeps the structure."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Flip a feature flag in appsettings.json",
+      "prompt": [
+        "Release day. In `~/app/appsettings.json`, change exactly these values and nothing else:",
+        "",
+        "1. `Logging.LogLevel.Default` to `\"Warning\"`;",
+        "2. `Features.Checkout.NewFlow.Enabled` to `true` (a JSON boolean);",
+        "3. `Features.Checkout.NewFlow.Rollout.Percent` to `50` (a number).",
+        "",
+        "Every other setting, including the `Regions` list deep inside, must survive. `jq . ~/app/appsettings.json` shows",
+        "the file if you want a second opinion."
+      ],
+      "setup": ["data.sh"],
+      "checks": [
+        { "name": "the log level is Warning",
+          "cmd": "jq -e '.Logging.LogLevel.Default == \"Warning\" and .Logging.LogLevel[\"Microsoft.AspNetCore\"] == \"Warning\"' ~/app/appsettings.json",
+          "fail": "`Logging.LogLevel.Default` should be `\"Warning\"`, and `Microsoft.AspNetCore` should still be there." },
+        { "name": "the new flow is on at 50%",
+          "cmd": "jq -e '.Features.Checkout.NewFlow.Enabled == true and .Features.Checkout.NewFlow.Rollout.Percent == 50' ~/app/appsettings.json",
+          "fail": "`Features.Checkout.NewFlow.Enabled` should be `true` and `Rollout.Percent` `50`, as JSON values (not strings)." },
+        { "name": "nothing deep was flattened",
+          "cmd": "jq -e '.Features.Checkout.NewFlow.Rollout.Regions == [\"eu-west\", \"us-east\"] and (.ConnectionStrings.Orders | startswith(\"Server=db.example.com\")) and .AllowedHosts == \"*\"' ~/app/appsettings.json",
+          "fail": "Some nested settings were lost or turned into text. Look at the file: `\"@{...}\"` means the JSON was written without enough `-Depth`." }
+      ],
+      "hints": [
+        "`$cfg = Get-Content ~/app/appsettings.json -Raw | ConvertFrom-Json`, then `$cfg.Features.Checkout.NewFlow` to look around.",
+        "Assign with `=`: `$cfg.Features.Checkout.NewFlow.Enabled = $true` and `$cfg.Features.Checkout.NewFlow.Rollout.Percent = 50`.",
+        "Write it back with `$cfg | ConvertTo-Json -Depth 10 | Set-Content ~/app/appsettings.json`."
+      ],
+      "solution": [
+        "$cfg = Get-Content ~/app/appsettings.json -Raw | ConvertFrom-Json",
+        "$cfg.Features.Checkout.NewFlow",
+        "$cfg.Logging.LogLevel.Default = 'Warning'",
+        "$cfg.Features.Checkout.NewFlow.Enabled = $true",
+        "$cfg.Features.Checkout.NewFlow.Rollout.Percent = 50",
+        "$cfg | ConvertTo-Json -Depth 10 | Set-Content ~/app/appsettings.json",
+        "jq . ~/app/appsettings.json"
+      ],
+      "explain": "Production habit: after writing a config, read it back and validate it before restarting anything: `Get-Content ./appsettings.json -Raw | Test-Json` returns `$true` for valid JSON. And keep the original: `Copy-Item appsettings.json appsettings.json.bak` first costs nothing."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "lang": "powershell",
+      "code": ["[pscustomobject]@{ Name = 'web'; Port = 8080; Tls = $true } | ConvertTo-Json -Compress"],
+      "answer": "{\"Name\":\"web\",\"Port\":8080,\"Tls\":true}",
+      "verify": false,
+      "explain": "`[pscustomobject]@{...}` keeps the keys in the order written (a plain `@{}` hashtable does not). Numbers and booleans become JSON numbers and booleans; `-Compress` drops the whitespace."
+    },
+    {
+      "type": "learn",
+      "title": "CSV: delimiters, culture and types",
+      "body": [
+        "Excel writes CSV with the **list separator of the machine's region**: a comma in the US and UK, a **semicolon** in",
+        "Germany, France, the Netherlands and much of Europe, where the comma is the decimal separator (`4,50`).",
+        "",
+        "```powershell",
+        "Import-Csv ./stock.csv -Delimiter ';'           # say which separator the file uses",
+        "Import-Csv ./stock.csv -UseCulture              # or: the current culture's list separator",
+        "Export-Csv ./out.csv -Delimiter ';'             # write one Excel in that region opens correctly",
+        "```",
+        "",
+        "Every field comes back as a **string**. Convert once, right after reading, with a calculated property:",
+        "",
+        "```powershell",
+        "$de = [cultureinfo]'de-DE'",
+        "Import-Csv ./stock.csv -Delimiter ';' | Select-Object Sku, Name,",
+        "    @{ n = 'Qty'; e = { [int]$_.Qty } },",
+        "    @{ n = 'Price'; e = { [decimal]::Parse($_.Price, $de) } }      # '4,50' -> 4.50",
+        "```",
+        "",
+        "Two cousins for other text formats: **`ConvertFrom-StringData`** turns `key=value` lines into a hashtable, and",
+        "**`Import-PowerShellDataFile`** safely reads a `.psd1` file (a PowerShell hashtable, the usual format for module",
+        "manifests and script settings) without running any code in it."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Read a German Excel export and keep only items that are low on stock.",
+      "code": ["Import-Csv ./stock.csv __1__ ';' |", "    Where-Object { __2__$_.Qty -lt 10 }"],
+      "blanks": [["-Delimiter"], ["[int]"]],
+      "bank": ["-Separator", "-Header", "[string]", "-Encoding"],
+      "explain": "Values from `Import-Csv` are strings, and PowerShell converts the right-hand side to the type of the **left-hand** side. So `'9' -lt 10` becomes the text comparison `'9' -lt '10'`, which is `$false`: the item with 9 left would be missed. Cast the left side and it is a number comparison."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "From Excel's CSV to a JSON feed",
+      "prompt": [
+        "The web shop needs today's stock as JSON. `~/data/stock.csv` came from Excel on a German machine (look at it with",
+        "`Get-Content ~/data/stock.csv`).",
+        "",
+        "Write `~/answers/stock.json`: a JSON **array** with one object per row and the properties `Sku`, `Name`, `Qty` and",
+        "`Price`, where **`Qty` is a JSON integer** and **`Price` a JSON number** (`\"4,50\"` becomes `4.5`). Names such as",
+        "`Milchkännchen` must come through intact."
+      ],
+      "setup": ["data.sh"],
+      "checks": [
+        { "name": "an array of five items",
+          "cmd": "jq -e 'type == \"array\" and length == 5' ~/answers/stock.json",
+          "fail": "`~/answers/stock.json` should be a JSON array with five objects." },
+        { "name": "Qty and Price are numbers with the right values",
+          "cmd": "jq -c '[.[] | [.Sku, .Qty, (if (.Price | type) == \"number\" then (.Price * 100 | round) else .Price end)]]' ~/answers/stock.json",
+          "expectOutput": "[[\"SKU-1001\",120,450],[\"SKU-1002\",8,2490],[\"SKU-1003\",0,120],[\"SKU-1004\",35,999],[\"SKU-1005\",3,725]]",
+          "fail": "Each item should have `Qty` as an integer and `Price` as a number (`4.5`, not `\"4,50\"`), in the file's order. (The check shows each price in cents.)" },
+        { "name": "names are intact",
+          "cmd": "jq -r '.[3].Name' ~/answers/stock.json",
+          "expectOutput": "Milchkännchen",
+          "fail": "The fourth item's `Name` should be `Milchkännchen`." }
+      ],
+      "hints": [
+        "`Import-Csv ~/data/stock.csv -Delimiter ';'` reads it. Every field is a string.",
+        "`[decimal]::Parse('4,50', [cultureinfo]'de-DE')` gives `4.50`. (Or `[decimal]($_.Price -replace ',', '.')`.)",
+        "`Import-Csv ~/data/stock.csv -Delimiter ';' | Select-Object Sku, Name, @{ n = 'Qty'; e = { [int]$_.Qty } }, @{ n = 'Price'; e = { [decimal]::Parse($_.Price, [cultureinfo]'de-DE') } } | ConvertTo-Json | Set-Content ~/answers/stock.json`"
+      ],
+      "solution": [
+        "Get-Content ~/data/stock.csv",
+        "$de = [cultureinfo]'de-DE'",
+        "$items = Import-Csv ~/data/stock.csv -Delimiter ';' | Select-Object Sku, Name, @{ n = 'Qty'; e = { [int]$_.Qty } }, @{ n = 'Price'; e = { [decimal]::Parse($_.Price, $de) } }",
+        "$items | Format-Table",
+        "ConvertTo-Json -InputObject @($items) | Set-Content ~/answers/stock.json",
+        "jq -c '.[0]' ~/answers/stock.json"
+      ],
+      "explain": [
+        "`ConvertTo-Json -InputObject @($items)` (or `-AsArray`) guarantees an array even if only one row is left on a quiet",
+        "day; piping one object would produce a bare object and break the consumer. `[decimal]` is the right type for money:",
+        "`[double]` would make `0.1 + 0.2` equal `0.30000000000000004`."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Which command reads it?",
+      "pairs": [
+        ["`{\"port\": 8080}`", "`ConvertFrom-Json`"],
+        ["`Sku;Name;Qty` lines from Excel", "`Import-Csv -Delimiter ';'`"],
+        ["`timeout=30` lines in an .ini-style file", "`ConvertFrom-StringData`"],
+        ["`@{ Retries = 3 }` in a .psd1 file", "`Import-PowerShellDataFile`"]
+      ]
+    }
+  ]
+}

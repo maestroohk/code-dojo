@@ -1,0 +1,171 @@
+{
+  "title": "Calling REST APIs",
+  "summary": "Invoke-RestMethod and Invoke-WebRequest with headers, bearer tokens and JSON bodies; pagination done right; retries, timeouts and status codes.",
+  "minutes": 17,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Invoke-RestMethod: JSON in, objects out",
+      "body": [
+        "`Invoke-RestMethod` (alias `irm`) sends an HTTP request and **converts a JSON (or XML) response into objects**, so",
+        "the result goes straight into the pipeline:",
+        "",
+        "```powershell",
+        "$token = Get-Secret -Name OpsApiToken -AsPlainText           # module 7; here: a file only you can read",
+        "$headers = @{ Authorization = \"Bearer $token\"; Accept = 'application/json' }",
+        "$page = Invoke-RestMethod -Uri 'https://api.example.com/v1/tickets?page=1' -Headers $headers",
+        "$page.items | Where-Object priority -eq 'urgent'",
+        "",
+        "$body = @{ title = 'Disk full on fs02'; priority = 'high' } | ConvertTo-Json",
+        "Invoke-RestMethod -Method Post -Uri 'https://api.example.com/v1/tickets' -Headers $headers -Body $body -ContentType 'application/json'",
+        "```",
+        "",
+        "`Invoke-WebRequest` (`iwr`) returns the raw response instead: `.StatusCode`, `.Headers`, `.Content`. Use it when you",
+        "need headers or the bytes (downloads with `-OutFile`).",
+        "",
+        "Switches that matter in automation (PowerShell 7):",
+        "",
+        "| Switch | Does |",
+        "|---|---|",
+        "| `-TimeoutSec 10` | give up instead of hanging the job (the default waits a very long time) |",
+        "| `-MaximumRetryCount 3 -RetryIntervalSec 2` | retry failed requests (5xx, 429, ...) by itself |",
+        "| `-SkipHttpErrorCheck` | do not throw on 4xx/5xx; look at the status yourself |",
+        "| `-StatusCodeVariable sc` | put the HTTP status code in `$sc` |",
+        "| `-Authentication Bearer -Token $secureToken` | send a token from a `SecureString` (HTTPS only, unless `-AllowUnencryptedAuthentication`) |"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You need the `ETag` response header of a REST call and its status code, as well as the body. Which command gives you all three most directly?",
+      "options": [
+        "`Invoke-WebRequest`: the response has `.StatusCode`, `.Headers` and `.Content`",
+        "`Invoke-RestMethod`: it returns only the converted body by default",
+        "`ConvertFrom-Json`",
+        "`Start-Process curl`"
+      ],
+      "answer": 0,
+      "explain": "`Invoke-RestMethod` is the right default because it gives you objects, but it hides the response. `Invoke-WebRequest` keeps everything (then `$r.Content | ConvertFrom-Json` for the body). In PowerShell 7, `Invoke-RestMethod -ResponseHeadersVariable h -StatusCodeVariable s` is the middle way."
+    },
+    {
+      "type": "learn",
+      "title": "Pagination: an API rarely returns everything",
+      "body": [
+        "Most APIs return a **page** (20, 50, 100 items) and tell you where the next one is: a `next` URL in the body",
+        "(`nextLink`, `@odata.nextLink` in Microsoft Graph), a `Link: <...>; rel=\"next\"` header, or a continuation token.",
+        "A script that reads only the first page is the most common REST bug: the report is right in test and wrong in",
+        "production, where there is more data.",
+        "",
+        "```powershell",
+        "$uri = 'https://api.example.com/v1/tickets?page=1'",
+        "$all = while ($uri) {",
+        "    $page = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 15",
+        "    $page.items                 # emit this page's items: the while loop's output is collected in $all",
+        "    $uri = $page.next           # $null on the last page ends the loop",
+        "}",
+        "```",
+        "",
+        "`-FollowRelLink` follows `Link` headers for you, but on PowerShell 7.6 it did not send the `Authorization` header",
+        "to the following pages against the lesson's API (it treats them like redirects), and many APIs put the next link",
+        "in the body anyway. The explicit loop works everywhere and is easy to log and limit."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "All the open tickets, every page",
+      "prompt": [
+        "The ticket API at `http://127.0.0.1:8088/api/tickets` needs `Authorization: Bearer <token>`; your token is in",
+        "`~/.config/ops/api-token` (a file only you can read: look at its permissions with `ls -l ~/.config/ops`). Each page",
+        "has `items`, `page` and `next`.",
+        "",
+        "Export **every ticket whose `status` is `open`**, from **all** pages, to `~/answers/open-tickets.csv` with the",
+        "columns **`Id`**, **`Title`**, **`Priority`**."
+      ],
+      "setup": ["api.sh"],
+      "checks": [
+        { "name": "all open tickets from all pages",
+          "cmd": "python3 \"$DOJO_FILES/checks.py\" open-tickets",
+          "fail": "Not quite (see what the check found)." }
+      ],
+      "hints": [
+        "Read the token without the trailing newline: `$token = (Get-Content ~/.config/ops/api-token -Raw).Trim()`. Then `$headers = @{ Authorization = \"Bearer $token\" }`.",
+        "Loop while there is a next page: `$uri = 'http://127.0.0.1:8088/api/tickets'; $all = while ($uri) { $p = Invoke-RestMethod $uri -Headers $headers; $p.items; $uri = $p.next }`.",
+        "`$all | Where-Object status -eq 'open' | Select-Object @{ n = 'Id'; e = { $_.id } }, @{ n = 'Title'; e = { $_.title } }, @{ n = 'Priority'; e = { $_.priority } } | Export-Csv ~/answers/open-tickets.csv`"
+      ],
+      "solution": [
+        "$token = (Get-Content ~/.config/ops/api-token -Raw).Trim()",
+        "$headers = @{ Authorization = \"Bearer $token\" }",
+        "Invoke-RestMethod http://127.0.0.1:8088/api/tickets -Headers $headers | Select-Object page, next",
+        "$uri = 'http://127.0.0.1:8088/api/tickets'",
+        "$all = while ($uri) { $p = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 10; $p.items; $uri = $p.next }",
+        "$all.Count",
+        "$all | Where-Object status -eq 'open' | Select-Object @{ n = 'Id'; e = { $_.id } }, @{ n = 'Title'; e = { $_.title } }, @{ n = 'Priority'; e = { $_.priority } } | Export-Csv -Path ~/answers/open-tickets.csv",
+        "Import-Csv ~/answers/open-tickets.csv | Measure-Object"
+      ],
+      "explain": [
+        "Collecting a loop's output with `$all = while (...) { ... }` is faster and cleaner than `$all += $item`, which copies",
+        "the whole array on every addition. For a real API, add a safety limit (`-and $n -lt 100`) and log each page, so a",
+        "server that keeps returning the same `next` cannot loop your job forever."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A nightly report calls an API that sometimes answers `503 Service Unavailable` for a few seconds during deployments. What is the most robust change?",
+      "options": [
+        "`-MaximumRetryCount 3 -RetryIntervalSec 5 -TimeoutSec 30` on the call",
+        "Wrap it in `try { } catch { }` and ignore the error",
+        "Run the report twice",
+        "`-SkipHttpErrorCheck`"
+      ],
+      "answer": 0,
+      "explain": "Built-in retries handle transient 5xx and 429 answers (and honour `Retry-After`), and the timeout stops a hung call from blocking the job. Ignoring the error produces an empty report; `-SkipHttpErrorCheck` just hands you the 503 to deal with yourself."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Survive a flaky endpoint",
+      "prompt": [
+        "`http://127.0.0.1:8088/api/flaky` answers **503** while the month-end report is being generated, then **200** with",
+        "the report. Try it once: `Invoke-RestMethod http://127.0.0.1:8088/api/flaky`.",
+        "",
+        "Fetch the report **in one command that retries by itself** (at least 3 retries, 1 second apart), and save the",
+        "response as JSON to `~/answers/report.json`."
+      ],
+      "setup": ["api.sh"],
+      "checks": [
+        { "name": "report.json holds the ready report",
+          "cmd": "jq -e '.report == \"ready\" and .rows == 1280' ~/answers/report.json",
+          "fail": "`~/answers/report.json` should contain the report: `{\"report\": \"ready\", \"rows\": 1280, ...}`." },
+        { "name": "the server saw the retries",
+          "cmd": "test \"$(curl -s http://127.0.0.1:8088/stats | jq '.\"/api/flaky\" // 0')\" -ge 3",
+          "fail": "The endpoint should have been called at least three times (two 503s, then the 200)." }
+      ],
+      "hints": [
+        "`Get-Help Invoke-RestMethod -Parameter *Retry*` lists the two parameters you need.",
+        "`Invoke-RestMethod http://127.0.0.1:8088/api/flaky -MaximumRetryCount 3 -RetryIntervalSec 1`",
+        "Pipe the result to `ConvertTo-Json | Set-Content ~/answers/report.json`."
+      ],
+      "solution": [
+        "Invoke-RestMethod http://127.0.0.1:8088/api/flaky/reset | Out-Null",
+        "Invoke-RestMethod http://127.0.0.1:8088/api/flaky",
+        "Invoke-RestMethod http://127.0.0.1:8088/api/flaky/reset | Out-Null",
+        "Invoke-RestMethod http://127.0.0.1:8088/api/flaky -MaximumRetryCount 3 -RetryIntervalSec 1 -TimeoutSec 10 | ConvertTo-Json | Set-Content ~/answers/report.json",
+        "Get-Content ~/answers/report.json"
+      ],
+      "explain": [
+        "Retries are only safe for requests that can be repeated without harm: GET, PUT and DELETE are meant to be",
+        "*idempotent*; a POST that creates an order may create two. For those, the API needs an idempotency key header",
+        "(`Idempotency-Key: <guid>`), or the script must check before retrying."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "A health probe that never throws, never hangs, and reports the status code.",
+      "code": ["$r = Invoke-RestMethod -Uri $url __1__ 5 __2__ -StatusCodeVariable __3__", "if ($code -ne 200) { Write-Warning \"$url answered $code\" }"],
+      "blanks": ["-TimeoutSec", "-SkipHttpErrorCheck", "code"],
+      "bank": ["-RetryIntervalSec", "-ErrorAction", "$code", "-PassThru"],
+      "explain": "`-StatusCodeVariable` takes the variable's **name** without `$`, like `-ErrorVariable`. A connection error or a timeout still throws: `-SkipHttpErrorCheck` only covers HTTP error answers."
+    }
+  ]
+}

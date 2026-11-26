@@ -1,0 +1,152 @@
+{
+  "title": "From a .ps1 to a module",
+  "summary": "Why teams ship functions as modules, what goes in a .psm1 and a .psd1 manifest, where PowerShell looks for modules, and how autoloading works.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What a module gives you",
+      "body": [
+        "Dot-sourcing a `.ps1` of helpers works for one person. A **module** is how a team shares functions:",
+        "",
+        "- **one import, one version**: `Import-Module LogTools` (or just call a function: PowerShell loads the module",
+        "  for you, *autoloading*);",
+        "- **public and private**: only the functions you export are visible; helpers stay internal;",
+        "- **a version and requirements** in a manifest, so `#Requires -Modules @{ ModuleName = 'LogTools'; ModuleVersion = '1.2' }`",
+        "  and `Install-PSResource` mean something.",
+        "",
+        "The parts:",
+        "",
+        "| File | Holds |",
+        "|---|---|",
+        "| `LogTools.psm1` | the code: functions (the *root module*) |",
+        "| `LogTools.psd1` | the **manifest**: a hashtable with version, author, requirements and the export list |",
+        "| `Modules/LogTools/1.0.0/` | where it is installed: a folder per module, a subfolder per version |",
+        "",
+        "PowerShell finds modules through **`$env:PSModulePath`**. For PowerShell 7 the per-user folder is",
+        "`Documents\\PowerShell\\Modules` on Windows and `~/.local/share/powershell/Modules` on Linux and macOS (Windows",
+        "PowerShell 5.1 uses `Documents\\WindowsPowerShell\\Modules`: another reason the two can see different modules)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why list functions explicitly in the manifest (`FunctionsToExport = 'Get-OldLog', 'Remove-OldLog'`) instead of `'*'`?",
+      "options": [
+        "Autoloading can read the list without running the module, and private helpers stay private",
+        "PowerShell refuses to import modules that export `*`",
+        "Explicit lists make the functions run faster",
+        "It is required by PowerShell 7"
+      ],
+      "answer": 0,
+      "explain": "With `'*'`, PowerShell must load and run the `.psm1` to discover what it exports, which slows down every `Get-Command` and Tab completion on a machine with many modules, and any helper function becomes public API that someone will start depending on."
+    },
+    {
+      "type": "learn",
+      "title": "Writing the manifest",
+      "body": [
+        "`New-ModuleManifest` writes a commented `.psd1` for you:",
+        "",
+        "```powershell",
+        "$manifest = @{",
+        "    Path              = './LogTools/LogTools.psd1'",
+        "    RootModule        = 'LogTools.psm1'",
+        "    ModuleVersion     = '1.0.0'",
+        "    FunctionsToExport = 'Get-OldLog', 'Remove-OldLog'",
+        "    Author            = 'Ops team'",
+        "    Description       = 'Find and remove old log files.'",
+        "    PowerShellVersion = '7.4'",
+        "}",
+        "New-ModuleManifest @manifest",
+        "Test-ModuleManifest ./LogTools/LogTools.psd1      # checks it, and shows what it exports",
+        "```",
+        "",
+        "To try a module straight from your repo: `Import-Module ./LogTools/LogTools.psd1 -Force` (`-Force` reloads it after",
+        "you change the code; a plain `Import-Module` of an already loaded module does nothing). To *install* it for",
+        "yourself, copy the files to `<user module folder>/LogTools/1.0.0/`; from then on any session can just call",
+        "`Get-OldLog`. Later in this module you publish it to a feed instead, which is how teams really distribute it."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Which manifest key does what?",
+      "pairs": [
+        ["`RootModule`", "the .psm1 file with the code"],
+        ["`ModuleVersion`", "the version installers and #Requires compare"],
+        ["`FunctionsToExport`", "the public functions"],
+        ["`RequiredModules`", "modules that must be loaded first"],
+        ["`PowerShellVersion`", "the oldest PowerShell it runs on"]
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Make LogTools a real module",
+      "prompt": [
+        "`~/src/LogTools/LogTools.psm1` has three functions: `Get-OldLog`, `Remove-OldLog` and the private helper `Get-Cutoff`.",
+        "",
+        "1. Create the manifest **`~/src/LogTools/LogTools.psd1`**: version **1.0.0**, root module `LogTools.psm1`, exporting",
+        "   **only** `Get-OldLog` and `Remove-OldLog`, with an author, a description, and **PowerShell 7.4** as the minimum.",
+        "2. Install it for your user (the `1.0.0` folder under `~/.local/share/powershell/Modules/LogTools/`), so that a new",
+        "   session can run `Get-OldLog -Path ~/logs/archive` without any `Import-Module`."
+      ],
+      "setup": ["src.sh"],
+      "checks": [
+        { "name": "the manifest is valid and says 1.0.0",
+          "cmd": "pwsh -NoProfile -c '(Test-ModuleManifest ~/src/LogTools/LogTools.psd1 -ErrorAction Stop).Version.ToString()'",
+          "expectOutput": "1.0.0",
+          "fail": "`Test-ModuleManifest ~/src/LogTools/LogTools.psd1` should succeed and report version 1.0.0." },
+        { "name": "it exports exactly the two public functions",
+          "cmd": "pwsh -NoProfile -c '(Import-Module ~/src/LogTools/LogTools.psd1 -PassThru).ExportedFunctions.Keys | Sort-Object'",
+          "expectOutput": ["Get-OldLog", "Remove-OldLog"],
+          "fail": "The module should export `Get-OldLog` and `Remove-OldLog`, and keep `Get-Cutoff` private (`FunctionsToExport`)." },
+        { "name": "root module, description and minimum version",
+          "cmd": "pwsh -NoProfile -c '$m = Import-PowerShellDataFile ~/src/LogTools/LogTools.psd1; \"$($m.RootModule) $($m.PowerShellVersion) $([bool]$m.Description) $([bool]$m.Author)\"'",
+          "expectOutput": "LogTools.psm1 7.4 True True",
+          "fail": "The manifest needs `RootModule = 'LogTools.psm1'`, `PowerShellVersion = '7.4'`, a `Description` and an `Author`." },
+        { "name": "a new session finds it without Import-Module",
+          "cmd": "cd /tmp && pwsh -NoProfile -c '(Get-OldLog -Path ~/logs/archive).Name -join \" \"; (Get-Module LogTools).ModuleBase'",
+          "expectMatch": "^app-3\\.log app-4\\.log app-5\\.log\\s*\\n.*/\\.local/share/powershell/Modules/LogTools/1\\.0\\.0\\s*$",
+          "fail": "From a fresh `pwsh`, `Get-OldLog -Path ~/logs/archive` should autoload the module from `~/.local/share/powershell/Modules/LogTools/1.0.0` and list the three old logs." }
+      ],
+      "hints": [
+        "`New-ModuleManifest -Path ~/src/LogTools/LogTools.psd1 -RootModule LogTools.psm1 -ModuleVersion 1.0.0 -FunctionsToExport Get-OldLog, Remove-OldLog -Author 'Ops team' -Description '...' -PowerShellVersion 7.4`",
+        "Check it with `Test-ModuleManifest ~/src/LogTools/LogTools.psd1`, and `Import-Module ~/src/LogTools/LogTools.psd1 -Force; Get-Command -Module LogTools`.",
+        "Install: `$dest = \"$HOME/.local/share/powershell/Modules/LogTools/1.0.0\"; New-Item -ItemType Directory $dest -Force; Copy-Item ~/src/LogTools/LogTools.ps*1 $dest`."
+      ],
+      "solution": [
+        "New-ModuleManifest -Path ~/src/LogTools/LogTools.psd1 -RootModule LogTools.psm1 -ModuleVersion 1.0.0 -FunctionsToExport Get-OldLog, Remove-OldLog -Author 'Ops team' -Description 'Find and remove old log files.' -PowerShellVersion 7.4",
+        "Test-ModuleManifest ~/src/LogTools/LogTools.psd1",
+        "$dest = \"$HOME/.local/share/powershell/Modules/LogTools/1.0.0\"",
+        "New-Item -ItemType Directory -Path $dest -Force | Out-Null",
+        "Copy-Item ~/src/LogTools/LogTools.ps*1 -Destination $dest",
+        "pwsh -NoProfile -c 'Get-OldLog -Path ~/logs/archive; Get-Module LogTools | Select-Object Name, Version, ModuleBase'"
+      ],
+      "explain": [
+        "`$env:PSModulePath -split [IO.Path]::PathSeparator` shows every folder PowerShell searches, in order. When two",
+        "versions are installed, `Import-Module` takes the highest unless you ask for one (`-RequiredVersion 1.0.0`), which",
+        "is how a team can roll a module forward and back."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Reload your module from the repo after changing it, then list what it exports.",
+      "code": ["Import-Module ./LogTools/LogTools.psd1 __1__", "Get-Command __2__ LogTools"],
+      "blanks": ["-Force", "-Module"],
+      "bank": ["-Global", "-Name", "-Reload", "-Noun"],
+      "explain": "Without `-Force`, importing a module that is already loaded is a no-op, and you keep testing the old code: the classic \"my fix did nothing\" afternoon."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A colleague installed your module into `Documents\\WindowsPowerShell\\Modules`. In `pwsh` it is \"not found\". Why?",
+      "options": [
+        "That is Windows PowerShell 5.1's user module folder; PowerShell 7's is `Documents\\PowerShell\\Modules`",
+        "Modules must be installed for all users",
+        "PowerShell 7 cannot load modules written for 5.1",
+        "The module needs a `.dll`"
+      ],
+      "answer": 0,
+      "explain": "PowerShell 7 does include the Windows PowerShell module folders for *system* modules, but the per-user folders differ. Installing with `Install-PSResource -Scope CurrentUser` from `pwsh` puts it in the right place."
+    }
+  ]
+}
