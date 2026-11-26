@@ -1,0 +1,191 @@
+{
+    "title":  "Security misconfiguration and response headers",
+    "summary":  "A02:2025, the second most common finding: stack traces in production, debug endpoints left on, default credentials, and missing headers. Read a baseline scan, then harden an app in one place.",
+    "minutes":  15,
+    "steps":  [
+                  {
+                      "type":  "learn",
+                      "title":  "What a baseline scan finds in the first minute",
+                      "body":  [
+                                   "```text",
+                                   "WARN-NEW: X-Content-Type-Options Header Missing [10021] x 4",
+                                   "WARN-NEW: Missing Anti-clickjacking Header [10020] x 2",
+                                   "WARN-NEW: Content Security Policy (CSP) Header Not Set [10038] x 2",
+                                   "WARN-NEW: Server Leaks Version Information via \"Server\" HTTP Response Header Field [10036] x 4",
+                                   "WARN-NEW: Application Error Disclosure [90022] x 1     GET /api/products/999999 -\u003e stack trace",
+                                   "WARN-NEW: Cookie No HttpOnly Flag [10010] x 1",
+                                   "```",
+                                   "",
+                                   "None of these is an exploit on its own. Together they make every other bug easier: the stack trace tells an attacker the framework, the file paths and the SQL; the Server header narrows the CVE search; a missing `nosniff` lets an uploaded \"image\" run as a script in old browsers.",
+                                   "",
+                                   "Misconfiguration is anything that is a **setting** rather than code: debug features on in production (`UseDeveloperExceptionPage`, Swagger UI with \"try it out\" on the public site, `/debug/config`), default or shared credentials (`admin/admin` on the admin console, the database\u0027s default user), directory listing, cloud storage buckets open to everyone, verbose CORS, and old TLS."
+                               ]
+                  },
+                  {
+                      "type":  "match",
+                      "prompt":  "Match each header to what it does.",
+                      "pairs":  [
+                                    [
+                                        "`Strict-Transport-Security: max-age=31536000; includeSubDomains`",
+                                        "the browser uses only HTTPS for this site for a year"
+                                    ],
+                                    [
+                                        "`X-Content-Type-Options: nosniff`",
+                                        "the browser does not guess a script out of a text file"
+                                    ],
+                                    [
+                                        "`Referrer-Policy: strict-origin-when-cross-origin`",
+                                        "other sites see only the origin, not full URLs with ids or tokens"
+                                    ],
+                                    [
+                                        "`X-Frame-Options: DENY`",
+                                        "no site may frame this page"
+                                    ],
+                                    [
+                                        "`Permissions-Policy: camera=(), geolocation=()`",
+                                        "the page cannot ask for these browser features"
+                                    ]
+                                ]
+                  },
+                  {
+                      "type":  "learn",
+                      "title":  "Harden in one place",
+                      "body":  [
+                                   "```csharp fragment",
+                                   "builder.Services.AddProblemDetails();                                    // RFC 9457 error bodies",
+                                   "builder.WebHost.ConfigureKestrel(k =\u003e k.AddServerHeader = false);        // no \"Server: Kestrel\"",
+                                   "var app = builder.Build();",
+                                   "",
+                                   "if (app.Environment.IsDevelopment()) app.MapGet(\"/debug/config\", ...);  // dev-only features stay dev-only",
+                                   "else app.UseHsts();                                                      // HSTS only means something over HTTPS",
+                                   "app.UseExceptionHandler();                                               // 500 problem+json, details in the log",
+                                   "// (the solution below sets the headers in Response.OnStarting, so error answers get them too)",
+                                   "app.Use(async (ctx, next) =\u003e",
+                                   "{",
+                                   "    ctx.Response.Headers.XContentTypeOptions = \"nosniff\";",
+                                   "    ctx.Response.Headers.XFrameOptions = \"DENY\";",
+                                   "    ctx.Response.Headers[\"Referrer-Policy\"] = \"strict-origin-when-cross-origin\";",
+                                   "    await next();",
+                                   "});",
+                                   "```",
+                                   "",
+                                   "`X-XSS-Protection` is obsolete: modern browsers removed the filter it controlled; do not add it. HSTS with `preload` is a commitment (every subdomain, HTTPS only, for a long time): add it deliberately. And the environment matters: `WebApplication` turns the developer exception page on by itself in `Development`, so make sure production really runs as `Production`."
+                               ]
+                  },
+                  {
+                      "type":  "mcq",
+                      "prompt":  "The admin console of a new deployment answers to `admin` / `admin`, because that is what the container image ships with. How should this be prevented for every future deployment?",
+                      "options":  [
+                                      "Fail the start-up when the default password is still configured, and set the real one from a secret store in the deployment",
+                                      "Write it in the runbook that someone must change it",
+                                      "Hide the admin console on a non-standard port",
+                                      "Block the console\u0027s URL in the WAF"
+                                  ],
+                      "answer":  0,
+                      "explain":  "Settings that people must remember to change are forgotten. Make the insecure default impossible to run with."
+                  },
+                  {
+                      "type":  "code",
+                      "mode":  "fix",
+                      "framework":  "web",
+                      "title":  "Harden the app",
+                      "prompt":  [
+                                     "Make the baseline scan clean (this runs as **Production**):",
+                                     "",
+                                     "- no developer exception page: `GET /boom` answers `500` problem details without the exception text;",
+                                     "- `GET /debug/config` exists only in Development: in production it is `404`;",
+                                     "- every response has `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: strict-origin-when-cross-origin`;",
+                                     "- no `Server` header."
+                                 ],
+                      "starter":  [
+                                      "using Microsoft.AspNetCore.Hosting;      // ConfigureKestrel",
+                                      "using Microsoft.Extensions.Configuration; // IConfiguration",
+                                      "",
+                                      "var builder = WebApplication.CreateBuilder(args);",
+                                      "var app = builder.Build();",
+                                      "",
+                                      "app.UseDeveloperExceptionPage();",
+                                      "",
+                                      "app.MapGet(\"/\", () =\u003e Results.Content(\"\u003c!doctype html\u003e\u003ch1\u003eLamp Shop\u003c/h1\u003e\", \"text/html\"));",
+                                      "app.MapGet(\"/boom\", () =\u003e { throw new InvalidOperationException(\"Connection to db-prod-01.shop.internal failed\"); });",
+                                      "app.MapGet(\"/debug/config\", (IConfiguration c) =\u003e c.AsEnumerable().ToDictionary(k =\u003e k.Key, k =\u003e k.Value));",
+                                      "",
+                                      "app.Run();"
+                                  ],
+                      "solution":  [
+                                       "using Microsoft.AspNetCore.Hosting;      // ConfigureKestrel",
+                                       "using Microsoft.Extensions.Configuration; // IConfiguration",
+                                       "",
+                                       "var builder = WebApplication.CreateBuilder(args);",
+                                       "builder.Services.AddProblemDetails();",
+                                       "builder.WebHost.ConfigureKestrel(k =\u003e k.AddServerHeader = false);",
+                                       "var app = builder.Build();",
+                                       "",
+                                       "// OnStarting: the headers are added when the response starts, so error answers get them too",
+                                       "// (the exception handler clears headers that were set earlier).",
+                                       "app.Use(async (ctx, next) =\u003e",
+                                       "{",
+                                       "    ctx.Response.OnStarting(() =\u003e",
+                                       "    {",
+                                       "        ctx.Response.Headers.XContentTypeOptions = \"nosniff\";",
+                                       "        ctx.Response.Headers.XFrameOptions = \"DENY\";",
+                                       "        ctx.Response.Headers[\"Referrer-Policy\"] = \"strict-origin-when-cross-origin\";",
+                                       "        return Task.CompletedTask;",
+                                       "    });",
+                                       "    await next();",
+                                       "});",
+                                       "app.UseExceptionHandler();",
+                                       "",
+                                       "app.MapGet(\"/\", () =\u003e Results.Content(\"\u003c!doctype html\u003e\u003ch1\u003eLamp Shop\u003c/h1\u003e\", \"text/html\"));",
+                                       "app.MapGet(\"/boom\", () =\u003e { throw new InvalidOperationException(\"Connection to db-prod-01.shop.internal failed\"); });",
+                                       "if (app.Environment.IsDevelopment())",
+                                       "    app.MapGet(\"/debug/config\", (IConfiguration c) =\u003e c.AsEnumerable().ToDictionary(k =\u003e k.Key, k =\u003e k.Value));",
+                                       "",
+                                       "app.Run();"
+                                   ],
+                      "hints":  [
+                                    "Swap `UseDeveloperExceptionPage()` for `builder.Services.AddProblemDetails()` plus `app.UseExceptionHandler()`.",
+                                    "`builder.WebHost.ConfigureKestrel(k =\u003e k.AddServerHeader = false);` removes the Server header; wrap the debug endpoint in `if (app.Environment.IsDevelopment())`.",
+                                    "The three headers go in one `app.Use(async (ctx, next) =\u003e { ...; await next(); })`. Set them inside `ctx.Response.OnStarting(() =\u003e { ...; return Task.CompletedTask; })`: the exception handler clears headers set earlier, and error pages need them too."
+                                ],
+                      "template":  [
+                                       "{{CODE}}",
+                                       "",
+                                       "static class DojoTests",
+                                       "{",
+                                       "    static string? H(HttpResponseMessage r, string n) =\u003e r.Headers.TryGetValues(n, out var v) ? string.Join(\",\", v) : null;",
+                                       "",
+                                       "    public static async Task Run(HttpClient http)",
+                                       "    {",
+                                       "        await Dojo.TryAsync(\"The app could be scanned\", async () =\u003e",
+                                       "        {",
+                                       "            var home = await http.GetAsync(\"/\");",
+                                       "            DojoWeb.Status(\"the home page still works\", 200, home);",
+                                       "            Dojo.Eq(\"X-Content-Type-Options: nosniff\", \"nosniff\", H(home, \"X-Content-Type-Options\"));",
+                                       "            Dojo.Eq(\"X-Frame-Options: DENY\", \"DENY\", H(home, \"X-Frame-Options\"));",
+                                       "            Dojo.Eq(\"Referrer-Policy\", \"strict-origin-when-cross-origin\", H(home, \"Referrer-Policy\"));",
+                                       "            Dojo.Eq(\"no Server header\", null, H(home, \"Server\"));",
+                                       "            var boom = await http.GetAsync(\"/boom\");",
+                                       "            var body = await DojoWeb.Text(boom);",
+                                       "            DojoWeb.Status(\"/boom is a 500\", 500, boom);",
+                                       "            Dojo.Check(\"...without the exception text or host name\", !body.Contains(\"db-prod-01\") \u0026\u0026 !body.Contains(\"InvalidOperationException\"), body.Length \u003e 300 ? body[..300] : body);",
+                                       "            Dojo.Eq(\"...as problem details\", \"500\", DojoWeb.Prop(await DojoWeb.Json(boom), \"status\"));",
+                                       "            Dojo.Eq(\"errors carry the headers too\", \"nosniff\", H(boom, \"X-Content-Type-Options\"));",
+                                       "            DojoWeb.Status(\"/debug/config does not exist in production\", 404, await http.GetAsync(\"/debug/config\"));",
+                                       "        });",
+                                       "    }",
+                                       "}"
+                                   ]
+                  },
+                  {
+                      "type":  "lab",
+                      "live":  "26-vulnerable-shop",
+                      "task":  "t21",
+                      "title":  "Live lab: a baseline scan, then harden",
+                      "prompt":  [
+                                     "In the **vulnerable shop** lab, do **Fix: misconfiguration found by a baseline scan**. Run `baseline-scan` on attacker before and after: the warnings it prints use OWASP ZAP\u0027s rule ids, so the output reads like a real ZAP report."
+                                 ],
+                      "explain":  "What is left after the fix (Secure cookies, HSTS) needs HTTPS, which the lab does not have: a scan result always needs a human to say which findings apply."
+                  }
+              ]
+}

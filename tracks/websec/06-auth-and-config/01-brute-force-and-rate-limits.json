@@ -1,0 +1,155 @@
+{
+  "title": "Brute force, credential stuffing and rate limits",
+  "summary": "A login that answers ten thousand guesses a minute will be guessed. Tell brute force from credential stuffing, choose limits that do not lock out real users, and add ASP.NET Core's rate limiter with a 429 and Retry-After.",
+  "minutes": 16,
+  "prereqs": ["auth/01-foundations/04-mfa-and-brute-force"],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three ways in through the front door",
+      "body": [
+        "```text",
+        "POST /login  username=carol&password=123456      ->  200 \"Wrong username or password\"",
+        "POST /login  username=carol&password=password    ->  200 \"Wrong username or password\"",
+        "...  (98 more, in 4 seconds)",
+        "POST /login  username=carol&password=sunshine1   ->  302 Location: /     <- found",
+        "```",
+        "",
+        "- **Brute force / password guessing**: one account, many passwords. Stopped by per-account and per-address limits.",
+        "- **Password spraying**: one common password (`Winter2026!`), many accounts, slowly, so no single account trips a limit.",
+        "- **Credential stuffing**: username/password pairs leaked from *other* sites, tried here from thousands of IP addresses. Each pair is tried once, so per-account limits barely help; breached-password checks, MFA and bot detection do.",
+        "",
+        "These are **A07:2025 Authentication Failures** (and API2:2023). Tools like hydra make them a one-liner, which is why the lab's task 17 takes seconds."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each attack to the defence that hurts it most.",
+      "pairs": [
+        ["Many passwords against one account", "a per-account failure limit with growing delays"],
+        ["One password against many accounts", "refusing common passwords at sign-up"],
+        ["Leaked pairs from thousands of IPs", "MFA and breached-password checks"],
+        ["One machine hammering the login", "a per-address rate limit (429)"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Limits that do not lock out your users",
+      "body": [
+        "A hard lockout (\"10 failures and the account is locked for a day\") is itself an attack: anyone can lock out the CEO by typing wrong passwords. Prefer:",
+        "",
+        "- **Rate limits per address** (5 a minute, then `429 Too Many Requests` with `Retry-After`), and **per account** with growing delays (1 s, 2 s, 4 s...) instead of a lock.",
+        "- **Same answer** for \"no such user\" and \"wrong password\", in the same time, so the login does not reveal who has an account (account enumeration; also check the sign-up and password-reset forms).",
+        "- **MFA**, ideally phishing-resistant (passkeys/WebAuthn).",
+        "- **Breached-password checks** (NIST SP 800-63B): refuse passwords that appear in known breaches, instead of composition rules like \"one digit, one symbol\".",
+        "",
+        "Behind a proxy or load balancer every request comes from the proxy's address. Configure `UseForwardedHeaders` with `KnownProxies`/`KnownNetworks` first, or the limit is shared by every user. And never trust `X-Forwarded-For` from the internet directly: an attacker sets a new one per request."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The login is rate limited per IP from `X-Forwarded-For`, read straight from the request. There is no proxy in front of the app. What happens?",
+      "options": [
+        "An attacker sends a different X-Forwarded-For with each request and is never limited",
+        "The limit works: X-Forwarded-For is set by the browser",
+        "Every user shares one limit",
+        "Requests without the header are refused"
+      ],
+      "answer": 0,
+      "explain": "Forwarded headers are only meaningful when your own proxy sets them and the app trusts only that proxy. Here it is attacker input."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "web",
+      "title": "Rate limit the login",
+      "prompt": [
+        "Add ASP.NET Core's built-in rate limiter (`using System.Threading.RateLimiting;`):",
+        "",
+        "- a policy `login`: a **fixed window** of **5 requests per minute** per client address (`ctx.Connection.RemoteIpAddress`), no queue;",
+        "- rejected requests get `429` and a `Retry-After: 60` header (`o.OnRejected`);",
+        "- only `POST /login` uses it (`RequireRateLimiting(\"login\")`); `GET /products` stays unlimited.",
+        "",
+        "**Run checks** sends six quick sign-ins from the same address."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.MapPost(\"/login\", (Login l) =>",
+        "    l.Username == \"carol\" && l.Password == \"correct horse battery staple\" ? Results.Ok(new { ok = true }) : Results.Unauthorized());",
+        "",
+        "app.MapGet(\"/products\", () => new[] { \"Desk lamp\", \"Floor lamp\" });",
+        "",
+        "app.Run();",
+        "",
+        "record Login(string Username, string Password);"
+      ],
+      "solution": [
+        "using System.Threading.RateLimiting;",
+        "",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddRateLimiter(o =>",
+        "{",
+        "    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;",
+        "    o.OnRejected = (ctx, _) =>",
+        "    {",
+        "        ctx.HttpContext.Response.Headers.RetryAfter = \"60\";",
+        "        return ValueTask.CompletedTask;",
+        "    };",
+        "    o.AddPolicy(\"login\", ctx => RateLimitPartition.GetFixedWindowLimiter(",
+        "        ctx.Connection.RemoteIpAddress?.ToString() ?? \"unknown\",",
+        "        _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));",
+        "});",
+        "var app = builder.Build();",
+        "app.UseRateLimiter();",
+        "",
+        "app.MapPost(\"/login\", (Login l) =>",
+        "    l.Username == \"carol\" && l.Password == \"correct horse battery staple\" ? Results.Ok(new { ok = true }) : Results.Unauthorized())",
+        "    .RequireRateLimiting(\"login\");",
+        "",
+        "app.MapGet(\"/products\", () => new[] { \"Desk lamp\", \"Floor lamp\" });",
+        "",
+        "app.Run();",
+        "",
+        "record Login(string Username, string Password);"
+      ],
+      "hints": [
+        "`builder.Services.AddRateLimiter(o => { ... })` before `Build()`, and `app.UseRateLimiter();` after it.",
+        "Inside: `o.RejectionStatusCode = 429; o.AddPolicy(\"login\", ctx => RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? \"unknown\", _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));`",
+        "`o.OnRejected = (ctx, _) => { ctx.HttpContext.Response.Headers.RetryAfter = \"60\"; return ValueTask.CompletedTask; };`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"The login could be called\", async () =>",
+        "        {",
+        "            DojoWeb.Status(\"the right password works\", 200, await http.PostAsJsonAsync(\"/login\", new { username = \"carol\", password = \"correct horse battery staple\" }));",
+        "            for (var i = 1; i <= 4; i++)",
+        "                DojoWeb.Status($\"wrong guess {i} is a normal 401\", 401, await http.PostAsJsonAsync(\"/login\", new { username = \"carol\", password = $\"guess{i}\" }));",
+        "            var limited = await http.PostAsJsonAsync(\"/login\", new { username = \"carol\", password = \"correct horse battery staple\" });",
+        "            DojoWeb.Status(\"the 6th request in a minute gets 429, even with the right password\", 429, limited);",
+        "            Dojo.Eq(\"...with Retry-After: 60\", \"60\", limited.Headers.TryGetValues(\"Retry-After\", out var ra) ? ra.First() : null);",
+        "            for (var i = 0; i < 8; i++)",
+        "                DojoWeb.Status($\"GET /products #{i + 1} is not limited\", 200, await http.GetAsync(\"/products\"));",
+        "        });",
+        "    }",
+        "}"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "26-vulnerable-shop",
+      "task": ["t17", "t18"],
+      "title": "Live lab: guess carol's password, then rate limit",
+      "prompt": [
+        "In the **vulnerable shop** lab, do **Attack: guess a password** (hydra or a curl loop over `~/top-passwords.txt`) and **Fix: rate limit the sign-in** in `Auth.cs`. Then run hydra again and look at what it reports: tools need tuning against defences, and so do alerts."
+      ],
+      "explain": "After the fix, hydra misreads the 429 page as a success, because it has no failure text. The same lesson applies to your monitoring: count 429s, they are attack traffic."
+    }
+  ]
+}
