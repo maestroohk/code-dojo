@@ -1,0 +1,145 @@
+{
+  "title": "Doing many things at once",
+  "summary": "ForEach-Object -Parallel with -ThrottleLimit and $using:, thread jobs, why shared variables do not work across threads, and how to stay polite to the systems you call.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "ForEach-Object -Parallel",
+      "body": [
+        "Checking 200 servers one after another, at 1 second each, takes over three minutes. Most of that time is",
+        "**waiting** (for the network, a disk, an API), so doing several at once is almost free:",
+        "",
+        "```powershell",
+        "$timeout = 5",
+        "Get-Content ./servers.txt | ForEach-Object -Parallel {",
+        "    $ok = Test-Connection $_ -Count 1 -TimeoutSeconds $using:timeout -Quiet",
+        "    [pscustomobject]@{ Server = $_; Up = $ok }",
+        "} -ThrottleLimit 10 | Sort-Object Server",
+        "```",
+        "",
+        "- Each item runs in its **own runspace** (a separate PowerShell inside the same process, on its own thread).",
+        "  PowerShell 7 only; Windows PowerShell 5.1 has no `-Parallel`.",
+        "- **`-ThrottleLimit`** (default **5**) is how many run at once. Pick it for the *other side*: a small API may answer",
+        "  `429 Too Many Requests` or fall over at 50 parallel calls.",
+        "- Variables from outside are **not** visible inside: use **`$using:name`** to pass a copy in.",
+        "- Results come back in **completion order**, not input order: sort them if order matters.",
+        "",
+        "**Thread jobs** run a script block in the background while your script carries on:",
+        "",
+        "```powershell",
+        "$job = Start-ThreadJob { Invoke-RestMethod https://reports.example.com/build -TimeoutSec 300 }",
+        "# ... other work ...",
+        "$report = Receive-Job $job -Wait -AutoRemoveJob",
+        "```",
+        "",
+        "`Start-ThreadJob` ships with PowerShell 7 (since 7.6 its module is called `Microsoft.PowerShell.ThreadJob`) and is much lighter",
+        "than the old `Start-Job`, which starts a whole new process per job."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Inside `ForEach-Object -Parallel { ... }`, you need the value of `$cutoff` that the script set earlier. How?",
+      "options": ["`$using:cutoff`", "`$global:cutoff`", "`$script:cutoff`", "It is visible automatically"],
+      "answer": 0,
+      "explain": "Each parallel block runs in a fresh runspace with none of your variables. `$using:` copies the value in. It is read-only in spirit: assigning to it is a parse error, and changes to the copy never come back."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Twelve slow endpoints in a few seconds",
+      "prompt": [
+        "`~/scripts/endpoints.txt` lists 12 endpoints of the lesson API; each takes **1 second** to answer `{\"id\": ..., \"ok\": true}`.",
+        "The API allows **at most 8** concurrent calls (more get `429`).",
+        "",
+        "Write `~/scripts/check-endpoints.ps1` that calls them all **in parallel** (with a sensible `-ThrottleLimit`) and",
+        "prints one line per endpoint, **`<id> ok`** (or `<id> failed`), **sorted by id**. The whole script must finish in",
+        "under 6 seconds (one by one would take 12)."
+      ],
+      "setup": ["parallel.sh"],
+      "checks": [
+        { "name": "twelve ok lines, sorted",
+          "cmd": "pwsh -NoProfile -NonInteractive -File ~/scripts/check-endpoints.ps1 2>&1 | tr -d '\\r' | tr '\\n' ' '",
+          "expectOutput": "svc01 ok svc02 ok svc03 ok svc04 ok svc05 ok svc06 ok svc07 ok svc08 ok svc09 ok svc10 ok svc11 ok svc12 ok",
+          "fail": "The script should print `svc01 ok` to `svc12 ok`, one per line, in order. A `failed` line usually means too many calls at once (429)." },
+        { "name": "finishes in under 6 seconds",
+          "cmd": "s=$(date +%s%N); timeout 20 pwsh -NoProfile -NonInteractive -File ~/scripts/check-endpoints.ps1 >/dev/null 2>&1; t=$(( ($(date +%s%N) - s) / 1000000 )); echo \"took ${t} ms\"; test $t -lt 6000",
+          "fail": "The run took too long. Use `ForEach-Object -Parallel` with a `-ThrottleLimit` between 4 and 8." }
+      ],
+      "hints": [
+        "`Get-Content ~/scripts/endpoints.txt | ForEach-Object -Parallel { ... } -ThrottleLimit 6`",
+        "Inside: `try { $r = Invoke-RestMethod $_ -TimeoutSec 5; \"$($r.id) ok\" } catch { ... \"failed\" }`. For the id of a failed call, take it from the URL: `($_ -split 'id=')[1]`.",
+        "Pipe the results into `Sort-Object` before they are printed."
+      ],
+      "solution": [
+        "@'",
+        "Get-Content -Path \"$PSScriptRoot/endpoints.txt\" | ForEach-Object -Parallel {",
+        "    $id = ($_ -split 'id=')[1]",
+        "    try {",
+        "        $r = Invoke-RestMethod -Uri $_ -TimeoutSec 5",
+        "        if ($r.ok) { \"$id ok\" } else { \"$id failed\" }",
+        "    }",
+        "    catch { \"$id failed\" }",
+        "} -ThrottleLimit 6 | Sort-Object",
+        "'@ | Set-Content ~/scripts/check-endpoints.ps1",
+        "Measure-Command { pwsh -File ~/scripts/check-endpoints.ps1 } | Select-Object TotalSeconds",
+        "pwsh -File ~/scripts/check-endpoints.ps1"
+      ],
+      "explain": [
+        "With 6 at a time, 12 one-second calls take about 2 seconds. The throttle is a promise to the system you call:",
+        "a busy production API, a domain controller or a database can be hurt by a laptop running 100 threads. Start low,",
+        "measure, raise it only if the other side is fine."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "lang": "powershell",
+      "code": ["$count = 0", "1..5 | ForEach-Object -Parallel { $count++ }", "\"count is $count\""],
+      "answer": "count is 0",
+      "verify": false,
+      "explain": "Each block has its own empty `$count` (it does not even see the outer one). Nothing comes back to the caller except **output**. To collect results, output them and gather them outside: `$n = (1..5 | ForEach-Object -Parallel { 1 } | Measure-Object).Count`."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "total bytes: 0",
+      "prompt": [
+        "`pwsh -File ~/scripts/total-size.ps1` scans each regional share in parallel and always says `total bytes: 0`.",
+        "Fix it so it prints the real total of everything under `~/shares` (still scanning the shares in parallel)."
+      ],
+      "setup": ["parallel.sh"],
+      "checks": [
+        { "name": "the real total",
+          "cmd": "want=$(find ~/shares -type f -printf '%s\\n' | awk '{s+=$1} END {print s}'); got=$(pwsh -NoProfile -NonInteractive -File ~/scripts/total-size.ps1 2>&1 | tr -d '\\r'); echo \"$got (expected total bytes: $want)\"; test \"$got\" = \"total bytes: $want\"",
+          "fail": "The script should print `total bytes: <the real sum>`." },
+        { "name": "still parallel",
+          "cmd": "grep -q -- '-Parallel' ~/scripts/total-size.ps1",
+          "fail": "Keep `ForEach-Object -Parallel`: on the real shares, scanning one by one takes an hour." }
+      ],
+      "hints": [
+        "`$total += $size` inside the block changes a different `$total` in the block's own runspace, which is thrown away.",
+        "Make each block **output** its size instead (just `$size` on its own line).",
+        "`$total = (Get-ChildItem ... | ForEach-Object -Parallel { ...; $size } -ThrottleLimit 4 | Measure-Object -Sum).Sum`"
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/total-size.ps1",
+        "@'",
+        "# total-size.ps1: adds up the size of every regional share, one share per thread (the real shares are slow to scan).",
+        "$sizes = Get-ChildItem -Path \"$HOME/shares\" -Directory | ForEach-Object -Parallel {",
+        "    (Get-ChildItem -Path $_.FullName -Recurse -File | Measure-Object -Property Length -Sum).Sum",
+        "} -ThrottleLimit 4",
+        "$total = ($sizes | Measure-Object -Sum).Sum",
+        "\"total bytes: $total\"",
+        "'@ | Set-Content ~/scripts/total-size.ps1",
+        "pwsh -File ~/scripts/total-size.ps1"
+      ],
+      "explain": [
+        "The rule for parallel code: **no shared mutable state**. Each worker outputs its result; the caller combines them.",
+        "If you really must share (a counter, a cache), use a thread-safe .NET type passed with `$using:`, such as",
+        "`[System.Collections.Concurrent.ConcurrentBag[object]]::new()`, never a plain array or `+=`."
+      ]
+    }
+  ]
+}

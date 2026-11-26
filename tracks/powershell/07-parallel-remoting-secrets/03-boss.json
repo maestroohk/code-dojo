@@ -1,0 +1,165 @@
+{
+  "title": "Boss: the dry run that deleted everything",
+  "summary": "A remote clean-up whose -DryRun wiped every log, a cache warmer that gets itself rate-limited, and a script that only works where someone once typed Set-Secret.",
+  "minutes": 22,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Incident review INC-5120",
+      "body": [
+        "*\"An engineer ran `clean-remote.ps1 -DryRun` on staging to preview it. It deleted every log on both web servers,",
+        "including today's. The same week the post-deploy cache warm-up reported half its pages failed, and the new CI capacity",
+        "check fails with an error nobody understands.\"*",
+        "",
+        "The staging logs have been restored on web01 and web02. **Read the script before you run it.** Every check",
+        "restores the folder first and then runs your fixed script."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "-DryRun deleted everything",
+      "prompt": [
+        "Read `~/scripts/clean-remote.ps1` (`Get-Content`). Work out why `-DryRun` deleted files, and why it deleted **all**",
+        "of them, not only those older than `-Days`.",
+        "",
+        "Fix it, so that `-DryRun` deletes nothing and a real run deletes only files older than `-Days` (default 30) on",
+        "every server. If you test it for real and lose the files, `cp -a /opt/dojo/state/srvlogs/. /srv/logs/app/` puts them back."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "-DryRun deletes nothing",
+          "cmd": "rm -rf /srv/logs/app/*; cp -a /opt/dojo/state/srvlogs/. /srv/logs/app/; timeout 60 pwsh -NoProfile -NonInteractive -File ~/scripts/clean-remote.ps1 -DryRun >/dev/null 2>&1; ls /srv/logs/app | tr '\\n' ' '",
+          "expectOutput": "api-1.log api-2.log api-3.log api-4.log worker.log worker.log.1",
+          "fail": "With `-DryRun`, all six files must still be there." },
+        { "name": "a real run deletes only the old files",
+          "cmd": "rm -rf /srv/logs/app/*; cp -a /opt/dojo/state/srvlogs/. /srv/logs/app/; timeout 60 pwsh -NoProfile -NonInteractive -File ~/scripts/clean-remote.ps1 >/dev/null 2>&1; ls /srv/logs/app | tr '\\n' ' '",
+          "expectOutput": "api-1.log api-2.log worker.log",
+          "fail": "Without `-DryRun`, only the files older than 30 days (`api-3.log`, `api-4.log`, `worker.log.1`) should go." },
+        { "name": "-Days is honoured remotely",
+          "cmd": "rm -rf /srv/logs/app/*; cp -a /opt/dojo/state/srvlogs/. /srv/logs/app/; timeout 60 pwsh -NoProfile -NonInteractive -File ~/scripts/clean-remote.ps1 -Days 10 >/dev/null 2>&1; ls /srv/logs/app | tr '\\n' ' '; rm -rf /srv/logs/app/*; cp -a /opt/dojo/state/srvlogs/. /srv/logs/app/",
+          "expectOutput": "api-1.log worker.log",
+          "fail": "With `-Days 10`, `api-1.log` and `worker.log` should be all that is left." }
+      ],
+      "hints": [
+        "The script block runs on the servers, in a new session. What are `$Days` and `$DryRun` there?",
+        "Both are `$null` remotely: `AddDays(-$null)` is *now* (so every file is \"old\"), and `-WhatIf:$null` means \"not a dry run\". Use `$using:`.",
+        "Before `Invoke-Command`: `$whatIf = $DryRun.IsPresent`. Inside: `AddDays(-$using:Days)` and `Remove-Item -WhatIf:$using:whatIf`."
+      ],
+      "solution": [
+        "Get-Content ~/scripts/clean-remote.ps1",
+        "@'",
+        "# clean-remote.ps1: deletes old app logs on every web server. -DryRun shows what would go.",
+        "[CmdletBinding()]",
+        "param(",
+        "    [string[]] $Server = @('web01', 'web02'),",
+        "    [ValidateRange(1, 3650)] [int] $Days = 30,",
+        "    [switch] $DryRun",
+        ")",
+        "$whatIf = $DryRun.IsPresent",
+        "Invoke-Command -HostName $Server -UserName learner -ScriptBlock {",
+        "    Set-StrictMode -Version Latest",
+        "    Get-ChildItem -Path /srv/logs/app -File |",
+        "        Where-Object LastWriteTime -lt (Get-Date).AddDays(-$using:Days) |",
+        "        Remove-Item -WhatIf:$using:whatIf -Verbose",
+        "}",
+        "'@ | Set-Content ~/scripts/clean-remote.ps1",
+        "pwsh -File ~/scripts/clean-remote.ps1 -DryRun",
+        "Get-ChildItem /srv/logs/app"
+      ],
+      "explain": [
+        "Two missing `$using:` turned a preview into a wipe. The habits that would each have stopped it: `Set-StrictMode",
+        "-Version Latest` *inside* the remote block (reading an unset `$Days` throws), a dry run whose output you read before",
+        "the real run (it listed every file, today's included), and a Pester test that runs the script with `-DryRun` and",
+        "asserts nothing was removed."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Half the pages failed to warm",
+      "prompt": [
+        "Run `pwsh -File ~/scripts/warm-cache.ps1`. It requests 30 pages in parallel and reports how many failed. Find out why",
+        "they fail (call one URL yourself with 30 others in flight, or look at the status code of a failure), then fix the",
+        "script so it prints **`warmed 30, failed 0`** in under 15 seconds. The API allows 8 concurrent requests."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "warmed 30, failed 0, quickly",
+          "cmd": "s=$(date +%s); out=$(timeout 40 pwsh -NoProfile -NonInteractive -File ~/scripts/warm-cache.ps1 2>&1 | tr -d '\\r'); t=$(( $(date +%s) - s )); echo \"$out (${t}s)\"; test \"$out\" = 'warmed 30, failed 0' && test $t -lt 15",
+          "fail": "The script should print `warmed 30, failed 0` and take less than 15 seconds." }
+      ],
+      "hints": [
+        "Change the `catch` to print `$_.Exception.Response.StatusCode` once: the failures are `429 Too Many Requests`.",
+        "`-ThrottleLimit 30` sends all 30 at once; the API allows 8. Lower it (6 to 8).",
+        "For safety, also let each call retry: `Invoke-RestMethod -Uri $_ -TimeoutSec 5 -MaximumRetryCount 3 -RetryIntervalSec 1`."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/warm-cache.ps1",
+        "(Get-Content ~/scripts/warm-cache.ps1 -Raw).Replace('-ThrottleLimit 30', '-ThrottleLimit 6').Replace('-TimeoutSec 5;', '-TimeoutSec 5 -MaximumRetryCount 3 -RetryIntervalSec 1;') | Set-Content ~/scripts/warm-cache.ps1 -NoNewline",
+        "pwsh -File ~/scripts/warm-cache.ps1"
+      ],
+      "explain": "More threads is not more speed once the other side says no. A 429 (with its `Retry-After` header) is the server telling you its limit; respect it with a throttle below the limit and retries for the occasional rejection. Against shared production services, agree the limit with the team that runs them."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "There are currently no extension vaults registered",
+      "prompt": [
+        "Run `pwsh -File ~/scripts/ci-ticket-count.ps1`. It works on the admin's laptop, where a vault holds `OpsApiToken`;",
+        "this machine is like a CI agent: **no vault**. CI systems hand secrets to jobs as **environment variables** (masked in",
+        "the logs).",
+        "",
+        "Change the script so that:",
+        "",
+        "- when **`$env:OPS_API_TOKEN`** is set, it uses that (and does not touch SecretManagement);",
+        "- otherwise it uses `Get-Secret -Name OpsApiToken`;",
+        "- when neither works, it stops with a clear error that mentions **`OPS_API_TOKEN`**, and exits non-zero.",
+        "",
+        "Test it with `$env:OPS_API_TOKEN = Get-Content /opt/dojo/state/api-token` (in a real pipeline, the secret variable does this)."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "works with OPS_API_TOKEN",
+          "cmd": "OPS_API_TOKEN=$(cat /opt/dojo/state/api-token) pwsh -NoProfile -NonInteractive -File ~/scripts/ci-ticket-count.ps1 2>&1",
+          "expectOutput": "tickets: 47",
+          "fail": "With `OPS_API_TOKEN` set, the script should print `tickets: 47`." },
+        { "name": "a clear error without it",
+          "cmd": "out=$(env -u OPS_API_TOKEN pwsh -NoProfile -NonInteractive -File ~/scripts/ci-ticket-count.ps1 2>&1); rc=$?; echo \"$out\" | tail -n 3; test $rc -ne 0 && echo \"$out\" | grep -q OPS_API_TOKEN",
+          "fail": "Without the variable and without a vault, the script must exit non-zero with a message that mentions `OPS_API_TOKEN`." },
+        { "name": "no token in the script",
+          "cmd": "! grep -q 'dojo-tk-' ~/scripts/ci-ticket-count.ps1",
+          "fail": "Never paste the token into the script." }
+      ],
+      "hints": [
+        "`if ($env:OPS_API_TOKEN) { $token = $env:OPS_API_TOKEN } else { ... }`",
+        "In the `else`: `try { $token = Get-Secret -Name OpsApiToken -AsPlainText } catch { throw \"No API token: set OPS_API_TOKEN or store OpsApiToken with Set-Secret ($($_.Exception.Message))\" }`.",
+        "Replace the `$token = Get-Secret ...` line with that block."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/ci-ticket-count.ps1",
+        "$old = '$token = Get-Secret -Name OpsApiToken -AsPlainText'",
+        "$new = @'",
+        "if ($env:OPS_API_TOKEN) {",
+        "    $token = $env:OPS_API_TOKEN",
+        "}",
+        "else {",
+        "    try { $token = Get-Secret -Name OpsApiToken -AsPlainText }",
+        "    catch { throw \"No API token: set the OPS_API_TOKEN variable (CI) or store OpsApiToken with Set-Secret. ($($_.Exception.Message))\" }",
+        "}",
+        "'@",
+        "(Get-Content ~/scripts/ci-ticket-count.ps1 -Raw).Replace($old, $new.TrimEnd()) | Set-Content ~/scripts/ci-ticket-count.ps1 -NoNewline",
+        "pwsh -File ~/scripts/ci-ticket-count.ps1",
+        "$env:OPS_API_TOKEN = Get-Content /opt/dojo/state/api-token",
+        "pwsh -File ~/scripts/ci-ticket-count.ps1",
+        "Remove-Item Env:OPS_API_TOKEN"
+      ],
+      "explain": [
+        "One script, two worlds: interactive machines with a vault, pipelines with injected variables. The error message is",
+        "part of the fix: the next person to see it learns what to configure instead of reading SecretManagement's",
+        "internals. Never `Write-Output` the token to check it: pipelines mask known secrets in logs, but only exact matches."
+      ]
+    }
+  ]
+}
