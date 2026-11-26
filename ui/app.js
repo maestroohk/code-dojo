@@ -14,6 +14,7 @@ import { archBuildLab } from './lab-archbuild.js';
 import { composeBuildLab } from './lab-composebuild.js';
 import { kubeBuildLab } from './lab-kubebuild.js';
 import { pipeBuildLab } from './lab-pipebuild.js';
+import { msgBuildLab } from './lab-msgbuild.js';
 import { vimLab } from './lab-vim.js';
 import { workbench } from './workbench.js';
 import { netLabs } from './netlabs.js';
@@ -170,6 +171,8 @@ const LABS = [
     text: 'Ingress, Services, Deployments, probes, ConfigMaps, Secrets and claims. Send requests from outside, roll out a broken release, delete pods: no endpoints, 502, CrashLoopBackOff, explained. Eleven challenges.' },
   { id: 'pipebuild', icon: '⛓', title: 'Pipeline builder', category: 'CI/CD',
     text: 'Jobs, needs, artifacts, caches, a matrix, environments with approvals and secrets. Run it for a push, a pull request or a fork and watch the timeline. Generates the GitHub Actions YAML. Ten challenges.' },
+  { id: 'msgbuild', icon: '📨', title: 'Messaging builder', category: 'Messaging',
+    text: 'RabbitMQ and Kafka on one board: exchanges, bindings, acks, dead-letter queues and restarts; partitions, keys, replicas, consumer groups, offsets and lag. Every message animated, every decision explained. Eleven challenges each.' },
   { id: 'vim', icon: '⌨', title: 'Vim & nano trainer', category: 'Linux',
     text: 'A real Vim emulator with 36 keystroke-golf challenges, from "how do I quit?" to text objects, dot-repeat and :%s. Plus nano basics, a cheat sheet and free practice.' },
   { id: 'code', icon: '▶', title: 'Code in motion', category: 'Foundations',
@@ -361,7 +364,7 @@ function linqLab(lab) {
   pick(LINQ_PRESETS[0]);
 }
 
-function labsView(id) {
+function labsView(id, sub) {
   if (!id) {
     return page('labs',
       h('section.hero', h('div', h('div.eyebrow', 'Labs'), h('h1', 'Build it, break it, see why'),
@@ -394,6 +397,7 @@ function labsView(id) {
     leave = id === 'netbuild' ? netBuildLab(host, solved) : archBuildLab(host, solved);
     return;
   }
+  if (id === 'msgbuild') { const host = h('div'); page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'), h('div.track-head', h('div', h('h2.track-title', `${lab.icon} ${lab.title}`), h('p.muted', 'Build a messaging setup as a diagram, send messages through it, and read why each one landed, waited, retried or got lost.'))), host); leave = msgBuildLab(host, (xp, title) => toast(h('div', h('b', `+${xp} XP`), ` · solved "${title}"`), 'gold'), sub); return; }
   if (id === 'composebuild' || id === 'kubebuild' || id === 'pipebuild') {
     const host = h('div');
     page('labs', h('a.back-link', { href: '#/labs' }, '← All labs'),
@@ -1254,7 +1258,7 @@ function route() {
   switch (parts[0]) {
     case undefined: if (shouldWelcome()) { location.replace('#/welcome'); return; } return home();
     case 'track': return trackView(parts[1]);
-    case 'labs': if (parts[1] === 'net' || parts[1] === 'linux') { leave = netLabs(page, parts[2], parts[1]); return; } return labsView(parts[1]);
+    case 'labs': if (parts[1] === 'net' || parts[1] === 'linux') { leave = netLabs(page, parts[2], parts[1]); return; } return labsView(parts[1], parts[2]);
     case 'workbench': leave = workbench(page); return;
     case 'spaces': leave = codeSpaces(page, parts[1]); return;
     case 'features': return featuresView(page);

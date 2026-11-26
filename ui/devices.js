@@ -63,6 +63,24 @@ const ART = {
     <path d="M6 66 H114" ${L}/>`,
   artifact: `<path d="M60 8 L96 22 V56 L60 70 L24 56 V22 Z" ${B}/><path d="M24 22 L60 36 L96 22 M60 36 V70" ${L}/><path d="M42 15 L78 29 V38" ${L}/>`,
   box: `<rect x="20" y="12" width="80" height="52" rx="6" ${B}/><rect x="26" y="18" width="68" height="40" rx="3" ${F}/>`,
+  // messaging (lab-msgbuild.js): app servers that publish or consume, a broker node, an exchange, a queue's trays, a partition log
+  producerapp: `<rect x="8" y="10" width="66" height="56" rx="5" ${B}/><rect x="14" y="16" width="54" height="11" rx="2" ${F}/><rect x="14" y="32" width="54" height="11" rx="2" ${F}/><rect x="14" y="48" width="54" height="11" rx="2" ${F}/>
+    <circle cx="61" cy="21.5" r="2.4" ${A}/><circle cx="61" cy="37.5" r="2.4" ${A}/><circle cx="61" cy="53.5" r="2.4" ${D}/><path d="M19 21.5 H44 M19 37.5 H38 M19 53.5 H42" ${L}/>
+    <path d="M76 38 H84" ${L} stroke-width="2.4" stroke-linecap="round"/><rect x="86" y="28" width="28" height="20" rx="2.5" ${A}/><path d="M87 29.5 L100 40 L113 29.5" ${L}/>`,
+  consumerapp: `<rect x="4" y="28" width="28" height="20" rx="2.5" ${A}/><path d="M5 29.5 L18 40 L31 29.5" ${L}/><path d="M34 38 H44" ${L} stroke-width="2.4" stroke-linecap="round"/>
+    <rect x="46" y="10" width="68" height="56" rx="5" ${B}/><rect x="52" y="16" width="56" height="44" rx="3" ${F}/>
+    <path d="M80 23 V28 M80 48 V53 M65 38 H70 M90 38 H95 M69.5 27.5 L73 31 M87 45 L90.5 48.5 M69.5 48.5 L73 45 M87 31 L90.5 27.5" ${L} stroke-width="3.2" stroke-linecap="round"/>
+    <circle cx="80" cy="38" r="9.5" ${B}/><circle cx="80" cy="38" r="3.6" ${A}/>`,
+  broker: `<rect x="24" y="3" width="72" height="70" rx="5" ${B}/>
+    ${[0, 1, 2].map(i => `<rect x="30" y="${9 + i * 21}" width="60" height="16" rx="2" ${F}/><path d="M35 ${15 + i * 21} H62 M35 ${20 + i * 21} H54" ${L}/><circle cx="82" cy="${17 + i * 21}" r="2.6" ${i === 2 ? D : A}/>`).join('')}`,
+  exchange: `<path d="M4 38 H30" ${L} stroke-width="2.6" stroke-linecap="round"/><path d="M24 32 L31 38 L24 44" ${L} stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="32" y="20" width="40" height="36" rx="8" ${B}/><circle cx="52" cy="38" r="9" ${F}/><path d="M47 38 H57 M53 34 L57 38 L53 42" ${L} stroke-width="1.8"/>
+    <path d="M72 30 L100 12 M72 38 H104 M72 46 L100 64" ${L} stroke-width="2.4" stroke-linecap="round"/><circle cx="102" cy="11" r="5" ${A}/><circle cx="108" cy="38" r="5" ${A}/><circle cx="102" cy="65" r="5" ${A}/>`,
+  tray: `${[0, 1, 2].map(i => `<path d="M${12 + i * 5} ${52 - i * 17} H${108 - i * 5} L${104 - i * 5} ${66 - i * 17} H${16 + i * 5} Z" ${B}/>
+    <rect x="${24 + i * 5}" y="${48 - i * 17}" width="20" height="12" rx="1.5" ${i === 2 ? A : F}/><rect x="${48 + i * 5}" y="${48 - i * 17}" width="20" height="12" rx="1.5" ${i === 0 ? D : F}/>`).join('')}
+    <path d="M110 59 H118 M114 55 L118 59 L114 63" ${L} stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
+  log: `${[0, 1, 2].map(i => `<rect x="4" y="${8 + i * 21}" width="100" height="16" rx="3" ${B}/>${Array.from({ length: 6 - i }, (_, j) => `<rect x="${8 + j * 13}" y="${11 + i * 21}" width="10" height="10" rx="1.5" ${j === 5 - i ? A : D}/>`).join('')}`).join('')}
+    <path d="M108 16 H116 M108 37 H116 M108 58 H116" ${L} stroke-width="2" stroke-dasharray="2 3"/>`,
 };
 
 export const ARTS = Object.keys(ART);
