@@ -34,7 +34,7 @@ RUN useradd -m -s /bin/bash -G sudo learner \
  && git config --system pull.rebase false \
  && mkdir -p /opt/dojo/files
 
-COPY dojo-editor dojo-bashrc /usr/local/lib/dojo/
+COPY dojo-editor dojo-bashrc dojo-linerc /usr/local/lib/dojo/
 RUN sed -i 's/\r$//' /usr/local/lib/dojo/* \
  && install -m 755 /usr/local/lib/dojo/dojo-editor /usr/local/bin/dojo-editor \
  && for home in /root /home/learner; do echo '. /usr/local/lib/dojo/dojo-bashrc' >> $home/.bashrc; done

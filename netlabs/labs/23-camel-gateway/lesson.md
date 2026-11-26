@@ -31,7 +31,7 @@ Everything you edit is on **ops**, in `/work`:
 /work/logs/gateway-access.log          every request the gateway proxied
 ```
 
-The in-page terminal is line based, so full-screen editors (`nano`, `vim`) cannot draw in it. Edit with commands instead, on a copy, and write the result back **in place** (Camel watches the folder, and `sed -i` there would make it load sed's temporary file as a second route file: `duplicate route id`):
+The in-page terminal is line based, so full-screen editors cannot draw in it: `nano file` or `vim file` (or **Open file…** under the terminal) opens the file in an editor on the page, with YAML highlighting, and **Save** writes it back **in place**, which is what Camel's reload needs. To edit with commands instead, work on a copy and write the result back **in place** (Camel watches the folder, and `sed -i` there would make it load sed's temporary file as a second route file: `duplicate route id`):
 
 ```
 cd /work/camel/routes

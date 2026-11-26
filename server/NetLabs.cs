@@ -200,7 +200,8 @@ public sealed partial class NetLabs
     }
 
     /// <summary>Run docker with an argument list. Never throws; 124 = timed out, 127 = docker not found.</summary>
-    public static async Task<Result> Docker(IEnumerable<string> args, TimeSpan timeout, IDictionary<string, string>? env = null, Action<string>? onLine = null)
+    public static async Task<Result> Docker(IEnumerable<string> args, TimeSpan timeout, IDictionary<string, string>? env = null, Action<string>? onLine = null,
+        byte[]? input = null)
     {
         var psi = new ProcessStartInfo("docker")
         {
@@ -215,9 +216,16 @@ public sealed partial class NetLabs
         catch (Win32Exception) { return new(127, "", "docker was not found. Install Docker Desktop."); }
         using (p)
         {
-            p.StandardInput.Close();
             var stdout = new StringBuilder();
             var stderr = new StringBuilder();
+            // stdin: the bytes given (docker exec -i ... reads them), else closed at once.
+            if (input is null) p.StandardInput.Close();
+            else _ = Task.Run(async () =>
+            {
+                try { await p.StandardInput.BaseStream.WriteAsync(input); await p.StandardInput.BaseStream.FlushAsync(); }
+                catch (Exception e) when (e is IOException or ObjectDisposedException) { }
+                finally { try { p.StandardInput.Close(); } catch (Exception e) when (e is IOException or ObjectDisposedException) { } }
+            });
             async Task Pump(StreamReader r, StringBuilder sb)
             {
                 while (await r.ReadLineAsync() is { } line)
@@ -285,7 +293,8 @@ public sealed partial class NetLabs
     DockerImage? _toolbox;
     DockerImage ToolboxImage => _toolbox ??= new DockerImage(Toolbox, _imageDir);
 
-    public Task<bool> ImageReady() => ToolboxImage.Ready();
+    /// <summary>Built and current; an outdated image starts rebuilding in the background (DockerImage.Usable).</summary>
+    public Task<bool> ImageReady() => ToolboxImage.Usable();
     public string BuildState => ToolboxImage.State;   // idle | building | done | failed
     public object BuildInfo() => ToolboxImage.Info();
     public bool StartBuild() => ToolboxImage.StartBuild();
@@ -297,7 +306,10 @@ public sealed partial class NetLabs
     public async Task<(bool Ok, string Msg)> Start(Lab lab)
     {
         if (!(await Status(fresh: true)).Ok) return (false, _status!.Message);
-        if (!await ImageReady()) return (false, "The lab tools image is not built yet. Press \"Build the tools image\" first.");
+        if (!await ImageReady())
+            return (false, ToolboxImage.Outdated
+                ? "The lab tools image is being updated (its files changed since it was built). Wait until the banner above clears, then start the lab."
+                : "The lab tools image is not built yet. Press \"Build the tools image\" first.");
         var gate = LabLock(lab);
         if (!await gate.WaitAsync(0)) return (false, "This lab is already starting or stopping.");
         try
@@ -529,8 +541,35 @@ public sealed partial class NetLabs
 
     // ---------------------------------------------------------------- in-page terminal
 
-    // Prefer a real pty inside the container (prompt, Ctrl+C, line editing); fall back to plain bash -i.
-    public const string ShellBoot = "if command -v script >/dev/null 2>&1; then exec script -qfc 'stty cols 160 rows 40 -echoctl 2>/dev/null; exec bash -i' /dev/null; else exec bash -i; fi";
+    /// <summary>
+    /// Starts the in-page terminal's shell (run as `sh -c ShellBoot`). A real pty inside the container when `script` is
+    /// there (prompt, Ctrl+C, line editing), else the shell as it is. bash when the image has it, else sh (Alpine, BusyBox).
+    /// With DOJO_RC in the environment (the live labs send the stand-ins of netlabs/images/shell/dojo-linerc that way, so
+    /// any image works, with nothing baked in), it is written to /tmp and read as bash's --rcfile or sh's $ENV; it is
+    /// taken out of the environment again, so `env` in a lab shows nothing extra.
+    /// </summary>
+    public const string ShellBoot =
+        "rc=; if [ -n \"${DOJO_RC:-}\" ]; then rc=/tmp/.dojo-rc-$(id -u); printf '%s\\n' \"$DOJO_RC\" > \"$rc\" 2>/dev/null || rc=; fi; unset DOJO_RC; " +
+        "if command -v bash >/dev/null 2>&1; then if [ -n \"$rc\" ]; then s=\"bash --rcfile $rc -i\"; else s='bash -i'; fi; " +
+        "else s='sh -i'; if [ -n \"$rc\" ]; then ENV=$rc; export ENV; fi; fi; " +
+        "if command -v script >/dev/null 2>&1; then exec script -qfc \"stty cols 160 rows 40 -echoctl 2>/dev/null; exec $s\" /dev/null; else exec $s; fi";
+
+    /// <summary>Environment for a line-based terminal: no pagers, and full-screen editors open the page's editor.</summary>
+    public static readonly string[] LineTermEnv =
+        ["TERM=xterm-256color", "DOJO_LINE_TERM=1", "DOJO_EDITOR=page", "PAGER=cat", "GIT_PAGER=cat", "MANPAGER=cat", "SYSTEMD_PAGER="];
+
+    /// <summary>
+    /// The rc a live-lab shell starts with: the host's own bash setup (its prompt), then the shared stand-ins
+    /// (netlabs/images/shell/dojo-linerc, the same file terminal steps use). Read on every terminal, so edits apply at once.
+    /// </summary>
+    public string LabRc()
+    {
+        var file = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(_imageDir))!, "shell", "dojo-linerc");
+        var standins = File.Exists(file) ? File.ReadAllText(file).Replace("\r", "") : "";
+        return "if [ -n \"${BASH_VERSION:-}\" ]; then [ -f /etc/bash.bashrc ] && . /etc/bash.bashrc; [ -f ~/.bashrc ] && . ~/.bashrc; fi\n" + standins;
+    }
+
+    public const string LabWorkdir = "/root";
 
     public async Task Terminal(HttpContext ctx, Lab lab, string node)
     {
@@ -544,7 +583,10 @@ public sealed partial class NetLabs
             await ws.CloseAsync(WebSocketCloseStatus.PolicyViolation, "too many", default);
             return;
         }
-        try { await Bridge(ctx, ws, ["exec", "-i", "-e", "TERM=xterm-256color", "-w", "/root", lab.Container(node), "sh", "-c", ShellBoot]); }
+        var args = new List<string> { "exec", "-i", "-w", LabWorkdir };
+        foreach (var e in LineTermEnv.Append("DOJO_RC=" + LabRc())) { args.Add("-e"); args.Add(e); }
+        args.AddRange([lab.Container(node), "sh", "-c", ShellBoot]);
+        try { await Bridge(ctx, ws, args); }
         finally { Interlocked.Decrement(ref _terminals); }
     }
 
@@ -629,6 +671,16 @@ public sealed partial class NetLabs
     // ---------------------------------------------------------------- HTTP endpoints
 
     public record TaskRequest(string? Task, string? Value, int? N);
+    public record FileRequest(string? Node, string? Path, string? Text, string? Eol, string? Hash, bool? Root);
+
+    static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
+
+    /// <summary>The page editor's answers (ui/fileedit.js), shared with TermSteps.cs.</summary>
+    public static IResult FileReply(ContainerFiles.ReadResult r) =>
+        Results.Json(new { ok = r.Ok, state = r.State, msg = r.Message, path = r.Path, text = r.Text, eol = r.Eol, hash = r.Hash }, WebJson);
+
+    public static IResult FileReply(ContainerFiles.WriteResult r) =>
+        Results.Json(new { ok = r.Ok, state = r.State, msg = r.Message, hash = r.Hash }, WebJson);
 
     /// <summary>Wire every live-lab endpoint. Called once from Program.cs.</summary>
     public static NetLabs Map(WebApplication app, string root, string stateDir)
@@ -675,6 +727,21 @@ public sealed partial class NetLabs
                     : await labs.CheckAnswer(lab, task, req!.Value)), json),
                 "hint" => Results.Json(labs.Hints(lab, task, req!.N ?? 1), json),
                 "solution" => Results.Json(labs.Solution(lab, task), json),
+                _ => Results.NotFound(),
+            };
+        });
+
+        // The page's file editor (ui/fileedit.js): `nano file` / `vim file` in a lab terminal, or its Open file button.
+        // As the container's own user (the one the terminal runs as), or as root for sudoedit / "save as root".
+        app.MapPost("/api/netlabs/{id}/file/{op}", async (string id, string op, FileRequest req) =>
+        {
+            if (labs.FindLab(id) is not { } lab || !lab.HasNode(req.Node)) return Results.NotFound();
+            if (!await labs.IsRunning(lab)) return Results.Json(new { ok = false, state = "gone", msg = "The lab is not running. Start it first." }, json);
+            var user = req.Root == true ? "0" : null;
+            return op switch
+            {
+                "read" => FileReply(await ContainerFiles.Read(lab.Container(req.Node!), user, LabWorkdir, req.Path ?? "")),
+                "write" => FileReply(await ContainerFiles.Write(lab.Container(req.Node!), user, LabWorkdir, req.Path ?? "", req.Text ?? "", req.Eol, req.Hash)),
                 _ => Results.NotFound(),
             };
         });

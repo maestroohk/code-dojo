@@ -333,7 +333,16 @@ The machine: Debian 13 (trixie) slim with `git` 2.47 (identity "Dojo Learner", d
 `curl`, `jq`, `rg` (ripgrep), `fd`, `tree`, `procps`, `iproute2`, `lsof`, `strace`, `sysstat`, `psmisc`, `file`, `unzip`,
 `python3`, `sqlite3`, `man`, `tmux`, `ssh`, `dig`, `make`, `shellcheck`, `crontab` (it checks the syntax on install), `systemd-analyze`
 (`calendar` and `verify` work offline; there is no running systemd or journald), `setfacl`/`getfacl`, `column`, a learner user with password-less `sudo`, and a prompt with the Git branch. The
-dockerfile is `netlabs/images/shell/Dockerfile`.
+dockerfile is `netlabs/images/shell/Dockerfile`. Images under `netlabs/images` carry a label with a hash of their folder
+(`code-dojo.context`, server/DockerImage.cs): change the Dockerfile or any file it copies and the image is rebuilt in the
+background the next time it is used (Docker's layer cache keeps that quick).
+
+**Live labs** (`netlabs/labs/<id>/`) use the same line-based terminal on hosts of any image (the toolbox, or public
+images such as Alpine-based ones with only BusyBox `sh`). Nothing has to be baked into a lab's image: each terminal
+starts with the stand-ins of `dojo-linerc` (sent along by server/NetLabs.cs, read as bash's `--rcfile` after the host's
+own `~/.bashrc`, or as `$ENV` for `sh`), with `PAGER=cat`, `GIT_PAGER=cat`, `MANPAGER=cat` and `SYSTEMD_PAGER=` set. So
+`nano /etc/hosts` opens the page editor there too, as the container's own user (`sudoedit`, or the editor's "as root"
+box, saves as root). Files in the read-only `/lab` mount cannot be saved; say so in the lesson if learners edit there.
 
 Writing good scenarios:
 
@@ -346,8 +355,13 @@ Writing good scenarios:
   --format=%s`, `git status --porcelain`). Then any correct way passes.
 - Answers that are files under the home folder (`~/answers/requests.txt`) make "what is the number?" questions checkable.
 - The in-page terminal is line based: full-screen programs (`vim`, `nano`, `less`, `top`, `tmux`) do not draw in it.
-  In the dojo shell they print a short note instead (`less` and `man` print plain text), and Git never opens an
-  editor (a prepared message is kept; a plain `git commit` asks for `-m`). Write prompts whose edits are commands:
+  Stand-ins take their place (`netlabs/images/shell/dojo-linerc`, shared with the live labs): `nano FILE`, `vim FILE`,
+  `vi FILE`, `sudoedit FILE` (and `sudo nano FILE`) open FILE in an **editor on the page** (Save writes it back into the
+  container, keeping its owner and permissions; the terminal's **Open file…** button does the same for any path);
+  `less`, `more`, `man` and every pager print plain text; `top` prints one snapshot; `crontab -e` explains the pipe
+  method; `tmux` prints a note. Git never opens an
+  editor (a prepared message is kept; a plain `git commit` asks for `-m`). Prompts may say "edit the file", but checks
+  must not depend on the editor: prefer edits any tool can make, and teach the commands too:
   `sed -i`, `cat > file <<'EOF'`, `git checkout --ours`, real Vim in Ex mode (`vim -es -c '%s/a/b/g' -c x file` runs; plain
   `vim` does not), and `GIT_SEQUENCE_EDITOR=:` (or a `sed -i` on the todo list) for `git rebase -i`. `git add -p` works:
   its questions are line based. Keystroke practice for Vim and nano belongs in the trainer: a `lab` step with `"lab": "vim"`.

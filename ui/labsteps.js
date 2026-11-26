@@ -116,6 +116,8 @@ export function terminalStep(step, ctx) {
     term?.close();
     term = terminal('step', 'dojo', {
       url: termUrl, label: 'Terminal for this step',
+      // nano / vim FILE (and the Open file… button) edit the file in an editor on the page, as learner or root.
+      files: { host: 'your machine', call: (op, body) => api(`termstep/file/${op}`, { ...where, ...body }) },
       onKey: e => {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); ctx.submit(); return true; }
         return e.key === 'Tab';   // let Tab move focus: no completion in a line terminal, and no keyboard trap
