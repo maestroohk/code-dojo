@@ -137,6 +137,14 @@ public static class Interleave
             result["threads"] = new JsonArray((r.Threads ?? []).Select(t => (JsonNode)JsonValue.Create(t.Name ?? "")!).ToArray());
             result["watchNames"] = new JsonArray(built.WatchNames.Select(n => (JsonNode)JsonValue.Create(n)!).ToArray());
             result["diagnostics"] = JsonSerializer.SerializeToNode(diags.Where(d => d.Severity != "error"), JsonOpts);
+            // The program numbers threads T0, T1...; say it with the names the lesson gave them.
+            var names = (r.Threads ?? []).Select((t, i) => t.Name ?? $"T{i + 1}").ToList();
+            string Named(string s) => System.Text.RegularExpressions.Regex.Replace(s, @"\bT(\d+)\b",
+                m => int.TryParse(m.Groups[1].Value, out var i) && i < names.Count ? names[i] : m.Value);
+            foreach (var key in new[] { "deadlock", "outcome" })
+                if ((string?)result[key] is { } text) result[key] = Named(text);
+            foreach (var o in (result["outcomes"] as JsonArray ?? []).OfType<JsonObject>())
+                if ((string?)o["outcome"] is { } text) o["outcome"] = Named(text);
             return result;
         }
         finally { Done(built); }
@@ -181,8 +189,10 @@ public static class Interleave
             var how = complete && bound is null ? $"all {runs} interleavings"
                 : complete ? $"all {runs} interleavings with up to {bound} preemptions"
                 : $"{runs} interleavings (a sample: there are too many to try them all)";
-            var result = (string?)sc["result"] ?? "the result";
-            var name = (title is null ? "" : title + ": ") + (expect.Count == 1 ? $"`{result}` is {expect[0]} in {how}" : $"`{result}` is one of {string.Join(", ", expect)} in {how}");
+            var resultText = (string?)sc["result"];
+            var result = (string?)sc["resultLabel"]
+                ?? (resultText is null || resultText.StartsWith('$') ? "the result" : $"`{resultText}`");   // an interpolated string reads badly
+            var name = (title is null ? "" : title + ": ") + (expect.Count == 1 ? $"{result} is {expect[0]} in {how}" : $"{result} is one of {string.Join(", ", expect)} in {how}");
             var bad = outcomes.FirstOrDefault(o => !expect.Contains((string?)o["outcome"] ?? ""));
             if (bad is null) { results.Add(new(name, true, "")); continue; }
 
@@ -195,6 +205,7 @@ public static class Interleave
                 + "\n\u0002interleave:" + JsonSerializer.Serialize(new
                 {
                     setup = req.Setup, threads = req.Threads, code = req.Code, watch = req.Watch, result = req.Result, schedule, expect,
+                    resultLabel = (string?)sc["resultLabel"],
                 }, JsonOpts);
             results.Add(new(name, false, detail));
         }

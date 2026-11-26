@@ -37,7 +37,8 @@ public class InterleaveTests
         var r = await Interleave.Run(Runner, req);
         Assert.Equal("deadlock", (string?)r["status"]);
         Assert.Equal([0, 1], (r["chosen"] as JsonArray)!.Select(x => (int)x!).Take(2));
-        Assert.Contains("T0 holds a and waits for b", (string?)r["deadlock"]);
+        Assert.Contains("T1 holds a and waits for b", (string?)r["deadlock"]);   // named as the lesson names its threads
+        Assert.Contains("T2 holds b and waits for a", (string?)r["deadlock"]);
         // every step records who could run next and which lock each thread needs
         var last = (r["steps"] as JsonArray)!.OfType<JsonObject>().Last();
         Assert.All(last["s"]!.AsArray(), s => Assert.Equal(1, (int)s![0]!));   // both blocked

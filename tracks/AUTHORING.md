@@ -128,6 +128,7 @@ the search falls back to "up to 2 preemptions", as CHESS and Coyote do. It canno
   "code": ["class Counter { ... }"],                 // optional types and methods the threads call (also instrumented)
   "watch": ["count"],                                // optional; default: the setup locals that are not lock objects
   "result": "count", "expect": "2",                  // the outcome shown at the end; expect colours good and bad outcomes
+  "resultLabel": "the count",                        // optional words for the result (use it when result is $"..." text)
   "schedules": [ { "name": "Lost update", "pick": [0, 1, 0, 1], "expect": "1" } ],   // presets: thread index per step
   "outcomes": ["1", "2"]                             // optional: dojo validate checks exploring finds exactly these
 }

@@ -35,6 +35,9 @@ export function interleaveCard(spec, opts = {}) {
     threads: (spec.threads || []).map((t, i) => ({ name: t.name || `T${i + 1}`, code: text(t.code) })),
   };
   const expect = spec.expect == null ? null : [].concat(spec.expect).map(String);
+  // "count = 1", or "the balances of a and b: 95 105" when the result is an interpolated string.
+  const labelled = outcome => spec.resultLabel ? h('span', `${spec.resultLabel}: `, h('code', outcome))
+    : src.result && !src.result.startsWith('$') ? h('code', `${src.result} = ${outcome}`) : h('code', outcome);
   const presets = [{ name: 'Default: a thread runs until it blocks or ends', pick: [] }, ...(spec.schedules || [])];
   let schedule = opts.schedule || presets[spec.schedules?.length && spec.start != null ? spec.start + 1 : 0].pick || [];
   let data = null, at = 0, timer = null, speed = 700, explored = null, busy = false;
@@ -150,16 +153,17 @@ export function interleaveCard(spec, opts = {}) {
 
   function paintTimeline(n) {
     const steps = data.steps;
-    const cols = `var(--il-label) repeat(${Math.max(steps.length, 1)}, var(--il-col))`;
+    const cols = `var(--il-label) repeat(${Math.max(steps.length, 1) + (data.status === 'deadlock' ? 1 : 0)}, var(--il-col))`;
     const row = (cls, label, cells, extra = '') => h(`div.il-row.${cls}`, { style: `grid-template-columns:${cols};${extra}` }, h('div.il-label', label), cells);
     const col = (i, span = 1) => ({ gridColumn: `${i + 2} / span ${span}` });
     const cell = (i, cls, content, title, span = 1) => {
-      const el = h(`div.il-cell.${cls}${i >= at ? '.future' : ''}${i === at - 1 ? '.cur' : ''}`, { title, onclick: () => { pause(); go(i + 1); } }, content);
+      const el = h(`div.il-cell.${cls}${i >= at && at < steps.length ? '.future' : ''}${i === at - 1 ? '.cur' : ''}`, { title, onclick: () => { pause(); go(i + 1); } }, content);
       Object.assign(el.style, col(i, span));
       return el;
     };
 
-    const axis = row('il-axis', h('span.muted.small', 'step'), steps.map((_, i) => cell(i, 'tick', (i + 1) % 5 === 0 || i === 0 ? String(i + 1) : '', `step ${i + 1}`)));
+    const axis = row('il-axis', h('span.muted.small', 'step'), steps.map((_, i) => cell(i, 'tick', (i + 1) % 5 === 0 || i === 0 ? String(i + 1) : '', `step ${i + 1}`)),
+      data.status === 'deadlock' ? cell(steps.length, 'tick', 'stuck', 'no thread can move') : null);
     const lanes = n.map((name, j) => {
       const cells = steps.map((s, i) => {
         if (s.t === j) {
@@ -171,6 +175,10 @@ export function interleaveCard(spec, opts = {}) {
         if (st[0] === 2) return cell(i, 'done', '', `${name} has finished`);
         return cell(i, 'ready', '', `${name} is ready but not running`);
       });
+      // A last column for how the run ended: still blocked (a deadlock) or finished.
+      const end = stateBefore(steps.length)[j] || [];
+      if (data.status === 'deadlock' && end[0] === 1)
+        cells.push(cell(steps.length, 'blocked.end', '', `${name} waits for ${end[4]} forever`));
       // Lock bands: the locks this lane holds after each step, drawn as spans.
       const bands = [];
       const lockNames = [...new Set(steps.flatMap(s => (s.h || []).filter(e => e[1] === 'lock').map(e => e[0])).concat((data.init?.h || []).filter(e => e[1] === 'lock').map(e => e[0])))];
@@ -305,7 +313,7 @@ export function interleaveCard(spec, opts = {}) {
     const good = data.status === 'deadlock' ? false : expect ? expect.includes(data.outcome) : null;
     outcome.replaceChildren(h(`div.il-result${good === true ? '.good' : good === false ? '.bad' : ''}`,
       h('b', data.status === 'deadlock' ? 'Deadlock. ' : data.status === 'limit' ? 'Still running. ' : 'Result: '),
-      data.status === 'deadlock' ? data.deadlock : h('code', src.result ? `${src.result} = ${data.outcome}` : data.outcome),
+      data.status === 'deadlock' ? data.deadlock : labelled(data.outcome),
       expect && data.status !== 'deadlock' ? h('span', good ? ' · as expected' : ` · expected ${expect.join(' or ')}`) : null));
   }
 
@@ -322,7 +330,7 @@ export function interleaveCard(spec, opts = {}) {
       ...outs.map(o => {
         const good = o.status === 'deadlock' ? false : expect ? expect.includes(o.outcome) : null;
         return h(`div.il-bar${good === true ? '.good' : good === false ? '.bad' : ''}`,
-          h('div.il-bar-label', h('code', o.status === 'deadlock' ? 'deadlock' : src.result ? `${src.result} = ${o.outcome}` : o.outcome)),
+          h('div.il-bar-label', o.status === 'deadlock' ? h('code', 'deadlock') : labelled(o.outcome)),
           h('div.il-bar-track', h('div.il-bar-fill', { style: `width:${Math.max(3, (100 * o.count) / total)}%` })),
           h('div.il-bar-count.small', `${o.count} of ${total}`),
           h('button.btn.ghost.small', { type: 'button', onclick: () => { schedule = o.schedule; load({ cursor: 0 }).then(play); } }, 'Show one'));
