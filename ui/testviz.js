@@ -14,6 +14,8 @@ const s = (tag, attrs = {}, ...kids) => {
   for (const k of kids.flat()) if (k != null) el.append(k instanceof Node ? k : document.createTextNode(String(k)));
   return el;
 };
+/** replaceChildren that skips the false/undefined left by cond && h(...) (the DOM would print them). */
+const put = (el, ...kids) => el.replaceChildren(...kids.flat().filter(k => k != null && k !== false && k !== ''));
 const lines = v => (Array.isArray(v) ? v.join('\n') : String(v ?? '')).replace(/\r\n/g, '\n').replace(/\n$/, '');
 
 export function testViz(spec) {
@@ -50,7 +52,7 @@ function pyramid(spec) {
   const show = key => {
     const l = LAYERS[key];
     shapes.forEach(p => p.classList.toggle('on', p.dataset.layer === key));
-    detail.replaceChildren(h('h3', l.name),
+    put(detail, h('h3', l.name),
       h('p', l.what),
       h('dl.tv-facts', h('dt', 'Speed'), h('dd', l.speed), h('dt', 'How many'), h('dd', l.count), h('dt', 'Catches'), h('dd', l.catches),
         h('dt', 'Costs'), h('dd', l.cost), h('dt', 'Tools'), h('dd', l.tools)));
@@ -78,10 +80,10 @@ function pyramid(spec) {
     s('text', { x: 150, y: 262, class: 'tv-caption', 'text-anchor': 'middle' }, 'Testing trophy'));
   const svg = s('svg', { viewBox: '0 0 620 272', class: 'tv-svg', role: 'img', 'aria-label': 'The test pyramid and the testing trophy' },
     pyr, tro,
-    s('text', { x: 310, y: 30, class: 'tv-axis', 'text-anchor': 'middle' }, 'slower, costlier'),
-    s('text', { x: 310, y: 46, class: 'tv-axis', 'text-anchor': 'middle' }, '↑'),
-    s('text', { x: 310, y: 226, class: 'tv-axis', 'text-anchor': 'middle' }, '↓'),
-    s('text', { x: 310, y: 242, class: 'tv-axis', 'text-anchor': 'middle' }, 'faster, cheaper'));
+    s('text', { x: 338, y: 30, class: 'tv-axis', 'text-anchor': 'middle' }, 'slower,'),
+    s('text', { x: 338, y: 44, class: 'tv-axis', 'text-anchor': 'middle' }, 'costlier ↑'),
+    s('text', { x: 338, y: 228, class: 'tv-axis', 'text-anchor': 'middle' }, 'faster,'),
+    s('text', { x: 338, y: 242, class: 'tv-axis', 'text-anchor': 'middle' }, 'cheaper ↓'));
   show(spec.highlight && LAYERS[spec.highlight] ? spec.highlight : 'unit');
   return h('div.testviz.tv-pyramid', h('div.tv-head', h('b', 'The pyramid and the trophy'), h('span.muted.small', 'Pick a layer.')), svg, detail);
 }
@@ -117,7 +119,7 @@ function doubles() {
   const show = key => {
     const d = DOUBLES.find(x => x.key === key);
     nodes.forEach(n => n.classList.toggle('on', n.dataset.key === key));
-    detail.replaceChildren(h('h3', d.name),
+    put(detail, h('h3', d.name),
       h('p', d.what), h('p.muted', h('b', 'Typical use: '), d.use),
       h('div.tv-two',
         h('div', h('div.field-label', 'NSubstitute'), h('pre.code', h('code', { html: highlight(d.nsub, 'csharp') }))),
@@ -134,7 +136,7 @@ function doubles() {
     const toSut = [cx + (x < cx ? -95 : x > cx ? 95 : 0), cy + (y < cy ? -30 : 30)];
     const from = [x + (x < cx ? 70 : x > cx ? -70 : 0), y + (x === cx ? (y < cy ? 18 : -18) : 0)];
     const [a, b] = d.dir === 'in' ? [from, toSut] : [toSut, from];
-    if (d.dir !== 'none') g.append(s('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1], class: `tv-arrow tv-${d.dir}`, 'marker-end': 'url(#tv-head)' }));
+    if (d.dir !== 'none') g.append(s('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1], class: `tv-arrow tv-${d.dir}`, 'marker-end': 'url(#tv-head)', 'marker-start': d.dir === 'both' ? 'url(#tv-head)' : null }));
     else g.append(s('line', { x1: from[0], y1: from[1], x2: toSut[0], y2: toSut[1], class: 'tv-arrow tv-none' }));
     const node = s('g', { class: 'tv-double', tabindex: 0, role: 'button', 'aria-label': d.name });
     node.dataset.key = d.key;
@@ -167,7 +169,7 @@ function mutation(spec) {
     marks.forEach(x => x.classList.toggle('on', x._m === m));
     const line = code[m.line - 1];
     const changed = line.replace(m.from, m.to);
-    detail.replaceChildren(
+    put(detail, 
       h('div', h(`span.tv-status.${m.status}`, STATUS[m.status][0]), ' ', h('span.muted.small', STATUS[m.status][1])),
       m.name && h('p', h('b', m.name)),
       h('pre.code.tv-diff', h('code', { html: `<span class="tv-minus">- ${esc(line.trim())}</span>\n<span class="tv-plus">+ ${esc(changed.trim())}</span>` })),
@@ -219,7 +221,7 @@ function tdd(spec) {
     const st = steps[at];
     arcs.forEach(([p, path]) => path.classList.toggle('on', p === st.phase));
     phaseText.textContent = st.phase === 'refactor' ? 'REFACTOR' : st.phase.toUpperCase();
-    list.replaceChildren(...(st.list || []).map(item => {
+    put(list, ...(st.list || []).map(item => {
       const done = /^\[x\]\s*/i.test(item), now = /^\[>\]\s*/.test(item);
       return h(`li${done ? '.done' : now ? '.now' : ''}`, item.replace(/^\[[x> ]\]\s*/i, ''));
     }));
@@ -254,7 +256,7 @@ function flaky(spec) {
     const flakyRow = fails > 0 && fails < [...t.runs].filter(c => c !== 'S').length;
     const row = h(`button.tv-frow${flakyRow ? '.flaky' : fails ? '.broken' : ''}`, { type: 'button', onclick: () => {
       rowsEls.forEach(r => r.classList.toggle('on', r === row));
-      detail.replaceChildren(h('h3', t.name),
+      put(detail, h('h3', t.name),
         h('p', flakyRow ? `Flaky: failed ${fails} of ${t.runs.length} runs with no code change.` : fails ? 'Fails every time: a real bug or a broken test, not flakiness.' : 'Passed every run.'),
         t.cause && h('div', { html: md(lines(t.cause)) }));
     } },
