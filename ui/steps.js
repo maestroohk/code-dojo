@@ -12,6 +12,7 @@ import { overTime, clock } from './pacing.js';
 import { EXTRA_STEPS, EXTRA_LABELS } from './labsteps.js';
 import { regexStep } from './regexstep.js';
 import { regexCard } from './regex-ui.js';
+import { sqlVisuals, withSqlVisuals, sqlPlanButton } from './sqlviz.js';
 
 export const DRAG_TYPES = new Set(['order', 'blanks', 'match', 'sort']);
 
@@ -28,7 +29,7 @@ export function renderStep(step, ctx) {
   if (EXTRA_STEPS[step.type]) return EXTRA_STEPS[step.type](step, ctx);
   const make = { learn, mcq, predict, order, blanks, match, sort, code, regex: regexStep }[step.type];
   if (!make) return { el: h('div.callout.warn', `Unknown step type "${step.type}".`), ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {} };
-  return make(step, ctx);
+  return withSqlVisuals(make(step, ctx), step);
 }
 
 // ---------------------------------------------------------------- learn
@@ -135,7 +136,7 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.regex && regexCard(step.regex)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.regex && regexCard(step.regex), sqlVisuals(step)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }
@@ -651,7 +652,7 @@ function code(step, ctx) {
           : 'No starter, no hints, no autocomplete, no solution to reveal. Same tests as before. Write what you remember.')),
       timer) : null;
   const promptEl = prompt(step);
-  const toolsEl = h('div.code-tools', !step.template && runBtn, step.setup && dataBtn, resetBtn, status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to check · Ctrl + Shift + F: large view'));
+  const toolsEl = h('div.code-tools', !step.template && runBtn, step.setup && dataBtn, step.setup && step.plan && sqlPlanButton(step, () => editor.value, panel), resetBtn, status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to check · Ctrl + Shift + F: large view'));
   const el = h(`div.code-step${cold ? '.cold' : ''}`,
     coldBanner,
     h('div.code-head', step.title && h('h2', step.title), step.mode === 'fix' && h('span.tag.fix', '🐞 Fix the bug'),

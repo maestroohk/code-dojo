@@ -1,0 +1,213 @@
+{
+  "title": "Paging through big tables",
+  "summary": "Why OFFSET gets slower and skips rows, and keyset pagination with a tie-breaker.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "OFFSET reads everything it skips",
+      "setup": [
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, customer TEXT NOT NULL, qty INTEGER NOT NULL, placed_at TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO orders SELECT i, i % 5 + 1, 'customer' || ((i * 7919) % 3000) || '@mail.test', i % 4 + 1, datetime('2026-09-01', '+' || (i * 6) || ' minutes', '+' || ((i * 37) % 3) || ' seconds') FROM n;",
+        "CREATE INDEX orders_placed ON orders (placed_at, id);"
+      ],
+      "body": [
+        "The box office's order list pages like this:",
+        "",
+        "```sql",
+        "SELECT id, placed_at FROM orders",
+        "ORDER BY placed_at DESC, id DESC",
+        "LIMIT 20 OFFSET 10000;     -- page 501",
+        "```",
+        "",
+        "`OFFSET 10000` does not jump anywhere: the database walks 10,020 rows in order and throws the first 10,000 away. Page 1 is fast, page 500 is slow, and the export job that walks every page does quadratic work.",
+        "",
+        "Worse, it is wrong while data changes: an order placed between two page loads shifts every row down by one, so the next page **repeats** a row; a deleted order makes it **skip** one.",
+        "",
+        "**Keyset pagination** (also called the seek method) remembers where the last page ended and asks for the rows after it. With an index on the sort columns, that is a jump to a spot in the index:",
+        "",
+        "```sql",
+        "SELECT id, placed_at FROM orders",
+        "WHERE (placed_at, id) < ('2026-10-12 20:00:01', 10021)   -- the last row of the previous page",
+        "ORDER BY placed_at DESC, id DESC",
+        "LIMIT 20;",
+        "```",
+        "",
+        "Compare what SQLite really does for both, on 20,000 orders:"
+      ],
+      "sqlplan": {
+        "setup": [
+          "CREATE TABLE orders (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, customer TEXT NOT NULL, qty INTEGER NOT NULL, placed_at TEXT NOT NULL);",
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO orders SELECT i, i % 5 + 1, 'customer' || ((i * 7919) % 3000) || '@mail.test', i % 4 + 1, datetime('2026-09-01', '+' || (i * 6) || ' minutes', '+' || ((i * 37) % 3) || ' seconds') FROM n;",
+          "CREATE INDEX orders_placed ON orders (placed_at, id);"
+        ],
+        "query": "SELECT id, placed_at FROM orders ORDER BY placed_at DESC, id DESC LIMIT 20 OFFSET 10000",
+        "after": "SELECT id, placed_at FROM orders WHERE (placed_at, id) < ('2026-10-12 20:00:01', 10021) ORDER BY placed_at DESC, id DESC LIMIT 20",
+        "labels": [
+          "LIMIT 20 OFFSET 10000",
+          "Keyset: WHERE (placed_at, id) < (...)"
+        ],
+        "note": "Same index, same 20 rows. The plans look alike (both walk the index backwards); the work does not: OFFSET steps through every skipped entry."
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "A customer is on page 3 of their order history (20 per page, `OFFSET 40`). While they read it, a new order of theirs is placed. They click *Next*. What do they see?",
+      "options": [
+        "The last order of page 3 again at the top of page 4",
+        "Page 4 exactly as it was",
+        "An error, because the result changed",
+        "One order skipped"
+      ],
+      "answer": 0,
+      "explain": "The new order goes to the top (newest first), pushing every row down by one, so `OFFSET 60` now starts one row earlier. A keyset query starts after the last row actually shown, so inserts and deletes elsewhere do not move it."
+    },
+    {
+      "type": "learn",
+      "title": "The tie-breaker",
+      "body": [
+        "Keyset paging needs an order in which **every row has a unique position**. `placed_at` alone is not unique: three orders came in at 09:12. If a page ends in the middle of them, `WHERE placed_at > '2026-11-20 09:12'` skips the rest of that minute.",
+        "",
+        "So sort by the column you want **plus a unique column** (usually the id), and compare both at once with a **row value**:",
+        "",
+        "```sql fragment",
+        "WHERE (placed_at, id) > ('2026-11-20 09:12', 4)",
+        "ORDER BY placed_at, id",
+        "```",
+        "",
+        "Row values compare like words in a dictionary: first `placed_at`, and `id` only when the times are equal. PostgreSQL, MySQL 8 and SQLite 3.15+ support them. **SQL Server does not**; write it out:",
+        "",
+        "```sql fragment",
+        "WHERE placed_at > @lastAt OR (placed_at = @lastAt AND id > @lastId)",
+        "```",
+        "",
+        "The index must match the sort, `(placed_at, id)`, and the API hands the client an opaque cursor (often base64 of `placed_at` and `id`) instead of a page number. Step through the page after `(09:12, 4)` below: order 5 and 6 share 09:12 but come after id 4, so they are kept."
+      ],
+      "sqlflow": {
+        "setup": [
+          "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer TEXT NOT NULL, placed_at TEXT NOT NULL);",
+          "INSERT INTO orders VALUES (1,'ana@mail.test','2026-11-20 09:00'),(2,'ben@mail.test','2026-11-20 09:05'),(3,'chloe@mail.test','2026-11-20 09:05'),(4,'dmitri@mail.test','2026-11-20 09:12'),(5,'esme@mail.test','2026-11-20 09:12'),(6,'farid@mail.test','2026-11-20 09:12'),(7,'greta@mail.test','2026-11-20 09:30'),(8,'hal@mail.test','2026-11-20 09:41');"
+        ],
+        "from": "orders",
+        "where": "(placed_at, id) > ('2026-11-20 09:12', 4)",
+        "select": [
+          "id",
+          "customer",
+          "placed_at"
+        ],
+        "orderBy": [
+          "placed_at",
+          "id"
+        ],
+        "limit": 3
+      }
+    },
+    {
+      "type": "blanks",
+      "prompt": "SQL Server has no row-value comparison. Complete the \"next page\" condition for `ORDER BY placed_at, id`.",
+      "code": "WHERE placed_at __1__ @lastAt OR (placed_at __2__ @lastAt AND id __3__ @lastId)",
+      "blanks": [
+        ">",
+        "=",
+        ">"
+      ],
+      "bank": [
+        ">=",
+        "<"
+      ],
+      "explain": "Strictly later time, or the same time with a larger id. Using `>=` in the first part would repeat rows from the same minute."
+    },
+    {
+      "type": "code",
+      "title": "The next page",
+      "prompt": [
+        "The order list is sorted **oldest first** by `placed_at`, then `id`. Page 1 ended with the order placed at **`2026-11-20 08:18:00`** with id **12**.",
+        "",
+        "Return the **next 10** orders: **id**, **customer**, **placed_at**, using a keyset condition (no OFFSET).",
+        "",
+        "Table: `orders(id, customer, placed_at)` (60 rows; several orders share a `placed_at` minute), with an index on `(placed_at, id)`."
+      ],
+      "starter": "-- Page 2: the 10 orders after (2026-11-20 08:18:00, 12)\n",
+      "solution": [
+        "SELECT id, customer, placed_at",
+        "FROM orders",
+        "WHERE (placed_at, id) > ('2026-11-20 08:18:00', 12)",
+        "ORDER BY placed_at, id",
+        "LIMIT 10;"
+      ],
+      "setup": [
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer TEXT NOT NULL, placed_at TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 60) INSERT INTO orders SELECT i, 'customer' || ((i * 17) % 40) || '@mail.test', datetime('2026-11-20 08:00', '+' || ((i / 2) * 3) || ' minutes') FROM n;",
+        "CREATE INDEX orders_placed ON orders (placed_at, id);"
+      ],
+      "check": "ordered",
+      "plan": true,
+      "forbid": [
+        {
+          "pattern": "(?i)\\boffset\\b",
+          "message": "No OFFSET"
+        }
+      ],
+      "require": [
+        {
+          "pattern": "(?i)\\blimit\\s+10\\b",
+          "message": "Takes 10 rows"
+        }
+      ],
+      "hints": [
+        "`WHERE (placed_at, id) > ('2026-11-20 08:18:00', 12)`",
+        "Same ORDER BY as the list, `placed_at, id`, then `LIMIT 10`. The ▤ Query plan button shows it searching the index."
+      ],
+      "explain": "Order 13 shares the 08:18 minute with order 12 and still appears first: that is the tie-breaker doing its job."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which screen is the better fit for plain `LIMIT ... OFFSET`?",
+      "options": [
+        "An admin table of 300 venues with numbered pages and \"jump to page 7\"",
+        "An infinite-scroll feed of 40 million orders, newest first",
+        "A nightly export that walks every order in batches of 5,000",
+        "An API that clients page through while new rows keep arriving"
+      ],
+      "answer": 0,
+      "explain": "Small and fairly static data, where users want page numbers: OFFSET is simple and fine. Deep, growing or changing data wants keyset. (Keyset cannot jump to page 7 directly; that is its trade-off.)"
+    },
+    {
+      "type": "code",
+      "title": "Newest first, page 2",
+      "prompt": [
+        "The same list, now **newest first** (`placed_at DESC, id DESC`). The first page ended with the order at **`2026-11-20 08:57:00`**, id **38**.",
+        "",
+        "Return the **next 10** orders (**id**, **customer**, **placed_at**) with a keyset condition.",
+        "",
+        "Table: `orders(id, customer, placed_at)` (60 rows; several orders share a `placed_at` minute), with an index on `(placed_at, id)`."
+      ],
+      "starter": "-- Newest first: the 10 orders after (2026-11-20 08:57:00, 38)\n",
+      "solution": [
+        "SELECT id, customer, placed_at",
+        "FROM orders",
+        "WHERE (placed_at, id) < ('2026-11-20 08:57:00', 38)",
+        "ORDER BY placed_at DESC, id DESC",
+        "LIMIT 10;"
+      ],
+      "setup": [
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer TEXT NOT NULL, placed_at TEXT NOT NULL);",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 60) INSERT INTO orders SELECT i, 'customer' || ((i * 17) % 40) || '@mail.test', datetime('2026-11-20 08:00', '+' || ((i / 2) * 3) || ' minutes') FROM n;",
+        "CREATE INDEX orders_placed ON orders (placed_at, id);"
+      ],
+      "check": "ordered",
+      "plan": true,
+      "forbid": [
+        {
+          "pattern": "(?i)\\boffset\\b",
+          "message": "No OFFSET"
+        }
+      ],
+      "hints": [
+        "Going backwards in time, \"after\" means smaller: `<`.",
+        "`WHERE (placed_at, id) < ('2026-11-20 08:57:00', 38) ORDER BY placed_at DESC, id DESC LIMIT 10`"
+      ],
+      "explain": "Flip the comparison with the sort direction. Both columns must sort the same way for a single row-value comparison to work; a mixed sort (`placed_at DESC, id ASC`) needs the written-out OR form."
+    }
+  ]
+}
