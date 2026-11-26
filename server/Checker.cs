@@ -29,8 +29,12 @@ public sealed class Checker(CSharpRunner runner)
             results.Add(new(rule.Message, !Regex.IsMatch(bare, rule.Pattern, RegexOptions.Singleline), "This exercise asks you to solve it another way."));
 
         var (web, efCore) = CSharpRunner.Frameworks((string?)step["framework"]);
+        var xunit = CSharpRunner.HasXunit((string?)step["framework"]) || step["xunit"] is JsonObject;
         var files = wrapped is { } w ? [.. extra ?? [], w] : extra;
-        var (program, diags) = runner.Compile(wrapped is null ? code : "", (string?)step["template"], web, efCore: efCore, extra: files);
+        // The learner writes the tests: they run against the real code and against planted bugs (XunitCheck.cs).
+        if (step["xunit"] is JsonObject spec && spec["target"] is not null)
+            return await XunitCheck.LearnerTests(runner, spec, code, results, files, web, efCore);
+        var (program, diags) = runner.Compile(wrapped is null ? code : "", (string?)step["template"], web, efCore: efCore, extra: files, xunit: xunit);
         if (program is null)
             return new(false, false, diags, results, "", "", false, 0);
 
@@ -48,8 +52,12 @@ public sealed class Checker(CSharpRunner runner)
                 results.AddRange(run.Marks.Select(m => new TestResult(m.Name, m.Pass, m.Detail)));
                 if (run.TimedOut) results.Add(new("Finishes in time", false, "Your program ran for too long and was stopped. Is there a loop that never ends, or is it waiting for something that never happens?"));
                 else if (run.ExitCode != 0) results.Add(new("Runs without crashing", false, FirstLine(run.Stderr)));
-                else if (run.Marks.Count == 0 && web) results.Add(new("The server starts", false, "Your program ended before the tests could call it. Does it end with app.Run()?"));
+                else if (run.Marks.Count == 0 && web && !program.Xunit) results.Add(new("The server starts", false, "Your program ended before the tests could call it. Does it end with app.Run()?"));
+                else if (run.Marks.Count == 0 && program.Xunit && CSharpRunner.ReadXunit(program) is not null) results.Add(new("xUnit finds the tests", false, XunitCheck.NoTests));
                 else if (run.Marks.Count == 0) results.Add(new("Runs without crashing", true, ""));
+                // Test-driven steps: the learner writes the code and their own tests, the hidden tests check the code.
+                if (program.Xunit && step["xunit"] is JsonObject own && CSharpRunner.ReadXunit(program) is { } cases)
+                    results.AddRange(XunitCheck.OwnTests(own, (string?)step["template"], cases));
             }
             else
             {

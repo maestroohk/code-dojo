@@ -119,23 +119,26 @@ app.MapPost("/api/run", async (RunRequest req) =>
     // A free run (Try it, the Run button) also sees the namespaces samples use most, so a sample that leaves out its
     // using lines still runs. Graded checks never get these.
     var playground = req.Template is null ? CSharpRunner.PlaygroundUsings : null;
-    var (program, diags) = runner.Compile(req.Code ?? "", req.Template, runWeb, efCore: runEf, extra: playground);
+    // xUnit steps: Run runs the tests (CSharpRunner.TestLib); a step where the learner writes tests runs them against its target.
+    var runXunit = CSharpRunner.HasXunit(req.Framework ?? content.Framework(req.Track ?? "csharp"));
+    if (runXunit && Builds.Text(req.Target) is { Length: > 0 } runTarget) playground = [.. playground ?? [], ("Target.cs", runTarget)];
+    var (program, diags) = runner.Compile(req.Code ?? "", req.Template, runWeb, efCore: runEf, extra: playground, xunit: runXunit);
     // A sample that only declares types (a class, a record, an interface) has no entry point (CS5001). It still
     // compiles, and that is worth knowing: say so instead of showing a confusing error.
-    if (program is null && req.Template is null && diags.Count(d => d.Severity == "error") == 1 && diags.Any(d => d.Id == "CS5001"))
+    if (program is null && !runXunit && req.Template is null && diags.Count(d => d.Severity == "error") == 1 && diags.Any(d => d.Id == "CS5001"))
     {
         var code = req.Code ?? "";
         var lines = code.Replace("\r\n", "\n").Split('\n');
         var head = lines.TakeWhile(l => l.TrimStart().StartsWith("using ") || l.Trim().Length == 0 || l.TrimStart().StartsWith("//")).Count();
         var wrapped = string.Join("\n", lines.Take(head)) + "\nSystem.Console.WriteLine(\"It compiles. This sample only declares types: add lines at the top that use them, then Run again.\");\n" + string.Join("\n", lines.Skip(head));
-        var (typesOnly, typeDiags) = runner.Compile(wrapped, null, runWeb, efCore: runEf, extra: playground);
+        var (typesOnly, typeDiags) = runner.Compile(wrapped, null, runWeb, efCore: runEf, extra: playground, xunit: runXunit);
         if (typesOnly is not null) (program, diags) = (typesOnly, typeDiags.Where(d => d.Severity != "error").ToList());
     }
     // A sample that declares a type and then uses it (CS8803): C# wants the statements first. Free runs move the
     // statements above the types, which is what the learner would do in a real file.
     if (program is null && req.Template is null && diags.Any(d => d.Id == "CS8803") && CSharpRunner.StatementsFirst(req.Code ?? "") is { } reordered)
     {
-        var (moved, movedDiags) = runner.Compile(reordered, null, runWeb, efCore: runEf, extra: playground);
+        var (moved, movedDiags) = runner.Compile(reordered, null, runWeb, efCore: runEf, extra: playground, xunit: runXunit);
         if (moved is not null) (program, diags) = (moved, movedDiags.Where(d => d.Severity != "error").ToList());
     }
     if (program is null) return Results.Json(new { compiled = false, diagnostics = diags }, json);
@@ -152,7 +155,7 @@ app.MapPost("/api/run", async (RunRequest req) =>
 // Graded run of one code step. The step is looked up server-side so tests cannot be bypassed by accident.
 app.MapPost("/api/check", async (CheckRequest req) =>
 {
-    var language = content.Language(req.Track);
+    var language = content.Language(req.Track, req.Module);
     if (language != "csharp" && !PolyChecker.Handles(language) && !SqlChecker.Handles(language)) return Results.BadRequest("unsupported language");
     var lesson = content.Lesson(req.Track, req.Module, req.Lesson, req.Dream);
     if ((lesson?["steps"] as JsonArray)?.ElementAtOrDefault(req.Step) is not JsonObject step || (string?)step["type"] != "code")
@@ -237,6 +240,7 @@ static string FindRoot()
     throw new DirectoryNotFoundException("Cannot find the code-dojo folder (the one holding tracks/ and ui/).");
 }
 
-record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework, string? Language = null, System.Text.Json.Nodes.JsonNode? Setup = null);
+record RunRequest(string? Track, string? Code, string? Stdin, string? Template, string? Framework, string? Language = null, System.Text.Json.Nodes.JsonNode? Setup = null,
+    System.Text.Json.Nodes.JsonNode? Target = null);
 record CheckRequest(string Track, string Module, string Lesson, int Step, string? Code, string? Dream = null,
     Dictionary<string, Pacing.UsesInput>? Uses = null);

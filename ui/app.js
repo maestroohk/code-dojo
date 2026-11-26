@@ -867,8 +867,8 @@ function dataSetupFor(items, pos) {
 
 async function lessonView(trackId, moduleId, lessonId, stepArg) {
   const track = tracks.find(t => t.id === trackId);
-  document.documentElement.dataset.codeLang = track?.language || 'csharp';
   const module = track?.modules.find(m => m.id === moduleId);
+  document.documentElement.dataset.codeLang = module?.language || track?.language || 'csharp';   // a module may run another language
   const index = module?.lessons.findIndex(l => l.id === lessonId) ?? -1;
   if (index < 0) return notFound();
   const meta = module.lessons[index];
@@ -1011,7 +1011,8 @@ async function challengeView() {
   clearTimeout(slow);
   if (location.hash !== '#/challenge') return;
   if (!ch) return page('home', h('div.empty', h('h2', 'No challenge today'), h('p.muted', 'Open a topic first.'), h('a.btn.primary', { href: '#/' }, 'Back')));
-  document.documentElement.dataset.codeLang = tracks.find(t => t.id === ch.item.track)?.language || 'csharp';
+  const chTrack = tracks.find(t => t.id === ch.item.track);
+  document.documentElement.dataset.codeLang = chTrack?.modules.find(m => m.id === ch.item.module)?.language || chTrack?.language || 'csharp';
   play({
     title: `Daily challenge · ${ch.trackTitle} · ${ch.lessonTitle}`, items: [ch.item], mode: 'challenge', meta: {},
     onFinish(r) {

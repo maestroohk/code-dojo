@@ -1,0 +1,295 @@
+{
+  "title": "Fixtures and test lifetime",
+  "summary": "A new test-class instance per test, constructor and Dispose as setup and teardown, IClassFixture and collection fixtures for expensive things, IAsyncLifetime for async setup, ITestOutputHelper for diagnostics.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "xUnit makes a new object for every test",
+      "body": [
+        "xUnit has no `[SetUp]` attribute. It creates a **new instance of the test class for every test**, so the constructor is the setup and `Dispose` (or `DisposeAsync`) is the teardown:",
+        "",
+        "```csharp fragment",
+        "public class CartTests : IDisposable",
+        "{",
+        "    readonly Cart cart = new();          // fresh for every test: no test sees another's items",
+        "",
+        "    public CartTests() => cart.Add(\"mug\", 8.00m);",
+        "",
+        "    [Fact] public void Starts_with_one_item() => Assert.Single(cart.Items);",
+        "    [Fact] public void Clear_empties_it() { cart.Clear(); Assert.Empty(cart.Items); }",
+        "",
+        "    public void Dispose() { /* runs after each test */ }",
+        "}",
+        "```",
+        "",
+        "This is deliberate isolation: instance fields cannot leak between tests, in any order. The only way to share state is to ask for it explicitly, and **static** fields, which bypass all of this and are the classic cause of tests that pass alone and fail together."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A class has 3 `[Fact]`s and a `[Theory]` with 4 `[InlineData]` rows. How many times does its constructor run in one test run?",
+      "options": [
+        "7",
+        "1",
+        "4",
+        "2"
+      ],
+      "answer": 0,
+      "explain": "One instance per test case, and every theory row is a test case: 3 + 4 = 7. That is why an expensive setup does not belong in the constructor."
+    },
+    {
+      "type": "learn",
+      "title": "Sharing expensive things on purpose: fixtures",
+      "body": [
+        "Some setup is too slow to repeat for every test: starting a web host, creating a database, loading a big file. A **fixture** is created once and handed to the tests that ask for it:",
+        "",
+        "```csharp fragment",
+        "public sealed class DatabaseFixture : IAsyncLifetime",
+        "{",
+        "    public PriceDb Db { get; private set; } = null!;",
+        "",
+        "    public async ValueTask InitializeAsync() => Db = await PriceDb.OpenAsync();   // once, before the first test",
+        "    public async ValueTask DisposeAsync() => await Db.DisposeAsync();           // once, after the last",
+        "}",
+        "",
+        "public class PriceTests(DatabaseFixture fixture, ITestOutputHelper output) : IClassFixture<DatabaseFixture>",
+        "{",
+        "    [Fact]",
+        "    public void Mugs_cost_eight()",
+        "    {",
+        "        output.WriteLine(\"checking the mug price\");   // shown with this test's result",
+        "        Assert.Equal(8.00m, fixture.Db.PriceOf(\"mug\"));",
+        "    }",
+        "}",
+        "```",
+        "",
+        "| Scope | How | Shared by |",
+        "|---|---|---|",
+        "| one test class | `IClassFixture<T>` on the class, `T` in the constructor | the tests of that class |",
+        "| several classes | `[CollectionDefinition(\"db\")] class DbCollection : ICollectionFixture<T>;` and `[Collection(\"db\")]` on each class | every class in the collection (and they no longer run in parallel with each other) |",
+        "| the whole assembly | `[assembly: AssemblyFixture(typeof(T))]` | every test (new in v3) |",
+        "",
+        "In v3 `IAsyncLifetime` returns `ValueTask` and extends `IAsyncDisposable`. `ITestOutputHelper` (now in the `Xunit` namespace) is injected the same way, and `TestContext.Current` gives the current test, its cancellation token and a key-value store from anywhere.",
+        "",
+        "Shared fixtures must be **read-only** for the tests, or tests start depending on each other's leftovers."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "A class uses `IClassFixture<DatabaseFixture>` and has two tests, A then B. Put what xUnit does in order.",
+      "lines": [
+        "new DatabaseFixture() and await InitializeAsync()",
+        "new PriceTests(fixture), run test A, Dispose it",
+        "new PriceTests(fixture), run test B, Dispose it",
+        "await fixture.DisposeAsync()"
+      ],
+      "explain": "The fixture lives across the class; the test-class instance is still new for every test. That is the whole design: share the expensive, isolate the rest."
+    },
+    {
+      "type": "sort",
+      "prompt": "Where does each piece of setup belong?",
+      "buckets": [
+        "Test-class constructor",
+        "IClassFixture / collection fixture"
+      ],
+      "items": [
+        [
+          "a fresh `Cart` to add items to",
+          0
+        ],
+        [
+          "a SQLite database with the schema created",
+          1
+        ],
+        [
+          "a `FakeTimeProvider` set to 9:00",
+          0
+        ],
+        [
+          "a started `TestServer` for the API",
+          1
+        ],
+        [
+          "an order builder with default values",
+          0
+        ],
+        [
+          "a Testcontainers PostgreSQL container",
+          1
+        ]
+      ],
+      "explain": "Cheap, mutable things are built per test so tests cannot affect each other. Slow things that tests only read go in a fixture."
+    },
+    {
+      "type": "code",
+      "title": "Open the expensive thing once",
+      "prompt": [
+        "`PriceDb` is slow to open, so it refuses to be opened twice in one test run. It is compiled beside your tests:",
+        "",
+        "```csharp",
+        "public sealed class PriceDb : IAsyncDisposable",
+        "{",
+        "    static int opened;",
+        "    readonly Dictionary<string, decimal> prices = new();",
+        "",
+        "    public static async Task<PriceDb> OpenAsync()",
+        "    {",
+        "        if (Interlocked.Increment(ref opened) > 1)",
+        "            throw new InvalidOperationException(\"PriceDb is expensive: open it once in a fixture, not in every test.\");",
+        "        await Task.Delay(10);",
+        "        var db = new PriceDb();",
+        "        db.prices[\"mug\"] = 8.00m;",
+        "        db.prices[\"tea\"] = 4.50m;",
+        "        db.prices[\"pot\"] = 24.00m;",
+        "        return db;",
+        "    }",
+        "",
+        "    public decimal PriceOf(string sku) => prices.TryGetValue(sku, out var p) ? p : throw new KeyNotFoundException(sku);",
+        "    public decimal Basket(params string[] skus) => skus.Sum(PriceOf);",
+        "    public ValueTask DisposeAsync() => ValueTask.CompletedTask;",
+        "}",
+        "```",
+        "",
+        "Write:",
+        "",
+        "1. `public sealed class PriceDbFixture : IAsyncLifetime` with a `PriceDb Db` property, opened in `InitializeAsync` and disposed in `DisposeAsync`;",
+        "2. `public class PriceTests` that uses it through `IClassFixture<PriceDbFixture>`, with at least **four** tests (prices, an unknown SKU, a basket). Take an `ITestOutputHelper` too and write one line from a test.",
+        "",
+        "Opening the database in each test (or in the constructor) fails from the second test on."
+      ],
+      "starter": [
+        "public sealed class PriceDbFixture : IAsyncLifetime",
+        "{",
+        "    public PriceDb Db { get; private set; } = null!;",
+        "",
+        "    public ValueTask InitializeAsync() => throw new NotImplementedException();",
+        "    public ValueTask DisposeAsync() => throw new NotImplementedException();",
+        "}",
+        "",
+        "public class PriceTests",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "public sealed class PriceDbFixture : IAsyncLifetime",
+        "{",
+        "    public PriceDb Db { get; private set; } = null!;",
+        "",
+        "    public async ValueTask InitializeAsync() => Db = await PriceDb.OpenAsync();",
+        "    public async ValueTask DisposeAsync() => await Db.DisposeAsync();",
+        "}",
+        "",
+        "public class PriceTests(PriceDbFixture fixture, ITestOutputHelper output) : IClassFixture<PriceDbFixture>",
+        "{",
+        "    public static TheoryData<string, decimal> Prices => new() { { \"mug\", 8.00m }, { \"tea\", 4.50m }, { \"pot\", 24.00m } };",
+        "",
+        "    [Theory]",
+        "    [MemberData(nameof(Prices))]",
+        "    public void Known_prices(string sku, decimal expected)",
+        "    {",
+        "        Assert.Equal(expected, fixture.Db.PriceOf(sku));",
+        "    }",
+        "",
+        "    [Fact]",
+        "    public void Unknown_skus_are_refused()",
+        "    {",
+        "        Assert.Throws<KeyNotFoundException>(() => fixture.Db.PriceOf(\"cup\"));",
+        "    }",
+        "",
+        "    [Fact]",
+        "    public void A_basket_adds_every_item()",
+        "    {",
+        "        decimal total = fixture.Db.Basket(\"mug\", \"tea\", \"pot\");",
+        "        output.WriteLine($\"basket total: {total}\");",
+        "        Assert.Equal(36.50m, total);",
+        "    }",
+        "}"
+      ],
+      "xunit": {
+        "minTests": 4,
+        "target": [
+          "public sealed class PriceDb : IAsyncDisposable",
+          "{",
+          "    static int opened;",
+          "    readonly Dictionary<string, decimal> prices = new();",
+          "",
+          "    public static async Task<PriceDb> OpenAsync()",
+          "    {",
+          "        if (Interlocked.Increment(ref opened) > 1)",
+          "            throw new InvalidOperationException(\"PriceDb is expensive: open it once in a fixture, not in every test.\");",
+          "        await Task.Delay(10);",
+          "        var db = new PriceDb();",
+          "        db.prices[\"mug\"] = 8.00m;",
+          "        db.prices[\"tea\"] = 4.50m;",
+          "        db.prices[\"pot\"] = 24.00m;",
+          "        return db;",
+          "    }",
+          "",
+          "    public decimal PriceOf(string sku) => prices.TryGetValue(sku, out var p) ? p : throw new KeyNotFoundException(sku);",
+          "    public decimal Basket(params string[] skus) => skus.Sum(PriceOf);",
+          "    public ValueTask DisposeAsync() => ValueTask.CompletedTask;",
+          "}"
+        ],
+        "mutants": [
+          {
+            "name": "mugs cost 8.50",
+            "replace": [
+              [
+                "db.prices[\"mug\"] = 8.00m;",
+                "db.prices[\"mug\"] = 8.50m;"
+              ]
+            ]
+          },
+          {
+            "name": "unknown SKUs cost nothing",
+            "replace": [
+              [
+                "throw new KeyNotFoundException(sku)",
+                "0m"
+              ]
+            ]
+          },
+          {
+            "name": "the basket drops its first item",
+            "replace": [
+              [
+                "skus.Sum(PriceOf)",
+                "skus.Skip(1).Sum(PriceOf)"
+              ]
+            ]
+          },
+          {
+            "name": "the pot is missing",
+            "replace": [
+              [
+                "db.prices[\"pot\"] = 24.00m;",
+                ""
+              ]
+            ]
+          }
+        ]
+      },
+      "require": [
+        {
+          "pattern": "IClassFixture<\\s*PriceDbFixture\\s*>",
+          "message": "PriceTests uses IClassFixture<PriceDbFixture>"
+        },
+        {
+          "pattern": "ValueTask\\s+InitializeAsync",
+          "message": "The fixture implements InitializeAsync"
+        },
+        {
+          "pattern": "ITestOutputHelper",
+          "message": "Takes an ITestOutputHelper"
+        }
+      ],
+      "hints": [
+        "`public async ValueTask InitializeAsync() => Db = await PriceDb.OpenAsync();`",
+        "The test class takes the fixture in its constructor: `public class PriceTests(PriceDbFixture fixture, ITestOutputHelper output) : IClassFixture<PriceDbFixture>`.",
+        "Check the basket with all three items (36.50) so a dropped first or missing item shows."
+      ],
+      "explain": "The fixture opens the database once for the whole class, and every test still gets its own `PriceTests` instance. Real suites use the same shape for a test web host or a database container."
+    }
+  ]
+}

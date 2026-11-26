@@ -11,7 +11,7 @@ public record Mark(string Name, bool Pass, string Detail);
 public record RunOutput(string Stdout, string Stderr, int ExitCode, bool TimedOut, bool Truncated, long Ms, List<Mark> Marks);
 
 /// <summary>A compiled learner program sitting in its own temp folder. Dispose deletes it.</summary>
-public sealed class Compiled(string dir, string dll, bool web = false, bool efCore = false) : IDisposable
+public sealed class Compiled(string dir, string dll, bool web = false, bool efCore = false, bool xunit = false) : IDisposable
 {
     public string Dir => dir;
     public string Dll => dll;
@@ -19,6 +19,8 @@ public sealed class Compiled(string dir, string dll, bool web = false, bool efCo
     public bool Web => web;
     /// <summary>Uses EF Core + SQLite (framework "efcore"): loads the EF assemblies from the shared cache and gets a larger CPU budget.</summary>
     public bool EfCore => efCore;
+    /// <summary>An xUnit v3 test assembly (framework "xunit"): running it runs its tests, and each test comes back as a mark.</summary>
+    public bool Xunit => xunit;
     public void Dispose()
     {
         try { Directory.Delete(dir, true); } catch { /* a locked temp folder is not worth failing over */ }
@@ -91,11 +93,182 @@ public sealed class CSharpRunner
         _webSupport = CSharpSyntaxTree.ParseText(WebSupportSource, Parse, path: "DojoWeb.cs", encoding: Encoding.UTF8);
         _liveSupport = CSharpSyntaxTree.ParseText(LiveSupportSource, Parse, path: "DojoLive.cs", encoding: Encoding.UTF8);
         _ef = new(() => EfLib.Prepare(webDir), LazyThreadSafetyMode.ExecutionAndPublication);
+        _tests = new(() => TestLib.Prepare(), LazyThreadSafetyMode.ExecutionAndPublication);
+        _webDirVersion = Path.GetFileName(webDir);
         _intelRefs = new(() =>
         {
-            try { return [.. _webRefs, .. _ef.Value.Refs]; }
-            catch { return _webRefs; }   // no EF assemblies next to the server: intelligence still works for everything else
+            List<MetadataReference> all = [.. _webRefs];
+            try { all.AddRange(_ef.Value.Refs); } catch { }      // no EF assemblies next to the server: intelligence still works for everything else
+            try { all.AddRange(_tests.Value.Refs); } catch { }   // the same for the test libraries
+            return all;
         });
+    }
+
+    readonly Lazy<TestLib> _tests;
+    readonly string _webDirVersion;
+
+    /// <summary>Does a step's "framework" ("xunit", "xunit+web", "xunit+efcore") ask for the test libraries?</summary>
+    public static bool HasXunit(string? framework) =>
+        (framework ?? "").Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Contains("xunit", StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The test libraries for learner code ("framework": "xunit"): xUnit v3 (core, assert and the in-process console
+    /// runner), NSubstitute (with Castle.Core), Microsoft.Extensions.TimeProvider.Testing (FakeTimeProvider) and
+    /// Microsoft.AspNetCore.TestHost (TestServer). The server restores them as packages it never compiles against, and its
+    /// build copies their runtime files into testlibs/ beside it (CodeDojo.csproj). Like EF Core, they are copied once
+    /// into a cache folder keyed by their versions, and a resolver compiled into the program loads them from there.
+    /// </summary>
+    sealed class TestLib
+    {
+        public required List<MetadataReference> Refs { get; init; }
+        public required string Dir { get; init; }
+        public required SyntaxTree Support { get; init; }
+
+        static string Locate()
+        {
+            var here = Path.Combine(AppContext.BaseDirectory, "testlibs");
+            if (Directory.Exists(here) && Directory.GetFiles(here, "xunit.v3.*.dll").Length > 0) return here;
+            // The dojo's own tests run from their own folder: the server's build records where its testlibs/ is.
+            var built = typeof(CSharpRunner).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+                .OfType<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "DojoTestLibs")?.Value;
+            if (built is { Length: > 0 } && Directory.Exists(built) && Directory.GetFiles(built, "xunit.v3.*.dll").Length > 0) return built;
+            throw new InvalidOperationException("The test libraries (xUnit v3, NSubstitute) are missing: build the server (dotnet build server) so testlibs/ is created next to it.");
+        }
+
+        public static TestLib Prepare()
+        {
+            var src = Locate();
+            var files = Directory.GetFiles(src, "*.dll").Order(StringComparer.OrdinalIgnoreCase).ToList();
+            var key = string.Join("|", files.Select(f => { var i = new FileInfo(f); return $"{i.Name}:{i.Length}:{i.LastWriteTimeUtc.Ticks}"; }));
+            var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..12].ToLowerInvariant();
+            var dir = Path.Combine(Path.GetTempPath(), "code-dojo", "testlibs-" + hash);
+            var ready = Path.Combine(dir, ".ready");
+            if (!File.Exists(ready))
+            {
+                var staging = dir + "-" + Guid.NewGuid().ToString("N")[..8];
+                Directory.CreateDirectory(staging);
+                foreach (var f in files) File.Copy(f, Path.Combine(staging, Path.GetFileName(f)), true);
+                File.WriteAllText(Path.Combine(staging, ".ready"), key);
+                try { Directory.Move(staging, dir); }
+                catch (IOException) { try { Directory.Delete(staging, true); } catch { } }
+                if (!File.Exists(ready)) throw new InvalidOperationException("could not prepare the test library folder " + dir);
+            }
+            return new TestLib
+            {
+                Dir = dir,
+                Refs = files.Select(f => (MetadataReference)MetadataReference.CreateFromFile(Path.Combine(dir, Path.GetFileName(f)))).ToList(),
+                Support = CSharpSyntaxTree.ParseText(XunitSupportSource, Parse, path: "DojoXunit.cs", encoding: Encoding.UTF8),
+            };
+        }
+    }
+
+    /// <summary>The global using a real xUnit v3 project gets (&lt;Using Include="Xunit" /&gt;), for code intelligence.</summary>
+    public static readonly SyntaxTree XunitUsingTree = CSharpSyntaxTree.ParseText("global using Xunit;\n", new CSharpParseOptions(LanguageVersion.Latest), path: "DojoXunitUsing.cs");
+
+    /// <summary>The test libraries' references, or null when they are not available (code intelligence only).</summary>
+    public IReadOnlyList<MetadataReference>? TestReferences { get { try { return _tests.Value.Refs; } catch { return null; } } }
+
+    /// <summary>
+    /// Compiled into test assemblies ("framework": "xunit"). It is what xUnit v3's MSBuild targets generate in a real
+    /// test project: an entry point that hands over to the in-process console runner, plus the reporters and the XML
+    /// result writer it registers. The runner writes xUnit's own console output (shown to the learner) and an xUnit v2
+    /// XML report, which the dojo reads back into one check row per test. A file "dojo-xunit.args" next to the program
+    /// adds runner switches for one run (the mutant runs add -stopOnFail).
+    /// </summary>
+    const string XunitSupportSource = """
+        global using Xunit;
+
+        [assembly: Xunit.Runner.Common.RegisterResultWriter("xml", typeof(Xunit.Runner.Common.XmlV2ResultWriter))]
+        [assembly: Xunit.Runner.Common.RegisterRunnerReporter(typeof(Xunit.Runner.Common.DefaultRunnerReporter))]
+        [assembly: Xunit.Runner.Common.RegisterRunnerReporter(typeof(Xunit.Runner.Common.QuietReporter))]
+        [assembly: Xunit.Runner.Common.RegisterRunnerReporter(typeof(Xunit.Runner.Common.SilentReporter))]
+        [assembly: Xunit.Runner.Common.RegisterRunnerReporter(typeof(Xunit.Runner.Common.VerboseReporter))]
+
+        #nullable enable
+        internal static class DojoXunit
+        {
+            [System.Runtime.CompilerServices.ModuleInitializer]
+            internal static void Init()
+            {
+                var dir = System.AppContext.GetData("Dojo.TestLibDir") as string;
+                if (string.IsNullOrEmpty(dir)) return;
+                System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (ctx, name) =>
+                {
+                    var path = System.IO.Path.Combine(dir, name.Name + ".dll");
+                    return System.IO.File.Exists(path) ? ctx.LoadFromAssemblyPath(path) : null;
+                };
+            }
+
+            static int Main(string[] args)
+            {
+                var here = System.AppContext.BaseDirectory;
+                var xml = System.IO.Path.Combine(here, "dojo-results.xml");
+                var argsFile = System.IO.Path.Combine(here, "dojo-xunit.args");
+                var extra = System.IO.File.Exists(argsFile) ? System.IO.File.ReadAllLines(argsFile).Where(l => l.Length > 0).ToArray() : [];
+                string[] all = ["-noLogo", "-noColor", "-noAutoReporters", "-parallelMode", "none", "-culture", "en-US", "-result-xml", xml, .. extra, .. args];
+                var code = Xunit.Runner.InProc.SystemConsole.ConsoleRunner.Run(all).GetAwaiter().GetResult();
+                // Failing tests are results, not a crash: the dojo reads them from the report.
+                return System.IO.File.Exists(xml) ? 0 : (code == 0 ? 1 : code);
+            }
+        }
+        """;
+
+    /// <summary>One test from xUnit's XML report.</summary>
+    public record XunitCase(string Name, string Type, string Method, string Result, string Message, string Stack, string Output)
+    {
+        public bool Passed => Result == "Pass";
+        public bool Failed => Result == "Fail";
+    }
+
+    const string XunitResultsFile = "dojo-results.xml";
+    const string XunitArgsFile = "dojo-xunit.args";
+
+    /// <summary>The tests of the last run of a test assembly, from xUnit's XML report (null when there is no report).</summary>
+    public static List<XunitCase>? ReadXunit(Compiled program)
+    {
+        var path = Path.Combine(program.Dir, XunitResultsFile);
+        if (!File.Exists(path)) return null;
+        try
+        {
+            var doc = System.Xml.Linq.XDocument.Load(path);
+            return doc.Descendants("test").Select(t =>
+            {
+                var failure = t.Element("failure");
+                return new XunitCase((string?)t.Attribute("name") ?? "?", (string?)t.Attribute("type") ?? "", (string?)t.Attribute("method") ?? "",
+                    (string?)t.Attribute("result") ?? "", ((string?)failure?.Element("message") ?? (string?)t.Element("reason") ?? "").Trim(),
+                    (string?)failure?.Element("stack-trace") ?? "", ((string?)t.Element("output") ?? "").Trim());
+            }).ToList();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>A failed test as the learner should read it: xUnit's message, then the lines of their own code it came through.</summary>
+    public static string XunitDetail(XunitCase c)
+    {
+        var where = c.Stack.Replace("\r\n", "\n").Split('\n')
+            .Select(l => System.Text.RegularExpressions.Regex.Match(l, @"at (?<at>.+?) in (?:.*[\\/])?(?<file>Program\.cs):line (?<line>\d+)"))
+            .Where(m => m.Success).Take(3)
+            .Select(m => $"{m.Groups["file"].Value} line {m.Groups["line"].Value}: {m.Groups["at"].Value}");
+        var text = c.Message;
+        foreach (var w in where) text += "\n  " + w;
+        if (c.Output.Length > 0) text += "\nOutput:\n" + c.Output;
+        return text.Trim();
+    }
+
+    static IEnumerable<Mark> XunitMarks(List<XunitCase> cases) =>
+        cases.Where(c => c.Result is "Pass" or "Fail" or "Skip").Select(c => c.Result switch
+        {
+            "Skip" => new Mark(c.Name + " (skipped)", true, ""),
+            _ => new Mark(c.Name, c.Passed, c.Passed ? "" : XunitDetail(c)),
+        });
+
+    /// <summary>Run a test assembly once with extra runner switches (e.g. -stopOnFail), and read its report.</summary>
+    public async Task<(RunOutput Run, List<XunitCase>? Cases)> RunTests(Compiled program, params string[] switches)
+    {
+        var args = Path.Combine(program.Dir, XunitArgsFile);
+        if (switches.Length > 0) File.WriteAllLines(args, switches); else File.Delete(args);
+        var run = await Run(program, null);
+        return (run, ReadXunit(program));
     }
 
     /// <summary>
@@ -242,8 +415,10 @@ public sealed class CSharpRunner
     /// <param name="live">A web app for the Workbench: no tests, plus a tracer that reports every request it handles.</param>
     /// <param name="efCore">Reference EF Core + SQLite (the packages this server ships with) and make them loadable at run time.</param>
     /// <param name="extra">More source files compiled with it: the learner's earlier pieces a step "uses" (Pacing.cs).</param>
+    /// <param name="xunit">Reference xUnit v3, NSubstitute, FakeTimeProvider and TestHost, and give the program xUnit's entry point
+    /// (framework "xunit"): running it runs every test in it (RunTests, ReadXunit). Top-level statements still win as the entry point.</param>
     public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false, bool live = false, bool efCore = false,
-        IEnumerable<(string Path, string Text)>? extra = null)
+        IEnumerable<(string Path, string Text)>? extra = null, bool xunit = false)
     {
         var tree = CSharpSyntaxTree.ParseText(BuildSource(code, template), Parse, path: "Source.cs", encoding: Encoding.UTF8);
         web |= live;
@@ -256,6 +431,14 @@ public sealed class CSharpRunner
             // EF Core's own dependencies (DI, logging, caching) live in the ASP.NET Core shared framework.
             refs = _webRefs.Concat(ef.Refs);
             trees = web ? [.. trees, ef.Support] : [.. trees, ef.Support, ef.ConsoleSupport];
+        }
+        TestLib? tests = null;
+        if (xunit && !live)
+        {
+            tests = _tests.Value;
+            // TestHost and the Microsoft.Extensions abstractions come from the ASP.NET Core shared framework.
+            refs = (efCore ? refs : _webRefs).Concat(tests.Refs);
+            trees = [.. trees, tests.Support];
         }
         if (extra is not null)
             trees = [.. trees, .. extra.Select(e => CSharpSyntaxTree.ParseText(e.Text, Parse, path: e.Path, encoding: Encoding.UTF8))];
@@ -291,8 +474,29 @@ public sealed class CSharpRunner
             try { Directory.Delete(dir, true); } catch { }
             return (null, diags);
         }
-        File.WriteAllText(Path.Combine(dir, "Exercise.runtimeconfig.json"), efCore ? _ef.Value.RuntimeConfig : web ? _webRuntimeConfig : _runtimeConfig);
-        return (new Compiled(dir, dll, web, efCore), diags);
+        File.WriteAllText(Path.Combine(dir, "Exercise.runtimeconfig.json"),
+            tests is not null ? TestRuntimeConfig(tests, efCore ? _ef.Value.Dir : null) : efCore ? _ef.Value.RuntimeConfig : web ? _webRuntimeConfig : _runtimeConfig);
+        // A test assembly is not a web server: its tests host the app themselves (TestServer), so no port is handed out.
+        return (new Compiled(dir, dll, web && tests is null, efCore, tests is not null), diags);
+    }
+
+    string TestRuntimeConfig(TestLib tests, string? efDir)
+    {
+        var props = new Dictionary<string, object> { ["Dojo.TestLibDir"] = tests.Dir };
+        if (efDir is not null) props["Dojo.LibDir"] = efDir;
+        return System.Text.Json.JsonSerializer.Serialize(new
+        {
+            runtimeOptions = new
+            {
+                tfm = $"net{Environment.Version.Major}.0",
+                frameworks = new[]
+                {
+                    new { name = "Microsoft.NETCore.App", version = Environment.Version.ToString() },
+                    new { name = "Microsoft.AspNetCore.App", version = _webDirVersion },
+                },
+                configProperties = props,
+            },
+        });
     }
 
     /// <summary>
@@ -370,16 +574,21 @@ public sealed class CSharpRunner
 
     public async Task<RunOutput> Run(Compiled program, string? stdin, int wallMs = WallLimitMs, int cpuMs = CpuLimitMs)
     {
-        if (program.EfCore && cpuMs == CpuLimitMs) cpuMs = EfCpuLimitMs;
+        // xUnit's runner JITs a fair amount before the first test, like EF Core: the same larger CPU budget.
+        if ((program.EfCore || program.Xunit) && cpuMs == CpuLimitMs) cpuMs = EfCpuLimitMs;
         await Gate.WaitAsync();
         try
         {
+            if (program.Xunit) File.Delete(Path.Combine(program.Dir, XunitResultsFile));
             var (result, _) = await RunCore(program, stdin, wallMs, cpuMs);
             // A non-zero exit with no output at all: a C# exception always prints something,
             // so silence means the runtime itself failed to start. Try once more.
             var neverStarted = result.ExitCode != 0 && !result.TimedOut && result.Stdout.Length == 0
                                && result.Stderr.Length == 0 && result.Marks.Count == 0;
             if (neverStarted) (result, _) = await RunCore(program, stdin, wallMs, cpuMs);
+            // A test assembly: every test in xUnit's report becomes a check row.
+            if (program.Xunit && ReadXunit(program) is { } cases)
+                result = result with { Marks = [.. result.Marks, .. XunitMarks(cases)] };
             return result;
         }
         finally { Gate.Release(); }

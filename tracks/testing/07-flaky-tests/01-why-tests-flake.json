@@ -1,0 +1,158 @@
+{
+  "title": "Why tests flake",
+  "summary": "A flaky test passes and fails on the same code. The usual causes, read from a real repeat-run report, and a time-of-day test made deterministic.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Same commit, different result",
+      "body": [
+        "A **flaky** test passes and fails without any change to the code. One flaky test in a suite of 3,000 is enough to teach a team to press \"re-run\" instead of reading failures, and then real failures get re-run too.",
+        "",
+        "Below are 20 CI runs of the same commit. Pick a row to see why it behaves that way. The causes are always some input the test does not control:",
+        "",
+        "- **time**: `DateTime.Now`, time zones, daylight saving, month ends, and timing (`Task.Delay(100)` \"should be enough\");",
+        "- **order and shared state**: static fields, a shared database, files in a fixed folder: tests that pass alone and fail together;",
+        "- **async and concurrency**: missing `await`, races between a background worker and the assertion;",
+        "- **environment**: culture (`1.234,50` on a German agent), the machine's time zone, available ports, CPU speed;",
+        "- **the outside world**: real HTTP calls, DNS, a shared staging service."
+      ],
+      "testviz": {
+        "kind": "flaky",
+        "title": "20 runs of commit 3f2a9c1 on CI",
+        "subtitle": "green passed, red failed, grey skipped",
+        "tests": [
+          { "name": "OrderTests.Total_includes_vat", "runs": "PPPPPPPPPPPPPPPPPPPP", "cause": "Deterministic: only its own inputs. This is what every test should look like." },
+          { "name": "GreetingTests.Says_good_morning", "runs": "PPPPPPPPFFFFPPPPPPPP", "cause": "Reads the real clock. The failing runs started after noon UTC. Fix: pass a `FakeTimeProvider` set to 09:00." },
+          { "name": "ExportTests.Writes_csv", "runs": "PPFPPPPFPPPPPFPPPPPF", "cause": "Writes to `C:\\temp\\export.csv`, and another test (or another CI job on the same agent) reads or deletes it at the same time. Fix: a temp folder per test." },
+          { "name": "OutboxTests.Sends_all_messages", "runs": "PPPPPFPPPPPPPPFPPPPP", "cause": "Waits `Task.Delay(50)` for a background worker; on a busy agent the worker needs 60 ms. Fix: await the worker's completion signal (`DrainAsync`), never a guess." },
+          { "name": "IdTests.First_id_is_1", "runs": "PFPFPPFPFFPPFPPFPPFP", "cause": "Uses a `static` id counter that other tests also call; it fails whenever another test ran first. Fix: an instance per test, or reset state in the constructor." },
+          { "name": "InvoiceTests.Formats_total", "runs": "PPPPPPPPPPFFFFFFFFFF", "cause": "Not flaky in the usual sense: runs 11-20 went to a new agent pool with culture de-DE, where `12.5m.ToString(\"0.00\")` is `12,50`. Fix: format with `CultureInfo.InvariantCulture`, and test under another culture on purpose." }
+        ]
+      }
+    },
+    {
+      "type": "match",
+      "prompt": "Match each flaky symptom to its most likely cause.",
+      "pairs": [
+        ["fails only when the whole suite runs, passes alone", "shared state between tests (a static field, a shared table)"],
+        ["fails only in the evening runs", "the test reads the real clock"],
+        ["fails one run in twenty, more often on busy agents", "a fixed delay waiting for async work"],
+        ["fails on every run on the new build agents", "the agents' culture or time zone"],
+        ["fails when the staging API is being deployed", "a real network call in a test"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your team adds automatic retries: a failed test is re-run up to 3 times before CI goes red. What is the main risk?",
+      "options": [
+        "Real intermittent bugs (races, timeouts) in the product are hidden as well, and the flaky tests are never fixed",
+        "Retries make the suite slower on green runs",
+        "Retries do not work with xUnit",
+        "Nothing: a passing retry proves the code works"
+      ],
+      "answer": 0,
+      "explain": "A race that fails one time in twenty in a test may fail one time in twenty for customers. Retries are acceptable as a short, visible quarantine (and the MTP retry extension reports them), never as the fix."
+    },
+    {
+      "type": "code",
+      "title": "Make the greeting test deterministic",
+      "prompt": [
+        "This test passed for months and now fails some evenings. It mirrors the code's logic and reads the real clock:",
+        "",
+        "```csharp",
+        "[Fact]",
+        "public void Greets_by_time_of_day()",
+        "{",
+        "    var expected = DateTime.Now.Hour < 12 ? \"Good morning\" : DateTime.Now.Hour < 18 ? \"Good afternoon\" : \"Good evening\";",
+        "    Assert.Equal(expected, Greeting.For(TimeProvider.System));",
+        "}",
+        "```",
+        "",
+        "It is flaky (two clock reads straddle 11:59:59.999) and it tests nothing: any bug in the code is copied into `expected`. The code, compiled beside your tests:",
+        "",
+        "```csharp",
+        "public static class Greeting",
+        "{",
+        "    // In the user's local time: morning until 12:00, afternoon until 18:00, then evening.",
+        "    public static string For(TimeProvider clock)",
+        "    {",
+        "        var hour = clock.GetLocalNow().Hour;",
+        "        return hour < 12 ? \"Good morning\" : hour < 18 ? \"Good afternoon\" : \"Good evening\";",
+        "    }",
+        "}",
+        "```",
+        "",
+        "Replace it with `public class GreetingTests`: at least **5** tests with a `FakeTimeProvider` set to fixed moments (11:59 and 12:00, 17:59 and 18:00 ...), and **one** with a local time zone that is not UTC (`clock.SetLocalTimeZone(...)`). Four planted bugs."
+      ],
+      "starter": [
+        "public class GreetingTests",
+        "{",
+        "    [Fact]",
+        "    public void Greets_by_time_of_day()",
+        "    {",
+        "        var expected = DateTime.Now.Hour < 12 ? \"Good morning\" : DateTime.Now.Hour < 18 ? \"Good afternoon\" : \"Good evening\";",
+        "        Assert.Equal(expected, Greeting.For(TimeProvider.System));",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "using Microsoft.Extensions.Time.Testing;",
+        "",
+        "public class GreetingTests",
+        "{",
+        "    static FakeTimeProvider At(int hour, int minute) => new(new DateTimeOffset(2026, 11, 27, hour, minute, 0, TimeSpan.Zero));",
+        "",
+        "    [Theory]",
+        "    [InlineData(6, 0, \"Good morning\")]",
+        "    [InlineData(11, 59, \"Good morning\")]",
+        "    [InlineData(12, 0, \"Good afternoon\")]",
+        "    [InlineData(17, 59, \"Good afternoon\")]",
+        "    [InlineData(18, 0, \"Good evening\")]",
+        "    [InlineData(23, 30, \"Good evening\")]",
+        "    public void Greets_by_the_hour(int hour, int minute, string expected) => Assert.Equal(expected, Greeting.For(At(hour, minute)));",
+        "",
+        "    [Fact]",
+        "    public void Uses_the_users_local_time()",
+        "    {",
+        "        var clock = At(9, 0);   // 09:00 UTC is 14:00 at UTC+5",
+        "        clock.SetLocalTimeZone(TimeZoneInfo.CreateCustomTimeZone(\"Test+5\", TimeSpan.FromHours(5), \"Test+5\", \"Test+5\"));",
+        "",
+        "        Assert.Equal(\"Good afternoon\", Greeting.For(clock));",
+        "    }",
+        "}"
+      ],
+      "xunit": {
+        "minTests": 5,
+        "target": [
+          "public static class Greeting",
+          "{",
+          "    public static string For(TimeProvider clock)",
+          "    {",
+          "        var hour = clock.GetLocalNow().Hour;",
+          "        return hour < 12 ? \"Good morning\" : hour < 18 ? \"Good afternoon\" : \"Good evening\";",
+          "    }",
+          "}"
+        ],
+        "mutants": [
+          { "name": "noon is still morning", "replace": [["hour < 12", "hour <= 12"]] },
+          { "name": "18:00 is still afternoon", "replace": [["hour < 18", "hour <= 18"]] },
+          { "name": "it uses UTC instead of the user's time", "replace": [["clock.GetLocalNow()", "clock.GetUtcNow()"]], "hint": "FakeTimeProvider's local time zone is UTC by default: set another one with SetLocalTimeZone." },
+          { "name": "evening became night", "replace": [["\"Good evening\";", "\"Good night\";"]] }
+        ]
+      },
+      "forbid": [
+        { "pattern": "DateTime(Offset)?\\.(Now|UtcNow|Today)|TimeProvider\\.System", "message": "Never reads the real clock" }
+      ],
+      "require": [
+        { "pattern": "SetLocalTimeZone\\s*\\(", "message": "One test sets a local time zone that is not UTC" }
+      ],
+      "hints": [
+        "A helper builds a clock at a given time: `new FakeTimeProvider(new DateTimeOffset(2026, 11, 27, hour, minute, 0, TimeSpan.Zero))`.",
+        "Test both sides of each boundary: 11:59 and 12:00, 17:59 and 18:00.",
+        "For the time zone: `clock.SetLocalTimeZone(TimeZoneInfo.CreateCustomTimeZone(\"Test+5\", TimeSpan.FromHours(5), \"Test+5\", \"Test+5\"))`, then 09:00 UTC is afternoon. A custom zone does not depend on the machine's time zone database."
+      ],
+      "explain": "Fixed inputs make the test deterministic, and writing the expected greeting by hand makes it actually test something. The time-zone case is the one people forget, and the one that fails on servers set to UTC."
+    }
+  ]
+}
