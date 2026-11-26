@@ -9,8 +9,9 @@ namespace CodeDojo;
 /// </summary>
 public static class Validator
 {
-    public static async Task<int> Run(Content content, Checker checker, CSharpRunner runner, LangRunner langs, string? filter, bool puzzles = false)
+    public static async Task<int> Run(Content content, Checker checker, CSharpRunner runner, LangRunner langs, string? filter, bool puzzles = false, bool noDocker = false)
     {
+        await using var terminals = new TerminalProof(content, noDocker);
         int lessons = 0, steps = 0, code = 0, errors = 0, warnings = 0, puzzlesChecked = 0, unverifiable = 0;
 
         void Error(string where, string msg) { errors++; Console.WriteLine($"  ERROR {where}: {msg}"); }
@@ -201,6 +202,14 @@ public static class Validator
                                 if ((await Grade(starter)).Passed) Warn(where + label, "the starter code already passes");
                             }
                             break;
+                        case "terminal":
+                            // A real shell scenario: lint it, then prove it in a container (checks fail, solution, checks pass).
+                            foreach (var (isError, msg) in await terminals.Prove(step, key, i, (string)track["id"]!, (string)module["id"]!))
+                                if (isError) Error(where, msg); else Warn(where, msg);
+                            break;
+                        case "lab":
+                            foreach (var msg in LabSteps.Check(step, Path.GetDirectoryName(content.TracksDir)!)) Error(where, msg);
+                            break;
                         default:
                             throw new($"unknown step type '{type}'");
                     }
@@ -213,7 +222,57 @@ public static class Validator
         Console.WriteLine($"{lessons} lessons, {steps} steps, {code} code exercises run. {errors} errors, {warnings} warnings.");
         if (puzzles)
             Console.WriteLine($"Puzzles: {puzzlesChecked} order/blanks steps checked for a second right answer, {unverifiable} could not be run on their own.");
+        if (terminals.Seen > 0)
+            Console.WriteLine($"Terminal steps: {terminals.Proven} proven in a container, {terminals.Skipped} skipped{(terminals.Skipped > 0 ? $" ({terminals.SkipReason})" : "")}.");
         return errors == 0 ? 0 : 1;
+    }
+
+    // ------------------------------------------------------------ terminal steps (TermSteps.cs)
+
+    /// <summary>
+    /// Proves terminal steps for real: one container per step, started, set up, checked before (the checks must fail),
+    /// solved with the step's own "solution" as the learner, checked again (all must pass), removed. Without Docker
+    /// (or with --no-docker / DOJO_NO_DOCKER=1) each step is only linted and skipped with a warning.
+    /// </summary>
+    sealed class TerminalProof(Content content, bool noDocker) : IAsyncDisposable
+    {
+        TermSteps? _steps;
+        bool? _docker;
+        public int Seen, Proven, Skipped;
+        public string SkipReason = "";
+
+        public async Task<List<(bool Error, string Message)>> Prove(JsonObject step, string key, int idx, string trackId, string moduleId)
+        {
+            Seen++;
+            var issues = new List<(bool, string)>();
+            TermSteps.Spec spec;
+            try { spec = TermSteps.Parse(step, $"{key}#{idx}", TermSteps.ModuleDir(content, step, trackId, moduleId)); }
+            catch (InvalidDataException e) { issues.Add((true, e.Message)); return issues; }
+            var root = Path.GetDirectoryName(content.TracksDir)!;
+            _steps ??= new TermSteps(Path.Combine(root, "netlabs", "images"), $"validate-{Environment.ProcessId}", sweep: false);
+            if (!_steps.ImageExists(spec.Image)) { issues.Add((true, $"there is no image folder netlabs/images/{spec.Image}")); return issues; }
+            if (spec.Solution.Trim().Length == 0) issues.Add((true, "missing 'solution' (the commands an expert would type)"));
+            if (step["hints"] is not JsonArray { Count: > 0 } && !Pacing.IsCold(step)) issues.Add((false, "no hints: give two or three, from a nudge to near the answer"));
+            if (noDocker) { Skip("--no-docker"); issues.Add((false, "terminal step not run in a container (--no-docker)")); return issues; }
+            _docker ??= (await NetLabs.Probe()).Ok;
+            if (_docker != true) { Skip("Docker is not running"); issues.Add((false, "terminal step not run: Docker is not running (start Docker Desktop to prove it)")); return issues; }
+            var image = _steps.ImageFor(spec.Image);
+            if (!await image.Ready())
+            {
+                if (!await image.Ensure(Console.WriteLine)) { issues.Add((true, $"the {image.Tag} image does not build")); return issues; }
+                if (await image.Size() is { } bytes) Console.WriteLine($"  built {image.Tag}: {bytes / 1_000_000} MB");
+            }
+            foreach (var p in await _steps.Prove(spec)) issues.Add((true, p));
+            if (issues.All(x => !x.Item1)) Proven++;
+            return issues;
+        }
+
+        void Skip(string why) { Skipped++; SkipReason = why; }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_steps is not null) await _steps.DisposeAsync();   // removes every container this run started
+        }
     }
 
     // ------------------------------------------------------------ puzzle ambiguity (`--puzzles`)

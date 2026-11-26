@@ -248,16 +248,22 @@ public sealed partial class NetLabs
     public async Task<DockerStatus> Status(bool fresh = false)
     {
         if (!fresh && _status is { } s && DateTime.UtcNow - _statusAt < TimeSpan.FromSeconds(s.Ok ? 15 : 4)) return s;
+        _status = await Probe();
+        _statusAt = DateTime.UtcNow;
+        return _status;
+    }
+
+    /// <summary>Ask Docker whether it is running, with a message a learner can act on (shared with TermSteps.cs).</summary>
+    public static async Task<DockerStatus> Probe()
+    {
         var r = await Docker(["info", "--format", "{{.ServerVersion}}"], TimeSpan.FromSeconds(20));
-        _status = r.Code switch
+        return r.Code switch
         {
             0 => new(true, "running", "Docker is running.", r.Out.Trim()),
             127 => new(false, "missing", "Docker is not installed. Install Docker Desktop (https://www.docker.com/products/docker-desktop/), start it, then come back here.", null),
             124 => new(false, "slow", "Docker did not answer in time. If Docker Desktop is still starting, wait until its whale icon stops animating, then press Retry.", null),
             _ => new(false, "stopped", "Docker Desktop is not running. Start Docker Desktop from the Start menu, wait until it says \"Engine running\", then press Retry.", null),
         };
-        _statusAt = DateTime.UtcNow;
-        return _status;
     }
 
     HashSet<string>? _projects;
@@ -274,37 +280,15 @@ public sealed partial class NetLabs
 
     public async Task<bool> IsRunning(Lab lab) => (await RunningProjects()).Contains(lab.Project);
 
-    public async Task<bool> ImageReady() => (await Docker(["image", "inspect", "--format", "{{.Id}}", Toolbox], TimeSpan.FromSeconds(20))).Ok;
+    // ---------------------------------------------------------------- toolbox image build (background, DockerImage.cs)
 
-    // ---------------------------------------------------------------- toolbox image build (background)
+    DockerImage? _toolbox;
+    DockerImage ToolboxImage => _toolbox ??= new DockerImage(Toolbox, _imageDir);
 
-    readonly object _buildLock = new();
-    readonly List<string> _buildLog = [];
-    public string BuildState { get; private set; } = "idle";   // idle | building | done | failed
-
-    public object BuildInfo()
-    {
-        lock (_buildLock) return new { state = BuildState, log = _buildLog.TakeLast(40).ToArray() };
-    }
-
-    public bool StartBuild()
-    {
-        lock (_buildLock)
-        {
-            if (BuildState == "building") return false;
-            BuildState = "building";
-            _buildLog.Clear();
-        }
-        _ = Task.Run(async () =>
-        {
-            var r = await Docker(["build", "--progress=plain", "-t", Toolbox, _imageDir], TimeSpan.FromMinutes(30), onLine: line =>
-            {
-                lock (_buildLock) { _buildLog.Add(line); if (_buildLog.Count > 400) _buildLog.RemoveAt(0); }
-            });
-            lock (_buildLock) BuildState = r.Ok ? "done" : "failed";
-        });
-        return true;
-    }
+    public Task<bool> ImageReady() => ToolboxImage.Ready();
+    public string BuildState => ToolboxImage.State;   // idle | building | done | failed
+    public object BuildInfo() => ToolboxImage.Info();
+    public bool StartBuild() => ToolboxImage.StartBuild();
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -546,7 +530,7 @@ public sealed partial class NetLabs
     // ---------------------------------------------------------------- in-page terminal
 
     // Prefer a real pty inside the container (prompt, Ctrl+C, line editing); fall back to plain bash -i.
-    const string ShellBoot = "if command -v script >/dev/null 2>&1; then exec script -qfc 'stty cols 160 rows 40 -echoctl 2>/dev/null; exec bash -i' /dev/null; else exec bash -i; fi";
+    public const string ShellBoot = "if command -v script >/dev/null 2>&1; then exec script -qfc 'stty cols 160 rows 40 -echoctl 2>/dev/null; exec bash -i' /dev/null; else exec bash -i; fi";
 
     public async Task Terminal(HttpContext ctx, Lab lab, string node)
     {
@@ -560,13 +544,24 @@ public sealed partial class NetLabs
             await ws.CloseAsync(WebSocketCloseStatus.PolicyViolation, "too many", default);
             return;
         }
+        try { await Bridge(ctx, ws, ["exec", "-i", "-e", "TERM=xterm-256color", "-w", "/root", lab.Container(node), "sh", "-c", ShellBoot]); }
+        finally { Interlocked.Decrement(ref _terminals); }
+    }
+
+    /// <summary>
+    /// Bridges an accepted WebSocket to a `docker exec -i ...` process: socket messages go to its stdin, its stdout and
+    /// stderr come back as text messages. Ends when either side closes; the process is always killed. Shared by the live
+    /// labs and the terminal steps (TermSteps.cs). <paramref name="onInput"/> is called for every message from the page.
+    /// </summary>
+    public static async Task Bridge(HttpContext ctx, WebSocket ws, IEnumerable<string> dockerArgs, Action? onInput = null)
+    {
+        async Task Say(string text) => await ws.SendAsync(Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, CancellationToken.None);
         var psi = new ProcessStartInfo("docker")
         {
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
             UseShellExecute = false, CreateNoWindow = true,
         };
-        foreach (var a in new[] { "exec", "-i", "-e", "TERM=xterm-256color", "-w", "/root", lab.Container(node), "sh", "-c", ShellBoot })
-            psi.ArgumentList.Add(a);
+        foreach (var a in dockerArgs) psi.ArgumentList.Add(a);
         Process? p = null;
         try
         {
@@ -603,6 +598,7 @@ public sealed partial class NetLabs
                     {
                         var r = await ws.ReceiveAsync(buf, cts.Token);
                         if (r.MessageType == WebSocketMessageType.Close) break;
+                        onInput?.Invoke();
                         await p.StandardInput.BaseStream.WriteAsync(buf.AsMemory(0, r.Count), cts.Token);
                         await p.StandardInput.BaseStream.FlushAsync(cts.Token);
                     }
@@ -622,7 +618,6 @@ public sealed partial class NetLabs
         catch (Exception e) when (e is Win32Exception or WebSocketException or OperationCanceledException or IOException) { }
         finally
         {
-            Interlocked.Decrement(ref _terminals);
             if (p is not null)
             {
                 try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }

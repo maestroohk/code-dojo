@@ -202,6 +202,105 @@ Things that catch authors out:
   contents of ordinary strings or comments.
 - In a table cell, write a literal pipe as `\|`.
 
+### terminal — a real shell, graded by its real state
+
+The learner gets a real Linux shell in a throwaway Docker container, set up with a scenario. They type real
+commands (`git`, `grep`, `sed`, `jq`, ...) in the same in-page terminal the live labs use, and **Check** (Ctrl+Enter)
+runs the step's checks inside the container against whatever state they left behind. Use it whenever the skill is
+"type the right commands": Git, the shell, text tools, editors-by-command, Docker and Kubernetes CLIs later.
+`tracks/git/02-history-and-undo` and `tracks/linux/02-files-and-text` are the reference modules.
+
+```json
+{
+  "type": "terminal",
+  "title": "Amend, then revert",
+  "prompt": ["`~/shop` is pushed up to ...", "", "1. ...", "2. ..."],
+  "setup": ["revert.sh", "echo extra setup commands work too"],
+  "checks": [
+    { "name": "the newest commit is the revert",
+      "cmd": "cd ~/shop && git log -1 --format=%s",
+      "expectOutput": "Revert \"Enable experimental cache\"",
+      "fail": "The newest commit should be the revert. `git log --oneline` shows what you have." },
+    { "name": "the working tree is clean", "cmd": "cd ~/shop && test -z \"$(git status --porcelain)\"" }
+  ],
+  "hints": ["a nudge", "closer", "nearly the answer"],
+  "solution": ["cd ~/shop", "git add CHANGELOG.md", "git commit --amend -m \"Fix typo in README\""],
+  "explain": "Shown after passing."
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `image` | Image folder under `netlabs/images` (default `"shell"`, built as `dojo-shell:latest` on first use). |
+| `network` | `true` gives the container a network (default: none at all). Only for steps that need one. |
+| `setup` | Lines of bash, run **as root** in `/home/learner` (with `HOME=/home/learner`) under `set -e -o pipefail` before the learner gets the prompt. A line that is just a `.sh` file name (`revert.sh` or `files/revert.sh`) runs that script from the **module's `files/` folder**, which is copied to `/opt/dojo/files` (`$DOJO_FILES`) in every container. Afterwards the home folder is handed to the learner (`chown -R`). |
+| `checks` | Run in order with `docker exec`, as the learner in `/home/learner` (`"user": "root"` when a check needs root). Each one passes when all of its expectations hold: `expectExit` (a number), `expectOutput` (stdout, trailing whitespace ignored), `expectContains` (a string, or an array of strings that must all appear), `expectMatch` (a regex, multiline). With none of them, it passes when the command exits 0. `fail` is shown when it fails, followed by what the command printed (`"quiet": true` hides that). Names must be unique. |
+| `solution` | The commands an expert would type, one per line. Shown by "Show answer", each with a **Type it** button; `dojo validate` runs them. |
+| `hints`, `explain`, `title` | As on every step. Hints are expected (the validator warns without them). |
+
+The machine: Debian slim with `git` (identity "Dojo Learner", default branch `main`), `vim`, `nano`, `less`, `curl`, `jq`,
+`rg` (ripgrep), `fd`, `tree`, `procps`, `iproute2`, `lsof`, `strace`, `sysstat`, `psmisc`, `file`, `unzip`, `python3`, `sqlite3`,
+`man`, `tmux`, `ssh`, `dig`, `make`, a learner user with password-less `sudo`, and a prompt with the Git branch. The
+dockerfile is `netlabs/images/shell/Dockerfile`.
+
+Writing good scenarios:
+
+- **Write the scenario as a script** in the module's `files/` folder (`files/lib.sh` in the Git module has helpers for
+  commits with fixed dates and teammate authors). Keep values the checks need (a hash to get back to) **outside** the
+  learner's home, in `/opt/dojo/state/`.
+- **Check the result, not the keystrokes.** Compare with what the right command gives on the same data
+  (`diff <(sort data | uniq -c | sort -rn) ~/answers/top.txt`), or with Git's real state (`git rev-parse`, `git log
+  --format=%s`, `git status --porcelain`). Then any correct way passes.
+- Answers that are files under the home folder (`~/answers/requests.txt`) make "what is the number?" questions checkable.
+- The in-page terminal is line based: full-screen programs (`vim`, `nano`, `less`, `top`, `tmux`) do not draw in it.
+  In the dojo shell they print a short note instead (`less` and `man` print plain text), and Git never opens an
+  editor (a prepared message is kept; a plain `git commit` asks for `-m`). Write prompts whose edits are commands:
+  `sed -i`, `cat > file <<'EOF'`, `git checkout --ours`.
+- A `solution` is typed one line at a time, like the learner would, so a command that stops on purpose (a revert
+  that conflicts) does not end it.
+
+What happens around it: one container per (lesson, step), started when the step opens and reused while the learner
+stays. **Reset scenario** throws it away and runs the setup again. It is removed when the learner leaves the step or
+the lesson (or closes the tab), after 5 minutes with no terminal attached, after 30 minutes without a keystroke or a
+check, and when the server stops. At most 4 run at once (the oldest idle one makes room), each limited to 512 MB, one
+CPU and 256 processes, without a network unless `"network": true`. Every container carries the label
+`code-dojo.termstep=<server instance>`, and the dojo only ever removes containers with its own label. Without Docker
+the step says how to start Docker Desktop and waits for it; there is no imitation fallback.
+
+**`dojo validate`** proves each terminal step in a real container: setup runs, the checks must **fail** before the
+learner does anything, the solution runs as the learner, and then every check must **pass**. The container is removed
+either way. On a machine without Docker (CI), `dojo validate --no-docker` (or `DOJO_NO_DOCKER=1`) lints the steps and
+skips the container part with a warning, not an error; without a running Docker it skips the same way.
+
+A terminal step can be a **cold rebuild** like a code step: `"cold": true` with `"coldOf": "track/module/lesson#N"` pointing
+at a terminal step borrows its `setup`, `checks`, `image`, `network` and `solution` (and its module's `files/`), and hides
+hints and the solution. Write the cold step's own `prompt` restating the task without the commands.
+
+### lab — link a lesson to a lab, and require it
+
+Labs are where the visual and the hands-on live. A `lab` step puts one into the lesson flow and passes only when the
+learner has done it there.
+
+```json
+{ "type": "lab", "lab": "composebuild", "challenge": "healthy",
+  "title": "Build it: started is not ready", "prompt": "In the **Compose builder**, ...", "explain": "..." }
+
+{ "type": "lab", "live": "13-pipes-and-plumbing", "task": "t3",
+  "title": "Mission: pipes and plumbing", "prompt": "In the mission **Pipes and plumbing**, answer ...", "explain": "..." }
+```
+
+- **Visual labs** (`"lab"`): `netbuild`, `archbuild`, `composebuild`, `kubebuild`, `pipebuild` or `pki`, and a
+  `challenge` id from that lab's `CHALLENGES` list (in `ui/netsim.js`, `archsim.js`, `composesim.js`, `kubesim.js`,
+  `pipesim.js`, `lab-pki.js`). The lab opens **inline** in the step, on that challenge (its full-screen button still works),
+  and the step passes as soon as the lab's saved progress marks the challenge solved. Sandbox challenges (no XP) cannot
+  be required.
+- **Live labs** (`"live"`): a lab folder under `netlabs/labs` and a `task` id from its `lab.json` (or an array of
+  ids). The step shows the task, opens the lab on its own page (with a **Back to the lesson** button that returns to
+  this exact step), and passes when the lab has recorded the task as done. Live labs need Docker.
+- Add lab steps **at the end** of a lesson: appending keeps every step index, which build pieces, drafts and `coldOf`
+  references depend on.
+- `dojo validate` checks that the lab, the challenge or the task exist (and that a challenge is not a sandbox).
+
 ## Topics in the learning center
 
 Every track is a topic card on the home page. `category` (e.g. "Programming", "Security") is shown above
@@ -358,6 +457,8 @@ messages are correct; the one-line helper prelude is accounted for.
 - 8 to 12 steps, about 10 minutes. Never two `learn` cards in a row without an exercise between them.
 - Mix the types: at least one drag-and-drop step (`order`, `blanks`, `match`, `sort`), at least one
   `predict` or `mcq`, and at least one `code` step. End on a `code` step that uses the whole lesson.
+  In tool topics (Git, Linux, Docker, Kubernetes) the hands-on steps are `terminal` steps instead: real commands on a
+  real machine, never a C# function that imitates the tool. A `lab` step may follow at the very end.
 - Difficulty climbs inside the lesson: recognise, then complete, then write.
 - A boss lesson is 3 to 5 `code` steps of rising difficulty that combine the module, with at most
   one short `learn` card to set the scene.
@@ -600,7 +701,7 @@ step that builds nothing):
 ### What `dojo validate` checks for pacing
 
 `uses` entries resolve to a piece built earlier and the reference solution passes with the reference pieces;
-`cold`, `timeLimit` and `coldOf` sit on code steps, `timeLimit` is 10-3600 and `coldOf` points at a code step; a cold
+`cold`, `timeLimit` and `coldOf` sit on code (or terminal) steps, `timeLimit` is 10-3600 and `coldOf` points at a step of the same type; a cold
 step with hints is a warning; every gate's lessons exist, a gate that asks for the boss has one, `minStars` is 1-3,
 and its `cold` lessons have a cold step.
 
