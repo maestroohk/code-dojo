@@ -132,146 +132,123 @@
       "explain": "Sourcing the file turns each line into a shell variable."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Parse os-release",
+      "type": "terminal",
+      "title": "Read os-release in a script",
       "prompt": [
-        "Write `Dictionary<string, string> ParseOsRelease(string text)`:",
+        "`/etc/os-release` is written in shell syntax on purpose, so a script can **source** it. Write `~/bin/osinfo` that",
+        "prints `ID VERSION_ID` (for example `debian 13`) for the file given as its argument, or for `/etc/os-release` when",
+        "there is none. Hosts without a `VERSION_ID` print `-` instead (`arch -`).",
         "",
-        "- one `KEY=value` per line; skip blank lines and lines starting with `#`, and lines with no `=`.",
-        "- strip one pair of matching surrounding quotes (`\"...\"` or `'...'`) from the value.",
-        "- the value is everything after the **first** `=` (values may contain `=`).",
-        "- trim whitespace around each line. Later duplicates win."
+        "Source the file in a **subshell** (`( . \"$f\"; ... )`), so its variables (`NAME`, `VERSION`...) do not leak into the",
+        "rest of your script. Try it on `~/fleet/*/os-release`."
       ],
-      "starter": [
-        "Dictionary<string, string> ParseOsRelease(string text)",
-        "{",
-        "    return new Dictionary<string, string>();",
-        "}"
+      "setup": [
+        "fleet.sh"
       ],
-      "solution": [
-        "Dictionary<string, string> ParseOsRelease(string text)",
-        "{",
-        "    var result = new Dictionary<string, string>();",
-        "    foreach (var raw in text.Split('\\n'))",
-        "    {",
-        "        var line = raw.Trim();",
-        "        if (line.Length == 0 || line.StartsWith(\"#\")) continue;",
-        "        int eq = line.IndexOf('=');",
-        "        if (eq <= 0) continue;",
-        "        var key = line.Substring(0, eq);",
-        "        var value = line.Substring(eq + 1);",
-        "        if (value.Length >= 2 && (value[0] == '\"' || value[0] == '\\'') && value[^1] == value[0])",
-        "            value = value.Substring(1, value.Length - 2);",
-        "        result[key] = value;",
-        "    }",
-        "    return result;",
-        "}"
+      "checks": [
+        {
+          "name": "osinfo with no argument reads /etc/os-release",
+          "cmd": "test \"$(~/bin/osinfo 2>/dev/null)\" = \"debian 13\"",
+          "fail": "`~/bin/osinfo` (no argument) should print `debian 13` here. Is it executable (`chmod +x`)?"
+        },
+        {
+          "name": "osinfo works on every fleet file",
+          "cmd": "for d in ~/fleet/*/; do want=$(ID= VERSION_ID=; . \"$d/os-release\"; echo \"$ID ${VERSION_ID:--}\"); got=$(~/bin/osinfo \"$d/os-release\" 2>/dev/null); [ \"$got\" = \"$want\" ] || { echo \"$d: got '$got', want '$want'\"; exit 1; }; done",
+          "fail": "One of the fleet files gives the wrong answer (below). Quotes around values are removed by the shell when you source the file."
+        },
+        {
+          "name": "the variables do not leak",
+          "cmd": "grep -q \"( *\\.\" ~/bin/osinfo || grep -q \"(\\s*source\" ~/bin/osinfo",
+          "fail": "Source the file inside `( ... )`, a subshell, so its variables stay there."
+        }
       ],
       "hints": [
-        "Split on `'\\n'`, `Trim()` each line, and use `IndexOf('=')`.",
-        "Only strip quotes when the first and last characters are the same quote."
+        "`f=${1:-/etc/os-release}` takes the argument or the default.",
+        "`( . \"$f\"; echo \"$ID ${VERSION_ID:--}\" )`: `${VERSION_ID:--}` means \"VERSION_ID, or `-` when it is empty\".",
+        "With `set -u`, an unset `VERSION_ID` is an error; `${VERSION_ID:--}` handles it."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoOs = ParseOsRelease(\"PRETTY_NAME=\\\"Ubuntu 24.04.1 LTS\\\"\\nNAME=\\\"Ubuntu\\\"\\nVERSION_ID=\\\"24.04\\\"\\nID=ubuntu\\nID_LIKE=debian\\n# comment\\n\\nBUG_URL='https://bugs.launchpad.net/?a=b'\\n\");",
-        "Dojo.Eq(\"PRETTY_NAME unquoted\", \"Ubuntu 24.04.1 LTS\", dojoOs[\"PRETTY_NAME\"]);",
-        "Dojo.Eq(\"bare value\", \"ubuntu\", dojoOs[\"ID\"]);",
-        "Dojo.Eq(\"VERSION_ID\", \"24.04\", dojoOs[\"VERSION_ID\"]);",
-        "Dojo.Eq(\"single quotes and = in value\", \"https://bugs.launchpad.net/?a=b\", dojoOs[\"BUG_URL\"]);",
-        "Dojo.Eq(\"comment and blank skipped\", 6, dojoOs.Count);",
-        "Dojo.Eq(\"mismatched quotes kept\", \"\\\"oops\", ParseOsRelease(\"X=\\\"oops\")[\"X\"]);"
+      "solution": [
+        "mkdir -p ~/bin",
+        "cat > ~/bin/osinfo <<'EOF'",
+        "#!/bin/bash",
+        "# osinfo [FILE]: prints \"ID VERSION_ID\" from an os-release file (default /etc/os-release).",
+        "set -euo pipefail",
+        "f=${1:-/etc/os-release}",
+        "( . \"$f\"; echo \"${ID:-unknown} ${VERSION_ID:--}\" )",
+        "EOF",
+        "chmod +x ~/bin/osinfo",
+        "for f in ~/fleet/*/os-release; do ~/bin/osinfo \"$f\"; done"
+      ],
+      "explain": [
+        "Sourcing is the documented way to read `os-release` on the machine itself. For files **collected from other machines**,",
+        "remember that sourcing runs them as code: if you do not trust where they came from, parse them instead",
+        "(`sed -n 's/^ID=//p' | tr -d '\"'`). Ansible's `ansible_distribution` and Python's `platform.freedesktop_os_release()` read",
+        "the same file."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Which family?",
+      "type": "terminal",
+      "title": "Which family is it?",
       "prompt": [
-        "Write `string Family(Dictionary<string, string> os)` returning `\"debian\"`, `\"rhel\"`, `\"suse\"`, `\"arch\"`, `\"alpine\"` or `\"unknown\"`. Look at `ID` first, then each word of `ID_LIKE` in order (case-insensitive), and return the first that is recognised:",
+        "Runbooks branch on the distro **family**, not on every distro. Write `~/bin/osfamily [FILE]` that prints `debian`,",
+        "`rhel`, `suse`, `arch`, `alpine` or `unknown`. Look at `ID` first, then each word of `ID_LIKE` in order, and print the",
+        "first one you recognise:",
         "",
-        "- `debian`, `ubuntu` → debian",
-        "- `rhel`, `fedora`, `centos`, `amzn` → rhel",
-        "- `suse`, `sles`, or anything starting with `opensuse` → suse",
-        "- `arch` → arch; `alpine` → alpine",
+        "- `debian`, `ubuntu` → `debian`",
+        "- `rhel`, `fedora`, `centos`, `rocky`, `almalinux`, `amzn` → `rhel`",
+        "- `suse`, `sles`, or anything starting with `opensuse` → `suse`",
+        "- `arch` → `arch`; `alpine` → `alpine`",
         "",
-        "Linux Mint has `ID=linuxmint` and `ID_LIKE=\"ubuntu debian\"`, so it is debian. Write your `ParseOsRelease` too, or copy it from the previous step: the tests call both."
+        "Linux Mint has `ID=linuxmint` and `ID_LIKE=\"ubuntu debian\"`, so it is `debian`. Test on `~/fleet/*/os-release`."
       ],
-      "starter": [
-        "Dictionary<string, string> ParseOsRelease(string text)",
-        "{",
-        "    var result = new Dictionary<string, string>();",
-        "    foreach (var raw in text.Split('\\n'))",
-        "    {",
-        "        var line = raw.Trim();",
-        "        if (line.Length == 0 || line.StartsWith(\"#\")) continue;",
-        "        int eq = line.IndexOf('=');",
-        "        if (eq <= 0) continue;",
-        "        var key = line.Substring(0, eq);",
-        "        var value = line.Substring(eq + 1);",
-        "        if (value.Length >= 2 && (value[0] == '\"' || value[0] == '\\'') && value[^1] == value[0])",
-        "            value = value.Substring(1, value.Length - 2);",
-        "        result[key] = value;",
-        "    }",
-        "    return result;",
-        "}",
-        "",
-        "string Family(Dictionary<string, string> os)",
-        "{",
-        "    return \"unknown\";",
-        "}"
+      "setup": [
+        "fleet.sh"
       ],
-      "solution": [
-        "Dictionary<string, string> ParseOsRelease(string text)",
-        "{",
-        "    var result = new Dictionary<string, string>();",
-        "    foreach (var raw in text.Split('\\n'))",
-        "    {",
-        "        var line = raw.Trim();",
-        "        if (line.Length == 0 || line.StartsWith(\"#\")) continue;",
-        "        int eq = line.IndexOf('=');",
-        "        if (eq <= 0) continue;",
-        "        var key = line.Substring(0, eq);",
-        "        var value = line.Substring(eq + 1);",
-        "        if (value.Length >= 2 && (value[0] == '\"' || value[0] == '\\'') && value[^1] == value[0])",
-        "            value = value.Substring(1, value.Length - 2);",
-        "        result[key] = value;",
-        "    }",
-        "    return result;",
-        "}",
-        "",
-        "string Family(Dictionary<string, string> os)",
-        "{",
-        "    var ids = new List<string>();",
-        "    if (os.TryGetValue(\"ID\", out var id)) ids.Add(id.ToLowerInvariant());",
-        "    if (os.TryGetValue(\"ID_LIKE\", out var like)) ids.AddRange(like.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));",
-        "    foreach (var x in ids)",
-        "    {",
-        "        if (x == \"debian\" || x == \"ubuntu\") return \"debian\";",
-        "        if (x == \"rhel\" || x == \"fedora\" || x == \"centos\" || x == \"amzn\") return \"rhel\";",
-        "        if (x == \"suse\" || x.StartsWith(\"opensuse\") || x == \"sles\") return \"suse\";",
-        "        if (x == \"arch\") return \"arch\";",
-        "        if (x == \"alpine\") return \"alpine\";",
-        "    }",
-        "    return \"unknown\";",
-        "}"
+      "checks": [
+        {
+          "name": "this machine is debian",
+          "cmd": "test \"$(~/bin/osfamily 2>/dev/null)\" = debian",
+          "fail": "`~/bin/osfamily` with no argument should print `debian` (it reads `/etc/os-release`). Is it executable?"
+        },
+        {
+          "name": "every fleet host gets the right family",
+          "cmd": "while read -r h want; do got=$(~/bin/osfamily ~/fleet/$h/os-release 2>/dev/null); [ \"$got\" = \"$want\" ] || { echo \"$h: got '$got', want '$want'\"; exit 1; }; done < /opt/dojo/state/families",
+          "fail": "A host gets the wrong family (below). Check `ID` first, then each word of `ID_LIKE`."
+        },
+        {
+          "name": "an unknown distro is unknown",
+          "cmd": "f=$(mktemp); printf 'ID=plan9\\nVERSION_ID=4\\n' > \"$f\"; got=$(~/bin/osfamily \"$f\" 2>/dev/null); rm -f \"$f\"; test \"$got\" = unknown",
+          "fail": "A file with `ID=plan9` and no `ID_LIKE` should give `unknown`."
+        }
       ],
       "hints": [
-        "Build a list: ID first, then the words of ID_LIKE.",
-        "Return as soon as one word is recognised."
+        "Read both fields in a subshell: `read -r id like < <(ID= ID_LIKE=; . \"$f\"; echo \"$ID $ID_LIKE\")`. `like` gets all remaining words.",
+        "Loop over the words: `for w in $id $like; do case $w in debian|ubuntu) echo debian; exit ;; ... esac; done; echo unknown`.",
+        "`opensuse*` in a `case` pattern matches `opensuse-leap` and `opensuse-tumbleweed`. `${w,,}` lowercases a value."
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"ubuntu\", \"debian\", Family(ParseOsRelease(\"ID=ubuntu\\nID_LIKE=debian\")));",
-        "Dojo.Eq(\"mint\", \"debian\", Family(ParseOsRelease(\"ID=linuxmint\\nID_LIKE=\\\"ubuntu debian\\\"\")));",
-        "Dojo.Eq(\"rocky\", \"rhel\", Family(ParseOsRelease(\"ID=\\\"rocky\\\"\\nID_LIKE=\\\"rhel centos fedora\\\"\")));",
-        "Dojo.Eq(\"amazon linux\", \"rhel\", Family(ParseOsRelease(\"ID=\\\"amzn\\\"\\nID_LIKE=\\\"fedora\\\"\")));",
-        "Dojo.Eq(\"tumbleweed\", \"suse\", Family(ParseOsRelease(\"ID=\\\"opensuse-tumbleweed\\\"\\nID_LIKE=\\\"opensuse suse\\\"\")));",
-        "Dojo.Eq(\"manjaro\", \"arch\", Family(ParseOsRelease(\"ID=manjaro\\nID_LIKE=arch\")));",
-        "Dojo.Eq(\"alpine\", \"alpine\", Family(ParseOsRelease(\"ID=alpine\")));",
-        "Dojo.Eq(\"nixos\", \"unknown\", Family(ParseOsRelease(\"ID=nixos\")));",
-        "Dojo.Eq(\"upper case\", \"rhel\", Family(new Dictionary<string, string> { [\"ID\"] = \"Fedora\" }));"
-      ]
+      "solution": [
+        "mkdir -p ~/bin",
+        "cat > ~/bin/osfamily <<'EOF'",
+        "#!/bin/bash",
+        "# osfamily [FILE]: the distro family, from ID and then the words of ID_LIKE.",
+        "set -euo pipefail",
+        "f=${1:-/etc/os-release}",
+        "read -r id like < <(ID= ID_LIKE=; . \"$f\"; echo \"${ID:-} ${ID_LIKE:-}\")",
+        "for w in $id $like; do",
+        "  case ${w,,} in",
+        "    debian|ubuntu) echo debian; exit ;;",
+        "    rhel|fedora|centos|rocky|almalinux|amzn) echo rhel; exit ;;",
+        "    suse|sles|opensuse*) echo suse; exit ;;",
+        "    arch) echo arch; exit ;;",
+        "    alpine) echo alpine; exit ;;",
+        "  esac",
+        "done",
+        "echo unknown",
+        "EOF",
+        "chmod +x ~/bin/osfamily",
+        "for f in ~/fleet/*/os-release; do echo \"$f $(~/bin/osfamily \"$f\")\"; done"
+      ],
+      "explain": "`ID_LIKE` exists for exactly this: a derivative lists the distros it behaves like, closest first, so tools can support Mint, Rocky or Pop!_OS without knowing them by name. Install scripts (Docker's, NodeSource's) and configuration tools branch the same way."
     }
   ]
 }

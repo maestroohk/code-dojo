@@ -71,7 +71,7 @@
       "body": [
         "systemd captures each service's stdout and stderr into the **journal**.",
         "",
-        "```text",
+        "```bash",
         "journalctl -u orders-api               # one unit's logs",
         "journalctl -u orders-api -f            # follow, like tail -f",
         "journalctl -u orders-api --since \"10 min ago\"",
@@ -177,66 +177,82 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "A cron matcher",
+      "type": "terminal",
+      "title": "Fix a crontab, then write a timer",
       "prompt": [
-        "Write `bool CronMatches(string expr, DateTime t)` for 5-field cron expressions. Each field may be:",
+        "`~/jobs.cron` is the crontab a colleague wants installed, but `crontab ~/jobs.cron` refuses it. Fix and install it,",
+        "then move the backup to a systemd timer.",
         "",
-        "- `*`, a number (`5`), a range (`1-5`), a step (`*/15`, `1-30/10`, `5/20` meaning 5, 25, 45...), or a comma list of those (`0,30` or `1-5,7`).",
-        "- Day of week: 0-7, both 0 and 7 are Sunday. (`DayOfWeek` gives Sunday = 0.)",
-        "",
-        "Treat day-of-month and day-of-week simply as \"both must match\". (Real cron ORs them when both are restricted; ignore that here.)"
+        "1. Fix `~/jobs.cron`: `rotate.sh` should run **every 15 minutes**, and the `tar` line must work under cron (look at",
+        "   what cron does with `%`). Install it with `crontab ~/jobs.cron` and check with `crontab -l`.",
+        "2. Write `~/units/backup.timer` for the existing `~/units/backup.service`: run it at **02:30 on weekdays**, catch up",
+        "   after downtime (`Persistent=true`), and enable it under `timers.target`. `systemd-analyze calendar` and",
+        "   `systemd-analyze verify` (both work here) tell you whether systemd agrees."
       ],
-      "starter": [
-        "bool CronMatches(string expr, DateTime t)",
-        "{",
-        "    return false;",
-        "}"
+      "setup": [
+        "schedule.sh"
       ],
-      "solution": [
-        "bool CronMatches(string expr, DateTime t)",
-        "{",
-        "    var f = expr.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
-        "    int dow = (int)t.DayOfWeek;",
-        "    return Field(f[0], t.Minute, 0) && Field(f[1], t.Hour, 0) && Field(f[2], t.Day, 1)",
-        "        && Field(f[3], t.Month, 1) && (Field(f[4], dow, 0) || (dow == 0 && Field(f[4], 7, 0)));",
-        "",
-        "    bool Field(string field, int value, int min)",
-        "    {",
-        "        foreach (var part in field.Split(','))",
-        "        {",
-        "            string range = part;",
-        "            int step = 1;",
-        "            int slash = part.IndexOf('/');",
-        "            if (slash >= 0) { range = part.Substring(0, slash); step = int.Parse(part.Substring(slash + 1)); }",
-        "            int lo, hi;",
-        "            if (range == \"*\") { lo = min; hi = int.MaxValue; }",
-        "            else if (range.Contains('-')) { var b = range.Split('-'); lo = int.Parse(b[0]); hi = int.Parse(b[1]); }",
-        "            else { lo = int.Parse(range); hi = slash >= 0 ? int.MaxValue : lo; }",
-        "            if (value >= lo && value <= hi && (value - lo) % step == 0) return true;",
-        "        }",
-        "        return false;",
-        "    }",
-        "}"
+      "checks": [
+        {
+          "name": "a crontab is installed",
+          "cmd": "crontab -l >/dev/null 2>&1",
+          "fail": "No crontab is installed. `crontab ~/jobs.cron` installs the file (and refuses it while it has errors)."
+        },
+        {
+          "name": "the backup line is still there",
+          "cmd": "crontab -l | grep -Eq \"^30[[:space:]]+2[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+(1-5|mon-fri|Mon-Fri|1,2,3,4,5)[[:space:]]+/home/learner/bin/backup.sh\"",
+          "fail": "The weekday 02:30 backup line is missing from `crontab -l`."
+        },
+        {
+          "name": "rotate.sh runs every 15 minutes",
+          "cmd": "crontab -l | grep -Eq \"^(\\*/15|0,15,30,45|0-59/15)[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+\\*[[:space:]]+/home/learner/bin/rotate.sh\"",
+          "fail": "The `rotate.sh` line should start `*/15 * * * *`. Minutes go from 0 to 59, so `61` is what `crontab` called a *bad minute*."
+        },
+        {
+          "name": "the % in the tar line is escaped",
+          "cmd": "crontab -l | grep \"tar czf\" | grep -q \"date +\\\\\\\\%F\"",
+          "fail": "In a crontab, an unescaped `%` ends the command (the rest becomes its input). Write `date +\\%F`."
+        },
+        {
+          "name": "the timer fires at 02:30 on weekdays",
+          "cmd": "test \"$(systemd-analyze calendar \"$(sed -n \"s/^OnCalendar=//p\" ~/units/backup.timer 2>/dev/null | head -n1)\" 2>/dev/null | sed -n \"s/^Normalized form: //p\")\" = \"Mon..Fri *-*-* 02:30:00\"",
+          "fail": "`systemd-analyze calendar` does not normalise your `OnCalendar=` to `Mon..Fri *-*-* 02:30:00`. Try `OnCalendar=Mon..Fri 02:30`."
+        },
+        {
+          "name": "the timer is Persistent",
+          "cmd": "grep -qx \"Persistent=true\" ~/units/backup.timer 2>/dev/null",
+          "fail": "Add `Persistent=true` to the `[Timer]` section."
+        },
+        {
+          "name": "the timer is enabled under timers.target",
+          "cmd": "grep -qx \"WantedBy=timers.target\" ~/units/backup.timer 2>/dev/null",
+          "fail": "Add an `[Install]` section with `WantedBy=timers.target`."
+        },
+        {
+          "name": "systemd-analyze verify accepts it",
+          "cmd": "cd ~/units && systemd-analyze verify backup.timer",
+          "fail": "`systemd-analyze verify ~/units/backup.timer` reports a problem: read its message."
+        }
       ],
       "hints": [
-        "Write a local `bool Field(string field, int value, int min)` and call it five times.",
-        "For a step, the value must be in range and `(value - start) % step == 0`. `*` starts at the field's minimum (0, or 1 for day and month)."
+        "Run `crontab ~/jobs.cron` and read the error: it names the line. Minutes are 0-59; every 15 minutes is `*/15`.",
+        "Cron turns `%` into a newline. `sed -i 's/+%F/+\\\\%F/' ~/jobs.cron` escapes it. Then `crontab ~/jobs.cron && crontab -l`.",
+        "The timer: `printf '[Unit]\\nDescription=Nightly backup timer\\n\\n[Timer]\\nOnCalendar=Mon..Fri 02:30\\nPersistent=true\\n\\n[Install]\\nWantedBy=timers.target\\n' > ~/units/backup.timer`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoMon9 = new DateTime(2031, 3, 10, 9, 0, 0);",
-        "Dojo.Eq(\"every minute\", true, CronMatches(\"* * * * *\", dojoMon9));",
-        "Dojo.Eq(\"weekday 09:00 on Monday\", true, CronMatches(\"0 9 * * 1-5\", dojoMon9));",
-        "Dojo.Eq(\"weekday 09:00 on Saturday\", false, CronMatches(\"0 9 * * 1-5\", new DateTime(2031, 3, 15, 9, 0, 0)));",
-        "Dojo.Eq(\"*/15 at :45\", true, CronMatches(\"*/15 * * * *\", new DateTime(2031, 1, 1, 4, 45, 0)));",
-        "Dojo.Eq(\"*/15 at :50\", false, CronMatches(\"*/15 * * * *\", new DateTime(2031, 1, 1, 4, 50, 0)));",
-        "Dojo.Eq(\"list 0,30\", true, CronMatches(\"0,30 * * * *\", new DateTime(2031, 1, 1, 4, 30, 0)));",
-        "Dojo.Eq(\"5/20 at :25\", true, CronMatches(\"5/20 * * * *\", new DateTime(2031, 1, 1, 4, 25, 0)));",
-        "Dojo.Eq(\"Sunday as 7\", true, CronMatches(\"0 0 * * 7\", new DateTime(2031, 3, 16, 0, 0, 0)));",
-        "Dojo.Eq(\"1st of the month 02:30\", true, CronMatches(\"30 2 1 * *\", new DateTime(2031, 4, 1, 2, 30, 0)));",
-        "Dojo.Eq(\"range with step 1-30/10 at :21\", true, CronMatches(\"1-30/10 * * * *\", new DateTime(2031, 1, 1, 0, 21, 0)));"
+      "solution": [
+        "crontab ~/jobs.cron",
+        "sed -i 's#^61 #*/15#' ~/jobs.cron",
+        "sed -i 's/+%F/+\\\\%F/' ~/jobs.cron",
+        "crontab ~/jobs.cron && crontab -l",
+        "printf '[Unit]\\nDescription=Nightly backup timer\\n\\n[Timer]\\nOnCalendar=Mon..Fri 02:30\\nPersistent=true\\n\\n[Install]\\nWantedBy=timers.target\\n' > ~/units/backup.timer",
+        "systemd-analyze calendar 'Mon..Fri 02:30'",
+        "cd ~/units && systemd-analyze verify backup.timer"
+      ],
+      "explain": [
+        "On a real server the timer goes into `/etc/systemd/system/` next to its service, then `systemctl daemon-reload` and",
+        "`systemctl enable --now backup.timer`; `systemctl list-timers` shows the next run. Timers log to the journal, can",
+        "catch up after downtime (`Persistent=true`), spread load with `RandomizedDelaySec=`, and never hit the `%` trap.",
+        "That is why new jobs on systemd machines are usually timers. Cron is still everywhere, so read both."
       ]
     },
     {

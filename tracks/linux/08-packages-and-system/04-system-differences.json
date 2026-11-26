@@ -1,6 +1,6 @@
 {
   "title": "Where distros differ",
-  "summary": "Init systems, filesystems, admin groups, firewalls and mandatory access control.",
+  "summary": "Init systems, filesystems, admin groups, firewalls and mandatory access control, and sudo drop-ins done safely.",
   "minutes": 12,
   "kind": "lesson",
   "steps": [
@@ -156,64 +156,75 @@
       "explain": "Each family's sudoers grants rights to a different group."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "systemctl to OpenRC",
+      "type": "terminal",
+      "title": "sudo rights, the safe way",
       "prompt": [
-        "Write `string ToOpenRc(string command)` translating a systemd command for Alpine:",
+        "Admin rights differ by family: Debian and Ubuntu give them to the group **`sudo`**, RHEL, Fedora and Arch to **`wheel`**.",
+        "This machine is Debian. Use `getent group sudo wheel` to see what exists.",
         "",
-        "- `systemctl start|stop|restart|status <svc>` → `rc-service <svc> <verb>`",
-        "- `systemctl enable <svc>` → `rc-update add <svc> default`; `disable` → `rc-update del <svc> default`",
-        "- `systemctl enable --now <svc>` → `rc-update add <svc> default && rc-service <svc> start`",
-        "- `systemctl list-units --type=service` → `rc-status`",
-        "- a leading `sudo` is kept; a `.service` suffix on the name is dropped",
-        "- anything else → `\"unsupported\"`"
+        "1. Make `ana` a full admin the Debian way: add her to the right group.",
+        "2. Let `deploy` run **only** `/usr/bin/systemctl restart shop` as root, without a password, through a drop-in file",
+        "   `/etc/sudoers.d/deploy` (mode `440`).",
+        "3. A teammate wrote `~/staging/90-ops` for the `ops` group. **Validate it before installing it**: one broken file in",
+        "   `/etc/sudoers.d` breaks `sudo` for everyone. Fix it and install it as `/etc/sudoers.d/90-ops` (mode `440`).",
+        "",
+        "`visudo -cf FILE` checks a file without installing it. `sudo -l -U USER` shows what a user may run."
       ],
-      "starter": [
-        "string ToOpenRc(string command)",
-        "{",
-        "    return \"unsupported\";",
-        "}"
+      "setup": [
+        "sudoers.sh"
       ],
-      "solution": [
-        "string ToOpenRc(string command)",
-        "{",
-        "    var w = command.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();",
-        "    string prefix = \"\";",
-        "    if (w.Count > 0 && w[0] == \"sudo\") { prefix = \"sudo \"; w.RemoveAt(0); }",
-        "    if (w.Count < 2 || w[0] != \"systemctl\") return \"unsupported\";",
-        "    if (w.Count == 3 && w[1] == \"list-units\" && w[2] == \"--type=service\") return prefix + \"rc-status\";",
-        "    string Svc(string s) => s.EndsWith(\".service\") ? s.Substring(0, s.Length - 8) : s;",
-        "    if (w.Count == 4 && w[1] == \"enable\" && w[2] == \"--now\")",
-        "    {",
-        "        var s = Svc(w[3]);",
-        "        return $\"{prefix}rc-update add {s} default && {prefix}rc-service {s} start\";",
-        "    }",
-        "    if (w.Count != 3) return \"unsupported\";",
-        "    var svc = Svc(w[2]);",
-        "    switch (w[1])",
-        "    {",
-        "        case \"start\": case \"stop\": case \"restart\": case \"status\": return $\"{prefix}rc-service {svc} {w[1]}\";",
-        "        case \"enable\": return $\"{prefix}rc-update add {svc} default\";",
-        "        case \"disable\": return $\"{prefix}rc-update del {svc} default\";",
-        "        default: return \"unsupported\";",
-        "    }",
-        "}"
+      "checks": [
+        {
+          "name": "ana is in the sudo group",
+          "cmd": "id -nG ana | tr \" \" \"\\n\" | grep -qx sudo",
+          "fail": "`ana` is not in the `sudo` group: `sudo usermod -aG sudo ana`."
+        },
+        {
+          "name": "the whole sudoers configuration is valid",
+          "cmd": "visudo -c >/dev/null",
+          "fail": "`sudo visudo -c` reports an error (below). Fix the file it names.",
+          "user": "root"
+        },
+        {
+          "name": "deploy may restart shop, and nothing else",
+          "cmd": "l=$(sudo -l -U deploy 2>/dev/null); echo \"$l\" | grep -q \"NOPASSWD: /usr/bin/systemctl restart shop\" && ! echo \"$l\" | grep -Eq \"\\(ALL( : ALL)?\\) (NOPASSWD: )?ALL$\"",
+          "fail": "`sudo -l -U deploy` should list exactly `(ALL) NOPASSWD: /usr/bin/systemctl restart shop`.",
+          "user": "root"
+        },
+        {
+          "name": "the ops team has its rights",
+          "cmd": "sudo -l -U omar 2>/dev/null | grep -q \"NOPASSWD: ALL\"",
+          "fail": "`sudo -l -U omar` (he is in `ops`) should show `NOPASSWD: ALL`. Is `/etc/sudoers.d/90-ops` installed and fixed?",
+          "user": "root"
+        },
+        {
+          "name": "both drop-ins are mode 440",
+          "cmd": "test \"$(stat -c %a /etc/sudoers.d/deploy 2>/dev/null) $(stat -c %a /etc/sudoers.d/90-ops 2>/dev/null)\" = \"440 440\"",
+          "fail": "Both files in `/etc/sudoers.d` should be `440` (sudo ignores files others can write). `sudo install -m 440 SRC DEST` copies with the mode in one go.",
+          "user": "root"
+        }
       ],
       "hints": [
-        "Split into words, peel off `sudo`, check `systemctl`.",
-        "Handle the special shapes (`list-units`, `enable --now`) before the simple 3-word ones."
+        "`sudo usermod -aG sudo ana`. On Rocky it would be `wheel`.",
+        "Write and validate in your home first: `echo 'deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart shop' > ~/deploy.sudo && visudo -cf ~/deploy.sudo`, then `sudo install -m 440 ~/deploy.sudo /etc/sudoers.d/deploy`.",
+        "`visudo -cf ~/staging/90-ops` points at the typo in `NOPASWD`. Fix it with `sed -i`, check again, then `sudo install -m 440 ~/staging/90-ops /etc/sudoers.d/90-ops`."
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"restart\", \"rc-service nginx restart\", ToOpenRc(\"systemctl restart nginx\"));",
-        "Dojo.Eq(\"status with sudo\", \"sudo rc-service sshd status\", ToOpenRc(\"sudo systemctl status sshd\"));",
-        "Dojo.Eq(\"enable\", \"rc-update add nginx default\", ToOpenRc(\"systemctl enable nginx.service\"));",
-        "Dojo.Eq(\"disable\", \"rc-update del crond default\", ToOpenRc(\"systemctl disable crond\"));",
-        "Dojo.Eq(\"enable --now\", \"sudo rc-update add redis default && sudo rc-service redis start\", ToOpenRc(\"sudo systemctl enable --now redis\"));",
-        "Dojo.Eq(\"list\", \"rc-status\", ToOpenRc(\"systemctl list-units --type=service\"));",
-        "Dojo.Eq(\"unsupported\", \"unsupported\", ToOpenRc(\"systemctl mask nginx\"));",
-        "Dojo.Eq(\"not systemctl\", \"unsupported\", ToOpenRc(\"service nginx start\"));"
+      "solution": [
+        "getent group sudo wheel",
+        "sudo usermod -aG sudo ana",
+        "echo 'deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart shop' > ~/deploy.sudo",
+        "visudo -cf ~/deploy.sudo && sudo install -m 440 ~/deploy.sudo /etc/sudoers.d/deploy",
+        "visudo -cf ~/staging/90-ops",
+        "sed -i 's/NOPASWD/NOPASSWD/' ~/staging/90-ops",
+        "visudo -cf ~/staging/90-ops && sudo install -m 440 ~/staging/90-ops /etc/sudoers.d/90-ops",
+        "sudo visudo -c",
+        "sudo -l -U deploy"
+      ],
+      "explain": [
+        "Drop-in files in `/etc/sudoers.d` are how configuration tools manage sudo: one file per role, easy to add and remove.",
+        "Always validate first (`visudo -cf`, or edit with `sudo visudo -f /etc/sudoers.d/x`, which refuses to save a broken",
+        "file): a syntax error locks every admin out of `sudo` until someone gets a root shell another way. Rights limited to",
+        "one command are what CI deploy users should get, never `ALL`."
       ]
     }
   ]

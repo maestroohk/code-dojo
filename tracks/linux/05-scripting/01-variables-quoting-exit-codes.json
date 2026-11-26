@@ -167,68 +167,67 @@
       "explain": "`${1:-staging}` substitutes a default when `$1` is missing. `|| exit 1` stops the script when cd fails, instead of carrying on in the wrong directory."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Variable expansion",
+      "type": "terminal",
+      "title": "Fix the quoting in a real deploy script",
       "prompt": [
-        "Write `string Expand(string text, Dictionary<string, string> env)` that expands, like double quotes do:",
+        "`~/deploy/deploy.sh FILE [ENV]` copies a build file into `~/sites/ENV/`. It has three bugs a reviewer would catch:",
         "",
-        "- `$NAME`: a name is letters, digits and `_`; an unset name expands to empty.",
-        "- `${NAME}`: the same, with explicit braces (so `${env}_db` works).",
-        "- `${NAME:-default}`: `default` when NAME is unset **or empty**.",
-        "- A `$` not followed by a name or `{` stays as `$`.",
+        "- It is called without ENV most of the time, and should then use `staging`. Today it copies into `~/sites/`.",
+        "- `~/build/release notes.txt` has a space in its name, and the script breaks it into two words.",
+        "- When the copy fails, it still prints `deployed ...` and exits 0, so the pipeline goes green.",
         "",
-        "`Expand(\"deploy ${APP}_v$VER to ${ENV:-staging}\", {APP=api, VER=2})` → `deploy api_v2 to staging`"
+        "Fix the script (rewrite it with `cat > ~/deploy/deploy.sh <<'EOF'` ... `EOF`, or edit it with `sed -i`) so that it",
+        "also passes `shellcheck`, the linter every reviewer runs. Try it: `~/deploy/deploy.sh ~/build/app.js prod`."
       ],
-      "starter": [
-        "string Expand(string text, Dictionary<string, string> env)",
-        "{",
-        "    return text;",
-        "}"
+      "setup": [
+        "quoting.sh"
       ],
-      "solution": [
-        "string Expand(string text, Dictionary<string, string> env)",
-        "{",
-        "    var sb = new StringBuilder();",
-        "    int i = 0;",
-        "    while (i < text.Length)",
-        "    {",
-        "        if (text[i] != '$' || i + 1 >= text.Length) { sb.Append(text[i++]); continue; }",
-        "        if (text[i + 1] == '{')",
-        "        {",
-        "            int close = text.IndexOf('}', i);",
-        "            string inner = text.Substring(i + 2, close - i - 2);",
-        "            int dflt = inner.IndexOf(\":-\");",
-        "            string name = dflt >= 0 ? inner.Substring(0, dflt) : inner;",
-        "            string value = env.GetValueOrDefault(name, \"\");",
-        "            if (dflt >= 0 && value == \"\") value = inner.Substring(dflt + 2);",
-        "            sb.Append(value);",
-        "            i = close + 1;",
-        "        }",
-        "        else",
-        "        {",
-        "            int j = i + 1;",
-        "            while (j < text.Length && (char.IsLetterOrDigit(text[j]) || text[j] == '_')) j++;",
-        "            if (j == i + 1) { sb.Append('$'); i++; continue; }",
-        "            sb.Append(env.GetValueOrDefault(text.Substring(i + 1, j - i - 1), \"\"));",
-        "            i = j;",
-        "        }",
-        "    }",
-        "    return sb.ToString();",
-        "}"
+      "checks": [
+        {
+          "name": "ENV defaults to staging",
+          "cmd": "rm -rf ~/sites; ~/deploy/deploy.sh ~/build/app.js >/dev/null 2>&1; test -f ~/sites/staging/app.js",
+          "fail": "`deploy.sh ~/build/app.js` (no ENV) should copy into `~/sites/staging/`. `${2:-staging}` gives a default."
+        },
+        {
+          "name": "a name with spaces works",
+          "cmd": "rm -rf ~/sites; ~/deploy/deploy.sh \"$HOME/build/release notes.txt\" prod >/dev/null 2>&1; test -f \"$HOME/sites/prod/release notes.txt\"",
+          "fail": "The file with a space did not arrive in `~/sites/prod/`. Quote every expansion: `cp \"$file\" \"$target/\"`."
+        },
+        {
+          "name": "a failed copy fails the script",
+          "cmd": "rm -rf ~/sites; out=$(~/deploy/deploy.sh ~/build/missing.js 2>&1); rc=$?; echo \"exit $rc: $out\"; test \"$rc\" -ne 0 && ! grep -q \"^deployed\" <<<\"$out\"",
+          "fail": "With a missing file, the script should stop with a non-zero exit code and not print `deployed`. `set -euo pipefail` at the top does that."
+        },
+        {
+          "name": "shellcheck is happy",
+          "cmd": "shellcheck ~/deploy/deploy.sh",
+          "fail": "`shellcheck ~/deploy/deploy.sh` still reports problems (below). Each has a code like SC2086 you can look up."
+        }
       ],
       "hints": [
-        "Walk the string with an index, copying characters until you see `$`.",
-        "For `${`, find the closing `}` and look for `:-` inside."
+        "Run `shellcheck ~/deploy/deploy.sh` first: it points at every unquoted `$var` (SC2086).",
+        "`env=${2:-staging}` uses `staging` when `$2` is unset or empty. `set -euo pipefail` on line 2 stops the script at the first failing command.",
+        "Rewrite it: `cat > ~/deploy/deploy.sh <<'EOF'`, then the lines `#!/bin/bash`, `set -euo pipefail`, `file=$1`, `env=${2:-staging}`, `target=\"$HOME/sites/$env\"`, `mkdir -p \"$target\"`, `cp -- \"$file\" \"$target/\"`, `echo \"deployed $file to $env\"`, and `EOF`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoEnv = new Dictionary<string, string> { [\"APP\"] = \"api\", [\"VER\"] = \"2\", [\"EMPTY\"] = \"\" };",
-        "Dojo.Eq(\"mix\", \"deploy api_v2 to staging\", Expand(\"deploy ${APP}_v$VER to ${ENV:-staging}\", dojoEnv));",
-        "Dojo.Eq(\"unset is empty\", \"[]\", Expand(\"[$NOPE]\", dojoEnv));",
-        "Dojo.Eq(\"default when empty\", \"x\", Expand(\"${EMPTY:-x}\", dojoEnv));",
-        "Dojo.Eq(\"set wins over default\", \"api\", Expand(\"${APP:-x}\", dojoEnv));",
-        "Dojo.Eq(\"lone dollar\", \"cost: $ 5\", Expand(\"cost: $ 5\", dojoEnv));"
+      "solution": [
+        "shellcheck ~/deploy/deploy.sh",
+        "cat > ~/deploy/deploy.sh <<'EOF'",
+        "#!/bin/bash",
+        "# Usage: deploy.sh FILE [ENV]     copies FILE into ~/sites/ENV/ (ENV defaults to staging)",
+        "set -euo pipefail",
+        "file=$1",
+        "env=${2:-staging}",
+        "target=\"$HOME/sites/$env\"",
+        "mkdir -p \"$target\"",
+        "cp -- \"$file\" \"$target/\"",
+        "echo \"deployed $file to $env\"",
+        "EOF",
+        "shellcheck ~/deploy/deploy.sh && ~/deploy/deploy.sh \"$HOME/build/release notes.txt\""
+      ],
+      "explain": [
+        "Unquoted `$var` is split on spaces and expanded as a glob, so one odd file name turns `cp` (or worse, `rm`) into a",
+        "different command. Quote every expansion unless you want splitting. `--` ends options, so a file named `-rf` is a file.",
+        "Put `shellcheck` in CI: it catches these before review does."
       ]
     }
   ]

@@ -1,0 +1,241 @@
+{
+  "title": "Triage a slow server",
+  "summary": "The first five minutes on a sick machine: memory, the cgroup limit, a deleted file that still fills the disk, and strace on a program that will not say why it fails.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The first five minutes",
+      "body": [
+        "When a server is \"slow\" or \"broken\", seniors run the same short list before they form a theory:",
+        "",
+        "| Question | Command |",
+        "|---|---|",
+        "| How long up, how loaded? | `uptime` (load averages over 1, 5, 15 minutes) |",
+        "| Memory? | `free -h` (read **available**, not free) |",
+        "| Which process uses it? | `ps -eo pid,user,comm,%cpu,rss --sort=-rss \\\\| head` |",
+        "| Disk space and inodes? | `df -h`, `df -i` |",
+        "| Space held by deleted files? | `lsof +L1` |",
+        "| What does a process do right now? | `strace -f -p PID -e trace=file,network` |",
+        "| Did the kernel kill something? | `dmesg -T \\\\| grep -i oom`, `journalctl -k` |",
+        "| What listens? | `ss -tlnp` |",
+        "",
+        "One trap in containers: `free` and `top` show the **host's** memory. The container's own limit is in the cgroup:",
+        "`cat /sys/fs/cgroup/memory.max` (bytes), and `memory.current` is what it uses now."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`df -h /` says the disk is 100% full. `du -xsh /` adds up to only 60% of it. What is the most likely cause?",
+      "options": [
+        "A big file was deleted while a process still has it open, so its space is not freed yet",
+        "`du` cannot read files owned by root",
+        "The inodes ran out",
+        "`df` counts swap as disk"
+      ],
+      "answer": 0,
+      "explain": "A deleted file is only freed when the last process closes it. `du` walks the folders and cannot see it any more; `df` asks the filesystem, which still counts it. `lsof +L1` lists open files with zero links (deleted)."
+    },
+    {
+      "type": "terminal",
+      "title": "Who is using the memory?",
+      "prompt": [
+        "Three programs run on this machine. Find out where the memory goes:",
+        "",
+        "1. `~/answers/top-mem.txt`: the **name** of the process with the most resident memory (RSS).",
+        "2. `~/answers/limit-mib.txt`: this container's memory **limit** in MiB, from the cgroup (not from `free`).",
+        "3. Stop the memory hog politely, and leave the other two running."
+      ],
+      "setup": [
+        "memhog.sh"
+      ],
+      "checks": [
+        {
+          "name": "top-mem.txt names the hog",
+          "cmd": "grep -qx \"cache-warmer\" <(awk '{print $NF}' ~/answers/top-mem.txt 2>/dev/null | head -n1)",
+          "fail": "That is not the process with the biggest RSS. `ps -eo pid,comm,rss --sort=-rss | head -n5` puts it first."
+        },
+        {
+          "name": "limit-mib.txt is the cgroup limit",
+          "cmd": "test \"$(head -n1 ~/answers/limit-mib.txt 2>/dev/null | tr -dc 0-9)\" = \"$(( $(cat /sys/fs/cgroup/memory.max) / 1024 / 1024 ))\"",
+          "fail": "The limit is the number in `/sys/fs/cgroup/memory.max` (bytes) divided by 1024 twice. `free -h` shows the host, not this container."
+        },
+        {
+          "name": "the hog is stopped",
+          "cmd": "for i in 1 2 3 4 5 6; do pgrep -x cache-warmer >/dev/null || exit 0; sleep 0.5; done; exit 1",
+          "fail": "`cache-warmer` is still running: `pkill -x cache-warmer`."
+        },
+        {
+          "name": "the others still run",
+          "cmd": "pgrep -x api-server >/dev/null && pgrep -x metrics-agent >/dev/null",
+          "fail": "`api-server` or `metrics-agent` was stopped too."
+        }
+      ],
+      "hints": [
+        "`ps -eo pid,user,comm,rss --sort=-rss | head -n5`. RSS is in KiB.",
+        "`cat /sys/fs/cgroup/memory.max` prints bytes. `echo $(( $(cat /sys/fs/cgroup/memory.max) / 1024 / 1024 ))` gives MiB.",
+        "`pkill -x cache-warmer` sends SIGTERM to exactly that name."
+      ],
+      "solution": [
+        "mkdir -p ~/answers",
+        "free -h",
+        "ps -eo pid,user,comm,rss --sort=-rss | head -n5",
+        "echo cache-warmer > ~/answers/top-mem.txt",
+        "echo $(( $(cat /sys/fs/cgroup/memory.max) / 1024 / 1024 )) > ~/answers/limit-mib.txt",
+        "pkill -x cache-warmer"
+      ],
+      "explain": [
+        "When a container's memory use reaches `memory.max`, the kernel's OOM killer ends a process inside it, often with",
+        "no message in the app's own log. `dmesg -T` (on the host) or `kubectl describe pod` (*OOMKilled*, exit code 137)",
+        "shows it. Watching RSS per process and the cgroup's `memory.current` tells you how close you are."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the symptom to the first command you run.",
+      "pairs": [
+        [
+          "*No space left on device*, but `df -h` shows free space",
+          "`df -i`"
+        ],
+        [
+          "`df` and `du` disagree by gigabytes",
+          "`lsof +L1`"
+        ],
+        [
+          "A program exits with \"startup failed\" and nothing else",
+          "`strace -f -e trace=file ./prog`"
+        ],
+        [
+          "\"Connection refused\" on port 8080",
+          "`ss -tlnp`"
+        ],
+        [
+          "The service died overnight with no error in its log",
+          "`dmesg -T | grep -i oom`"
+        ]
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "The disk space that will not come back",
+      "prompt": [
+        "Someone deleted a 40 MB log in `~/var/log/shop` to free space, but the space did not come back. A program still",
+        "has the file open.",
+        "",
+        "1. Write the **PID** of the program that holds the deleted file into `~/answers/holder.txt`.",
+        "2. Free the space **without stopping that program** (it is a log shipper; restarting it loses its place). Truncate",
+        "   the deleted file through `/proc/PID/fd/`."
+      ],
+      "setup": [
+        "deleted.sh"
+      ],
+      "checks": [
+        {
+          "name": "holder.txt has the right PID",
+          "cmd": "test \"$(head -n1 ~/answers/holder.txt 2>/dev/null | tr -dc 0-9)\" = \"$(pgrep -x log-shipper)\"",
+          "fail": "That is not the PID that holds the deleted file. `lsof +L1` lists open files with no name left (NLINK 0)."
+        },
+        {
+          "name": "the space is freed",
+          "cmd": "test \"$(stat -L -c %s /proc/$(pgrep -x log-shipper)/fd/3)\" = 0",
+          "fail": "The deleted file still holds its 40 MB. Truncate it through the process: `: > /proc/PID/fd/FD` (the FD number is in the `FD` column of `lsof`, like `3w`)."
+        },
+        {
+          "name": "log-shipper still runs",
+          "cmd": "pgrep -x log-shipper >/dev/null",
+          "fail": "`log-shipper` was stopped. The task was to free the space while it keeps running."
+        }
+      ],
+      "hints": [
+        "`lsof +L1` shows `log-shipp ... 3w ... (deleted)`: the PID is the second column, the file descriptor is `3` (opened for writing).",
+        "`ls -l /proc/PID/fd/` shows the same: `3 -> /home/learner/var/log/shop/shipper.log (deleted)`.",
+        "`: > /proc/$(pgrep -x log-shipper)/fd/3` truncates it to 0 bytes. Check with `lsof +L1` again: SIZE is 0."
+      ],
+      "solution": [
+        "mkdir -p ~/answers",
+        "df -h ~; du -sh ~/var",
+        "lsof +L1",
+        "pgrep -x log-shipper > ~/answers/holder.txt",
+        ": > /proc/$(pgrep -x log-shipper)/fd/3",
+        "lsof +L1"
+      ],
+      "explain": [
+        "On a real server, `rm` on a live log is the usual cause. The proper fixes: truncate instead of deleting",
+        "(`truncate -s 0 app.log` or `: > app.log`), use `logrotate` with `copytruncate` or a reload signal, or restart the",
+        "program. Writing through `/proc/PID/fd/N` is the emergency move when none of those is possible right now."
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "strace: what is it looking for?",
+      "prompt": [
+        "`~/app/orders-worker` refuses to start and only says `startup failed`. There is no documentation. Find out which",
+        "file it wants with `strace`, then create that file so the program prints `orders-worker: ready`. A config with one",
+        "line, `queue=orders`, is what it expects."
+      ],
+      "setup": [
+        "straceapp.sh"
+      ],
+      "checks": [
+        {
+          "name": "orders-worker starts",
+          "cmd": "~/app/orders-worker | grep -qx \"orders-worker: ready\"",
+          "fail": "`~/app/orders-worker` still fails. `strace -f -e trace=openat ~/app/orders-worker` shows each file it tries to open; look for `ENOENT`."
+        }
+      ],
+      "hints": [
+        "`strace -f -e trace=openat ~/app/orders-worker 2>&1 | grep ENOENT` lists the files that were not there. Most are harmless library lookups; one is in your home folder.",
+        "It opens `~/.config/orders/worker.ini`. The folder does not exist either.",
+        "`mkdir -p ~/.config/orders && echo 'queue=orders' > ~/.config/orders/worker.ini`."
+      ],
+      "solution": [
+        "~/app/orders-worker",
+        "strace -f -e trace=openat ~/app/orders-worker 2>&1 | grep ENOENT",
+        "mkdir -p ~/.config/orders",
+        "echo 'queue=orders' > ~/.config/orders/worker.ini",
+        "~/app/orders-worker"
+      ],
+      "explain": [
+        "`strace` shows every system call a program makes, so it answers \"what file, what host, what port?\" when the",
+        "program will not tell you. `-f` follows child processes, `-e trace=file` or `trace=network` narrows the noise, and",
+        "`-p PID` attaches to something already running (that needs root or the same user, and is slow, so keep it short in",
+        "production)."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "An alert says the checkout server is slow. Arrange a sensible first pass, from the broad view to the specific process.",
+      "lines": [
+        "`uptime` and `free -h`: load and memory at a glance",
+        "`df -h` and `df -i`: space and inodes",
+        "`ps -eo pid,comm,%cpu,rss --sort=-%cpu | head`: the top processes",
+        "`journalctl -u checkout --since \"-15min\"`: what the service logged",
+        "`strace -p PID -e trace=network`: what the busy process is doing"
+      ],
+      "explain": "Start wide and cheap, then narrow down. Each step either rules a whole class of causes out or points at the next one. `strace` comes last: it slows the process down and only helps once you know which one to watch."
+    },
+    {
+      "type": "lab",
+      "live": "16-disk-full",
+      "task": [
+        "t2",
+        "t6"
+      ],
+      "title": "Mission: the disk is full",
+      "prompt": "Now on a whole machine. In the mission **The disk is full**, do **Where did it all go?** and **The invisible space thief**: find the folder that ate the disk, and the space that `du` cannot see.",
+      "explain": "`du -xh --max-depth=1 | sort -h` for space you can see, `lsof +L1` for space you cannot: together they solve almost every \"disk full\" page."
+    },
+    {
+      "type": "lab",
+      "live": "22-incident-night",
+      "task": [
+        "t1",
+        "t5"
+      ],
+      "title": "Mission: incident night",
+      "prompt": "One more, with several faults at once. In **Incident night**, do **Triage: what filled the disk?** and **Who's eating the CPU?**.",
+      "explain": "Real incidents rarely have one cause. Working through the same short list every time keeps you from chasing the first theory."
+    }
+  ]
+}

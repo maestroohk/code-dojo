@@ -1,150 +1,176 @@
 {
   "title": "Boss: the permissions auditor",
-  "summary": "Apply symbolic chmod, decide access like the kernel, and flag dangerous files.",
+  "summary": "Fix a scan report with symbolic chmod, solve a Permission denied ticket and audit with find -perm.",
   "minutes": 15,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "Security review",
-      "body": "Before go-live, security wants an audit of the app server's files. Each file comes as `ls -l`-style data: a 9-character mode like `rwxr-x---`, an owner and a group."
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Apply symbolic chmod",
-      "prompt": "Write `string ApplyChmod(string mode, string spec)`. `mode` is 9 characters (`rw-r-----`), `spec` is comma-separated clauses like `u+x`, `go-w`, `a=r`, `o=` (who letters from `ugoa`, op `+ - =`, perms from `rwx`, possibly empty after `=`). Return the new 9-character mode.",
-      "starter": [
-        "string ApplyChmod(string mode, string spec)",
-        "{",
-        "    return mode;",
-        "}"
-      ],
-      "solution": [
-        "string ApplyChmod(string mode, string spec)",
-        "{",
-        "    var m = mode.ToCharArray();",
-        "    foreach (var clause in spec.Split(','))",
-        "    {",
-        "        int op = clause.IndexOfAny(new[] { '+', '-', '=' });",
-        "        string who = clause.Substring(0, op);",
-        "        if (who == \"\" || who.Contains('a')) who = \"ugo\";",
-        "        char sign = clause[op];",
-        "        string perms = clause.Substring(op + 1);",
-        "        foreach (char w in who)",
-        "        {",
-        "            int baseIdx = w == 'u' ? 0 : w == 'g' ? 3 : 6;",
-        "            for (int i = 0; i < 3; i++)",
-        "            {",
-        "                char p = \"rwx\"[i];",
-        "                bool listed = perms.Contains(p);",
-        "                if (sign == '+' && listed) m[baseIdx + i] = p;",
-        "                if (sign == '-' && listed) m[baseIdx + i] = '-';",
-        "                if (sign == '=') m[baseIdx + i] = listed ? p : '-';",
-        "            }",
-        "        }",
-        "    }",
-        "    return new string(m);",
-        "}"
-      ],
-      "hints": [
-        "Find the operator with `IndexOfAny`; what's before it is *who*, what's after is the perms.",
-        "`=` sets every one of the three positions: listed ones on, the others off."
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"+x for all\", \"rwxr-xr-x\", ApplyChmod(\"rw-r--r--\", \"+x\"));",
-        "Dojo.Eq(\"g+w,o+r\", \"rw-rw-r--\", ApplyChmod(\"rw-r-----\", \"g+w,o+r\"));",
-        "Dojo.Eq(\"u=rw,go=\", \"rw-------\", ApplyChmod(\"rwxrwxrwx\", \"u=rw,go=\"));",
-        "Dojo.Eq(\"a-w\", \"r-xr-xr-x\", ApplyChmod(\"rwxrwxr-x\", \"a-w\"));"
+      "body": [
+        "Before go-live, security reviews the app server's files. Three tickets on a real machine: fix a scan report with",
+        "symbolic `chmod`, solve a \"Permission denied\" that only one user gets, and run a repeatable audit with `find -perm`."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Can this user do that?",
+      "type": "terminal",
+      "title": "Fix a scan report with symbolic chmod",
       "prompt": [
-        "Write `bool CanAccess(string mode, string owner, string group, string user, List<string> userGroups, char want)` where `want` is `'r'`, `'w'` or `'x'`. Follow the kernel's rule: use the **owner** triple if `user == owner`, else the **group** triple if `userGroups` contains `group`, else **other**. Only one triple is ever checked, even if a later one would allow it.",
+        "The security scan of `~/site` came back red. Fix each finding with **symbolic** `chmod` (`u+x`, `go-w`, `o=`),",
+        "which changes only the bits you name and leaves the rest alone:",
         "",
-        "`root` may always read and write, and may execute if **any** triple has `x`."
+        "1. `bin/*.sh` cannot be run: add execute for the **owner and group** only.",
+        "2. `conf/*.conf` are writable by group and others: remove **write** for group and others, keep their read.",
+        "3. `uploads/` is `777`: others must lose **write**, keep read and enter.",
+        "4. `public/index.html`: others must be able to **read** it, nothing more."
       ],
-      "starter": [
-        "bool CanAccess(string mode, string owner, string group, string user, List<string> userGroups, char want)",
-        "{",
-        "    return false;",
-        "}"
+      "setup": [
+        "scan.sh"
       ],
-      "solution": [
-        "bool CanAccess(string mode, string owner, string group, string user, List<string> userGroups, char want)",
-        "{",
-        "    if (user == \"root\") return want != 'x' || mode.Contains('x');",
-        "    int offset = user == owner ? 0 : userGroups.Contains(group) ? 3 : 6;",
-        "    int idx = offset + (want == 'r' ? 0 : want == 'w' ? 1 : 2);",
-        "    return mode[idx] != '-';",
-        "}"
+      "checks": [
+        {
+          "name": "scripts are 754",
+          "cmd": "test \"$(stat -c %a ~/site/bin/start.sh ~/site/bin/stop.sh | sort -u)\" = 754",
+          "fail": "`bin/*.sh` should be `rwxr-xr--` (754): `chmod ug+x`."
+        },
+        {
+          "name": "configs are 644",
+          "cmd": "test \"$(stat -c %a ~/site/conf/*.conf | sort -u)\" = 644",
+          "fail": "`conf/*.conf` should be `rw-r--r--` (644): `chmod go-w`."
+        },
+        {
+          "name": "uploads is 775",
+          "cmd": "test \"$(stat -c %a ~/site/uploads)\" = 775",
+          "fail": "`uploads/` should be `rwxrwxr-x` (775): `chmod o-w`."
+        },
+        {
+          "name": "index.html is 644",
+          "cmd": "test \"$(stat -c %a ~/site/public/index.html)\" = 644",
+          "fail": "`public/index.html` should be `rw-r--r--` (644): `chmod o+r`."
+        }
       ],
       "hints": [
-        "Pick the offset 0, 3 or 6 first, then add 0/1/2 for r/w/x.",
-        "The owner triple wins even when it is *more* restrictive than group or other."
+        "Symbolic mode is *who* (`u g o a`), *op* (`+ - =`), *what* (`r w x`). Several clauses join with commas: `chmod u+x,g+x`.",
+        "`chmod ug+x ~/site/bin/*.sh` and `chmod go-w ~/site/conf/*.conf`.",
+        "`chmod o-w ~/site/uploads` and `chmod o+r ~/site/public/index.html`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoNone = new List<string>();",
-        "Dojo.Eq(\"owner may write\", true, CanAccess(\"rw-r-----\", \"ana\", \"devs\", \"ana\", dojoNone, 'w'));",
-        "Dojo.Eq(\"group may read\", true, CanAccess(\"rw-r-----\", \"ana\", \"devs\", \"bob\", new List<string> { \"devs\" }, 'r'));",
-        "Dojo.Eq(\"other gets nothing\", false, CanAccess(\"rw-r-----\", \"ana\", \"devs\", \"eve\", dojoNone, 'r'));",
-        "Dojo.Eq(\"owner triple wins even if stricter\", false, CanAccess(\"---rwxrwx\", \"ana\", \"devs\", \"ana\", dojoNone, 'r'));",
-        "Dojo.Eq(\"root reads anything\", true, CanAccess(\"---------\", \"ana\", \"devs\", \"root\", dojoNone, 'r'));",
-        "Dojo.Eq(\"root cannot run non-executables\", false, CanAccess(\"rw-rw-rw-\", \"ana\", \"devs\", \"root\", dojoNone, 'x'));"
+      "solution": [
+        "cd ~/site && ls -l bin conf public && ls -ld uploads",
+        "chmod ug+x bin/*.sh",
+        "chmod go-w conf/*.conf",
+        "chmod o-w uploads",
+        "chmod o+r public/index.html"
+      ],
+      "explain": "Octal sets all nine bits at once, so `chmod 755` on the wrong file can quietly *add* permissions. Symbolic mode says exactly what you mean (\"take write away from others\") and is safe to run on many files with different modes."
+    },
+    {
+      "type": "terminal",
+      "title": "bob gets Permission denied",
+      "prompt": [
+        "Ticket: *\"bob cannot read `/srv/app/config.yml`. ana can. Please give bob the same access as ana: he joined the",
+        "`devs` team. Nobody outside `devs` may read it.\"*",
+        "",
+        "Find out **why** first (`ls -l`, `ls -ld`, `id bob`, `sudo -u bob cat /srv/app/config.yml`), then fix it with",
+        "`sudo`. Do not make anything readable by others."
+      ],
+      "setup": [
+        "denied.sh"
+      ],
+      "checks": [
+        {
+          "name": "bob is in devs",
+          "cmd": "id -nG bob | tr \" \" \"\\n\" | grep -qx devs",
+          "fail": "`bob` is not in the `devs` group yet. `sudo usermod -aG devs bob` (the `-a` matters: without it, his other groups are removed)."
+        },
+        {
+          "name": "bob can read the config",
+          "cmd": "su bob -s /bin/sh -c \"cat /srv/app/config.yml\" >/dev/null",
+          "fail": "`bob` still cannot read it. Every folder on the path needs `x` for him too: look at `ls -ld /srv/app`.",
+          "user": "root"
+        },
+        {
+          "name": "ana can still read it",
+          "cmd": "su ana -s /bin/sh -c \"cat /srv/app/config.yml\" >/dev/null",
+          "fail": "`ana` lost access. Keep her able to read it.",
+          "user": "root"
+        },
+        {
+          "name": "eve (not in devs) cannot",
+          "cmd": "! su eve -s /bin/sh -c \"cat /srv/app/config.yml\" >/dev/null 2>&1",
+          "fail": "`eve` is not in `devs` but can read the file. Others must get nothing.",
+          "user": "root"
+        }
+      ],
+      "hints": [
+        "`ls -l /srv/app/config.yml` is `root:devs 640`: fine for the group. But `ls -ld /srv/app` shows the folder as `ana:root 750`. To open a file you need `x` on **every** folder on the way.",
+        "Two fixes: put bob in the group (`sudo usermod -aG devs bob`) and give the folder to that group (`sudo chgrp devs /srv/app`).",
+        "Test as him: `sudo -u bob cat /srv/app/config.yml`. A new group only counts in new logins, which `sudo -u` is."
+      ],
+      "solution": [
+        "ls -l /srv/app/config.yml; ls -ld /srv/app; id bob",
+        "sudo -u bob cat /srv/app/config.yml",
+        "sudo usermod -aG devs bob",
+        "sudo chgrp devs /srv/app",
+        "sudo -u bob cat /srv/app/config.yml",
+        "sudo -u eve cat /srv/app/config.yml"
+      ],
+      "explain": [
+        "The kernel checks one triple per object: owner if you own it, else group if you are in it, else other. And it checks",
+        "**every directory** on the path for `x`. Half of all \"Permission denied, but the file looks fine\" tickets are a",
+        "parent folder. `namei -l /srv/app/config.yml` prints the permissions of every step of the path in one go."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Audit report",
+      "type": "terminal",
+      "title": "Audit with find -perm, then fix",
       "prompt": [
-        "Write `List<string> Audit(List<(string Path, string Mode, string Owner)> files)` returning one finding per problem, in input order, formatted `\"<path>: <problem>\"`:",
+        "Before the review meeting, audit `~/srv` with `find` and write the findings, one path per line, as `find ~/srv ...` prints them:",
         "",
-        "- `world-writable` if other has `w`,",
-        "- `secret readable by others` if the path ends in `.pem`, `.key` or `.env`, or contains `/.ssh/`, and group or other has **any** permission,",
-        "- `not owned by root` if the path starts with `/etc/` and the owner isn't `root`.",
+        "1. `~/answers/world-writable.txt`: everything (files and folders) that **others can write**.",
+        "2. `~/answers/secrets.txt`: secret files that the group or others can access **at all**: names ending in `.key`",
+        "   or `.pem`, files named `.env`, and anything inside a `.ssh` folder.",
         "",
-        "A file can produce several findings; list them in the order above."
+        "Then fix them: nothing under `~/srv` may be writable by others, and the secrets must be owner-only (`600`)."
       ],
-      "starter": [
-        "List<string> Audit(List<(string Path, string Mode, string Owner)> files)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "audit.sh"
       ],
-      "solution": [
-        "List<string> Audit(List<(string Path, string Mode, string Owner)> files)",
-        "{",
-        "    var findings = new List<string>();",
-        "    foreach (var (path, mode, owner) in files)",
-        "    {",
-        "        if (mode[7] == 'w') findings.Add($\"{path}: world-writable\");",
-        "        bool secret = path.EndsWith(\".pem\") || path.EndsWith(\".key\") || path.EndsWith(\".env\") || path.Contains(\"/.ssh/\");",
-        "        if (secret && mode.Substring(3) != \"------\") findings.Add($\"{path}: secret readable by others\");",
-        "        if (path.StartsWith(\"/etc/\") && owner != \"root\") findings.Add($\"{path}: not owned by root\");",
-        "    }",
-        "    return findings;",
-        "}"
+      "checks": [
+        {
+          "name": "world-writable.txt is complete",
+          "cmd": "diff <(sed 's#/*$##' ~/answers/world-writable.txt 2>/dev/null | sort) /opt/dojo/state/world-writable",
+          "fail": "The list does not match. `find ~/srv -perm -o+w` lists everything with the others-write bit (`-perm -MODE` means *all of these bits are set*)."
+        },
+        {
+          "name": "secrets.txt is complete",
+          "cmd": "diff <(sort ~/answers/secrets.txt 2>/dev/null) /opt/dojo/state/secrets",
+          "fail": "The list does not match. Group the name tests with `\\( ... -o ... \\)` and add `-perm /077` (*any* of the group or other bits)."
+        },
+        {
+          "name": "nothing is world-writable now",
+          "cmd": "test -z \"$(find ~/srv -perm -o+w)\"",
+          "fail": "Something under `~/srv` is still writable by others."
+        },
+        {
+          "name": "the secrets are 600",
+          "cmd": "test -z \"$(find ~/srv \\( -name \"*.key\" -o -name \"*.pem\" -o -name .env -o -path \"*/.ssh/*\" \\) -type f ! -perm 600)\"",
+          "fail": "A secret file is not `600` yet."
+        }
       ],
       "hints": [
-        "Other's `w` is index 7 of the 9-character mode.",
-        "Group and other are `mode.Substring(3)`; for a secret it must be `------`."
+        "`find ~/srv -perm -o+w > ~/answers/world-writable.txt`. `-perm -o+w` means \"at least these bits\"; `-perm /077` means \"any of these bits\".",
+        "`find ~/srv \\( -name '*.key' -o -name '*.pem' -o -name .env -o -path '*/.ssh/*' \\) -perm /077 > ~/answers/secrets.txt`. Without the parentheses, `-perm` only binds to the last `-o`.",
+        "Fix with the lists you just made: `xargs chmod o-w < ~/answers/world-writable.txt` and `xargs chmod 600 < ~/answers/secrets.txt`."
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoFiles = new List<(string Path, string Mode, string Owner)> {",
-        "  (\"/srv/app/app.dll\", \"rwxr-xr-x\", \"app\"),",
-        "  (\"/srv/app/.env\", \"rw-r--r--\", \"app\"),",
-        "  (\"/tmp/upload\", \"rwxrwxrwx\", \"app\"),",
-        "  (\"/home/app/.ssh/id_ed25519\", \"rw-------\", \"app\"),",
-        "  (\"/etc/nginx/nginx.conf\", \"rw-rw-rw-\", \"deploy\") };",
-        "Dojo.Eq(\"findings\", new List<string> { \"/srv/app/.env: secret readable by others\", \"/tmp/upload: world-writable\", \"/etc/nginx/nginx.conf: world-writable\", \"/etc/nginx/nginx.conf: not owned by root\" }, Audit(dojoFiles));"
-      ]
+      "solution": [
+        "mkdir -p ~/answers",
+        "find ~/srv -perm -o+w > ~/answers/world-writable.txt",
+        "find ~/srv \\( -name '*.key' -o -name '*.pem' -o -name .env -o -path '*/.ssh/*' \\) -perm /077 > ~/answers/secrets.txt",
+        "xargs chmod o-w < ~/answers/world-writable.txt",
+        "xargs chmod 600 < ~/answers/secrets.txt",
+        "find ~/srv -perm -o+w"
+      ],
+      "explain": "An audit you can rerun beats one you did by eye: the same `find` commands go into a cron job or a CI check, and an empty result is the pass. `-perm -BITS` (all of them) and `-perm /BITS` (any of them) are the two forms to know."
     }
   ]
 }
