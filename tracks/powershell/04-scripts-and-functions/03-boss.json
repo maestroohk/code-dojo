@@ -1,0 +1,194 @@
+{
+  "title": "Boss: the job that said it was fine",
+  "summary": "A sync that hides its failures, a nightly job that locks itself out after one bad night, and an error record pasted into a ticket. Make failures visible, safe and explained.",
+  "minutes": 20,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket FIN-402",
+      "body": [
+        "*\"Finance says the payroll export has not reached the share since Tuesday, but the sync job's log says `sync",
+        "complete` every night. Also, the nightly job has refused to run since it failed once, and the night operator pasted",
+        "a deploy error into DEP-1187 that nobody has read.\"*",
+        "",
+        "Three scripts that each fail quietly, or fail once and then forever. A senior fixes the code so the next failure is",
+        "loud, specific and harmless."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "sync complete (it was not)",
+      "prompt": [
+        "Run `pwsh -File ~/scripts/sync-exports.ps1; \"exit $LASTEXITCODE\"` and compare `~/exports` with `~/share/exports`.",
+        "",
+        "Rewrite `~/scripts/sync-exports.ps1` so that:",
+        "",
+        "- one file that cannot be copied does **not** stop the others;",
+        "- each failure is reported with the **file name** (a `Write-Warning` or `Write-Error` line);",
+        "- the last line is **`copied <n>, failed <m>`**;",
+        "- it exits **`1`** if anything failed, and `0` otherwise."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "a failure is reported and exits 1",
+          "cmd": "rm -f ~/share/exports/*; out=$(pwsh -NoProfile -NonInteractive -File ~/scripts/sync-exports.ps1 2>&1); rc=$?; echo \"$out\"; test $rc = 1 && echo \"$out\" | grep -q 'payroll.csv' && test \"$(echo \"$out\" | tail -n1 | tr -d '\\r')\" = 'copied 4, failed 1'",
+          "fail": "With `payroll.csv` unreadable, the script must name it, end with `copied 4, failed 1` and exit 1." },
+        { "name": "the other four files are copied",
+          "cmd": "rm -f ~/share/exports/*; pwsh -NoProfile -NonInteractive -File ~/scripts/sync-exports.ps1 >/dev/null 2>&1; ls ~/share/exports | tr '\\n' ' '",
+          "expectOutput": "customers.csv invoices.csv orders.csv stock.csv",
+          "fail": "The four readable files must still reach `~/share/exports` when one fails." },
+        { "name": "a clean run exits 0",
+          "cmd": "d=$(mktemp -d); out=$(pwsh -NoProfile -NonInteractive -File ~/scripts/sync-exports.ps1 -Source /opt/dojo/state/goodexports -Target \"$d\" 2>&1); rc=$?; echo \"$out\"; test $rc = 0 && test \"$(echo \"$out\" | tail -n1 | tr -d '\\r')\" = 'copied 4, failed 0'",
+          "fail": "When every file copies, the last line should be `copied 4, failed 0` and the exit code 0." },
+        { "name": "errors are no longer silenced",
+          "cmd": "! grep -Eiq \"ErrorActionPreference *= *['\\\"]SilentlyContinue\" ~/scripts/sync-exports.ps1",
+          "fail": "Remove `$ErrorActionPreference = 'SilentlyContinue'`: it is what hid the failure." }
+      ],
+      "hints": [
+        "`$ErrorActionPreference = 'SilentlyContinue'` threw every error away. Replace it with `'Stop'`, so each failure can be caught.",
+        "Put the `Copy-Item` in a `try`/`catch` **inside** the loop, count successes, and collect failed names in the `catch`.",
+        "After the loop: `\"copied $copied, failed $($failed.Count)\"` and `if ($failed.Count) { exit 1 }`."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/sync-exports.ps1; \"exit $LASTEXITCODE\"",
+        "@'",
+        "# sync-exports.ps1: copies the nightly exports to the finance share.",
+        "param(",
+        "    [string] $Source = \"$HOME/exports\",",
+        "    [string] $Target = \"$HOME/share/exports\"",
+        ")",
+        "$ErrorActionPreference = 'Stop'",
+        "$copied = 0",
+        "$failed = [System.Collections.Generic.List[string]]::new()",
+        "foreach ($file in Get-ChildItem -Path $Source -Filter *.csv -File) {",
+        "    try {",
+        "        Copy-Item -LiteralPath $file.FullName -Destination $Target -Force",
+        "        $copied++",
+        "    }",
+        "    catch {",
+        "        Write-Warning \"could not copy $($file.Name): $($_.Exception.Message)\"",
+        "        $failed.Add($file.Name)",
+        "    }",
+        "}",
+        "\"copied $copied, failed $($failed.Count)\"",
+        "if ($failed.Count -gt 0) { exit 1 }",
+        "'@ | Set-Content ~/scripts/sync-exports.ps1",
+        "pwsh -File ~/scripts/sync-exports.ps1; \"exit $LASTEXITCODE\""
+      ],
+      "explain": [
+        "`SilentlyContinue` for a whole script is almost always a bug waiting for a bad night. The pattern you wrote, *stop on",
+        "every error, catch per item, report, exit non-zero at the end*, is the standard shape of a batch job: partial",
+        "success is still delivered, and monitoring still finds out."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Another run is in progress (forever)",
+      "prompt": [
+        "`pwsh -File ~/scripts/nightly.ps1` refuses to run: a lock from last night's **failed** run is still there. The real",
+        "bug is in the script: when `work.ps1` fails (its input `~/data/input.csv` has not arrived), the lock is never",
+        "removed.",
+        "",
+        "1. Fix `~/scripts/nightly.ps1` so the lock is removed **whatever happens**, while a failed run still fails",
+        "   (non-zero exit).",
+        "2. Then remove the stale lock (no other run is going on: you checked)."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "the stale lock is gone",
+          "cmd": "test ! -e ~/run/nightly.lock",
+          "fail": "Remove `~/run/nightly.lock` once the script is fixed." },
+        { "name": "a failed run fails and leaves no lock",
+          "cmd": "rm -f ~/data/input.csv ~/run/nightly.lock; pwsh -NoProfile -NonInteractive -File ~/scripts/nightly.ps1 >/dev/null 2>&1; rc=$?; echo \"exit $rc\"; test $rc -ne 0 && test ! -e ~/run/nightly.lock",
+          "fail": "Without `input.csv`, the run must exit non-zero **and** remove its lock. Wrap the work in `try { } finally { }`." },
+        { "name": "a good run works and leaves no lock",
+          "cmd": "rm -f ~/run/nightly.lock; printf 'id\\n1\\n2\\n' > ~/data/input.csv; out=$(pwsh -NoProfile -NonInteractive -File ~/scripts/nightly.ps1 2>&1); rc=$?; rm -f ~/data/input.csv; echo \"$out\"; test $rc = 0 && echo \"$out\" | grep -q 'processed 2 rows' && echo \"$out\" | grep -q done && test ! -e ~/run/nightly.lock",
+          "fail": "With an input file, the run should print `processed 2 rows` and `done`, exit 0, and remove its lock." },
+        { "name": "a real concurrent run is still refused",
+          "cmd": "echo busy > ~/run/nightly.lock; pwsh -NoProfile -NonInteractive -File ~/scripts/nightly.ps1 >/dev/null 2>&1; rc=$?; test -e ~/run/nightly.lock; ok=$?; rm -f ~/run/nightly.lock; test $rc -ne 0 && test $ok = 0",
+          "fail": "When another run holds the lock, the script must refuse **and leave that lock alone** (it belongs to the other run). Create the lock before `try`, not inside it." }
+      ],
+      "hints": [
+        "`Remove-Item -LiteralPath $lock` is the second-to-last line: a failing `work.ps1` (with `$ErrorActionPreference = 'Stop'`) jumps straight past it.",
+        "`try { & \"$PSScriptRoot/work.ps1\"; 'done' } finally { Remove-Item -LiteralPath $lock -ErrorAction SilentlyContinue }`. `finally` runs on success, on error and on Ctrl+C, and the error still propagates.",
+        "Keep the `Test-Path`/`throw` and the `New-Item` **before** `try`, so a refused run never deletes the other run's lock. Then `Remove-Item ~/run/nightly.lock`."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/nightly.ps1",
+        "@'",
+        "# nightly.ps1: makes sure only one nightly run happens at a time.",
+        "$ErrorActionPreference = 'Stop'",
+        "$lock = \"$HOME/run/nightly.lock\"",
+        "if (Test-Path -LiteralPath $lock) { throw \"Another run is in progress (lock: $lock)\" }",
+        "New-Item -ItemType File -Path $lock | Out-Null",
+        "try {",
+        "    & \"$PSScriptRoot/work.ps1\"",
+        "    \"done\"",
+        "}",
+        "finally {",
+        "    Remove-Item -LiteralPath $lock -ErrorAction SilentlyContinue",
+        "}",
+        "'@ | Set-Content ~/scripts/nightly.ps1",
+        "Get-Content ~/run/nightly.lock",
+        "Remove-Item ~/run/nightly.lock",
+        "pwsh -File ~/scripts/nightly.ps1; \"exit $LASTEXITCODE\""
+      ],
+      "explain": [
+        "A lock without `finally` turns one failure into a permanent outage. Production versions add a timestamp and the",
+        "process id to the lock and treat a lock older than the longest possible run as stale, so a power cut cannot lock",
+        "the job out either. On Windows, a named mutex (`[System.Threading.Mutex]::new($false, 'Global\\NightlyJob')`) does the",
+        "same without any file."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Read the error record in DEP-1187",
+      "prompt": [
+        "The night operator pasted `$Error[0] | Format-List * -Force` into the ticket: `Get-Content ~/incident/error.txt`.",
+        "The script is `~/deploy/deploy.ps1`.",
+        "",
+        "1. Write what the record tells you into `~/answers/incident.txt`, exactly three `key=value` lines:",
+        "   `Exception=` the exception's full type name, `Function=` the function that failed, `Line=` its line number in the script.",
+        "2. Fix the cause so the deploy can log as a normal user: give the script a **`-LogPath`** parameter (default still",
+        "   `/var/log/deploy.log` for production) and use it in `Write-DeployLog`. `pwsh -File ~/deploy/deploy.ps1 -LogPath ~/logs/deploy.log`",
+        "   must succeed and append `deployed 4.2.0`."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "incident.txt reads the record correctly",
+          "cmd": "tr -d '\\r' < ~/answers/incident.txt | sed 's/ *= */=/' | sed '/^$/d' | sort | tr '\\n' ' '",
+          "expectOutput": "Exception=System.UnauthorizedAccessException Function=Write-DeployLog Line=27",
+          "fail": "`~/answers/incident.txt` should hold `Exception=...`, `Function=...` and `Line=...`. The type is at the start of the `Exception` line; `ScriptStackTrace` names the function and line, innermost first." },
+        { "name": "-LogPath works",
+          "cmd": "d=$(mktemp -d); pwsh -NoProfile -NonInteractive -File ~/deploy/deploy.ps1 -LogPath \"$d/deploy.log\" 2>&1; rc=$?; test $rc = 0 && grep -q 'deployed 4.2.0' \"$d/deploy.log\"",
+          "fail": "`deploy.ps1 -LogPath <file>` should exit 0 and append a line with `deployed 4.2.0` to that file." },
+        { "name": "production default unchanged",
+          "cmd": "grep -Eq \"LogPath *= *['\\\"]/var/log/deploy\\.log['\\\"]\" ~/deploy/deploy.ps1",
+          "fail": "The default of `-LogPath` should stay `/var/log/deploy.log`." }
+      ],
+      "hints": [
+        "`Exception : System.UnauthorizedAccessException: Access to the path ... is denied.` The inner `IOException: Permission denied` confirms it is file permissions, not a missing folder.",
+        "`ScriptStackTrace` lists the innermost frame first: `at Write-DeployLog, .../deploy.ps1: line 27`.",
+        "Add `[string] $LogPath = '/var/log/deploy.log'` to the `param()` line and replace `-Path /var/log/deploy.log` with `-Path $LogPath`."
+      ],
+      "solution": [
+        "Get-Content ~/incident/error.txt",
+        "@('Exception=System.UnauthorizedAccessException', 'Function=Write-DeployLog', 'Line=27') | Set-Content ~/answers/incident.txt",
+        "$s = Get-Content ~/deploy/deploy.ps1 -Raw",
+        "$s = $s.Replace(\"param([string] `$Version = '4.2.0')\", \"param([string] `$Version = '4.2.0', [string] `$LogPath = '/var/log/deploy.log')\").Replace('Add-Content -Path /var/log/deploy.log', 'Add-Content -Path $LogPath')",
+        "Set-Content ~/deploy/deploy.ps1 -Value $s -NoNewline",
+        "pwsh -File ~/deploy/deploy.ps1 -LogPath ~/logs/deploy.log; \"exit $LASTEXITCODE\"",
+        "Get-Content ~/logs/deploy.log"
+      ],
+      "explain": [
+        "Reading an error record top to bottom answers the three questions of every incident: *what* (the exception type",
+        "and message), *where* (`ScriptStackTrace`, `InvocationInfo`), and *with what* (`TargetObject`, here the log path).",
+        "`Write-DeployLog` reads `$LogPath` from the script scope, which works; in a module you would pass it as a parameter."
+      ]
+    }
+  ]
+}

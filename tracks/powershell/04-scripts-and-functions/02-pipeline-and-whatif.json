@@ -1,0 +1,238 @@
+{
+  "title": "Pipeline input and -WhatIf",
+  "summary": "Functions that take objects from the pipeline (by value and by property name) with begin/process/end, and that support -WhatIf and -Confirm through SupportsShouldProcess.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Taking input from the pipeline",
+      "body": [
+        "A function can accept objects from `|` like any cmdlet. Mark the parameter, and put the work in a **`process`**",
+        "block, which runs **once per object**:",
+        "",
+        "```powershell",
+        "function Get-FileAge {",
+        "    [CmdletBinding()]",
+        "    param([Parameter(Mandatory, ValueFromPipeline)] [System.IO.FileInfo] $File)",
+        "    begin   { $now = Get-Date }                    # once, before the first object",
+        "    process { [pscustomobject]@{ Name = $File.Name; Days = ($now - $File.LastWriteTime).Days } }",
+        "    end     { Write-Verbose 'done' }               # once, after the last object",
+        "}",
+        "Get-ChildItem ./logs -File | Get-FileAge",
+        "```",
+        "",
+        "- **`ValueFromPipeline`** binds the whole incoming object (here each `FileInfo`).",
+        "- **`ValueFromPipelineByPropertyName`** binds a **property with the same name** as the parameter (or one of its",
+        "  `[Alias()]`es). That is what lets `Import-Csv users.csv | New-HomeFolder` fill `-UserName` and `-Department`",
+        "  from the CSV columns.",
+        "",
+        "Without a `process` block, the body runs once at the **end**, with only the **last** object: the classic",
+        "\"my function only handles one file\" bug."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "lang": "powershell",
+      "code": [
+        "function Show-Item { param([Parameter(ValueFromPipeline)] $Item) \"got $Item\" }",
+        "function Show-Each { param([Parameter(ValueFromPipeline)] $Item) process { \"got $Item\" } }",
+        "1..3 | Show-Item",
+        "1..3 | Show-Each"
+      ],
+      "answer": ["got 3", "got 1", "got 2", "got 3"],
+      "verify": false,
+      "explain": "A body with no `begin`/`process`/`end` is treated as an `end` block: by then the parameter holds only the last object. `process` runs for each one."
+    },
+    {
+      "type": "learn",
+      "title": "-WhatIf and -Confirm for your own functions",
+      "body": [
+        "Anything that changes or deletes should support a dry run. Ask for it in `[CmdletBinding()]` and ask permission",
+        "before each change:",
+        "",
+        "```powershell",
+        "function Remove-OldLog {",
+        "    [CmdletBinding(SupportsShouldProcess)]",
+        "    param([Parameter(Mandatory, ValueFromPipeline)] [System.IO.FileInfo] $File, [int] $Days = 30)",
+        "    process {",
+        "        if ($File.LastWriteTime -lt (Get-Date).AddDays(-$Days) -and",
+        "            $PSCmdlet.ShouldProcess($File.FullName, 'Remove old log')) {",
+        "            Remove-Item -LiteralPath $File.FullName",
+        "        }",
+        "    }",
+        "}",
+        "```",
+        "",
+        "- `SupportsShouldProcess` adds **`-WhatIf`** and **`-Confirm`** to the function.",
+        "- `$PSCmdlet.ShouldProcess(target, action)` returns `$false` and prints *What if: Performing the operation \"Remove",
+        "  old log\" on target \"...\"* under `-WhatIf`, asks under `-Confirm`, and returns `$true` otherwise.",
+        "- `-WhatIf` also flows into the cmdlets you call (`Remove-Item` above), so nothing is missed.",
+        "- `ConfirmImpact = 'High'` makes PowerShell **ask by default** (because `$ConfirmPreference` is `High`); scripts then",
+        "  pass `-Confirm:$false` deliberately. Keep it for truly dangerous operations (dropping a database)."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put the skeleton of a pipeline function that supports -WhatIf in order.",
+      "lines": [
+        "function Remove-StaleBranch {",
+        "    [CmdletBinding(SupportsShouldProcess)]",
+        "    param([Parameter(Mandatory, ValueFromPipeline)] [string] $Name)",
+        "    process {",
+        "        if ($PSCmdlet.ShouldProcess($Name, 'Delete branch')) {",
+        "            git branch -D $Name",
+        "        }",
+        "    }",
+        "}"
+      ],
+      "explain": "`[CmdletBinding()]` comes before `param()`, and `ShouldProcess` is asked inside `process`, once per item, right before the change."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Remove-OldLog with a dry run",
+      "prompt": [
+        "In `~/scripts/LogTools.ps1`, write **`Remove-OldLog`**:",
+        "",
+        "- it takes **files from the pipeline** (`Get-ChildItem ~/logs/archive -File | Remove-OldLog`);",
+        "- **`-Days`** (default `30`): files whose `LastWriteTime` is older than that many days are deleted, the rest kept;",
+        "- **`-WhatIf`** shows what would go and deletes nothing; `-Confirm` asks per file.",
+        "",
+        "Load it with `. ~/scripts/LogTools.ps1` and try it on `~/logs/archive` with `-WhatIf` first. The checks run it on",
+        "fresh copies of that folder."
+      ],
+      "setup": ["pipeline.sh"],
+      "checks": [
+        { "name": "-WhatIf deletes nothing and says what it would do",
+          "cmd": "d=$(mktemp -d); cp -a /opt/dojo/state/archive/. \"$d\"; out=$(pwsh -NoProfile -c \". ~/scripts/LogTools.ps1; Get-ChildItem $d -File | Remove-OldLog -WhatIf\" 2>&1); echo \"$out\"; test \"$(ls \"$d\" | wc -l)\" = 5 && test \"$(echo \"$out\" | grep -c 'What if')\" = 3",
+          "fail": "With `-WhatIf` all five files must remain, and there should be three `What if:` lines (one per old file). Use `[CmdletBinding(SupportsShouldProcess)]` and `$PSCmdlet.ShouldProcess(...)`." },
+        { "name": "the default of 30 days removes the three old files",
+          "cmd": "d=$(mktemp -d); cp -a /opt/dojo/state/archive/. \"$d\"; pwsh -NoProfile -c \". ~/scripts/LogTools.ps1; Get-ChildItem $d -File | Remove-OldLog\" >/dev/null 2>&1; ls \"$d\" | tr '\\n' ' '",
+          "expectOutput": "app-1.log app-2.log",
+          "fail": "Without `-Days`, files older than 30 days (`app-3.log`, `app-4.log`, `app-5.log`) should be deleted and the others kept. Is the work in a `process` block?" },
+        { "name": "-Days 10 removes more",
+          "cmd": "d=$(mktemp -d); cp -a /opt/dojo/state/archive/. \"$d\"; pwsh -NoProfile -c \". ~/scripts/LogTools.ps1; Get-ChildItem $d -File | Remove-OldLog -Days 10\" >/dev/null 2>&1; ls \"$d\" | tr '\\n' ' '",
+          "expectOutput": "app-1.log",
+          "fail": "With `-Days 10`, only `app-1.log` (5 days old) should be left." }
+      ],
+      "hints": [
+        "Start from the skeleton in the lesson: `[CmdletBinding(SupportsShouldProcess)]`, then `param([Parameter(Mandatory, ValueFromPipeline)] [System.IO.FileInfo] $File, [int] $Days = 30)`.",
+        "In `process { }`: `if ($File.LastWriteTime -lt (Get-Date).AddDays(-$Days) -and $PSCmdlet.ShouldProcess($File.FullName, 'Remove old log')) { Remove-Item -LiteralPath $File.FullName }`.",
+        "Write the file with a here-string: `@' ... '@ | Set-Content ~/scripts/LogTools.ps1`, or `nano ~/scripts/LogTools.ps1`. Then `. ~/scripts/LogTools.ps1` to load it."
+      ],
+      "solution": [
+        "@'",
+        "function Remove-OldLog {",
+        "    [CmdletBinding(SupportsShouldProcess)]",
+        "    param(",
+        "        [Parameter(Mandatory, ValueFromPipeline)]",
+        "        [System.IO.FileInfo] $File,",
+        "",
+        "        [ValidateRange(1, 3650)]",
+        "        [int] $Days = 30",
+        "    )",
+        "    begin { $cutoff = (Get-Date).AddDays(-$Days) }",
+        "    process {",
+        "        if ($File.LastWriteTime -lt $cutoff -and $PSCmdlet.ShouldProcess($File.FullName, 'Remove old log')) {",
+        "            Remove-Item -LiteralPath $File.FullName",
+        "        }",
+        "    }",
+        "}",
+        "'@ | Set-Content ~/scripts/LogTools.ps1",
+        ". ~/scripts/LogTools.ps1",
+        "Get-ChildItem ~/logs/archive -File | Remove-OldLog -WhatIf",
+        "Get-ChildItem ~/logs/archive -File | Remove-OldLog -Verbose",
+        "Get-ChildItem ~/logs/archive"
+      ],
+      "explain": [
+        "`-Verbose` on a ShouldProcess function prints *Performing the operation ... on target ...* for every change it makes,",
+        "which is a free audit line in the job log. In module 5 this function moves into a module with tests that check",
+        "`-WhatIf` never deletes anything."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A function declares `[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]`. A scheduled task calls it without `-Confirm` or `-WhatIf`. What happens?",
+      "options": [
+        "It asks for confirmation, and in a non-interactive session that fails, so nothing is changed",
+        "It runs without asking",
+        "It behaves as if `-WhatIf` was given",
+        "PowerShell ignores ConfirmImpact in scripts"
+      ],
+      "answer": 0,
+      "explain": "`$ConfirmPreference` defaults to `High`, so operations of impact High prompt automatically. A scheduled caller must pass `-Confirm:$false` on purpose. That is the point: no accidental mass delete."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Onboard new hires from a CSV",
+      "prompt": [
+        "HR sends `~/data/new-hires.csv` (`UserName`, `Department`, `StartDate`). In `~/scripts/Onboarding.ps1`, write",
+        "**`New-HomeFolder`** so this works: `Import-Csv ~/data/new-hires.csv | New-HomeFolder`.",
+        "",
+        "- `-UserName` and `-Department` come from the pipeline **by property name**, and both are mandatory;",
+        "- `-Department` must be one of `Engineering`, `Sales`, `Finance` (one row has `Marketing`: that row must fail with a",
+        "  clear error **and the others must still be created**);",
+        "- `-Root` (default `~/homes`): it creates `<Root>/<Department>/<UserName>` and outputs the new folder;",
+        "- it supports **`-WhatIf`**."
+      ],
+      "setup": ["pipeline.sh"],
+      "checks": [
+        { "name": "creates the four valid folders",
+          "cmd": "d=$(mktemp -d); pwsh -NoProfile -c \". ~/scripts/Onboarding.ps1; Import-Csv ~/data/new-hires.csv | New-HomeFolder -Root $d\" >/dev/null 2>&1; (cd \"$d\" && find . -mindepth 2 -maxdepth 2 -type d | sort | tr '\\n' ' ')",
+          "expectOutput": "./Engineering/asha.k ./Engineering/mira.s ./Finance/tom.b ./Sales/li.wen",
+          "fail": "`Import-Csv ~/data/new-hires.csv | New-HomeFolder -Root <dir>` should create `<dir>/Engineering/asha.k`, `.../mira.s`, `Finance/tom.b` and `Sales/li.wen`, and nothing for Marketing." },
+        { "name": "the Marketing row fails with a validation error",
+          "cmd": "d=$(mktemp -d); pwsh -NoProfile -c \". ~/scripts/Onboarding.ps1; Import-Csv ~/data/new-hires.csv | New-HomeFolder -Root $d\" 2>&1 | grep -q 'does not belong to the set'",
+          "fail": "The `Marketing` row should be refused by `[ValidateSet('Engineering', 'Sales', 'Finance')]` on `-Department`." },
+        { "name": "-WhatIf creates nothing",
+          "cmd": "d=$(mktemp -d); pwsh -NoProfile -c \". ~/scripts/Onboarding.ps1; Import-Csv ~/data/new-hires.csv | New-HomeFolder -Root $d -WhatIf\" >/dev/null 2>&1; test -z \"$(ls -A \"$d\")\"",
+          "fail": "With `-WhatIf` the root folder must stay empty. `New-Item` inside a ShouldProcess function gets `-WhatIf` passed on automatically." },
+        { "name": "outputs the new folders",
+          "cmd": "d=$(mktemp -d); pwsh -NoProfile -c \". ~/scripts/Onboarding.ps1; (Import-Csv ~/data/new-hires.csv | New-HomeFolder -Root $d | Measure-Object).Count\" 2>/dev/null",
+          "expectOutput": "4",
+          "fail": "The function should output one folder object per created home folder (four in total)." }
+      ],
+      "hints": [
+        "`[Parameter(Mandatory, ValueFromPipelineByPropertyName)] [string] $UserName`, and the same for `$Department` plus a `[ValidateSet(...)]`.",
+        "In `process`: `$target = Join-Path $Root $Department $UserName`, then `if ($PSCmdlet.ShouldProcess($target, 'Create home folder')) { New-Item -ItemType Directory -Path $target -Force }`.",
+        "Do not forget `[CmdletBinding(SupportsShouldProcess)]` and `[string] $Root = \"$HOME/homes\"`."
+      ],
+      "solution": [
+        "@'",
+        "function New-HomeFolder {",
+        "    [CmdletBinding(SupportsShouldProcess)]",
+        "    param(",
+        "        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]",
+        "        [ValidatePattern('^[a-z][a-z0-9.]{1,19}$')]",
+        "        [string] $UserName,",
+        "",
+        "        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]",
+        "        [ValidateSet('Engineering', 'Sales', 'Finance')]",
+        "        [string] $Department,",
+        "",
+        "        [string] $Root = \"$HOME/homes\"",
+        "    )",
+        "    process {",
+        "        $target = Join-Path $Root $Department $UserName",
+        "        if ($PSCmdlet.ShouldProcess($target, 'Create home folder')) {",
+        "            New-Item -ItemType Directory -Path $target -Force",
+        "        }",
+        "    }",
+        "}",
+        "'@ | Set-Content ~/scripts/Onboarding.ps1",
+        ". ~/scripts/Onboarding.ps1",
+        "Import-Csv ~/data/new-hires.csv | New-HomeFolder -WhatIf",
+        "Import-Csv ~/data/new-hires.csv | New-HomeFolder",
+        "Get-ChildItem ~/homes -Recurse -Directory | Select-Object FullName"
+      ],
+      "explain": [
+        "A validation failure on pipeline input is a **non-terminating** error for that one object: the bad row is reported",
+        "and the pipeline carries on with the next. In a real onboarding job, collect those errors (`-ErrorVariable failed`)",
+        "and send them back to HR instead of letting them scroll by."
+      ]
+    }
+  ]
+}

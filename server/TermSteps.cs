@@ -221,9 +221,22 @@ public sealed partial class TermSteps : IAsyncDisposable
         var args = new List<string> { "exec", "-u", user, "-w", Home, "-e", "HOME=" + (user == "root" ? "/root" : Home), "-e", "DOJO_FILES=" + FilesIn };
         foreach (var e in env) { args.Add("-e"); args.Add(e); }
         args.Add(name);
-        args.AddRange(shell == "pwsh" ? ["pwsh", "-NoLogo", "-NonInteractive", "-Command", script] : ["bash", "-c", script]);
+        args.AddRange(shell == "pwsh" ? ["pwsh", "-NoLogo", "-NonInteractive", "-Command", PwshTyped(script)] : ["bash", "-c", script]);
         return NetLabs.Docker(args, TimeSpan.FromSeconds(seconds), onLine: onLine);
     }
+
+    /// <summary>
+    /// A pwsh script that runs <paramref name="script"/> the way the learner types it at the prompt: one top-level
+    /// statement at a time in the global scope, so a statement that throws (a step that fails on purpose) reports its
+    /// error and the next one still runs, as in the terminal's line-based prompt (netlabs/images/pwsh/dojo-repl.ps1).
+    /// The text travels base64-encoded, so no quoting can break it.
+    /// </summary>
+    public static string PwshTyped(string script) =>
+        "$__dojo_src = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + Convert.ToBase64String(Encoding.UTF8.GetBytes(script)) + "'))\n" +
+        "$__dojo_err = $null\n" +
+        "$__dojo_ast = [System.Management.Automation.Language.Parser]::ParseInput($__dojo_src, [ref] $null, [ref] $__dojo_err)\n" +
+        "if ($__dojo_err) { $__dojo_err | ForEach-Object { Write-Error \"line $($_.Extent.StartLineNumber): $($_.Message)\" -ErrorAction Continue }; exit 2 }\n" +
+        "foreach ($__dojo_st in $__dojo_ast.EndBlock.Statements) { try { . ([scriptblock]::Create($__dojo_st.Extent.Text)) | Out-Default } catch { $_ | Out-Default } }";
 
     /// <summary>While a step starts: how long it has been starting and the last line its setup printed (dojo-cluster prints its phases).</summary>
     public (int Seconds, string Line)? Progress(string key) =>

@@ -1,0 +1,181 @@
+{
+  "title": "Errors that you actually catch",
+  "summary": "Terminating versus non-terminating errors, -ErrorAction and $ErrorActionPreference, try/catch/finally with specific exception types, and reading an error record properly.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two kinds of error",
+      "body": [
+        "PowerShell has **non-terminating** and **terminating** errors, and `try`/`catch` only sees the second kind.",
+        "",
+        "- **Non-terminating**: a cmdlet reports a problem with *one* item and carries on with the rest. `Copy-Item` with a",
+        "  missing source, `Get-Item` on one bad path out of ten, `Remove-Item` on a locked file. The error is printed and",
+        "  added to `$Error`, `$?` becomes `$false`, and **the script goes on to the next line**.",
+        "- **Terminating**: the statement stops. `throw`, exceptions from .NET methods (`[IO.File]::ReadAllText(...)`),",
+        "  parse errors, and any error raised with **`-ErrorAction Stop`**.",
+        "",
+        "```powershell",
+        "try { Copy-Item ./missing.csv ./out/ } catch { 'never printed' }                    # not caught!",
+        "try { Copy-Item ./missing.csv ./out/ -ErrorAction Stop } catch { \"caught: $_\" }  # caught",
+        "```",
+        "",
+        "For a whole script, set **`$ErrorActionPreference = 'Stop'`** at the top: every error becomes terminating, so the",
+        "first failure stops the script (or jumps to your `catch`). For a single call where you *expect* failures, use",
+        "`-ErrorAction SilentlyContinue` (or `Ignore`) on that call only, never for the whole script."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does this print to the output (ignoring the red error message itself)?",
+      "code": ["try {", "    Get-Item ./no-such-file.txt", "    'next line'", "} catch {", "    'caught'", "}", "'after'"],
+      "lang": "powershell",
+      "options": ["`next line`, then `after`", "`caught`, then `after`", "only `after`", "nothing: the script stops"],
+      "answer": 0,
+      "explain": "`Get-Item` writes a non-terminating error and the `try` block simply continues, so `catch` never runs. Add `-ErrorAction Stop` to `Get-Item` (or set `$ErrorActionPreference = 'Stop'`) and the output becomes `caught`, `after`."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "The alert that never fired",
+      "prompt": [
+        "`~/scripts/copy-reports.ps1` has a `try`/`catch` that should exit `1` (so the scheduler alerts) when the copy fails.",
+        "Last night the source folder was missing. Reproduce it:",
+        "",
+        "```powershell",
+        "pwsh -File ~/scripts/copy-reports.ps1 -Source ~/reports/missing; \"exit code: $LASTEXITCODE\"",
+        "```",
+        "",
+        "Fix the script so a failed copy prints a line with `FAILED` and exits with a **non-zero** code, without printing",
+        "`copied`. A good run must still copy the three CSV files and exit `0`."
+      ],
+      "setup": ["errors.sh"],
+      "checks": [
+        { "name": "a missing source fails loudly",
+          "cmd": "out=$(pwsh -NoProfile -NonInteractive -File ~/scripts/copy-reports.ps1 -Source ~/reports/missing 2>&1); rc=$?; echo \"$out\"; echo \"exit $rc\"; test $rc -ne 0 && echo \"$out\" | grep -q FAILED && ! echo \"$out\" | grep -q '^copied'",
+          "fail": "With a missing source the script must print `FAILED ...` and exit non-zero, and not claim it copied anything." },
+        { "name": "a good run still works",
+          "cmd": "rm -f ~/share/reports/*; pwsh -NoProfile -NonInteractive -File ~/scripts/copy-reports.ps1 >/dev/null 2>&1; rc=$?; test $rc = 0 && test \"$(ls ~/share/reports | wc -l)\" = 3",
+          "fail": "A normal run should copy the three CSV files into `~/share/reports` and exit 0." }
+      ],
+      "hints": [
+        "The output says `copied reports to ...` and `exit code: 0` even though `Copy-Item` printed an error. Which kind of error was it?",
+        "`catch` only runs for terminating errors. `Copy-Item` reports a missing path as non-terminating.",
+        "Add `-ErrorAction Stop` to the `Copy-Item` line (or `$ErrorActionPreference = 'Stop'` right after `param()`)."
+      ],
+      "solution": [
+        "pwsh -File ~/scripts/copy-reports.ps1 -Source ~/reports/missing; \"exit code: $LASTEXITCODE\"",
+        "(Get-Content ~/scripts/copy-reports.ps1 -Raw).Replace(\"-Destination `$Target\", \"-Destination `$Target -ErrorAction Stop\") | Set-Content ~/scripts/copy-reports.ps1 -NoNewline",
+        "pwsh -File ~/scripts/copy-reports.ps1 -Source ~/reports/missing; \"exit code: $LASTEXITCODE\"",
+        "pwsh -File ~/scripts/copy-reports.ps1; \"exit code: $LASTEXITCODE\""
+      ],
+      "explain": [
+        "`exit 1` in a script run with `pwsh -File` becomes the process exit code, which is what Task Scheduler, CI and",
+        "monitoring look at. An uncaught terminating error under `pwsh -File` also exits with `1`. A script that ends",
+        "normally exits with `0`, even if non-terminating errors scrolled past: that is exactly how this alert stayed silent."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "catch, finally, and reading the error record",
+      "body": [
+        "```powershell",
+        "try {",
+        "    $cfg = Get-Content -Raw $path -ErrorAction Stop | ConvertFrom-Json",
+        "}",
+        "catch [System.Management.Automation.ItemNotFoundException] { throw \"Config $path is missing\" }",
+        "catch [System.ArgumentException]                           { throw \"Config $path is not valid JSON: $($_.Exception.Message)\" }",
+        "finally { Remove-Item $lockFile -ErrorAction SilentlyContinue }   # always runs: success, error, or Ctrl+C",
+        "```",
+        "",
+        "Inside `catch`, **`$_` is an `ErrorRecord`**. When a message is not enough, look at the whole record:",
+        "",
+        "```powershell",
+        "$Error[0] | Format-List * -Force           # every property, including the exception chain",
+        "$Error[0].Exception.GetType().FullName     # the type to put in a catch [ ... ]",
+        "$Error[0].Exception.InnerException         # the real cause, often wrapped one level down",
+        "$Error[0].ScriptStackTrace                 # which line of which script",
+        "$Error[0].InvocationInfo.PositionMessage   # the command and a ~~~~ marker under it",
+        "```",
+        "",
+        "`$Error` keeps the most recent errors of the session, newest first. `-ErrorVariable failed` (no `$`) collects one",
+        "command's errors into `$failed` for later reporting. Use **`throw`** to stop with your own message, and",
+        "**`Write-Error`** to report a non-terminating problem with one input and carry on."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Which property answers the question about `$e = $Error[0]`?",
+      "pairs": [
+        ["Which exception type do I catch?", "`$e.Exception.GetType().FullName`"],
+        ["What really went wrong underneath?", "`$e.Exception.InnerException`"],
+        ["Which line of which script?", "`$e.ScriptStackTrace`"],
+        ["Which object was being processed?", "`$e.TargetObject`"],
+        ["Show me everything", "`$e | Format-List * -Force`"]
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "One bad record in the export",
+      "prompt": [
+        "`pwsh -File ~/scripts/import-orders.ps1` fails on today's web shop export, `~/data/orders.json`. Run it, then",
+        "investigate the error record in your session: `$Error[0] | Format-List * -Force`.",
+        "",
+        "1. Write the **full type name of the inner exception** (the parser's own exception, one level under the one",
+        "   PowerShell reports) into `~/answers/inner.txt`.",
+        "2. The message says exactly which record is broken. Fix that record in `~/data/orders.json` (the amount was",
+        "   meant to be twelve and a half), so the script prints `orders: 6, total: 800`."
+      ],
+      "setup": ["errors.sh"],
+      "checks": [
+        { "name": "inner.txt names the parser's exception",
+          "cmd": "tr -d '\\r\\n ' < ~/answers/inner.txt",
+          "expectOutput": "Newtonsoft.Json.JsonReaderException",
+          "fail": "`$Error[0].Exception.InnerException.GetType().FullName` gives the inner exception's type. Write exactly that into `~/answers/inner.txt`." },
+        { "name": "the import works",
+          "cmd": "pwsh -NoProfile -File ~/scripts/import-orders.ps1 2>&1",
+          "expectOutput": "orders: 6, total: 800",
+          "fail": "After fixing the record, the script should print `orders: 6, total: 800`." },
+        { "name": "only the broken amount changed",
+          "cmd": "jq -c '[.[] | [.Id, .Customer, (.Amount * 100 | round)]]' ~/data/orders.json",
+          "expectOutput": "[[1,\"Northwind\",12000],[2,\"Contoso\",7550],[3,\"Fabrikam\",30000],[4,\"Tailspin\",1250],[5,\"Litware\",4200],[6,\"Adventure Works\",25000]]",
+          "fail": "Order 4 (Tailspin) should have `\"Amount\": 12.50`, and the other orders must be unchanged (the check shows amounts in cents)." }
+      ],
+      "hints": [
+        "Run the script in your session so `$Error` is yours: `& ~/scripts/import-orders.ps1`, then `$Error[0] | Format-List * -Force`.",
+        "The `Exception` line shows two exceptions: `System.ArgumentException` and, after `--->`, the inner one. `Path '[3].Amount', line 5` is the 4th record (arrays count from 0).",
+        "`$Error[0].Exception.InnerException.GetType().FullName | Set-Content ~/answers/inner.txt`, and `(Get-Content ~/data/orders.json -Raw).Replace('12,50', '12.50') | Set-Content ~/data/orders.json -NoNewline`."
+      ],
+      "solution": [
+        "& ~/scripts/import-orders.ps1",
+        "$Error[0] | Format-List * -Force",
+        "$Error[0].Exception.InnerException.GetType().FullName | Set-Content ~/answers/inner.txt",
+        "(Get-Content ~/data/orders.json -Raw).Replace('12,50', '12.50') | Set-Content ~/data/orders.json -NoNewline",
+        "& ~/scripts/import-orders.ps1"
+      ],
+      "explain": [
+        "In production you would not hand-edit the export: you would reject it with a clear message and tell the team that",
+        "produces it, because a decimal comma in JSON means their serializer uses the wrong culture. The habit that matters",
+        "is the investigation: the outer exception says *what* failed, the inner one *why*, and the message often says *where*."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "A job must never leave its lock file behind, whatever happens. Put it in order.",
+      "lines": [
+        "$lock = Join-Path ([System.IO.Path]::GetTempPath()) 'nightly.lock'",
+        "if (Test-Path $lock) { throw 'Another run is in progress' }",
+        "New-Item $lock -ItemType File | Out-Null",
+        "try {",
+        "    Invoke-NightlyWork -ErrorAction Stop",
+        "}",
+        "finally {",
+        "    Remove-Item $lock -ErrorAction SilentlyContinue",
+        "}"
+      ],
+      "explain": "Check and create the lock before `try`: if another run holds it, this run must not delete it. Everything after the lock is created goes in `try`, and `finally` removes it even when the work throws or someone presses Ctrl+C."
+    }
+  ]
+}
