@@ -21,6 +21,11 @@ Alongside the courses:
   (`23-camel-gateway`, under the Integration heading) runs a real Apache Camel route behind a Kong gateway; its
   first start pulls about 400 MB and builds a Camel image with the jars inside (`image/`), then runs offline.
   A lab may set `ready_seconds` (slow JVM startup) and `download` (shown before the first start).
+  The **Live RabbitMQ lab** (`24-rabbitmq-ops`, rabbitmq:4.4.1-management plus a small services image built on
+  the tools image) and the **Live Kafka lab** (`25-kafka-ops`, apache/kafka:4.4.0 in KRaft mode) go with the
+  Messaging topic.
+- **Messaging builder** (`#/labs/msgbuild`, `ui/lab-msgbuild.js`): RabbitMQ and Kafka modes on the shared board,
+  driven by pure simulators (`ui/rabbitsim.js`, `ui/kafkasim.js`, tested in Node by `MsgSimTests`).
 - **Workbench**: run your own ASP.NET Core apps live inside the dojo. Send them requests (JSON, forms,
   multipart file uploads, custom headers), see the response, the curl command and the C# test for it, and
   watch each request travel through *your* code: the map is drawn from your `Program.cs` (middleware, then
