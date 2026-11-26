@@ -1,0 +1,30 @@
+#!/bin/bash
+# shop-supervisor: runs shop-api as user shop and restarts it when it crashes.
+# After 5 quick crashes in a row it gives up, so a broken app does not restart in a tight loop forever.
+log=/var/log/shop/supervisor.log
+applog=/var/log/shop/shop-api.log
+mkdir -p /var/log/shop
+say() { echo "$(date '+%F %T') shop-supervisor[$$]: $*" >> "$log"; }
+
+trap 'say "stopping (asked to)"; [ -n "$child" ] && kill "$child" 2>/dev/null; wait; exit 0' TERM INT
+
+crashes=0
+say "started"
+while :; do
+  say "starting shop-api as user shop"
+  started=$SECONDS
+  runuser -u shop -- /srv/shop/bin/shop-api >> "$applog" 2>&1 &
+  child=$!
+  wait "$child"
+  code=$?
+  child=
+  ran=$((SECONDS - started))
+  say "shop-api exited with status $code after ${ran}s (see $applog)"
+  if [ "$ran" -ge 30 ]; then crashes=0; fi
+  crashes=$((crashes + 1))
+  if [ "$crashes" -ge 5 ]; then
+    say "shop-api crashed $crashes times in a row: giving up. Fix the cause, then run: shopctl restart"
+    exit 1
+  fi
+  sleep 1
+done

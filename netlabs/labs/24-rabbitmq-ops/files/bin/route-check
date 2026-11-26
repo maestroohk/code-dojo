@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""route-check EXCHANGE ROUTING_KEY QUEUE
+
+Would a message published to EXCHANGE with ROUTING_KEY reach QUEUE? Reads the exchange's bindings from the
+management HTTP API and matches them the way the broker does (direct: equal keys; fanout: always;
+topic: word by word, * is exactly one word, # is zero or more). Exit code 0 means yes, 1 means no.
+Bindings to other exchanges (exchange-to-exchange) and alternate exchanges are not followed.
+"""
+import base64
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+API = "http://rabbit:15672/api"
+AUTH = "Basic " + base64.b64encode(b"guest:guest").decode()
+
+
+def get(path):
+    req = urllib.request.Request(API + path, headers={"Authorization": AUTH})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.load(r)
+
+
+def topic_match(pattern, key):
+    p, k = pattern.split("."), key.split(".")
+
+    def m(i, j):
+        if i == len(p):
+            return j == len(k)
+        if p[i] == "#":
+            return any(m(i + 1, jj) for jj in range(j, len(k) + 1))
+        if j == len(k):
+            return False
+        return (p[i] == "*" or p[i] == k[j]) and m(i + 1, j + 1)
+    return m(0, 0)
+
+
+def main():
+    if len(sys.argv) != 4:
+        print("usage: route-check EXCHANGE ROUTING_KEY QUEUE", file=sys.stderr)
+        return 2
+    exchange, key, queue = sys.argv[1:]
+    x = urllib.parse.quote(exchange, safe="")
+    try:
+        ex = get(f"/exchanges/%2F/{x}")
+        bindings = get(f"/exchanges/%2F/{x}/bindings/source")
+    except Exception as e:
+        print(f"route-check: cannot read exchange '{exchange}' from the management API: {e}", file=sys.stderr)
+        return 1
+    kind = ex.get("type")
+    hits = []
+    for b in bindings:
+        if b.get("destination_type") != "queue" or b.get("destination") != queue:
+            continue
+        bk = b.get("routing_key", "")
+        if kind == "fanout" or (kind == "direct" and bk == key) or (kind == "topic" and topic_match(bk, key)):
+            hits.append(bk)
+    keys = [b.get("routing_key", "") for b in bindings if b.get("destination") == queue]
+    if hits:
+        print(f"yes: '{key}' on {kind} exchange '{exchange}' reaches queue '{queue}' (binding key '{hits[0]}')")
+        return 0
+    print(f"no: '{key}' on {kind} exchange '{exchange}' does not reach queue '{queue}'"
+          + (f" (its binding keys: {', '.join(repr(k) for k in keys)})" if keys else " (the queue has no binding to that exchange)"))
+    return 1
+
+
+sys.exit(main())

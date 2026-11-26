@@ -30,7 +30,7 @@ cd ..               # one level up
 cd                  # home (same as cd ~)
 ```
 
-Press **Tab** to complete names: type `cd /var/l` and press Tab. It saves typing and typos. The **Up arrow** brings back your previous command.
+The **Up arrow** brings back your previous command. (On a real server, **Tab** completes names: type `cd /var/l` and press Tab. The in-page terminal here is line based, so Tab and full-screen programs such as `less` and `nano` do not work in it.)
 
 ## Reading files
 
@@ -38,7 +38,7 @@ Press **Tab** to complete names: type `cd /var/l` and press Tab. It saves typing
 cat file            # dump the whole file
 head -n 5 file      # first 5 lines
 tail -n 5 file      # last 5 lines
-less file           # scroll: arrows, PgUp/PgDn, /word searches, G = end, q = quit
+less file           # scroll (on a real terminal): arrows, /word searches, G = end, q = quit
 wc -l file          # count lines
 ```
 
@@ -56,7 +56,7 @@ find /srv -type d               # only directories
 mkdir notes                     # make a directory
 echo 'hello' > file.txt         # write a line to a file (replaces what was there)
 echo 'more' >> file.txt         # append a line
-nano file.txt                   # a friendly editor (Ctrl+O save, Ctrl+X exit)
+cat > file.txt <<'EOF'          # write several lines; finish with a line that is just EOF
 ```
 
 > Stuck? Every task has gentle **hints** (press Hint again for a bigger one) and a solution if you really need it. Nothing here can break anything that matters: **Restart** gives you a brand-new server, with new secrets.

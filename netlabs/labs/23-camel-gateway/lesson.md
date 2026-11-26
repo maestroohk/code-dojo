@@ -31,7 +31,21 @@ Everything you edit is on **ops**, in `/work`:
 /work/logs/gateway-access.log          every request the gateway proxied
 ```
 
-Edit with `nano` (Ctrl+O saves, Ctrl+X quits). Keep a second terminal open on ops with `tail -f /work/logs/camel.log`: after each save you see `Routes reloaded`, or the error that stopped the reload. Keep all routes in that one file: live reload handles one file well, but gets confused when you add or delete route files. If reload ever gets stuck (for example `duplicate route id`), run `camel-restart` on the **camel** host: Camel starts again from the files in a few seconds.
+The in-page terminal is line based, so full-screen editors (`nano`, `vim`) cannot draw in it. Edit with commands instead, on a copy, and write the result back **in place** (Camel watches the folder, and `sed -i` there would make it load sed's temporary file as a second route file: `duplicate route id`):
+
+```
+cd /work/camel/routes
+cp orders.camel.yaml /tmp/orders.yaml                      # 1. work on a copy
+sed -i 's/old text/new text/' /tmp/orders.yaml             # 2a. change text on a line
+cat > /tmp/snippet.yaml <<'EOF'                            # 2b. or write a block of lines (end with EOF)...
+        - removeHeaders:
+            pattern: "*"
+EOF
+sed -i '/- log: "received order/r /tmp/snippet.yaml' /tmp/orders.yaml   # ...and insert it after the line that matches
+cat /tmp/orders.yaml > orders.camel.yaml                   # 3. write it back in place: one clean reload
+```
+
+To add a whole new route (or the `routeConfiguration` of task 6) at the end, append straight to the file: `cat >> orders.camel.yaml <<'EOF'` ... `EOF`. `kong.yml` is not watched, so there `sed -i` and `cat >>` are fine. Keep a second terminal open on ops with `tail -f /work/logs/camel.log`: after each write you see `Routes reloaded`, or the error that stopped the reload. YAML indentation is spaces, never tabs: copy it from the lines around your change. Keep all routes in that one file: live reload handles one file well, but gets confused when you add or delete route files. If reload ever gets stuck (for example `duplicate route id`), run `camel-restart` on the **camel** host: Camel starts again from the files in a few seconds.
 
 The gateway does not watch its file. Run `gw-apply` on ops: it sends `kong.yml` to Kong's admin API. Kong checks the whole file first; if anything is wrong it keeps the old configuration and tells you why. The admin API listens only on the backend network, so a partner can never reach it.
 

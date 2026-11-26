@@ -1,0 +1,53 @@
+#!/bin/bash
+# shopctl: control the shop (a supervisor that runs shop-api as user shop).
+#   shopctl status | start | stop | restart
+log=/var/log/shop/supervisor.log
+
+sup_pid() { pgrep -f '/usr/local/bin/[s]hop-supervisor' | head -1; }
+api_pid() { pgrep -u shop -f '/srv/shop/bin/[s]hop-api' | head -1; }
+
+status() {
+  local s a
+  s=$(sup_pid); a=$(api_pid)
+  if [ -n "$s" ]; then
+    echo "shop-supervisor: running (pid $s)"
+  elif tail -n 1 "$log" 2>/dev/null | grep -q 'giving up'; then
+    echo "shop-supervisor: NOT RUNNING: it gave up after repeated crashes ($(tail -n 1 "$log" | cut -c1-19))"
+  else
+    echo "shop-supervisor: not running"
+  fi
+  if [ -n "$a" ]; then
+    echo "shop-api:        running (pid $a)"
+  else
+    echo "shop-api:        not running"
+  fi
+  echo
+  echo "Last supervisor messages ($log):"
+  tail -n 4 "$log" 2>/dev/null | sed 's/^/  /'
+  [ -z "$a" ] && echo "The app's own errors are in /var/log/shop/shop-api.log."
+  return 0
+}
+
+start() {
+  if [ -n "$(sup_pid)" ]; then echo "shop is already running (supervisor pid $(sup_pid))"; return 0; fi
+  cd /
+  setsid nohup /usr/local/bin/shop-supervisor >/dev/null 2>&1 &
+  echo "shop starting (supervisor pid $!)"
+}
+
+stop() {
+  local s
+  s=$(sup_pid)
+  [ -n "$s" ] && kill "$s" 2>/dev/null
+  for _ in 1 2 3 4 5; do [ -z "$(sup_pid)" ] && break; sleep 0.5; done
+  pkill -u shop -f '/srv/shop/bin/[s]hop-api' 2>/dev/null
+  echo "shop stopped"
+}
+
+case "$1" in
+  status) status ;;
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start; sleep 2; status ;;
+  *) echo "usage: shopctl status | start | stop | restart" >&2; exit 2 ;;
+esac

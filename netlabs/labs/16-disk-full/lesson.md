@@ -22,7 +22,7 @@ find /srv/data -type f -size +10M -exec ls -lh {} \;   # big files, wherever the
 | Situation | Do | Don't |
 |---|---|---|
 | a junk file | `rm file` | `rm -rf` with a wildcard you haven't checked with `ls` first |
-| old logs to keep | `gzip app.log.1` (read later with `zcat`, `zless`, `zgrep`) | delete evidence you might need |
+| old logs to keep | `gzip app.log.1` (read later with `zcat` or `zgrep`) | delete evidence you might need |
 | a log a program is writing | `truncate -s 0 app.log` or `: > app.log` | `rm app.log` (see below) |
 
 ## Deleted, but not gone

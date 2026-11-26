@@ -1,5 +1,5 @@
 {
-  "title": "DNS and Ingress",
+  "title": "DNS and the Gateway API",
   "summary": "Names inside the cluster, and one front door for HTTP from outside.",
   "minutes": 12,
   "steps": [
@@ -81,87 +81,100 @@
     },
     {
       "type": "learn",
-      "title": "Ingress",
+      "title": "Gateway API: one front door",
       "body": [
-        "One LoadBalancer per app gets expensive and gives you no HTTP routing. An **Ingress** is a set of HTTP rules; an **ingress controller** (ingress-nginx, Traefik, the cloud's gateway) is the pod that actually receives traffic and applies them.",
+        "One LoadBalancer per app gets expensive and gives you no HTTP routing. The **Gateway API** splits the front door into two objects, owned by two teams:",
+        "",
+        "- a **Gateway** (platform team): the listener, its port, hostname and TLS certificate, and which controller runs it (`gatewayClassName`);",
+        "- **HTTPRoutes** (app teams, in their own namespace): \"this host and path go to this Service\".",
+        "",
+        "A **Gateway controller** (Envoy Gateway, Istio, Cilium, Traefik, NGINX Gateway Fabric, or the cloud's own) runs the proxy pods that actually receive traffic and apply the routes.",
         "",
         "```text",
-        "internet --> LB 20.50.1.9 --> ingress controller pods",
+        "internet --> LB 20.50.1.9 --> Gateway 'public' (proxy pods)",
         "                                | host shop.example.com  path /api -> svc shop-api:80",
         "                                | host shop.example.com  path /    -> svc shop-web:80",
         "                                | host blog.example.com  path /    -> svc blog:80",
         "```",
         "",
         "```yaml",
-        "apiVersion: networking.k8s.io/v1",
-        "kind: Ingress",
+        "apiVersion: gateway.networking.k8s.io/v1",
+        "kind: HTTPRoute",
         "metadata:",
         "  name: shop",
+        "  namespace: shop",
         "spec:",
-        "  ingressClassName: nginx",
-        "  tls:",
-        "  - hosts: [shop.example.com]",
-        "    secretName: shop-tls",
+        "  parentRefs:",
+        "  - name: public            # the Gateway to attach to",
+        "    namespace: gateway",
+        "  hostnames: [shop.example.com]",
         "  rules:",
-        "  - host: shop.example.com",
-        "    http:",
-        "      paths:",
-        "      - path: /api",
-        "        pathType: Prefix",
-        "        backend:",
-        "          service: { name: shop-api, port: { number: 80 } }",
+        "  - matches:",
+        "    - path: { type: PathPrefix, value: /api }",
+        "    backendRefs:",
+        "    - name: shop-api         # a Service in this namespace",
+        "      port: 80",
         "```",
         "",
-        "An Ingress with **no controller installed does nothing**. `ingressClassName` says which controller should handle it. TLS terminates at the controller using the certificate in the Secret. (The newer **Gateway API** splits this into Gateway and HTTPRoute objects; the idea is the same.)"
+        "A Gateway with **no controller installed does nothing**: it never gets an address. TLS terminates at the Gateway, using the certificate Secret its listener names.",
+        "",
+        "> **Note:** You will still meet the older **Ingress** object (`kind: Ingress`, `ingressClassName`, `pathType: Prefix`) in existing clusters. The Ingress API is frozen and the popular ingress-nginx controller was retired in March 2026, so new setups use the Gateway API. The routing ideas are the same."
       ]
     },
     {
       "type": "blanks",
-      "prompt": "Complete the rule sending `api.shop.example.com/orders...` to Service `orders` on port 8080.",
+      "prompt": "Complete the HTTPRoute that sends `api.shop.example.com/orders` and everything under it to Service `orders` on port 8080.",
       "code": [
-        "rules:",
-        "- __1__: api.shop.example.com",
-        "  http:",
-        "    paths:",
-        "    - path: /orders",
-        "      pathType: __2__",
-        "      backend:",
-        "        __3__:",
-        "          name: orders",
-        "          port: { number: __4__ }"
+        "kind: HTTPRoute",
+        "spec:",
+        "  parentRefs:",
+        "  - name: public",
+        "    namespace: gateway",
+        "  __1__: [api.shop.example.com]",
+        "  rules:",
+        "  - matches:",
+        "    - path: { type: __2__, value: /orders }",
+        "    __3__:",
+        "    - name: orders",
+        "      port: __4__"
       ],
       "blanks": [
-        "host",
-        "Prefix",
-        "service",
+        "hostnames",
+        "PathPrefix",
+        "backendRefs",
         "8080"
       ],
       "bank": [
-        "hostname",
+        "host",
         "Exact",
-        "pod",
+        "service",
         "80"
-      ]
+      ],
+      "explain": "`hostnames` is a list, `PathPrefix` matches `/orders` and `/orders/...` (`Exact` would match only `/orders`), and `backendRefs` names the Service and its port."
     },
     {
       "type": "mcq",
-      "prompt": "You applied an Ingress, DNS points at the cluster, but every request times out. `kubectl get ingress` shows an empty `ADDRESS` column. Most likely?",
+      "prompt": "You applied a Gateway and an HTTPRoute, but every request times out. `kubectl get gateway public -n gateway` shows an empty `ADDRESS` column and `PROGRAMMED` is `False` (or `Unknown`). Most likely?",
+      "code": [
+        "NAME     CLASS   ADDRESS   PROGRAMMED   AGE",
+        "public   envoy             Unknown      20m"
+      ],
       "options": [
-        "No ingress controller is installed (or `ingressClassName` names one that does not exist)",
+        "No Gateway controller is installed (or `gatewayClassName` names a GatewayClass that does not exist)",
         "The Service type must be LoadBalancer",
         "The pods lack a containerPort",
-        "TLS is not configured"
+        "The HTTPRoute has no `hostnames`"
       ],
       "answer": 0,
-      "explain": "The controller fills in the ADDRESS once it has picked up the Ingress. Check `kubectl get ingressclass` and the controller's pods."
+      "explain": "The controller fills in the ADDRESS and sets `Programmed: True` once it has set up the proxy for the Gateway. Check `kubectl get gatewayclass` (its `ACCEPTED` should be `True`) and the controller's pods. A missing `hostnames` would only make the route match every host."
     },
     {
       "type": "predict",
-      "prompt": "`pathType: Prefix` matches whole path segments, and the longest matching path wins. Which backend handles `/api/orders/7`?",
+      "prompt": "A `PathPrefix` match compares whole path segments, and the longest matching prefix wins. One HTTPRoute for `shop.example.com` has these three rules. Which backend handles `/api/orders/7`? Type the Service name.",
       "code": [
-        "path /         -> shop-web",
-        "path /api      -> shop-api",
-        "path /api/admin -> admin"
+        "PathPrefix /          -> shop-web",
+        "PathPrefix /api       -> shop-api",
+        "PathPrefix /api/admin -> admin"
       ],
       "answer": "shop-api",
       "verify": false,

@@ -29,5 +29,5 @@ TXT
 
 # Fault 4: a CPU hog.
 cd /
-setsid nohup runuser -u shop -- /usr/local/bin/thumbnailer >/dev/null 2>&1 &
+setsid nohup setpriv --reuid=shop --regid=shop --init-groups /usr/local/bin/thumbnailer >/dev/null 2>&1 &
 /usr/local/bin/shopctl start >/dev/null
