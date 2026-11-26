@@ -21,8 +21,6 @@ var checker = new Checker(runner);
 using var apps = new AppHost(runner);
 var langs = new LangRunner();
 var stateDir = Environment.GetEnvironmentVariable("DOJO_STATE") is { Length: > 0 } envState ? envState : Path.Combine(root, ".state");
-var progressFile = Path.Combine(stateDir, "progress.json");
-var progressLock = new object();
 
 if (args.Length > 0 && args[0] == "validate")
     return await Validator.Run(content, checker, runner, langs,
@@ -68,7 +66,7 @@ app.Use(async (ctx, next) =>
     }
     if (HttpMethods.IsPost(ctx.Request.Method) || HttpMethods.IsPut(ctx.Request.Method))
     {
-        if (ctx.Request.ContentType?.StartsWith("application/json") != true || ctx.Request.ContentLength > 2_000_000)
+        if (ctx.Request.ContentType?.StartsWith("application/json") != true || ctx.Request.ContentLength > (ctx.Request.Path.StartsWithSegments("/api/sync") ? 25_000_000 : 2_000_000))
         {
             ctx.Response.StatusCode = 415;
             return;
@@ -92,25 +90,8 @@ app.MapGet("/api/lesson/{track}/{module}/{lesson}", (string track, string module
         ? Results.Text(Pacing.ForLearner(l).ToJsonString(), "application/json")   // cold steps lose starter, hints and solution
         : Results.NotFound());
 
-app.MapGet("/api/progress", () =>
-{
-    lock (progressLock)
-        return Results.Text(File.Exists(progressFile) ? File.ReadAllText(progressFile) : "{}", "application/json");
-});
-
-app.MapPut("/api/progress", async (HttpRequest req) =>
-{
-    using var doc = await JsonDocument.ParseAsync(req.Body);   // reject anything that is not JSON
-    var text = JsonSerializer.Serialize(doc.RootElement, new JsonSerializerOptions { WriteIndented = true });
-    lock (progressLock)
-    {
-        Directory.CreateDirectory(stateDir);
-        var tmp = progressFile + ".tmp";
-        File.WriteAllText(tmp, text);
-        File.Move(tmp, progressFile, overwrite: true);
-    }
-    return Results.NoContent();
-});
+// Progress, the welcome profile, export / import and the sync folder (ProgressSync.cs, merge rules in ProgressMerge.cs).
+// Mapped below, once the live labs (whose task progress travels with it) exist.
 
 // Free run: compile and execute whatever is in the editor, no grading.
 // Languages the playground can run here: C# always, others when their toolchain is installed.
@@ -184,28 +165,6 @@ app.MapPost("/api/check", async (CheckRequest req) =>
     return Results.Text(Pacing.WithUses(result, uses, json).ToJsonString(json), "application/json");
 });
 
-// The welcome profile (docs/CURRICULUM.md 3.8) as its own file, so it survives a progress reset and can be edited by hand.
-var profileFile = Path.Combine(stateDir, "profile.json");
-app.MapGet("/api/profile", () =>
-{
-    lock (progressLock)
-        return Results.Text(File.Exists(profileFile) ? File.ReadAllText(profileFile) : "null", "application/json");
-});
-app.MapPut("/api/profile", async (HttpRequest req) =>
-{
-    using var doc = await JsonDocument.ParseAsync(req.Body);
-    if (doc.RootElement.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null)) return Results.BadRequest("a profile is a JSON object");
-    var text = JsonSerializer.Serialize(doc.RootElement, new JsonSerializerOptions { WriteIndented = true });
-    lock (progressLock)
-    {
-        Directory.CreateDirectory(stateDir);
-        var tmp = profileFile + ".tmp";
-        File.WriteAllText(tmp, text);
-        File.Move(tmp, profileFile, overwrite: true);
-    }
-    return Results.NoContent();
-});
-
 // Certificate lab: build a small PKI from a description and validate a chain with the real X509Chain.
 app.MapPost("/api/pki", (PkiLab.Request req) => Results.Json(PkiLab.Run(req), json));
 
@@ -232,7 +191,10 @@ app.MapPost("/api/apps/{id}/stop", (string id) => Results.Json(new { stopped = a
 app.MapPost("/api/apps/{id}/send", async (string id, AppHost.SendRequest req) => Results.Json(await apps.Send(id, req), json));
 app.MapPost("/api/outline", (RunRequest req) => Results.Json(CodeOutline.Read(req.Code ?? ""), json));
 // Live network labs: Docker-based networking and security labs with an in-page terminal (NetLabs.cs).
-NetLabs.Map(app, root, stateDir);
+var netlabs = NetLabs.Map(app, root, stateDir);
+ProgressSync.Map(app, stateDir, netlabs);
+// Learning paths: role routes across topics, stored as content/paths/*.json (Paths.cs).
+Paths.Map(app, root, netlabs);
 // Terminal steps: a real shell in a throwaway container per lesson step, checked by real commands (TermSteps.cs).
 TermSteps.Map(app, content, root, Port);
 PyEnv.Map(app);  // one-click data science environment (numpy, pandas, matplotlib)

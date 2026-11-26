@@ -163,6 +163,48 @@ public sealed partial class NetLabs
         }
     }
 
+    /// <summary>Every lab's finished tasks, { labId: { taskId: date } }, for the progress file (ProgressSync.cs).</summary>
+    public JsonObject ProgressSnapshot()
+    {
+        lock (_stateLock)
+            return (JsonObject)Section(ReadState(), "progress").DeepClone();
+    }
+
+    /// <summary>Merges finished tasks from another machine (union, earliest date). True when anything was added.</summary>
+    public bool MergeProgress(JsonObject? incoming)
+    {
+        if (incoming is null || incoming.Count == 0) return false;
+        lock (_stateLock)
+        {
+            var s = ReadState();
+            var before = Section(s, "progress");
+            var merged = ProgressMerge.MergeBundles(
+                new JsonObject { ["netlabs"] = before.DeepClone() }, new JsonObject { ["netlabs"] = incoming.DeepClone() })["netlabs"] as JsonObject ?? [];
+            if (ProgressMerge.Canon(merged) == ProgressMerge.Canon(before)) return false;
+            s["progress"] = merged.DeepClone();
+            WriteState(s);
+            return true;
+        }
+    }
+
+    /// <summary>id, title, kind (net or linux), minutes, done, total for every live lab: no Docker needed (Paths.cs).</summary>
+    public JsonArray TaskSummary()
+    {
+        var list = new JsonArray();
+        foreach (var l in LoadLabs())
+        {
+            var done = DoneTasks(l);
+            var ids = l.Tasks.Select(t => (string?)t["id"]).Where(i => i is not null).ToList();
+            list.Add(new JsonObject
+            {
+                ["id"] = l.Id, ["title"] = l.Title, ["module"] = (string?)l.Def["module"],
+                ["kind"] = ((string?)l.Def["module"])?.StartsWith("Linux missions", StringComparison.Ordinal) == true ? "linux" : "net",
+                ["minutes"] = (int?)l.Def["minutes"], ["done"] = ids.Count(i => done.Contains(i!)), ["total"] = ids.Count,
+            });
+        }
+        return list;
+    }
+
     public void ResetProgress(Lab lab)
     {
         lock (_stateLock)

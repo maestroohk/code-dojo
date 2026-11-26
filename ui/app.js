@@ -32,6 +32,10 @@ import { installSearch, searchButton } from './search.js';   // Ctrl+K: search e
 import * as notes from './notes.js';                         // notes and highlights per step, #/notes
 import { glossaryView } from './glossary.js';
 
+import * as learningPaths from './paths.js';
+import { certificateView, certificatesPanel } from './certificate.js';
+import { syncPanel, startWatcher } from './sync.js';
+
 const app = document.getElementById('app');
 let tracks = [];
 let leave = null;              // cleanup for the current view
@@ -83,6 +87,7 @@ function header(active) {
     h('a.brand', { href: '#/' }, h('span.brand-mark', '{ }'), h('span', 'code-dojo')),
     h('nav.nav',
       link('#/', 'Topics', 'home'),
+      link('#/paths', 'Paths', 'paths'),
       link('#/labs', 'Labs', 'labs'),
       h(`a.nav-link${active === 'practice' ? '.active' : ''}`, { href: '#/practice' }, 'Practice', due > 0 && h('span.badge', due)),
       link('#/projects', 'Projects', 'projects'),
@@ -281,6 +286,7 @@ function home() {
         h('a.btn.primary.big', { href: `#/lesson/${resume.key}`, onclick: () => sessionStorage.setItem('track', recent.id) }, 'Continue'),
         h('span.muted.small', `${recent.title} · ${resume.lesson.title}`))),
     pathPanel(tracks, { nextLesson: game.nextLesson, trackProgress: game.trackProgress }),
+    learningPaths.homePanel(tracks),
     gamify.todayPanel({ refresh: () => { if (!location.hash || location.hash === '#/') home(); } }),
     // Topics grouped by category, in the order their first topic appears.
     [...new Set(sorted.map(t => t.category || 'Topics'))].map(cat => [
@@ -1263,6 +1269,8 @@ function profile() {
       h('div.card', h('b.card-num', answered ? `${Math.round((s.stats.correct / answered) * 100)}%` : '–'), h('span.muted', 'answers correct')),
       h('div.card', h('b.card-num', s.stats.bestCombo), h('span.muted', 'best combo'))),
     gamify.profilePanels(profile),
+    certificatesPanel(tracks),
+    syncPanel(profile),
     h('section.panel', h('h2', 'Activity'), h('div.heatmap', cells), h('p.muted.small', 'Brighter squares are days you reached more of your daily goal.')),
     h('section.panel',
       h('h2', `Achievements  ${Object.keys(s.achievements).length} / ${game.ACHIEVEMENTS.length}`),
@@ -1320,6 +1328,8 @@ function route() {
     case 'welcome': return welcomeView(page, tracks);
     case 'playground': return playground();
     case 'profile': return profile();
+    case 'paths': return learningPaths.pathsView(page, tracks, parts[1]);
+    case 'certificate': return certificateView(page, tracks, parts[1], parts[2]);
     default: return notFound();
   }
 }
@@ -1359,6 +1369,10 @@ async function boot() {
   window.addEventListener('hashchange', route);
   window.addEventListener('beforeunload', saveHud);
   installSearch(() => tracks);
+
+  // Another machine's record was merged in (sync.js, game.replaceState): redraw pages that only show progress.
+  window.addEventListener('dojo:progress', () => { if (['', 'paths', 'builds', 'track', 'certificate'].includes(location.hash.split('/')[1] || '')) route(); });
+  startWatcher();
   route();
 }
 
