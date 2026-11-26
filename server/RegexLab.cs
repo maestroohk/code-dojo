@@ -375,6 +375,35 @@ public static class RegexLab
             var r = Grade(step, req.Pattern ?? "", req.Flags, req.Replacement);
             return Results.Json(new { passed = r.Passed, compiled = r.Compiled, error = r.Error, errorOffset = r.ErrorOffset, tests = r.Tests, timedOut = r.TimedOut, ms = r.Ms }, JsonOpts);
         });
+        // The lab's challenges: the checks live in the page (nothing to hide), graded the same way as lesson steps.
+        app.MapPost("/api/regex/grade", (GradeRequest req) =>
+        {
+            if (req.Step is not JsonObject step) return Results.BadRequest("missing step");
+            var r = Grade(step, req.Pattern ?? "", req.Flags, req.Replacement);
+            return Results.Json(new { passed = r.Passed, compiled = r.Compiled, error = r.Error, errorOffset = r.ErrorOffset, tests = r.Tests, timedOut = r.TimedOut, ms = r.Ms }, JsonOpts);
+        });
+        // Live highlighting for a lesson step: what .NET finds in each sample while the learner types.
+        app.MapPost("/api/regex/preview", (PreviewRequest req) => Results.Json(Preview(req), JsonOpts));
+    }
+
+    public record GradeRequest(JsonObject? Step, string? Pattern, string? Flags, string? Replacement);
+    public record PreviewRequest(string? Pattern, string? Flags, List<string>? Inputs, string? Replacement, bool NonBacktracking = false);
+    public record PreviewItem(List<int[]> Spans, string? Replaced, bool TimedOut);
+
+    public static object Preview(PreviewRequest req)
+    {
+        var (options, flagError) = ParseFlags(req.Flags, req.NonBacktracking);
+        if (flagError is not null) return new { error = flagError, errorOffset = -1, items = Array.Empty<PreviewItem>() };
+        var (regex, error, offset, _) = Build(req.Pattern ?? "", options, GradeTimeoutMs);
+        if (regex is null) return new { error, errorOffset = offset, items = Array.Empty<PreviewItem>() };
+        var items = new List<PreviewItem>();
+        foreach (var input in (req.Inputs ?? []).Take(40))
+        {
+            var text = input.Length > 20_000 ? input[..20_000] : input;
+            try { items.Add(new(SpansOf(regex, text), req.Replacement is null ? null : regex.Replace(text, req.Replacement), false)); }
+            catch (RegexMatchTimeoutException) { items.Add(new([], null, true)); }
+        }
+        return new { error = (string?)null, errorOffset = -1, items };
     }
 
     static readonly System.Text.Json.JsonSerializerOptions JsonOpts = new(System.Text.Json.JsonSerializerDefaults.Web);
