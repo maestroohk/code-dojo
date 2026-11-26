@@ -1,0 +1,170 @@
+{
+  "title": "ORMs and raw SQL: where injection survives",
+  "summary": "EF Core and Dapper parameterize for you, until someone reaches for FromSqlRaw, ExecuteSqlRaw or a sort column from the query string. Learn which calls are safe, and allow-list what parameters cannot carry.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "LINQ is safe. Raw SQL is up to you.",
+      "body": [
+        "```csharp fragment",
+        "db.Products.Where(p => p.Name.Contains(q))                         // LINQ: always a parameter",
+        "",
+        "db.Products.FromSql($\"SELECT * FROM Products WHERE Name = {q}\")     // safe: {q} becomes a parameter",
+        "db.Database.ExecuteSql($\"UPDATE Products SET Hidden = 1 WHERE Id = {id}\")   // safe",
+        "db.Database.SqlQuery<int>($\"SELECT Id FROM Products WHERE Name = {q}\")     // safe",
+        "",
+        "db.Products.FromSqlRaw(\"SELECT * FROM Products WHERE Name = '\" + q + \"'\")  // INJECTABLE",
+        "db.Products.FromSqlRaw($\"SELECT * FROM Products WHERE Name = '{q}'\")       // INJECTABLE: the trap",
+        "db.Products.FromSqlRaw(\"SELECT * FROM Products WHERE Name = {0}\", q)       // safe: {0} is a parameter",
+        "```",
+        "",
+        "The trap is the line with `$` and `FromSqlRaw`. It *looks* like the safe `FromSql` call, but `FromSqlRaw` takes a finished string, so C# fills in `q` before EF Core ever sees it. EF Core's analyzer warns about it (**EF1002**, \"risk of vulnerability to SQL injection\"): treat that warning as an error.",
+        "",
+        "Dapper is the same story: `conn.Query<Product>(\"SELECT * FROM Products WHERE Name = @name\", new { name = q })` is a parameter; `\"... = '\" + q + \"'\"` is not."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe (parameterized) or injectable?",
+      "buckets": ["Safe", "Injectable"],
+      "items": [
+        ["`db.Products.Where(p => p.Name == q)`", 0],
+        ["`db.Products.FromSql($\"... WHERE Name = {q}\")`", 0],
+        ["`db.Products.FromSqlRaw(\"... WHERE Name = {0}\", q)`", 0],
+        ["`conn.Query<P>(\"... WHERE Name = @n\", new { n = q })`", 0],
+        ["`db.Products.FromSqlRaw($\"... WHERE Name = '{q}'\")`", 1],
+        ["`db.Database.ExecuteSqlRaw(\"DELETE FROM Carts WHERE Id = \" + id)`", 1],
+        ["`conn.Query<P>(\"... ORDER BY \" + sort)`", 1],
+        ["`db.Products.FromSql($\"... ORDER BY {sort}\")` (expecting a column name)", 1]
+      ],
+      "explain": "The last one is not injectable, but it does not work either: a parameter is a **value**, so `ORDER BY @p0` sorts by a constant string. Column names need an allow-list."
+    },
+    {
+      "type": "learn",
+      "title": "What a parameter cannot carry",
+      "body": [
+        "Parameters hold values. These parts of a query are **identifiers and keywords**, and must never come from the request as text:",
+        "",
+        "- column and table names: `ORDER BY {sort}`, `SELECT {fields}`, a tenant's table name;",
+        "- sort direction: `ASC` / `DESC`;",
+        "- `LIMIT`/`TOP` built as text (use a parameter or LINQ's `Take`, and cap it).",
+        "",
+        "Map the request's word to code you wrote, and refuse anything else:",
+        "",
+        "```csharp fragment",
+        "query = sort switch",
+        "{",
+        "    \"name\"   => query.OrderBy(p => p.Name),",
+        "    \"price\"  => query.OrderBy(p => p.PriceCents),",
+        "    \"-price\" => query.OrderByDescending(p => p.PriceCents),",
+        "    _        => throw new ArgumentException(\"Unknown sort.\")   // -> 400",
+        "};",
+        "```",
+        "",
+        "And **LIKE**: a parameter stops injection, but `%` and `_` in the value are still wildcards. That is harmless for a search box; for an exact-prefix check (`WHERE Email LIKE @domain`), escape them or use `=`/`StartsWith`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The build shows `warning EF1002: Method 'FromSqlRaw' inserts interpolated strings directly into the SQL`. What is the right change?",
+      "options": [
+        "Switch to `FromSql($\"...\")` (or LINQ), so the interpolated values become parameters",
+        "Suppress the warning: the values come from our own front-end",
+        "Escape the quotes in the values before interpolating",
+        "Move the query into a stored procedure that concatenates the same way"
+      ],
+      "answer": 0,
+      "explain": "`FromSql` and `FromSqlInterpolated` turn each `{value}` into a `DbParameter`. Keep EF1002 as an error in CI (`<WarningsAsErrors>EF1002</WarningsAsErrors>`) so this never ships again."
+    },
+    {
+      "type": "learn",
+      "title": "NoSQL injects too",
+      "body": [
+        "Document databases have no SQL, but they have **operators**, and a JSON body can carry them:",
+        "",
+        "```text",
+        "POST /login",
+        "{\"username\": \"admin\", \"password\": {\"$ne\": null}}",
+        "```",
+        "",
+        "If that body is turned into a MongoDB filter as it is, the query becomes *username is admin and password is not null*: signed in without a password. The fix is the same idea as for SQL: bind the body to a typed record (`record Login(string Username, string Password)`), so an object where a string belongs fails to bind, and build filters with the driver's builders (`Builders<User>.Filter.Eq(u => u.Username, login.Username)`), never from raw JSON."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "efcore",
+      "title": "Fix the EF Core search and its sort",
+      "prompt": [
+        "Fix `List<string> Search(ShopDb db, string q, string sort)`. It returns product names that contain `q`, ordered by `sort`:",
+        "",
+        "- `q` must be a **parameter** (`FromSql` with interpolation, or LINQ);",
+        "- `sort` is one of `name`, `price` (cheapest first), `-price` (dearest first); ties sort by name; anything else throws `ArgumentException`.",
+        "",
+        "`ShopDb` has `DbSet<Product> Products`; a `Product` has `Id`, `Name` and `PriceCents`."
+      ],
+      "starter": [
+        "List<string> Search(ShopDb db, string q, string sort) =>",
+        "    db.Products",
+        "      .FromSqlRaw(\"SELECT * FROM Products WHERE Name LIKE '%\" + q + \"%' ORDER BY \" + sort)",
+        "      .Select(p => p.Name)",
+        "      .ToList();"
+      ],
+      "solution": [
+        "List<string> Search(ShopDb db, string q, string sort)",
+        "{",
+        "    var pattern = \"%\" + q + \"%\";",
+        "    var query = db.Products.FromSql($\"SELECT * FROM Products WHERE Name LIKE {pattern}\");",
+        "    query = sort switch",
+        "    {",
+        "        \"name\" => query.OrderBy(p => p.Name),",
+        "        \"price\" => query.OrderBy(p => p.PriceCents).ThenBy(p => p.Name),",
+        "        \"-price\" => query.OrderByDescending(p => p.PriceCents).ThenBy(p => p.Name),",
+        "        _ => throw new ArgumentException(\"Unknown sort.\", nameof(sort)),",
+        "    };",
+        "    return query.Select(p => p.Name).ToList();",
+        "}"
+      ],
+      "hints": [
+        "Build the pattern first, then `db.Products.FromSql($\"SELECT * FROM Products WHERE Name LIKE {pattern}\")`. EF Core makes `{pattern}` a parameter.",
+        "Sorting: `query = sort switch { \"name\" => query.OrderBy(p => p.Name), ..., _ => throw new ArgumentException(\"Unknown sort.\") };` EF Core wraps the raw SQL in a subquery and sorts outside it."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "using var dojoConn = new SqliteConnection(\"Data Source=:memory:\");",
+        "dojoConn.Open();",
+        "using var dojoDb = new ShopDb(new DbContextOptionsBuilder<ShopDb>().UseSqlite(dojoConn).Options);",
+        "dojoDb.Database.EnsureCreated();",
+        "dojoDb.Products.AddRange(",
+        "    new Product { Name = \"Desk lamp\", PriceCents = 4900 },",
+        "    new Product { Name = \"Night Owl O'Clock Lamp\", PriceCents = 3900 },",
+        "    new Product { Name = \"Floor lamp\", PriceCents = 8900 },",
+        "    new Product { Name = \"Bulb pack\", PriceCents = 1200 });",
+        "dojoDb.SaveChanges();",
+        "",
+        "Dojo.Try(\"sort by name\", () => Dojo.Eq(\"lamp, by name\", new List<string> { \"Desk lamp\", \"Floor lamp\", \"Night Owl O'Clock Lamp\" }, Search(dojoDb, \"lamp\", \"name\")));",
+        "Dojo.Try(\"sort by price\", () => Dojo.Eq(\"lamp, cheapest first\", new List<string> { \"Night Owl O'Clock Lamp\", \"Desk lamp\", \"Floor lamp\" }, Search(dojoDb, \"lamp\", \"price\")));",
+        "Dojo.Try(\"sort by price, descending\", () => Dojo.Eq(\"lamp, dearest first\", new List<string> { \"Floor lamp\", \"Desk lamp\", \"Night Owl O'Clock Lamp\" }, Search(dojoDb, \"lamp\", \"-price\")));",
+        "Dojo.Try(\"a quote in the search\", () => Dojo.Eq(\"O'Clock is found\", new List<string> { \"Night Owl O'Clock Lamp\" }, Search(dojoDb, \"O'Clock\", \"name\")));",
+        "Dojo.Try(\"a UNION payload\", () => Dojo.Eq(\"' UNION SELECT ... finds nothing\", new List<string>(), Search(dojoDb, \"' UNION SELECT 99, 'pwned', 0--\", \"name\")));",
+        "Dojo.Throws<ArgumentException>(\"a sort with SQL in it is refused\", () => Search(dojoDb, \"lamp\", \"PriceCents; DROP TABLE Products\"));",
+        "Dojo.Throws<ArgumentException>(\"an unknown column is refused\", () => Search(dojoDb, \"lamp\", \"Id\"));",
+        "Dojo.Eq(\"the products table is intact\", 4, dojoDb.Products.Count());",
+        "",
+        "class ShopDb(DbContextOptions<ShopDb> options) : DbContext(options)",
+        "{",
+        "    public DbSet<Product> Products => Set<Product>();",
+        "}",
+        "",
+        "class Product",
+        "{",
+        "    public int Id { get; set; }",
+        "    public string Name { get; set; } = \"\";",
+        "    public int PriceCents { get; set; }",
+        "}"
+      ]
+    }
+  ]
+}

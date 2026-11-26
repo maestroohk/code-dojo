@@ -1,0 +1,165 @@
+{
+  "title": "SQL injection, and why parameters end it",
+  "summary": "Watch a search box turn into a UNION query that dumps the users table, learn the error-based and blind variants, then fix it with a parameter that keeps O'Clock working.",
+  "minutes": 18,
+  "prereqs": ["sql/10-concurrency-and-safety/03-injection-and-parameters"],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The request, and the SQL it builds",
+      "body": [
+        "```csharp fragment",
+        "var sql = \"SELECT name FROM products WHERE hidden = 0 AND name LIKE '%\" + q + \"%' ORDER BY name\";",
+        "```",
+        "",
+        "```text",
+        "GET /api/products/search?q=lamp",
+        "  SELECT name FROM products WHERE hidden = 0 AND name LIKE '%lamp%' ORDER BY name",
+        "",
+        "GET /api/products/search?q=' UNION SELECT username || ':' || password_hash FROM users--",
+        "  SELECT name FROM products WHERE hidden = 0 AND name LIKE '%' UNION SELECT username || ':' ||",
+        "         password_hash FROM users--%' ORDER BY name",
+        "                                       ^^ the rest is a comment",
+        "```",
+        "",
+        "The quote **ends the string** the developer started, and everything after it is SQL. The database cannot know which part the developer wrote and which part arrived in the URL: by the time it sees the text, they are one string. The search now returns every username and password hash.",
+        "",
+        "The same mistake hides in `ORDER BY` + a sort parameter, in `IN (...)` lists built from ids, in reports that filter by region, and in anything stored and used later (**second-order** injection: a username saved safely, then glued into a query by a nightly job)."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What SQL does this build? (One line.)",
+      "code": [
+        "var q = \"x' OR '1'='1\";",
+        "var sql = \"SELECT name FROM products WHERE hidden = 0 AND name = '\" + q + \"'\";",
+        "Console.WriteLine(sql);"
+      ],
+      "answer": "SELECT name FROM products WHERE hidden = 0 AND name = 'x' OR '1'='1'",
+      "explain": "`AND` binds tighter than `OR`, so this is `(hidden = 0 AND name = 'x') OR '1'='1'`: every row, hidden products included."
+    },
+    {
+      "type": "learn",
+      "title": "When you cannot see the results",
+      "body": [
+        "UNION needs the results on the page. Attackers have two more ways:",
+        "",
+        "- **Error-based**: make the database raise an error that contains data, and rely on a verbose error page to show it. `?q=' ORDER BY 9--` answering *\"1st ORDER BY term out of range - should be between 1 and 3\"* tells the attacker the column count. (Hiding error details is part of the fix: A02.)",
+        "- **Blind**: ask yes/no questions and watch the answer change. *Boolean*: `?q=lamp' AND substr((SELECT password_hash FROM users WHERE username='admin'),1,1)='a'--` returns lamps only when the guess is right. *Time-based*: on databases with a sleep function (`pg_sleep(5)`, `WAITFOR DELAY`), the answer takes 5 seconds when the guess is right.",
+        "",
+        "Blind extraction is slow by hand and fast with **sqlmap**, which automates all of these. Which is why \"we show no errors\" and \"the endpoint returns nothing interesting\" are not defences. Only keeping data out of the SQL text is."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put a manual UNION attack in order.",
+      "lines": [
+        "Send a single quote and see the query break (an error, or a different answer)",
+        "Find the number of columns with ORDER BY 1, 2, 3 ... until it fails",
+        "Send UNION SELECT with that many columns and see which ones appear on the page",
+        "Read the table names from the schema (sqlite_master, information_schema.tables)",
+        "UNION SELECT the interesting columns from the users table"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Parameters: SQL and data travel apart",
+      "body": [
+        "```csharp fragment",
+        "using var cmd = db.CreateCommand();",
+        "cmd.CommandText = \"SELECT name FROM products WHERE hidden = 0 AND name LIKE '%' || $q || '%' ORDER BY name\";",
+        "cmd.Parameters.AddWithValue(\"$q\", q);",
+        "```",
+        "",
+        "The database receives the SQL with a placeholder, compiles it, and only then gets the value. A value can never change the shape of a compiled query, so `' UNION SELECT ...` is just a strange product name that matches nothing, and `Night Owl O'Clock Lamp` is found like any other.",
+        "",
+        "What does **not** work:",
+        "",
+        "- **Escaping by hand** (`q.Replace(\"'\", \"''\")`): every database, encoding and context has its own rules; one miss is enough.",
+        "- **Block-lists** (`if (q.Contains(\"UNION\"))`): `UnIoN`, `UN/**/ION`, and blind attacks need no UNION at all.",
+        "- **Stored procedures** that build SQL inside with `EXEC(@sql)`: the concatenation just moved.",
+        "",
+        "Parameters cover **values**. Table and column names cannot be parameters: choose them from an allow-list (next lesson)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A pull request fixes the search with `q = q.Replace(\"'\", \"\")`. What do you say in review?",
+      "options": [
+        "Use a parameter instead: removing quotes breaks real searches (O'Clock) and is one escaping rule among many",
+        "Approve: without quotes there is no injection",
+        "Ask for `Replace(\"--\", \"\")` as well",
+        "Ask for a WAF rule instead"
+      ],
+      "answer": 0,
+      "explain": "Stripping characters changes what customers can search for, and numeric contexts (`WHERE id = \" + id`) need no quote at all to be injected. Parameters are simpler and complete."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "efcore",
+      "title": "Parameterize the search",
+      "prompt": [
+        "Fix `List<string> FindProducts(SqliteConnection db, string q)`. It returns the names of the products that are **not hidden** and whose name contains `q`, sorted by name. Use a **parameter** for `q`: the tests send UNION, `OR '1'='1'` and hidden-product payloads, and search for `O'Clock`, a real product."
+      ],
+      "starter": [
+        "List<string> FindProducts(SqliteConnection db, string q)",
+        "{",
+        "    using var cmd = db.CreateCommand();",
+        "    cmd.CommandText = \"SELECT name FROM products WHERE hidden = 0 AND name LIKE '%\" + q + \"%' ORDER BY name\";",
+        "    var names = new List<string>();",
+        "    using var r = cmd.ExecuteReader();",
+        "    while (r.Read()) names.Add(r.GetString(0));",
+        "    return names;",
+        "}"
+      ],
+      "solution": [
+        "List<string> FindProducts(SqliteConnection db, string q)",
+        "{",
+        "    using var cmd = db.CreateCommand();",
+        "    cmd.CommandText = \"SELECT name FROM products WHERE hidden = 0 AND name LIKE '%' || $q || '%' ORDER BY name\";",
+        "    cmd.Parameters.AddWithValue(\"$q\", q);",
+        "    var names = new List<string>();",
+        "    using var r = cmd.ExecuteReader();",
+        "    while (r.Read()) names.Add(r.GetString(0));",
+        "    return names;",
+        "}"
+      ],
+      "hints": [
+        "Put a placeholder where the value goes: `LIKE '%' || $q || '%'` (`||` joins strings in SQLite).",
+        "`cmd.Parameters.AddWithValue(\"$q\", q);` before `ExecuteReader()`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "using var dojoDb = new SqliteConnection(\"Data Source=:memory:\");",
+        "dojoDb.Open();",
+        "using (var dojoCmd = dojoDb.CreateCommand())",
+        "{",
+        "    dojoCmd.CommandText = \"CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT, hidden INTEGER);\" +",
+        "        \"CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT);\" +",
+        "        \"INSERT INTO products VALUES (1, 'Desk lamp', 0), (2, 'Night Owl O''Clock Lamp', 0), (3, 'Floor lamp', 0), (4, 'Prototype lamp', 1);\" +",
+        "        \"INSERT INTO users VALUES (1, 'admin', '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8');\";",
+        "    dojoCmd.ExecuteNonQuery();",
+        "}",
+        "",
+        "Dojo.Try(\"a normal search\", () => Dojo.Eq(\"'lamp' finds the three lamps for sale, by name\", new List<string> { \"Desk lamp\", \"Floor lamp\", \"Night Owl O'Clock Lamp\" }, FindProducts(dojoDb, \"lamp\")));",
+        "Dojo.Try(\"a search with a quote in it\", () => Dojo.Eq(\"'O'Clock' finds the clock lamp\", new List<string> { \"Night Owl O'Clock Lamp\" }, FindProducts(dojoDb, \"O'Clock\")));",
+        "Dojo.Try(\"the UNION payload\", () => Dojo.Check(\"' UNION SELECT ... FROM users-- returns no user data\", !FindProducts(dojoDb, \"' UNION SELECT username || ':' || password_hash FROM users--\").Any(n => n.Contains(\"admin\")), \"the users table leaked\"));",
+        "Dojo.Try(\"the OR payload\", () => Dojo.Eq(\"x' OR '1'='1 finds nothing\", new List<string>(), FindProducts(dojoDb, \"x' OR '1'='1\")));",
+        "Dojo.Try(\"the hidden-product payload\", () => Dojo.Check(\"' OR hidden = 1-- does not show the prototype\", !FindProducts(dojoDb, \"' OR hidden = 1--\").Contains(\"Prototype lamp\"), \"a hidden product leaked\"));",
+        "Dojo.Try(\"an empty search\", () => Dojo.Eq(\"an empty search lists the three products for sale\", 3, FindProducts(dojoDb, \"\").Count));"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "26-vulnerable-shop",
+      "task": ["t5", "t6"],
+      "title": "Live lab: dump the users table, then parameterize",
+      "prompt": [
+        "In the **vulnerable shop** lab, do **Attack: dump the users table** (a `UNION SELECT` through the search box; `sqlmap` is installed on attacker if you want to see it automated) and then **Fix: parameterize the query** in `Search.cs`. Notice the error page the first quote produces: it shows the SQL, which is task 21's bug."
+      ],
+      "explain": "The admin's hash is unsalted SHA-256: you could crack weak ones from that dump with a wordlist in seconds. Injection and weak password storage together turn one bug into an account takeover."
+    }
+  ]
+}
