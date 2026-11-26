@@ -89,6 +89,57 @@ public sealed class DbStudioTests : IDisposable
     }
 
     [Fact]
+    public void MySql_scripts_split_like_the_mysql_client()
+    {
+        var parts = DbStudio.SplitStatements("""
+            -- a comment
+            INSERT INTO t VALUES ('O\'Brien; x'), ("a \"b\"; c");  # trailing comment
+            SELECT 5--1;
+            DELIMITER $$
+            CREATE PROCEDURE p()
+            BEGIN
+              SELECT 1; SELECT 2;
+            END$$
+            DELIMITER ;
+            CALL p();
+            """, mysql: true);
+        Assert.Equal(4, parts.Count);
+        Assert.Equal(("INSERT INTO t VALUES ('O\\'Brien; x'), (\"a \\\"b\\\"; c\")", 2), parts[0]);
+        Assert.Equal(("SELECT 5--1", 3), parts[1]);     // -- needs a space after it to start a MySQL comment
+        Assert.StartsWith("CREATE PROCEDURE p()", parts[2].Sql);
+        Assert.EndsWith("END", parts[2].Sql);
+        Assert.Equal(5, parts[2].Line);
+        Assert.Equal(("CALL p()", 10), parts[3]);
+    }
+
+    [Fact]
+    public void Postgres_scripts_split_like_psql()
+    {
+        var parts = DbStudio.SplitStatements("""
+            CREATE FUNCTION f() RETURNS int AS $body$
+            BEGIN RETURN 1; END;
+            $body$ LANGUAGE plpgsql;
+            SELECT E'it\'s; ok', 'plain''s; ok', $$a;b$$;
+            /* block; comment */ SELECT 2
+            """, mysql: false);
+        Assert.Equal(3, parts.Count);
+        Assert.EndsWith("LANGUAGE plpgsql", parts[0].Sql);
+        Assert.Equal(4, parts[1].Line);
+        Assert.Equal(("SELECT 2", 5), parts[2]);
+    }
+
+    [Fact]
+    public void Sql_server_scripts_split_on_go_lines()
+    {
+        var batches = DbStudio.SqlServerBatches("CREATE TABLE t (a INT);\ngo\n\nINSERT INTO t VALUES (1);\nGO 3\nSELECT * FROM t -- not GO\nGO");
+        Assert.Equal(3, batches.Count);
+        Assert.Equal(("CREATE TABLE t (a INT);", 1, 1), batches[0]);
+        Assert.Equal(3, batches[1].Line);                 // the batch keeps its blank first line, so error lines still match
+        Assert.Equal(3, batches[1].Repeat);
+        Assert.Equal(("SELECT * FROM t -- not GO", 6, 1), batches[2]);
+    }
+
+    [Fact]
     public async Task Csv_import_infers_column_types()
     {
         _studio.Create("imports");

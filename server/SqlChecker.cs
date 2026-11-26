@@ -211,7 +211,7 @@ public static partial class SqlChecker
         try { return r.GetDataTypeName(c).ToUpperInvariant(); } catch { return ""; }
     }
 
-    static string FirstWord(string sql) =>
+    internal static string FirstWord(string sql) =>
         Regex.Match(StripComments(sql), @"[A-Za-z]+") is { Success: true } m ? m.Value.ToUpperInvariant() : "Statement";
 
     [GeneratedRegex(@"^SQLite Error \d+: '(?<m>.*)'\.?$", RegexOptions.Singleline)]
