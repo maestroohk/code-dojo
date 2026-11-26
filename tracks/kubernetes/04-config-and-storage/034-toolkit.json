@@ -1,0 +1,96 @@
+{
+  "title": "Senior's toolkit: config, secrets and volumes",
+  "summary": "Generate ConfigMaps and Secrets, read them back, roll pods after a change, and debug claims that never bind.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: config, secrets and volumes",
+      "body": "Config bugs are quiet: the pod runs, but with the wrong values. These commands show what the pod really got.",
+      "toolkit": [
+        { "cmd": "kubectl create configmap <name> --from-file=<f> --dry-run=client -o yaml", "what": "Generates the YAML for a ConfigMap from real files instead of pasting them by hand. Pipe it to `apply` or save it to Git.",
+          "flags": [["--from-file=appsettings.json", "one key per file, named after the file"], ["--from-literal=KEY=value", "a single key"], ["--dry-run=client -o yaml", "print the object, create nothing"]],
+          "example": "kubectl create configmap api-config --from-file=appsettings.json --dry-run=client -o yaml | kubectl apply -f -", "lang": "bash" },
+        { "cmd": "kubectl create secret generic <name> --from-literal=<k>=<v>", "what": "Creates a Secret. The values are only base64-encoded, not encrypted: RBAC and etcd encryption protect them, not the format.",
+          "flags": [["--from-literal", "a value on the command line (it lands in shell history; prefer `--from-file` for real secrets)"], ["--from-env-file=.env", "one key per `KEY=value` line"], ["--dry-run=client -o yaml", "generate without creating"]],
+          "example": "kubectl create secret generic db --from-file=password=./db-password.txt -n shop", "lang": "bash" },
+        { "cmd": "kubectl get secret <name> -o jsonpath='{.data.<key>}' | base64 -d", "what": "Reads one secret value back, to check it is the one you expect.",
+          "flags": [["-o jsonpath='{.data.password}'", "just that key, still base64"], ["base64 -d", "decode it (on Windows: `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(...))`)"]],
+          "example": "kubectl get secret db -n shop -o jsonpath='{.data.password}' | base64 -d", "lang": "bash" },
+        { "cmd": "kubectl exec <pod> -- env", "what": "Prints the environment the container actually started with. Environment variables are read once at start and never update.",
+          "flags": [["-- env", "the whole environment"], ["-- cat /etc/config/appsettings.json", "or a mounted file, which does update after about a minute (not with `subPath`)"]],
+          "example": "kubectl exec deploy/api -- env | grep -i connection", "lang": "bash" },
+        { "cmd": "kubectl apply -k <dir>", "what": "Applies a Kustomize overlay: one base plus small per-environment patches. Its `configMapGenerator` adds a hash to the name, so pods roll automatically when config changes.",
+          "flags": [["-k overlays/prod", "the overlay folder with a `kustomization.yaml`"], ["kubectl kustomize overlays/prod", "print the rendered YAML without applying"]],
+          "example": "kubectl kustomize overlays/prod | kubectl diff -f -", "lang": "bash" },
+        { "cmd": "kubectl get pvc,pv", "what": "Claims and the volumes they bound to. A claim stuck in `Pending` means no volume could be provided.",
+          "flags": [["pvc,pv", "several kinds in one call"], ["-A", "every namespace (PVs are cluster-wide)"]],
+          "example": "kubectl get pvc,pv -n shop", "lang": "bash" },
+        { "cmd": "kubectl describe pvc <name>", "what": "The events say why a claim is Pending: no StorageClass, a class that waits for the first pod, or a zone mismatch.",
+          "flags": [["WaitForFirstConsumer", "normal: it binds when a pod using it is scheduled"], ["kubectl get storageclass", "which classes exist and which one is `(default)`"]],
+          "example": "kubectl describe pvc data-postgres-0 -n shop", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You changed `LOG_LEVEL` in the `api-config` ConfigMap and ran `kubectl apply`. An hour later the logs are still at `Information`. The pod reads it with `envFrom`. What do you run?",
+      "options": [
+        "`kubectl rollout restart deployment/api`",
+        "`kubectl apply -f configmap.yaml` again",
+        "`kubectl delete configmap api-config`",
+        "Nothing; wait for the kubelet sync"
+      ],
+      "answer": 0,
+      "explain": "Environment variables are set when the container starts and never change. New pods pick up the new value. Kustomize's `configMapGenerator` avoids this by changing the name on every change."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Generate a ConfigMap from `appsettings.json` and apply it, without writing the YAML by hand.",
+      "code": "kubectl create configmap api-config --__1__=appsettings.json --__2__=client -o __3__ | kubectl apply -f -",
+      "blanks": ["from-file", "dry-run", "yaml"],
+      "bank": ["from-literal", "from-env-file", "server", "wide"],
+      "explain": "`--from-file` makes a key named after the file. `--dry-run=client -o yaml` prints the object instead of creating it, so `apply` can create or update it."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the command to its job.",
+      "pairs": [
+        ["`kubectl get secret db -o jsonpath='{.data.password}'`", "read one secret value, still base64-encoded"],
+        ["`kubectl exec deploy/api -- env`", "see what the container started with"],
+        ["`kubectl kustomize overlays/prod`", "render an overlay without applying it"],
+        ["`kubectl describe pvc data-0`", "find out why a claim is Pending"],
+        ["`kubectl get storageclass`", "see which class is the default"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A new Postgres StatefulSet pod sits in `Pending`. `kubectl describe pvc data-postgres-0` ends with: `no persistent volumes available for this claim and no storage class is set`. What fixes it?",
+      "options": [
+        "Set `storageClassName` in the volumeClaimTemplate to a class from `kubectl get storageclass` (or mark one as default)",
+        "Raise the pod's memory limit",
+        "`kubectl rollout restart statefulset/postgres`",
+        "Change the Service to `type: LoadBalancer`"
+      ],
+      "answer": 0,
+      "explain": "Without a class there is nothing to provision a volume dynamically. Restarting does not help: the claim will stay Pending until it can bind."
+    },
+    {
+      "type": "sort",
+      "prompt": "Does a running pod see the change without a restart?",
+      "buckets": ["Seen without restart", "Needs new pods"],
+      "items": [
+        ["ConfigMap mounted as a volume (no `subPath`)", 0],
+        ["Secret mounted as a volume (no `subPath`)", 0],
+        ["ConfigMap read with `envFrom`", 1],
+        ["Secret read with `env.valueFrom.secretKeyRef`", 1],
+        ["ConfigMap mounted with `subPath`", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "When config looks wrong, check what the pod got (`exec -- env` or `cat` the file), not what you applied. Generate ConfigMaps and Secrets with `--dry-run=client -o yaml` or Kustomize, and roll the Deployment after every change that comes in through environment variables."
+    }
+  ]
+}

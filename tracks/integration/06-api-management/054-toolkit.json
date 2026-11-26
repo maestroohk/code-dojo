@@ -1,0 +1,116 @@
+{
+  "title": "Senior's toolkit: driving the gateway",
+  "summary": "Kong's Admin API, decK for config as code, key checks and a quick burst test for rate limits.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: driving the gateway",
+      "body": [
+        "Kong is the example here; Azure API Management, Apigee and AWS API Gateway have the same ideas behind their own CLIs.",
+        "The Admin API (port 8001) changes the gateway; the proxy (port 8000) is what clients call. The Admin API must never be reachable from outside."
+      ],
+      "toolkit": [
+        { "cmd": "curl :8001/services, /routes, /plugins", "what": "Reads what the gateway is really running: which upstreams, which paths, which plugins with which config. Faster than clicking through a console.",
+          "flags": [["/services", "upstream APIs and their URLs"], ["/routes", "paths and hosts that map to a service"], ["/plugins", "auth, rate limiting and the rest, with config"], ["| jq '.data[] | {name, ...}'", "trim the answer"]],
+          "example": "curl -sS http://localhost:8001/plugins | jq '.data[] | {name, service: .service.id, config}'", "when": "\"what is the gateway actually doing?\"", "lang": "bash" },
+        { "cmd": "curl -X POST :8001/services", "what": "Creates a service and a route, which is all it takes to publish an upstream through the gateway.",
+          "flags": [["--data name=orders --data url=http://orders:8080", "a service pointing at the backend"], ["/services/orders/routes --data 'paths[]=/orders'", "a route for it"]],
+          "example": "curl -sS -X POST http://localhost:8001/services --data name=orders --data url=http://orders:8080 && curl -sS -X POST http://localhost:8001/services/orders/routes --data 'paths[]=/orders'", "lang": "bash" },
+        { "cmd": "curl -X POST :8001/services/<s>/plugins", "what": "Turns on a policy for one service, such as key authentication or a rate limit.",
+          "flags": [["name=key-auth", "require an API key"], ["name=rate-limiting config.minute=60 config.policy=local", "60 requests a minute per consumer"]],
+          "example": "curl -sS -X POST http://localhost:8001/services/orders/plugins --data name=rate-limiting --data config.minute=60 --data config.policy=local", "lang": "bash" },
+        { "cmd": "curl -X POST :8001/consumers/<c>/key-auth", "what": "Creates an API consumer's key. Keys belong to consumers, so limits and logs are per application.",
+          "flags": [["/consumers --data username=shop-web", "create the consumer"], ["/consumers/shop-web/key-auth", "issue a key (Kong generates one if you send none)"]],
+          "example": "curl -sS -X POST http://localhost:8001/consumers --data username=shop-web && curl -sS -X POST http://localhost:8001/consumers/shop-web/key-auth | jq -r .key", "lang": "bash" },
+        { "cmd": "deck gateway dump / diff / sync", "what": "decK keeps the gateway's whole config in a YAML file in Git. `diff` shows what would change, `sync` applies it. This is how teams avoid hand-made Admin API changes in production.",
+          "flags": [["dump -o kong.yaml", "export the current config"], ["diff kong.yaml", "show what a sync would change"], ["sync kong.yaml", "make the gateway match the file"], ["--select-tag team-orders", "only touch entities with that tag"]],
+          "example": "deck gateway diff kong.yaml --select-tag team-orders && deck gateway sync kong.yaml --select-tag team-orders", "when": "every gateway change after the first experiment", "lang": "bash" },
+        { "cmd": "deck file openapi2kong", "what": "Generates Kong services and routes from an OpenAPI contract, so the gateway config follows the contract instead of being typed twice.",
+          "flags": [["-s openapi.yaml", "the contract"], ["-o kong.yaml", "the decK file to write"]],
+          "example": "deck file openapi2kong -s openapi.yaml -o kong.yaml", "lang": "bash" },
+        { "cmd": "hey -n -c", "what": "Fires a burst of requests to see a rate limit or a 429 for yourself, and prints a summary of the status codes.",
+          "flags": [["-n 200", "total requests"], ["-c 20", "20 at a time"], ["-H 'apikey: ...'", "a header on every request"]],
+          "example": "hey -n 200 -c 20 -H 'apikey: 3f9c1a' http://localhost:8000/orders", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each call to what it does.",
+      "pairs": [
+        ["`GET :8001/plugins`", "list every policy the gateway applies"],
+        ["`POST :8001/services/orders/routes`", "map a path to the orders upstream"],
+        ["`POST :8001/consumers/shop-web/key-auth`", "issue an API key to an application"],
+        ["`deck gateway diff kong.yaml`", "preview how the gateway would change"],
+        ["`hey -n 200 -c 20`", "burst-test a rate limit"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": [
+        "A partner says every call returns `429` since this morning. You run:",
+        "",
+        "```text",
+        "$ curl -sS -D - -o /dev/null -H 'apikey: 3f9c1a' http://gateway:8000/orders",
+        "HTTP/1.1 429 Too Many Requests",
+        "RateLimit-Limit: 5",
+        "RateLimit-Remaining: 0",
+        "RateLimit-Reset: 41",
+        "X-RateLimit-Limit-Minute: 5",
+        "```",
+        "",
+        "Their contract allows 600 a minute. What do you check next?"
+      ],
+      "options": [
+        "`curl :8001/plugins | jq` to see which rate-limiting plugin with `minute: 5` applies to their consumer or the service",
+        "Restart the gateway to clear the counters",
+        "Ask the partner to add retries",
+        "Raise the backend's thread pool"
+      ],
+      "answer": 0,
+      "explain": "The headers say a limit of 5 per minute is in force, which matches no contract. Someone set or scoped a plugin wrongly (a test value, or a global plugin). Find it in `/plugins`, fix it in the decK file, and `deck gateway sync`."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Preview, then apply, the gateway config from Git, touching only your team's entities.",
+      "code": [
+        "deck gateway __1__ kong.yaml --select-tag team-orders",
+        "deck gateway __2__ kong.yaml --select-tag team-orders"
+      ],
+      "blanks": ["diff", "sync"],
+      "bank": ["dump", "apply", "push", "validate"],
+      "explain": "`diff` shows the changes; `sync` makes the gateway match the file, including deletions of tagged entities not in the file. `dump` goes the other way, from the gateway to a file."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which port do you call?",
+      "buckets": ["Proxy (8000): what clients use", "Admin API (8001): what operators use"],
+      "items": [
+        ["Call `GET /orders/42` with an API key", 0],
+        ["Burst-test the rate limit with `hey`", 0],
+        ["List the plugins on the orders service", 1],
+        ["Issue a key for a new consumer", 1],
+        ["Check which response headers a partner really gets", 0],
+        ["`deck gateway sync` the config from Git", 1]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A colleague fixed a route in production with `curl -X PATCH :8001/routes/...` during an incident. Next week's `deck gateway sync` undid the fix. What is the lasting lesson?",
+      "options": [
+        "Put the fix in the decK file in Git as well; a sync makes the gateway match the file, so manual changes are temporary",
+        "Never use decK",
+        "Run `deck gateway dump` before every sync and commit nothing",
+        "Use the Admin API for all changes"
+      ],
+      "answer": 0,
+      "explain": "With config as code, the file is the truth. An emergency change through the Admin API is fine, as long as the same change lands in Git right after; `deck gateway diff` would have shown the drift before the sync."
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Read the gateway's real config with the Admin API before you guess, and change it through the decK file in Git with a `diff` first. When a partner reports 401 or 429, reproduce it with their key and `curl -D -`, and read the headers."
+    }
+  ]
+}

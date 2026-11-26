@@ -1,0 +1,84 @@
+{
+  "title": "Senior's toolkit: TCP and MTU on a live system",
+  "summary": "Read round-trip times, retransmits and socket states from ss, catch resets in tcpdump, and find an MTU black hole.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: TCP and MTU on a live system",
+      "body": "When a transfer is slow or connections pile up, the kernel already knows why: RTT, retransmits, window sizes and socket states. These commands read it out.",
+      "toolkit": [
+        { "cmd": "ss -ti dst 10.0.5.20", "what": "Per-connection TCP internals: round-trip time, congestion window and retransmit counts. Shows whether a slow transfer is loss, latency or a small window.",
+          "flags": [["-t -i", "TCP sockets with internal info"], ["rtt:12.5/3.1", "smoothed RTT / variance in ms"], ["retrans:0/27", "current / total retransmits: a rising total means loss"], ["dst / dport = :443", "filter by peer or port"]],
+          "example": "ss -ti 'dport = :443'", "when": "a download is slow and bandwidth looks fine", "lang": "bash" },
+        { "cmd": "ss -s", "what": "One-screen summary of all sockets by state. Thousands in `timewait` or `estab` point to connection churn or a leak.",
+          "flags": [["-s", "totals per protocol and state"]],
+          "lang": "bash" },
+        { "cmd": "ss -tan state time-wait", "what": "Lists sockets in one TCP state. Counting them by peer shows which client opens a new connection per request instead of reusing one.",
+          "flags": [["state time-wait", "also `established`, `close-wait`, `syn-sent`"], ["-a -n", "all sockets, numeric"], ["| wc -l", "just the count"]],
+          "example": "ss -tan state close-wait | awk 'NR>1 {print $4}' | sort | uniq -c | sort -rn | head", "lang": "bash" },
+        { "cmd": "tcpdump 'tcp[tcpflags] & (tcp-syn|tcp-rst) != 0'", "what": "Captures only SYNs and resets. Shows unanswered SYNs (a firewall drops them) and who sends the RST that kills connections.",
+          "flags": [["tcp-syn", "connection attempts"], ["tcp-rst", "resets"], ["-nn -i any", "numeric, every interface"]],
+          "example": "sudo tcpdump -i any -nn 'tcp[tcpflags] & (tcp-syn|tcp-rst) != 0 and port 5432'", "lang": "bash" },
+        { "cmd": "ping -M do -s 1472 host", "what": "Sends a full 1500-byte packet with Don't Fragment set. If it fails while smaller ones pass, something on the path has a smaller MTU, for example a VPN or tunnel.",
+          "flags": [["-M do", "set Don't Fragment, never fragment locally"], ["-s 1472", "payload size: 1472 + 8 ICMP + 20 IP = 1500"], ["tracepath host", "finds the path MTU hop by hop, no root needed"]],
+          "example": "ping -M do -s 1372 -c 3 10.8.0.1", "when": "small requests work but large responses or TLS handshakes hang", "lang": "bash" },
+        { "cmd": "ip link set dev wg0 mtu 1380", "what": "Lowers an interface MTU so packets fit through the narrowest link. The usual fix for a tunnel black hole, alongside MSS clamping on the gateway.",
+          "flags": [["mtu N", "the new maximum packet size"], ["ip link show wg0", "check the current `mtu`"]],
+          "lang": "bash" },
+        { "cmd": "nc -u -v host 514", "what": "Sends UDP data by hand. UDP has no handshake, so \"no error\" proves nothing; watch for the reply, or run tcpdump on the receiver.",
+          "flags": [["-u", "UDP instead of TCP"], ["-l -u -p 514", "listen for UDP on the other side to test both ends"]],
+          "example": "echo test | nc -u -w 1 syslog.internal 514", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each observation to what it points to.",
+      "pairs": [
+        ["`ss -ti` shows `retrans` climbing", "packet loss on the path"],
+        ["Thousands of sockets in `close-wait`", "the app never closes connections the peer already closed"],
+        ["Many SYNs in tcpdump, no SYN-ACK", "a firewall drops the connection attempts"],
+        ["`ping -M do -s 1472` fails, `-s 1200` works", "a link on the path has a smaller MTU"],
+        ["Thousands in `time-wait` on a client", "a new connection per request instead of reuse"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Over the new site-to-site VPN, `curl` to an internal API returns small JSON fine, but downloading a 2 MB report hangs forever. `ping` works. What do you test next?",
+      "options": [
+        "`ping -M do -s 1472` to the API, then smaller sizes, to look for an MTU black hole",
+        "`dig` the API name",
+        "Increase the HTTP timeout",
+        "`ss -s`"
+      ],
+      "answer": 0,
+      "explain": "Small packets fit, full-size ones are dropped, and the ICMP \"fragmentation needed\" message is blocked somewhere, so TCP never learns to send smaller segments. Fix it with a lower tunnel MTU or MSS clamping."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An API server starts failing with `too many open files`. `ss -s` shows 28,000 TCP sockets, and `ss -tan state close-wait | wc -l` prints 27,500. Where is the bug?",
+      "options": [
+        "In the app: it does not close sockets after the peer hangs up (for example an HTTP response or DB connection never disposed)",
+        "In the network: packets are lost",
+        "The client keeps the connection open too long",
+        "The kernel's TIME_WAIT timer is too long"
+      ],
+      "answer": 0,
+      "explain": "CLOSE_WAIT means the other side sent FIN and the local application has not called close. Only the app can leave that state, so the leak is in its code."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Show TCP internals (RTT, retransmits) for every connection to port 443.",
+      "code": "ss -__1__ '__2__ = :443'",
+      "blanks": ["ti", "dport"],
+      "bank": ["tl", "sport", "tu"],
+      "explain": "`-t` TCP and `-i` internal info. `dport` filters on the remote port of outgoing connections; `sport` would be your own listening port."
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "When something is slow or connections pile up, look at `ss -s` and `ss -ti` before you change timeouts: they say whether the cause is loss, latency or the app. Any time a tunnel or VPN is involved and big transfers hang, test the MTU first."
+    }
+  ]
+}

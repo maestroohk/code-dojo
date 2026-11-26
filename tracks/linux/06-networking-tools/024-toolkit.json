@@ -1,0 +1,100 @@
+{
+  "title": "Senior's toolkit: the network from the host",
+  "summary": "ip, ss, ssh jump hosts and tunnels, ssh config, rsync, tmux and strace for network calls.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: the network from the host",
+      "body": "These are the commands for getting onto servers, moving files between them, and seeing what the machine itself thinks about the network.",
+      "toolkit": [
+        { "cmd": "ip -br a / ip route get <addr>", "what": "`ip -br a` is one line per interface with its addresses. `ip route get` says which interface, gateway and source address the kernel would use for a destination.",
+          "flags": [["-br", "brief, one line per interface"], ["route get 10.20.0.5", "the exact route chosen for that address"], ["ip r", "the whole routing table"]],
+          "example": "ip -br a && ip route get 10.20.0.5", "lang": "bash" },
+        { "cmd": "ss -tlnp", "what": "Which programs listen on which TCP ports and addresses. `127.0.0.1:5000` accepts only local connections.",
+          "flags": [["-t / -u", "TCP / UDP"], ["-l", "listening sockets only"], ["-n", "numbers, no name lookups"], ["-p", "the owning process (needs sudo for other users)"]],
+          "example": "sudo ss -tlnp 'sport = :5432'", "lang": "bash" },
+        { "cmd": "ssh -J <bastion> <host>", "what": "Connects through a jump host in one step, with end-to-end encryption. Your key never has to sit on the bastion.",
+          "flags": [["-J user@bastion", "jump through this host (ProxyJump)"], ["-i <key>", "use this private key"], ["-v", "debug a failing login"]],
+          "example": "ssh -J ops@bastion.contoso.com app@10.20.0.15", "lang": "bash" },
+        { "cmd": "ssh -N -L <local>:<target>:<port> <host>", "what": "A tunnel: a port on your laptop forwards through the SSH host to a private service, such as a database without a public address.",
+          "flags": [["-L 5433:db.internal:5432", "local port 5433 reaches db.internal:5432"], ["-N", "no remote command, just the tunnel"], ["-R", "the reverse: expose a local port on the remote host"]],
+          "example": "ssh -N -L 5433:db.internal:5432 ops@bastion.contoso.com", "when": "you need psql or a GUI against a private database", "lang": "bash" },
+        { "cmd": "~/.ssh/config", "what": "Per-host settings so `ssh prod-api` just works: user, key, jump host, port.",
+          "flags": [["Host prod-*", "a pattern of names"], ["ProxyJump bastion", "always jump"], ["IdentityFile / IdentitiesOnly yes", "use exactly this key"]],
+          "example": "Host prod-api\n  HostName 10.20.0.15\n  User app\n  ProxyJump ops@bastion.contoso.com\n  IdentityFile ~/.ssh/id_ed25519\n  IdentitiesOnly yes", "lang": "bash" },
+        { "cmd": "rsync -avz --delete <src>/ <host>:<dst>/", "what": "Copies only what changed, over SSH, and can mirror deletions. Always do a dry run first with `--delete`.",
+          "flags": [["-a", "archive: keep permissions, times, links"], ["-z", "compress in transit"], ["-n / --dry-run", "show what would happen"], ["--delete", "remove files that are gone from the source"], ["trailing /", "copy the folder's contents, not the folder"]],
+          "example": "rsync -avzn --delete ./dist/ web1:/srv/app/", "lang": "bash" },
+        { "cmd": "tmux new -s <name> / tmux attach -t <name>", "what": "A terminal session that lives on the server. If Wi-Fi drops, the long migration keeps running and you reattach.",
+          "flags": [["new -s ops", "a named session"], ["Ctrl+b d", "detach"], ["attach -t ops", "reattach"], ["ls", "list sessions"]],
+          "example": "tmux new -s migrate", "when": "anything that takes longer than a coffee", "lang": "bash" },
+        { "cmd": "strace -f -e trace=network -p <pid>", "what": "Shows the network system calls a running process makes: which address it really connects to and what error it gets back.",
+          "flags": [["-f", "follow threads and children"], ["-e trace=network", "only socket calls (`connect`, `sendto` ...)"], ["-p <pid>", "attach to a running process"]],
+          "example": "sudo strace -f -e trace=network -p $(pgrep -f Orders.Api)", "when": "the app says \"connection failed\" but not to where", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each ssh option to what it does.",
+      "pairs": [
+        ["`-J ops@bastion`", "go through a jump host"],
+        ["`-L 5433:db:5432`", "reach a remote service on a local port"],
+        ["`-R 8080:localhost:3000`", "expose your local port on the remote host"],
+        ["`-N`", "open the tunnel without running a command"],
+        ["`-v`", "print debug output for a failing login"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You started a two-hour data migration over SSH from a café. The Wi-Fi dropped, and when you reconnected the migration process was gone. What would have kept it running?",
+      "options": [
+        "Starting it inside `tmux new -s migrate` and reattaching with `tmux attach -t migrate`",
+        "`ssh -N`",
+        "Running it with `sudo`",
+        "Adding `-v` to ssh"
+      ],
+      "answer": 0,
+      "explain": "When the SSH session dies, its shell gets SIGHUP and takes its children with it. A tmux session belongs to the tmux server on the host, not to your connection. `nohup` or a systemd unit also work for unattended jobs."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Postgres runs on `db.internal:5432`, reachable only from the bastion. You want to open it in a GUI on your laptop. What do you run?",
+      "options": [
+        "`ssh -N -L 5433:db.internal:5432 ops@bastion` and connect the GUI to `localhost:5433`",
+        "`ssh -R 5432:db.internal:5432 ops@bastion`",
+        "`ssh -J ops@bastion db.internal:5432`",
+        "Open port 5432 on the database firewall to your IP"
+      ],
+      "answer": 0,
+      "explain": "`-L` listens on your laptop and forwards each connection through the bastion to the target. The address after the first colon is resolved on the bastion, which is why `db.internal` works."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Preview a mirror of `./dist/` to the server that also deletes files you removed, then reach the server through the bastion.",
+      "code": ["rsync -avz __1__ --delete ./dist/ web1:/srv/app/", "ssh -__2__ ops@bastion app@web1"],
+      "blanks": [["--dry-run", "-n"], "J"],
+      "bank": ["--progress", "--update", "L"],
+      "explain": "`--dry-run` lists what would be copied and deleted, so a wrong path does not wipe the server folder. `-J` is ProxyJump; `-L` would open a tunnel instead."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which command answers the question?",
+      "buckets": ["`ip`", "`ss`", "`strace`"],
+      "items": [
+        ["Which interface is used to reach 10.20.0.5?", 0],
+        ["What address does eth0 have?", 0],
+        ["Is anything listening on port 5432?", 1],
+        ["Does the app listen on 127.0.0.1 or on every interface?", 1],
+        ["Which address does this running process actually connect to?", 2],
+        ["Which error does the kernel return to the app's `connect()`?", 2]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Put every server you use into `~/.ssh/config` with `ProxyJump`, start anything long inside `tmux`, and run `rsync -n` before every `--delete`. When a service cannot connect, check `ip route get` and `ss -tlnp` on both ends before you suspect the network team."
+    }
+  ]
+}

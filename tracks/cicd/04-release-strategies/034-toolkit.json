@@ -1,0 +1,95 @@
+{
+  "title": "Senior's toolkit: shipping and rolling back",
+  "summary": "Tags, release notes, environment approvals, canary promotion and idempotent migration scripts.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: shipping and rolling back",
+      "body": "A release is a tag, notes, a gated deploy and a tested way back. These are the commands behind each of those.",
+      "toolkit": [
+        { "cmd": "git describe --tags --abbrev=0", "what": "The latest tag reachable from HEAD: the version you are about to bump.",
+          "flags": [["--abbrev=0", "only the tag, no `-5-g1a2b3c` suffix"], ["--always", "fall back to a short hash when there is no tag"]],
+          "example": "git describe --tags --abbrev=0", "lang": "bash" },
+        { "cmd": "git log <last-tag>..HEAD --oneline", "what": "Everything that will ship in this release. Read it to choose major, minor or patch.",
+          "flags": [["v1.3.0..HEAD", "commits after the tag"], ["--no-merges", "hide merge commits"]],
+          "example": "git log v1.3.0..HEAD --oneline --no-merges", "lang": "bash" },
+        { "cmd": "git tag -a <version> -m <msg> && git push origin <version>", "what": "An annotated tag is the release marker; pushing it is what usually triggers the release workflow.",
+          "flags": [["-a", "annotated: has an author, date and message"], ["-m", "the message"], ["push origin v1.4.0", "push just this tag (`--tags` pushes every local tag)"]],
+          "example": "git tag -a v1.4.0 -m \"Release 1.4.0\" && git push origin v1.4.0", "lang": "bash" },
+        { "cmd": "gh release create <tag> --generate-notes", "what": "Creates the GitHub release with notes built from the merged pull requests since the previous release.",
+          "flags": [["--generate-notes", "notes from PR titles, grouped by `.github/release.yml` labels"], ["--verify-tag", "fail if the tag was not pushed yet"], ["--prerelease", "mark as a pre-release"]],
+          "example": "gh release create v1.4.0 --verify-tag --generate-notes ./dist/*.zip", "lang": "bash" },
+        { "cmd": "environment: production", "what": "Ties a job to a GitHub environment, so its protection rules apply: required reviewers, a wait timer, allowed branches, and its own secrets.",
+          "flags": [["environment: name", "the environment to deploy to"], ["url:", "a link shown on the run and the PR"]],
+          "example": "jobs:\n  deploy-prod:\n    needs: deploy-staging\n    environment:\n      name: production\n      url: https://shop.example.com", "lang": "yaml" },
+        { "cmd": "kubectl argo rollouts get rollout <name> --watch", "what": "With Argo Rollouts, shows a canary's steps, traffic weight and analysis live. `promote` moves it to the next step, `abort` sends all traffic back to the stable version.",
+          "flags": [["--watch", "keep updating"], ["promote <name>", "continue past a pause"], ["abort <name>", "roll back to stable"]],
+          "example": "kubectl argo rollouts promote api -n shop", "lang": "bash" },
+        { "cmd": "dotnet ef migrations script --idempotent -o <file>", "what": "One SQL script that brings any older database version up to date and is safe to run twice. Review it and run it as its own pipeline step.",
+          "flags": [["--idempotent", "checks the migrations history before each migration"], ["-o migrate.sql", "write to a file you can review and keep as an artifact"], ["<from> <to>", "only the migrations in a range"]],
+          "example": "dotnet ef migrations script --idempotent -o artifacts/migrate.sql", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Five minutes into a canary at 20% traffic, the error rate of the new pods is 4% against 0.2% on stable. Argo Rollouts manages the deployment. What do you run?",
+      "options": [
+        "`kubectl argo rollouts abort api`",
+        "`kubectl argo rollouts promote api`",
+        "`kubectl rollout restart deployment/api`",
+        "`gh release create v1.4.1`"
+      ],
+      "answer": 0,
+      "explain": "`abort` shifts all traffic back to the stable ReplicaSet at once. `promote` would push the bad version to more users. Good setups run an analysis that aborts automatically on this metric."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the command to its place in a release.",
+      "pairs": [
+        ["`git describe --tags --abbrev=0`", "find the current version"],
+        ["`git log v1.3.0..HEAD --oneline`", "see what is about to ship"],
+        ["`git push origin v1.4.0`", "trigger the release workflow"],
+        ["`gh release create v1.4.0 --generate-notes`", "publish the release with notes"],
+        ["`environment: production`", "require approval before the prod job runs"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Create a migration script that is safe to run against any older version of the database.",
+      "code": "dotnet ef migrations __1__ --__2__ -o artifacts/migrate.sql",
+      "blanks": ["script", "idempotent"],
+      "bank": ["add", "remove", "force", "no-build"],
+      "explain": "`--idempotent` wraps each migration in a check against `__EFMigrationsHistory`, so the same script works on staging (one behind) and production (two behind)."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a tagged release in order.",
+      "lines": [
+        "git describe --tags --abbrev=0",
+        "git log v1.3.0..HEAD --oneline --no-merges",
+        "git tag -a v1.4.0 -m \"Release 1.4.0\"",
+        "git push origin v1.4.0",
+        "gh release create v1.4.0 --verify-tag --generate-notes"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Rolling back the 1.4.0 app was fast, but the old version now throws `Invalid column name 'CustomerRef'`. The release renamed a column. What would have prevented this?",
+      "options": [
+        "Expand and contract: add the new column first, ship code that works with both, and drop the old one in a later release",
+        "Running `dotnet ef migrations script` without `--idempotent`",
+        "A longer canary",
+        "`cancel-in-progress: true` on the deploy"
+      ],
+      "answer": 0,
+      "explain": "An app rollback does not roll back the schema. Changes that each version can live with (expand, migrate, contract) keep rollback safe."
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Read `git log <last-tag>..HEAD` before you pick the version, release from a pushed tag, and put production behind an environment with reviewers. Know your rollback command (`rollout undo`, `argo rollouts abort`, a feature flag) before you ship, and keep schema changes backward compatible."
+    }
+  ]
+}

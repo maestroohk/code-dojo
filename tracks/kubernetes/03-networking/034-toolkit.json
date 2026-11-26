@@ -1,0 +1,95 @@
+{
+  "title": "Senior's toolkit: Services, routes and connectivity",
+  "summary": "EndpointSlices, port-forward, a throwaway client pod, Gateway API status and network policies.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: Services, routes and connectivity",
+      "body": "When a request does not arrive, walk the path: is there a backend behind the Service, does the name resolve, does the route accept it, does a policy block it?",
+      "toolkit": [
+        { "cmd": "kubectl get endpointslices -l kubernetes.io/service-name=<svc>", "what": "Shows which pod IPs are behind a Service right now. Empty means the selector matches no ready pod, the most common Service bug.",
+          "flags": [["-l kubernetes.io/service-name=api", "slices that belong to the `api` Service"], ["-o wide", "show the addresses"]],
+          "example": "kubectl get endpointslices -l kubernetes.io/service-name=api -o wide", "when": "a Service times out or returns 503", "lang": "bash" },
+        { "cmd": "kubectl port-forward svc/<name> <local>:<port>", "what": "Opens a tunnel from your laptop to a Service or pod, with no Ingress, Gateway or LoadBalancer involved. Proves whether the app itself works.",
+          "flags": [["svc/api", "pick one pod behind the Service (`pod/x`, `deploy/x` work too)"], ["8080:80", "local port, then the Service port"], ["--address 0.0.0.0", "listen on all interfaces, not only localhost"]],
+          "example": "kubectl port-forward svc/api 8080:80 -n shop", "lang": "bash" },
+        { "cmd": "kubectl run <name> --rm -it --image=busybox:1.36 --restart=Never -- <cmd>", "what": "A throwaway pod inside the cluster, to test DNS and HTTP from where the app actually sits.",
+          "flags": [["--rm -it", "attach, and delete the pod when you exit"], ["--restart=Never", "a bare pod, not a Deployment"], ["-n <ns>", "test from the client's namespace: policies and DNS search paths differ"]],
+          "example": "kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -n shop -- wget -qO- http://api.shop.svc.cluster.local/health", "lang": "bash" },
+        { "cmd": "kubectl exec -it <pod> -- nslookup <name>", "what": "Checks name resolution from a pod. `<svc>.<ns>.svc.cluster.local` must resolve to the ClusterIP.",
+          "flags": [["-it", "interactive terminal"], ["-c <container>", "choose the container in a multi-container pod"], ["--", "everything after it is the command to run"]],
+          "example": "kubectl exec -it tmp -- nslookup api.shop.svc.cluster.local", "lang": "bash" },
+        { "cmd": "kubectl get gateway,httproute -A", "what": "The Gateway API objects that bring outside traffic in. Gateway API is the current standard; ingress-nginx was retired in March 2026, so Ingress is legacy you will still meet.",
+          "flags": [["-A", "all namespaces: routes often live with the app, the Gateway with the platform team"], ["-o wide", "hostnames and parent gateways"]],
+          "example": "kubectl get gateway,httproute -A", "lang": "bash" },
+        { "cmd": "kubectl describe httproute <name>", "what": "Status conditions tell you whether the Gateway took the route: `Accepted` and `ResolvedRefs` must be `True`.",
+          "flags": [["Accepted", "False: wrong `parentRefs` or the listener does not allow this namespace"], ["ResolvedRefs", "False: the backend Service or port does not exist"]],
+          "example": "kubectl describe httproute api -n shop", "lang": "bash" },
+        { "cmd": "kubectl get networkpolicy -n <ns>", "what": "Lists the policies in a namespace. Once any policy selects a pod, traffic not allowed by some policy is dropped, which looks like a timeout.",
+          "flags": [["describe networkpolicy <name>", "readable ingress and egress rules"], ["-o yaml", "the exact selectors"]],
+          "example": "kubectl describe networkpolicy default-deny -n shop", "when": "connections hang instead of being refused", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Calls to `http://api.shop` from the `web` pods time out. The `api` pods are Running and Ready. `kubectl get endpointslices -l kubernetes.io/service-name=api` shows no addresses. What is the likely cause?",
+      "options": [
+        "The Service's selector does not match the pods' labels",
+        "CoreDNS is down",
+        "The HTTPRoute is not Accepted",
+        "The node is out of memory"
+      ],
+      "answer": 0,
+      "explain": "No endpoints with Ready pods means the selector matches nothing (for example `app: api` against pods labelled `app: orders-api`). Compare `kubectl get svc api -o yaml` with `kubectl get pods --show-labels`."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the check to the question it answers.",
+      "pairs": [
+        ["`kubectl get endpointslices -l kubernetes.io/service-name=api`", "does the Service have backends?"],
+        ["`kubectl port-forward svc/api 8080:80`", "does the app answer if I skip the edge?"],
+        ["`kubectl exec -it tmp -- nslookup api.shop`", "does the name resolve inside the cluster?"],
+        ["`kubectl describe httproute api`", "did the Gateway accept my route?"],
+        ["`kubectl get networkpolicy -n shop`", "could a policy be dropping the traffic?"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Reach the `api` Service (port 80) on `localhost:8080` from your laptop.",
+      "code": "kubectl __1__ __2__/api __3__ -n shop",
+      "blanks": ["port-forward", "svc", "8080:80"],
+      "bank": ["expose", "proxy", "ingress", "80:8080"],
+      "explain": "The first number is the local port, the second is the Service port. `kubectl proxy` is a tunnel to the API server, not to your app."
+    },
+    {
+      "type": "order",
+      "prompt": "A request from the internet to `shop.example.com/api` returns 404. Walk the path from the app outward.",
+      "lines": [
+        "kubectl port-forward svc/api 8080:80, then curl localhost:8080/health",
+        "kubectl get endpointslices -l kubernetes.io/service-name=api",
+        "kubectl describe httproute api",
+        "kubectl describe gateway public -n gateway"
+      ],
+      "explain": "Prove the app, then the Service, then the route, then the Gateway. The first layer that fails is where you look."
+    },
+    {
+      "type": "mcq",
+      "prompt": "After the security team applied a `default-deny` NetworkPolicy in `shop`, `web` cannot reach `api`. The pods are fine and the Service has endpoints. Requests hang for 30 seconds and then fail. What do you add?",
+      "options": [
+        "A NetworkPolicy selecting `app: api` that allows ingress from pods labelled `app: web`",
+        "A second Service for `api`",
+        "A longer timeout in `web`",
+        "`kubectl rollout restart deployment/api`"
+      ],
+      "answer": 0,
+      "explain": "Dropped packets look like a hang, not a refusal. Policies are additive allow-lists: add one that allows the flow you need (and DNS egress to kube-system, if egress is denied too)."
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "When traffic does not arrive, test from the inside out: `port-forward` to the app, endpoint slices for the Service, a throwaway busybox pod for DNS, then route and Gateway status. Hangs point to policies and firewalls; refusals point to ports and selectors."
+    }
+  ]
+}

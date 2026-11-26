@@ -1,0 +1,94 @@
+{
+  "title": "Senior's toolkit: debugging DNS",
+  "summary": "dig with the flags that matter, asking a specific server, tracing delegation, and seeing what the local resolver and the app really get.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: debugging DNS",
+      "body": "\"It's always DNS\" is a joke because it is often true. The skill is asking the right server the right question, and comparing that with what the machine's resolver hands to the app.",
+      "toolkit": [
+        { "cmd": "dig +short api.example.com", "what": "Just the answer: the addresses, or the CNAME chain and then the addresses. The first check after every DNS change.",
+          "flags": [["+short", "answers only"], ["MX / TXT / CNAME / AAAA", "ask for another record type"], ["+noall +answer", "the answer section with TTLs, without the rest"]],
+          "example": "dig +noall +answer api.example.com", "lang": "bash" },
+        { "cmd": "dig @1.1.1.1 api.example.com", "what": "Asks one specific server instead of the system resolver. Comparing a public resolver, the corporate one and the authoritative one shows who still has the old answer.",
+          "flags": [["@server", "the server to ask"], ["+norecurse", "\"answer from what you hold\": against an authoritative server, shows what it really serves"], ["+tcp", "use TCP (large answers, or UDP blocked)"]],
+          "example": "dig @ns1.example.com api.example.com +norecurse", "when": "after a record change: is it published, or only cached somewhere?", "lang": "bash" },
+        { "cmd": "dig +trace api.example.com", "what": "Walks the delegation from the root, to the TLD, to the domain's name servers, as a resolver would. Finds broken delegations and wrong NS records.",
+          "flags": [["+trace", "follow referrals from the root, ignore caches"], ["NS example.com", "list the zone's name servers"]],
+          "lang": "bash" },
+        { "cmd": "dig -x 203.0.113.10 +short", "what": "Reverse lookup: the PTR name for an address. Mail servers, logs and some security checks rely on it.",
+          "flags": [["-x ADDR", "build the in-addr.arpa (or ip6.arpa) query for you"]],
+          "lang": "bash" },
+        { "cmd": "resolvectl status", "what": "On systemd-resolved hosts (Ubuntu, Fedora and most desktops), shows which DNS servers and search domains each interface really uses. `/etc/resolv.conf` there only points at 127.0.0.53.",
+          "flags": [["status", "servers and search domains per link"], ["query name", "resolve through resolved and say which link answered"], ["flush-caches", "drop the local cache"]],
+          "example": "resolvectl query api.example.com", "when": "dig and the app disagree, or only the VPN names fail", "lang": "bash" },
+        { "cmd": "getent hosts api.example.com", "what": "Resolves the way most applications do: through `/etc/nsswitch.conf`, so `/etc/hosts` entries and search domains count. dig skips all of that.",
+          "flags": [["hosts", "IPv4 and IPv6 via the system resolver"], ["ahosts", "every address the resolver library returns"]],
+          "lang": "bash" },
+        { "cmd": "Resolve-DnsName api.contoso.com -Server 10.0.0.53", "what": "Windows: dig-like queries with a chosen server and record type. Pair it with `Clear-DnsClientCache` after a change.",
+          "flags": [["-Type A / CNAME / TXT", "the record type"], ["-Server", "the server to ask"], ["-DnsOnly", "skip hosts file and LLMNR/NetBIOS"], ["Clear-DnsClientCache", "flush the client cache (like `ipconfig /flushdns`)"]],
+          "example": "Resolve-DnsName api.contoso.com -Type CNAME -DnsOnly", "lang": "powershell" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each command to what it is for.",
+      "pairs": [
+        ["`dig +trace example.com`", "follow the delegation from the root"],
+        ["`dig @ns1.example.com x.example.com +norecurse`", "see what the authoritative server really serves"],
+        ["`dig -x 203.0.113.10`", "find the name for an address"],
+        ["`getent hosts x.example.com`", "resolve the way the application does"],
+        ["`resolvectl status`", "see which DNS servers each interface uses"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You moved `api.example.com` to a new IP an hour ago. `dig @ns1.example.com api.example.com +short` shows the new IP; `dig +short api.example.com` on your laptop still shows the old one. The old record had a TTL of 86400. What is happening?",
+      "options": [
+        "Your resolver cached the old answer and may keep it for up to a day; next time lower the TTL well before a move",
+        "The change was not saved",
+        "The authoritative server is wrong",
+        "DNSSEC is broken"
+      ],
+      "answer": 0,
+      "explain": "The authoritative server already serves the new value. Caches keep the old one until its TTL runs out. `dig +noall +answer` against your resolver shows the TTL counting down."
+    },
+    {
+      "type": "mcq",
+      "prompt": "On a laptop, `dig +short db.corp.internal` returns nothing, but `ping db.corp.internal` works while the VPN is up. Why can they disagree?",
+      "options": [
+        "dig asks only the server listed in `/etc/resolv.conf`, while the system resolver sends `corp.internal` names to the VPN's DNS server (split DNS); check with `resolvectl status` on Linux or `scutil --dns` on macOS",
+        "ping does not use DNS",
+        "dig only does IPv6",
+        "The record has a TTL of 0"
+      ],
+      "answer": 0,
+      "explain": "Split DNS sends some domains to some servers. Use `resolvectl query` or `getent hosts` to see what apps get, and `dig @<vpn-dns>` to ask the VPN's server directly."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Show only the answer section, with TTLs, as given by Google's public resolver.",
+      "code": "dig __1__8.8.8.8 api.example.com +__2__ +__3__",
+      "blanks": ["@", "noall", "answer"],
+      "bank": ["#", "short", "trace", "all"],
+      "explain": "`@` picks the server. `+noall` turns every section off and `+answer` turns the answer back on, so you see name, TTL, type and value. The order matters: `+answer +noall` would hide everything."
+    },
+    {
+      "type": "order",
+      "prompt": "A name resolves to the wrong address for some users. Narrow it down from the source outwards.",
+      "lines": [
+        "dig NS example.com +short   # which servers are authoritative?",
+        "dig @ns1.example.com api.example.com +norecurse   # what do they serve?",
+        "dig @10.0.0.53 api.example.com +noall +answer   # what does our resolver cache, with what TTL?",
+        "getent hosts api.example.com   # what does the app machine actually get?"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Lower a record's TTL a day before any planned move, and check the authoritative servers with `+norecurse` right after. When users see different answers, compare authoritative, resolver and `getent` in that order: the first one that differs is where the problem lives."
+    }
+  ]
+}

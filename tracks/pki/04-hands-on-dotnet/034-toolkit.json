@@ -1,0 +1,103 @@
+{
+  "title": "Senior's toolkit: certificates in .NET",
+  "summary": "The dev-cert commands, Kestrel settings and X509 APIs a .NET engineer uses to ship HTTPS and trust a private CA.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: certificates in .NET",
+      "body": "You have built a CA in code. These are the commands and APIs you use to run HTTPS in real .NET services, locally and in containers.",
+      "toolkit": [
+        { "cmd": "dotnet dev-certs https --export-path <file> --format PEM --no-password", "what": "Exports the development certificate and its key as PEM files, for a container or a non-.NET tool.",
+          "flags": [["--export-path", "where to write the certificate (`-ep`)"], ["--format PEM", "PEM instead of PFX; the key goes next to it as `.key`"], ["--no-password", "leave the exported key unencrypted (dev only)"]],
+          "example": "dotnet dev-certs https --export-path ./certs/localhost.pem --format PEM --no-password", "when": "running an ASP.NET Core container with HTTPS on your laptop", "lang": "bash" },
+        { "cmd": "ASPNETCORE_Kestrel__Certificates__Default__Path", "what": "Points Kestrel at a certificate from the environment, so the same image runs with a different certificate in each environment.",
+          "flags": [["__Path", "the certificate (PEM or PFX)"], ["__KeyPath", "the PEM private key"], ["__Password", "the PFX or key password (from a secret store)"]],
+          "example": "docker run -p 8443:8443 -e ASPNETCORE_URLS=https://+:8443 -e ASPNETCORE_Kestrel__Certificates__Default__Path=/certs/fullchain.pem -e ASPNETCORE_Kestrel__Certificates__Default__KeyPath=/certs/key.pem -v ./certs:/certs:ro myapi:1.0", "lang": "bash" },
+        { "cmd": "SSL_CERT_FILE / SSL_CERT_DIR", "what": "On Linux .NET uses OpenSSL, which reads these variables. Point them at a bundle that includes your private root to trust it without code changes.",
+          "flags": [["SSL_CERT_FILE", "one PEM bundle of trusted roots"], ["SSL_CERT_DIR", "a directory of hashed certificates"]],
+          "example": "SSL_CERT_FILE=/etc/ssl/certs/with-corp-root.pem dotnet run", "lang": "bash" },
+        { "cmd": "X509Certificate2.CreateFromPemFile(certPath, keyPath)", "what": "Loads a PEM certificate and its key into one object you can use for TLS or signing.",
+          "flags": [["certPath", "the PEM certificate (first block is the leaf)"], ["keyPath", "the PEM key; omit when it is in the same file"]],
+          "example": "using var cert = X509Certificate2.CreateFromPemFile(\"fullchain.pem\", \"key.pem\");", "lang": "csharp" },
+        { "cmd": "X509CertificateLoader.LoadPkcs12FromFile(path, password)", "what": "The current way (.NET 9 and later) to load a PFX. The old `new X509Certificate2(path, password)` constructor is obsolete (SYSLIB0057).",
+          "flags": [["LoadCertificateFromFile", "a certificate with no key (PEM or DER)"], ["X509KeyStorageFlags.EphemeralKeySet", "keep the key in memory only"]],
+          "example": "var cert = X509CertificateLoader.LoadPkcs12FromFile(\"api.pfx\", password);", "lang": "csharp" },
+        { "cmd": "X509ChainTrustMode.CustomRootTrust", "what": "Validates a chain against your own root only, ignoring the machine store. The right way to trust a private CA in code.",
+          "flags": [["CustomTrustStore.Add(root)", "the roots to trust"], ["ExtraStore.Add(intermediate)", "intermediates that help build the path"], ["chain.ChainStatus", "why it failed: `PartialChain`, `NotTimeValid`, `UntrustedRoot`..."]],
+          "example": "chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;\nchain.ChainPolicy.CustomTrustStore.Add(root);\nvar ok = chain.Build(leaf);", "lang": "csharp" },
+        { "cmd": "New-SelfSignedCertificate", "what": "Makes a test certificate in the Windows store from PowerShell, for an IIS site or a quick local test.",
+          "flags": [["-DnsName", "the names for the SAN list"], ["-CertStoreLocation", "for example `Cert:\\CurrentUser\\My`"], ["-NotAfter", "the expiry date"]],
+          "example": "New-SelfSignedCertificate -DnsName 'api.local' -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddDays(90)", "lang": "powershell" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each API or setting to its job.",
+      "pairs": [
+        ["`X509Certificate2.CreateFromPemFile`", "load a PEM certificate with its key"],
+        ["`X509CertificateLoader.LoadPkcs12FromFile`", "load a PFX the current way"],
+        ["`CustomTrustStore`", "the roots your chain check trusts"],
+        ["`ExtraStore`", "intermediates that help build the path"],
+        ["`ASPNETCORE_Kestrel__Certificates__Default__Path`", "tell Kestrel which certificate to serve"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your service runs fine on your Windows laptop, but in its Linux container `HttpClient` calls to `https://billing.corp.internal` fail with `The remote certificate is invalid ... UntrustedRoot`. The billing certificate comes from the company CA. What is the right fix?",
+      "options": [
+        "Add the company root to the image's trust store (copy it to `/usr/local/share/ca-certificates/` and run `update-ca-certificates`)",
+        "Set `ServerCertificateCustomValidationCallback` to return `true`",
+        "Use `HttpClientHandler.DangerousAcceptAnyServerCertificateValidator`",
+        "Switch the call to HTTP"
+      ],
+      "answer": 0,
+      "explain": "Your laptop trusts the company root because IT installed it in Windows; the container image does not. Install the root in the image (or point `SSL_CERT_FILE` at a bundle with it). The other options remove TLS protection."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Validate `leaf` against your own root only, with the intermediate as a helper.",
+      "code": [
+        "using var chain = new X509Chain();",
+        "chain.ChainPolicy.TrustMode = X509ChainTrustMode.__1__;",
+        "chain.ChainPolicy.__2__.Add(root);",
+        "chain.ChainPolicy.__3__.Add(intermediate);",
+        "bool ok = chain.Build(leaf);"
+      ],
+      "blanks": ["CustomRootTrust", "CustomTrustStore", "ExtraStore"],
+      "bank": ["System", "ApplicationPolicy", "CertificatePolicy"],
+      "explain": "`CustomRootTrust` ignores the machine store. Roots go in `CustomTrustStore`; intermediates in `ExtraStore` are used to build the path but are not trusted by themselves."
+    },
+    {
+      "type": "mcq",
+      "prompt": "After moving to .NET 10 the build warns `SYSLIB0057` on `new X509Certificate2(\"api.pfx\", password)`. What do you change it to?",
+      "options": [
+        "`X509CertificateLoader.LoadPkcs12FromFile(\"api.pfx\", password)`",
+        "`X509Certificate2.CreateFromPemFile(\"api.pfx\")`",
+        "Suppress the warning",
+        "`File.ReadAllBytes(\"api.pfx\")`"
+      ],
+      "answer": 0,
+      "explain": "The loader makes the format explicit, so a file cannot be parsed as something you did not expect. `CreateFromPemFile` is for PEM, not PFX."
+    },
+    {
+      "type": "sort",
+      "prompt": "Fine for local development only, or fine in production?",
+      "buckets": ["Local development only", "Fine in production"],
+      "items": [
+        ["`dotnet dev-certs https --trust`", 0],
+        ["exporting a key with `--no-password`", 0],
+        ["`New-SelfSignedCertificate` for a public site", 0],
+        ["Kestrel certificate paths from environment variables and mounted secrets", 1],
+        ["`CustomRootTrust` with your company root", 1],
+        ["a company root installed in the image with `update-ca-certificates`", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Keep certificates out of the image and the repository: mount them and point Kestrel at them through configuration. When a call fails only in a container, compare trust stores before you touch code, and never ship a callback that returns `true`."
+    }
+  ]
+}

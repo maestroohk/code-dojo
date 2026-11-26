@@ -1,0 +1,95 @@
+{
+  "title": "Senior's toolkit: when trust breaks",
+  "summary": "Commands that name the failure: expired, wrong name, wrong purpose, revoked, or a client certificate the server will not take.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: when trust breaks",
+      "body": "A TLS error message is vague; these commands make it exact. Each one tests one way a certificate can fail.",
+      "toolkit": [
+        { "cmd": "openssl x509 -checkend <seconds>", "what": "Exits 0 if the certificate is still valid that many seconds from now, 1 if not. Perfect for scripts and alerts.",
+          "flags": [["-checkend 2592000", "still valid in 30 days?"], ["-noout", "print only the verdict"], ["-enddate", "print `notAfter` too"]],
+          "example": "openssl x509 -in cert.pem -noout -enddate -checkend 2592000 || echo 'renew now'", "when": "expiry monitoring and pre-deploy checks", "lang": "bash" },
+        { "cmd": "openssl s_client -verify_hostname host -verify_return_error", "what": "Checks the live certificate against the name you expect and stops on any error, like a strict client.",
+          "flags": [["-verify_hostname", "fail if the name is not in the SAN list"], ["-verify_return_error", "abort the handshake on a verify failure"], ["-brief", "one short summary instead of the full dump"]],
+          "example": "openssl s_client -connect api.example.com:443 -servername api.example.com -verify_hostname api.example.com -verify_return_error -brief </dev/null", "lang": "bash" },
+        { "cmd": "openssl x509 -noout -ext subjectAltName,extendedKeyUsage", "what": "Shows the names a certificate covers and what it is for. A server certificate needs `TLS Web Server Authentication`; mTLS clients need `Client Authentication`.",
+          "flags": [["subjectAltName", "DNS names and IPs"], ["extendedKeyUsage", "serverAuth, clientAuth, codeSigning..."], ["basicConstraints", "`CA:TRUE` only on CAs"]],
+          "example": "openssl x509 -in client.pem -noout -ext subjectAltName,extendedKeyUsage", "when": "\"name mismatch\" or \"unsuitable certificate purpose\"", "lang": "bash" },
+        { "cmd": "openssl crl -in ca.crl -inform der -noout -text", "what": "Reads a revocation list: when it was issued, when the next one is due, and the revoked serial numbers.",
+          "flags": [["-inform der", "most CRLs are downloaded as DER"], ["-nextupdate", "print when it expires (a stale CRL fails strict clients)"]],
+          "example": "curl -s http://crl.corp.example/issuing.crl | openssl crl -inform der -noout -lastupdate -nextupdate", "when": "public CAs now publish CRLs; OCSP is being wound down", "lang": "bash" },
+        { "cmd": "openssl x509 -noout -serial", "what": "The serial number. Compare it with the CRL list, or quote it when you ask a CA to revoke.",
+          "flags": [["-serial", "hex serial number"]],
+          "example": "openssl x509 -in cert.pem -noout -serial", "lang": "bash" },
+        { "cmd": "curl --cert client.pem --key client.key https://host", "what": "Calls a mutual-TLS endpoint with a client certificate, to tell a server problem from a client problem.",
+          "flags": [["--cert", "client certificate (PEM)"], ["--key", "its private key"], ["--cacert", "the CA for the server's certificate"], ["-v", "see whether the server asked for a certificate"]],
+          "example": "curl -v --cert client.pem --key client.key --cacert corp-root.pem https://payments.internal/health", "lang": "bash" },
+        { "cmd": "dotnet dev-certs https --check --trust", "what": "Tells you whether the ASP.NET Core development certificate exists and is trusted on this machine.",
+          "flags": [["--check", "report, do not change anything"], ["--trust", "with `--check`: also check trust; alone: trust it"], ["--clean", "delete old dev certificates first"]],
+          "example": "dotnet dev-certs https --clean && dotnet dev-certs https --trust", "when": "a browser rejects `https://localhost:5001`", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "At 09:00 every client of `api.example.com` starts failing with `certificate has expired`. Yesterday's deploy did not touch TLS. What do you run first?",
+      "options": [
+        "`openssl s_client -connect api.example.com:443 -servername api.example.com </dev/null | openssl x509 -noout -dates`",
+        "Restart the clients",
+        "`openssl x509 -checkend 0` on the copy in the repository",
+        "Disable certificate validation in the clients"
+      ],
+      "answer": 0,
+      "explain": "Check what the server is serving right now, not a file that may differ. If `notAfter` has passed, renewal failed or the new certificate was never loaded. Disabling validation turns an outage into a security hole."
+    },
+    {
+      "type": "match",
+      "prompt": "Match each error to the command that confirms it.",
+      "pairs": [
+        ["`certificate has expired`", "`openssl x509 -noout -dates`"],
+        ["`hostname mismatch`", "`openssl x509 -noout -ext subjectAltName`"],
+        ["`unsuitable certificate purpose`", "`openssl x509 -noout -ext extendedKeyUsage`"],
+        ["`certificate revoked`", "`openssl crl -inform der -noout -text`"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Make a cron check fail when the certificate expires within 30 days (30 x 24 x 3600 seconds).",
+      "code": "openssl x509 -in cert.pem -noout -__1__ __2__",
+      "blanks": ["checkend", "2592000"],
+      "bank": ["enddate", "dates", "43200", "30"],
+      "explain": "`-checkend` takes seconds and exits 1 if the certificate will have expired by then. `-enddate` prints the date but always exits 0."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Public TLS certificates are capped at 200 days since March 2026, falling to 100 days in 2027 and 47 days in 2029. What does that mean for your team?",
+      "options": [
+        "Renewal must be automated (ACME) and expiry monitored; manual renewal will not keep up",
+        "Nothing; buy a longer certificate from another public CA",
+        "Use self-signed certificates on public sites",
+        "Turn off expiry checks in clients"
+      ],
+      "answer": 0,
+      "explain": "The CA/Browser Forum limit applies to every public CA. With 47-day certificates a human process fails several times a year; automate issuance and alert with `-checkend`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A partner's mTLS calls fail: the server log says `no client certificate presented`. `curl -v --cert client.pem --key client.key` from your machine works. What do you check on the partner side?",
+      "options": [
+        "That their client is configured with the certificate and key, and that the certificate has `Client Authentication` in its EKU",
+        "That your server certificate has not expired",
+        "Their DNS server",
+        "That they use HTTP/2"
+      ],
+      "answer": 0,
+      "explain": "Your curl proves the server side works. A client that sends nothing usually has no certificate configured, cannot read its key, or filters out certificates without the clientAuth usage."
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Read the exact error, then run the one command that confirms it before changing anything. Put `openssl x509 -checkend` in monitoring for every certificate you own, with a lead time longer than your renewal process takes."
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "title": "Senior's toolkit: on call with kubectl and Helm",
+  "summary": "Events, previous logs, ephemeral debug containers, can-i, diff, server-side apply and Helm releases.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: on call with kubectl and Helm",
+      "body": "The incident commands: what happened, what the crashed container said, a shell into a distroless pod, and a safe release with a way back.",
+      "toolkit": [
+        { "cmd": "kubectl get events --sort-by=.lastTimestamp", "what": "Recent events in time order: scheduling failures, image pulls, probe failures, kills. The first stop when you do not know what broke.",
+          "flags": [["--sort-by=.lastTimestamp", "newest last"], ["--field-selector type=Warning", "only problems"], ["kubectl events --for pod/<name>", "the newer command, events for one object"]],
+          "example": "kubectl events -n shop --for pod/api-7d9f8c6b5-x2k4q --types=Warning", "lang": "bash" },
+        { "cmd": "kubectl logs <pod> -p", "what": "The logs of the previous, crashed container. Without `-p` you see the fresh restart, which has not failed yet.",
+          "flags": [["-p", "previous instance (`--previous`)"], ["-c <container>", "pick a container in a multi-container pod"], ["-f --since=10m", "follow, starting ten minutes back"], ["-l app=api --prefix", "all pods with a label, each line tagged"]],
+          "example": "kubectl logs api-7d9f8c6b5-x2k4q -c api -p", "when": "CrashLoopBackOff", "lang": "bash" },
+        { "cmd": "kubectl debug -it <pod> --image=busybox:1.36 --target=<container>", "what": "Adds an ephemeral debug container that shares the target's process namespace. Works on distroless images that have no shell.",
+          "flags": [["--image", "the toolbox image (busybox, nicolaka/netshoot)"], ["--target", "the container whose processes you want to see"], ["node/<name>", "`kubectl debug node/x -it --image=...`: a pod on the node with the host filesystem at `/host`"]],
+          "example": "kubectl debug -it api-7d9f8c6b5-x2k4q --image=busybox:1.36 --target=api", "lang": "bash" },
+        { "cmd": "kubectl auth can-i <verb> <resource>", "what": "Asks the API server whether a user or service account may do something. Settles RBAC questions without trial and error.",
+          "flags": [["--as=system:serviceaccount:<ns>:<sa>", "ask on behalf of a service account"], ["--list", "everything allowed in the namespace"], ["-n <ns>", "the namespace to check"]],
+          "example": "kubectl auth can-i create deployments -n shop --as=system:serviceaccount:shop:deployer", "lang": "bash" },
+        { "cmd": "kubectl diff -f <dir>", "what": "Shows what `apply` would change, computed by the server. Exit code 1 means there are differences.",
+          "flags": [["-f k8s/", "a file or folder"], ["-k overlays/prod", "a Kustomize overlay"], ["--server-side", "diff as server-side apply would"]],
+          "example": "kubectl diff -f k8s/", "when": "before every manual apply", "lang": "bash" },
+        { "cmd": "kubectl apply --server-side --field-manager=<name> -f <dir>", "what": "The API server merges the change and records which tool owns each field. Conflicts with other owners are reported instead of silently overwritten.",
+          "flags": [["--field-manager=ci", "name the owner (your pipeline)"], ["--force-conflicts", "take ownership of fields another manager set, on purpose"]],
+          "example": "kubectl apply --server-side --field-manager=ci -f k8s/", "lang": "bash" },
+        { "cmd": "helm upgrade --install <release> <chart> --rollback-on-failure", "what": "Installs or upgrades a release in one idempotent command, waits for it, and rolls back automatically if it does not become healthy. Helm 3 calls the flag `--atomic`.",
+          "flags": [["--install", "install if the release does not exist yet"], ["-f values-prod.yaml", "the environment's values"], ["--rollback-on-failure", "wait, and roll back on failure (Helm 3: `--atomic`)"], ["--timeout 5m", "how long to wait"]],
+          "example": "helm upgrade --install api ./chart -n shop -f values-prod.yaml --rollback-on-failure --timeout 5m", "lang": "bash" },
+        { "cmd": "helm history <release> / helm rollback <release> <rev>", "what": "Lists a release's revisions and returns to one. `helm template ... | kubectl diff -f -` previews a change before you run it.",
+          "flags": [["-n <ns>", "the release's namespace"], ["<rev>", "a revision number from `history`"]],
+          "example": "helm history api -n shop && helm rollback api 7 -n shop", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A pod restarts every 30 seconds. `kubectl logs api-x` shows only the start-up banner and nothing else. What do you run first?",
+      "options": [
+        "`kubectl logs api-x -p` and `kubectl describe pod api-x`",
+        "`kubectl delete pod api-x`",
+        "`helm rollback api`",
+        "`kubectl top nodes`"
+      ],
+      "answer": 0,
+      "explain": "Plain `logs` shows the new container, which has not crashed yet. `-p` shows the one that died, and `describe` shows the last state (exit code, OOMKilled) and probe failures, often a liveness probe killing a slow start."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the flag to its meaning.",
+      "pairs": [
+        ["`kubectl logs -p`", "logs of the previous, crashed container"],
+        ["`kubectl debug --target=api`", "share the process namespace of container `api`"],
+        ["`kubectl auth can-i --as=...`", "check permissions on behalf of someone else"],
+        ["`kubectl apply --server-side`", "let the API server merge and track field owners"],
+        ["`helm upgrade --install`", "install if missing, upgrade if present"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Get a shell next to a distroless container that has no `sh` of its own.",
+      "code": "kubectl __1__ -it api-7d9f8c6b5-x2k4q --__2__=busybox:1.36 --__3__=api",
+      "blanks": ["debug", "image", "target"],
+      "bank": ["exec", "attach", "container", "copy-to"],
+      "explain": "`kubectl exec` needs a shell inside the image. `debug` adds an ephemeral container with your own tools, and `--target` lets it see the app's processes."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The CI pipeline fails with `deployments.apps is forbidden: User \"system:serviceaccount:shop:deployer\" cannot patch resource \"deployments\"`. How do you confirm the fix before re-running the pipeline?",
+      "options": [
+        "`kubectl auth can-i patch deployments -n shop --as=system:serviceaccount:shop:deployer` should print `yes`",
+        "Re-run the pipeline until it passes",
+        "`kubectl get events --sort-by=.lastTimestamp`",
+        "`kubectl diff -f k8s/`"
+      ],
+      "answer": 0,
+      "explain": "`can-i --as` asks the authorizer directly, in seconds. Add the verb to the Role, apply it, check with `can-i`, then re-run."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a careful manual release with Helm in order.",
+      "lines": [
+        "helm template api ./chart -f values-prod.yaml | kubectl diff -f -",
+        "helm upgrade --install api ./chart -n shop -f values-prod.yaml --rollback-on-failure --timeout 5m",
+        "kubectl get events -n shop --sort-by=.lastTimestamp",
+        "helm history api -n shop"
+      ],
+      "also": [[
+        "helm template api ./chart -f values-prod.yaml | kubectl diff -f -",
+        "helm upgrade --install api ./chart -n shop -f values-prod.yaml --rollback-on-failure --timeout 5m",
+        "helm history api -n shop",
+        "kubectl get events -n shop --sort-by=.lastTimestamp"
+      ]],
+      "explain": "Preview, release with automatic rollback, then check what happened. The two checks at the end can go in either order."
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe to run during an incident without changing anything, or does it change the cluster?",
+      "buckets": ["Read-only", "Changes the cluster"],
+      "items": [
+        ["`kubectl get events --sort-by=.lastTimestamp`", 0],
+        ["`kubectl logs -p`", 0],
+        ["`kubectl auth can-i --list`", 0],
+        ["`kubectl diff -f k8s/`", 0],
+        ["`kubectl debug -it pod --image=busybox:1.36`", 1],
+        ["`helm rollback api 7`", 1]
+      ],
+      "explain": "`debug` adds an ephemeral container to the pod spec: harmless, but it is a change and it stays until the pod is replaced."
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "On call, start with events and `logs -p`, then `describe`, and reach for `kubectl debug` instead of baking shells into images. Never apply by hand without a `diff`, and release with Helm's automatic rollback so a failed deploy undoes itself."
+    }
+  ]
+}

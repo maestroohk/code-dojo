@@ -1,0 +1,99 @@
+{
+  "title": "Senior's toolkit: tests in the pipeline",
+  "summary": "dotnet test with filters, reports, hang dumps and coverage, plus service containers, test artifacts and hunting a flaky test.",
+  "minutes": 7,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: tests in the pipeline",
+      "body": "A test job should run the right tests, leave a report behind even when it fails, and never hang. These flags and keys do that (shown for `dotnet test` in its default VSTest mode).",
+      "toolkit": [
+        { "cmd": "dotnet test --filter <expr>", "what": "Runs a subset of tests: fast unit tests on every push, slow integration tests in their own job.",
+          "flags": [["Category!=Integration", "skip tests with that trait or category"], ["FullyQualifiedName~Checkout", "names that contain `Checkout`"], ["| and &", "combine conditions with or and and"]],
+          "example": "dotnet test --filter \"Category!=Integration\"", "lang": "bash" },
+        { "cmd": "dotnet test -c Release --no-build", "what": "Tests the exact binaries the build step produced instead of compiling again.",
+          "flags": [["-c Release", "same configuration as the build"], ["--no-build", "fail if it was not built, instead of building silently"], ["--no-restore", "skip restore as well"]],
+          "example": "dotnet build -c Release && dotnet test -c Release --no-build", "lang": "bash" },
+        { "cmd": "dotnet test --logger trx --results-directory <dir>", "what": "Writes machine-readable results that CI test reporters and PR annotations read.",
+          "flags": [["--logger \"trx;LogFileName=unit.trx\"", "a TRX file with a fixed name"], ["--results-directory TestResults", "where results and coverage go"]],
+          "example": "dotnet test --no-build --logger \"trx;LogFileName=unit.trx\" --results-directory TestResults", "lang": "bash" },
+        { "cmd": "dotnet test --blame-hang-timeout <time>", "what": "If a test hangs longer than this, collect a dump and fail, instead of waiting for the job timeout. Names the test that hung.",
+          "flags": [["--blame-hang-timeout 5m", "per-test hang limit"], ["--blame-crash", "collect a dump when the test host crashes"]],
+          "example": "dotnet test --no-build --blame-hang-timeout 5m --blame-crash", "lang": "bash" },
+        { "cmd": "dotnet test --collect \"XPlat Code Coverage\"", "what": "Collects line and branch coverage with coverlet (the `coverlet.collector` package, in the default xUnit template). `reportgenerator` turns it into HTML or a summary.",
+          "flags": [["--collect \"XPlat Code Coverage\"", "writes `coverage.cobertura.xml` under the results directory"], ["reportgenerator -reports: -targetdir: -reporttypes:", "merge and render the reports"]],
+          "example": "dotnet test --no-build --collect \"XPlat Code Coverage\" --results-directory TestResults", "lang": "bash" },
+        { "cmd": "if: ${{ !cancelled() }} on the upload step", "what": "Uploads the test results even when the test step failed, which is exactly when you need them.",
+          "flags": [["!cancelled()", "run after success or failure, not after a cancel"], ["always()", "run even after a cancel"], ["path: TestResults", "the folder to upload"]],
+          "example": "- uses: actions/upload-artifact@v5\n  if: ${{ !cancelled() }}\n  with:\n    name: test-results\n    path: TestResults", "lang": "yaml" },
+        { "cmd": "services:", "what": "Runs a real dependency (Postgres, Redis) as a container next to the job, so integration tests hit the real thing.",
+          "flags": [["image: postgres:17", "the service image"], ["ports: ['5432:5432']", "reach it on localhost from the job"], ["options: --health-cmd", "wait until it is healthy before the steps run"]],
+          "example": "services:\n  db:\n    image: postgres:17\n    env:\n      POSTGRES_PASSWORD: test\n    ports: ['5432:5432']\n    options: >-\n      --health-cmd \"pg_isready -U postgres\" --health-interval 5s --health-retries 10", "lang": "yaml" },
+        { "cmd": "for i in $(seq 30); do dotnet test --no-build --filter <test> || break; done", "what": "Runs one suspect test many times to prove it is flaky (and to prove your fix). One pass proves nothing.",
+          "flags": [["--filter FullyQualifiedName~...", "only the suspect test"], ["|| break", "stop at the first failure and keep its output"]],
+          "example": "for i in $(seq 30); do dotnet test --no-build --filter \"FullyQualifiedName~CheckoutTests.Applies_discount\" || break; done", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The test job failed, and the \"Upload test results\" step after it shows as skipped, so there is no report to read. What do you change?",
+      "options": [
+        "Add `if: ${{ !cancelled() }}` to the upload step",
+        "Add `continue-on-error: true` to the test step",
+        "Re-run with `gh run rerun --failed`",
+        "Move the upload to a separate workflow"
+      ],
+      "answer": 0,
+      "explain": "Steps run only after success by default. A status condition makes the upload run after a failure too. `continue-on-error` would turn the red test job green, which hides the failure."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the flag to its meaning.",
+      "pairs": [
+        ["`--no-build`", "test the binaries the build step already made"],
+        ["`--filter \"Category!=Integration\"`", "skip the slow integration tests"],
+        ["`--blame-hang-timeout 5m`", "dump and fail a test that hangs"],
+        ["`--logger trx`", "write results a CI reporter can read"],
+        ["`--collect \"XPlat Code Coverage\"`", "record which lines the tests ran"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Run the unit tests on the Release build without compiling again, and keep a results file.",
+      "code": "dotnet test -c Release --__1__ --__2__ \"Category!=Integration\" --__3__ trx",
+      "blanks": ["no-build", "filter", "logger"],
+      "bank": ["no-cache", "where", "output", "verbosity"],
+      "explain": "`--no-build` reuses the build output, `--filter` picks the tests, `--logger trx` writes the results file."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`CheckoutTests.Applies_discount` fails about once in fifteen CI runs and always passes on your laptop. What is the right next step?",
+      "options": [
+        "Run it in a loop (`--filter` plus a `for` loop) until it fails, then read that failure; look for shared state, time or ordering",
+        "Add a retry so the job passes",
+        "Delete the test",
+        "Raise the job's `timeout-minutes`"
+      ],
+      "answer": 0,
+      "explain": "You fix a flaky test by reproducing it. A loop turns one-in-fifteen into a failure within minutes. Retries can buy time while you fix it, but a test that sometimes fails is telling you about a real race or a hidden dependency."
+    },
+    {
+      "type": "sort",
+      "prompt": "Unit test job or integration test job?",
+      "buckets": ["Unit test job", "Integration test job"],
+      "items": [
+        ["`dotnet test --filter \"Category!=Integration\"`", 0],
+        ["Runs on every push in under two minutes", 0],
+        ["`services: db: image: postgres:17`", 1],
+        ["`dotnet test --filter \"Category=Integration\"`", 1],
+        ["Needs a health check before the tests start", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Build once and test with `--no-build`, always upload results with a status condition, and give test runs a hang timeout. When a test flakes, loop it until it fails instead of re-running the pipeline."
+    }
+  ]
+}

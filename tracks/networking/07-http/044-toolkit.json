@@ -1,0 +1,97 @@
+{
+  "title": "Senior's toolkit: HTTP from the command line",
+  "summary": "curl with the flags that find where time goes, test one backend behind a load balancer, and check headers and protocol versions.",
+  "minutes": 8,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: HTTP from the command line",
+      "body": "curl is the universal HTTP client: in every container, every CI runner and every incident channel. These are the flags that turn it from \"fetch a page\" into a debugger.",
+      "toolkit": [
+        { "cmd": "curl -v https://api.example.com/health", "what": "Shows the whole exchange: DNS result, TCP connect, TLS handshake, request headers (`>`) and response headers (`<`).",
+          "flags": [["-v", "verbose, to stderr"], ["-i", "only add the response headers to the output"], ["-o /dev/null", "throw the body away"], ["-s -S", "silent, but still print errors"]],
+          "example": "curl -sS -v -o /dev/null https://api.example.com/health", "lang": "bash" },
+        { "cmd": "curl -w '...timings...' -o /dev/null -sS URL", "what": "Breaks one request into DNS, connect, TLS, time to first byte and total. Tells you whether a slow call is the network or the server.",
+          "flags": [["%{time_namelookup}", "DNS done"], ["%{time_connect}", "TCP connected"], ["%{time_appconnect}", "TLS done"], ["%{time_starttransfer}", "first byte back (server think time ends)"], ["%{time_total} %{http_code}", "everything, and the status"]],
+          "example": "curl -sS -o /dev/null -w 'dns %{time_namelookup} tcp %{time_connect} tls %{time_appconnect} ttfb %{time_starttransfer} total %{time_total} code %{http_code}\\n' https://api.example.com/orders", "when": "\"the API is slow\"", "lang": "bash" },
+        { "cmd": "curl --resolve api.example.com:443:10.0.4.21 https://api.example.com/", "what": "Sends a request to one specific server while keeping the real name, so SNI, the certificate check and the Host header are all correct.",
+          "flags": [["--resolve host:port:addr", "pin the name to an address for this call"], ["--connect-to host:port:other:port", "connect to another host name and port instead"], ["-H 'Host: x'", "only changes the header, not SNI: wrong for HTTPS"]],
+          "example": "curl -sS --resolve api.example.com:443:10.0.4.21 https://api.example.com/health", "when": "one backend behind the load balancer misbehaves, or before a DNS cut-over", "lang": "bash" },
+        { "cmd": "curl -fsS --max-time 5 URL", "what": "The script and health-check form: fail on HTTP errors, stay quiet, never hang.",
+          "flags": [["-f / --fail", "exit 22 on 4xx/5xx (`--fail-with-body` also prints the body)"], ["--max-time 5", "give up after 5 seconds in total"], ["--retry 3 --retry-all-errors", "retry on failures, with backoff"], ["-L", "follow redirects"]],
+          "example": "curl -fsS --max-time 5 --retry 3 http://localhost:8080/health || exit 1", "lang": "bash" },
+        { "cmd": "curl -sSI URL", "what": "A HEAD request: only headers. Quick check of `cache-control`, `content-type`, redirects and which server or CDN answered.",
+          "flags": [["-I", "HEAD instead of GET (some servers answer HEAD differently)"], ["-D - -o /dev/null", "a real GET, print headers only"]],
+          "example": "curl -sS -D - -o /dev/null https://www.example.com/ | grep -i -E '^(cache-control|age|etag|location):'", "lang": "bash" },
+        { "cmd": "curl --http2 / --http3 URL", "what": "Forces a protocol version and `%{http_version}` reports what was used. Checks that HTTP/2 and HTTP/3 are really on.",
+          "flags": [["--http1.1", "force HTTP/1.1"], ["--http2", "try HTTP/2 (ALPN)"], ["--http3", "HTTP/3 over QUIC, if your curl is built with it (`curl -V` lists `HTTP3`)"], ["-w '%{http_version}'", "print the version used"]],
+          "example": "curl -sS -o /dev/null -w '%{http_version}\\n' --http2 https://www.example.com/", "lang": "bash" },
+        { "cmd": "curl -X POST -H 'Content-Type: application/json' -d @body.json URL", "what": "Send a body from a file with the right content type. Reproduces a client's request exactly.",
+          "flags": [["-d @file", "body from a file (`--data-binary @file` keeps newlines)"], ["--json @file", "curl 7.82+: sets the JSON content type and accept headers for you"], ["-H 'Authorization: Bearer ...'", "add a header"]],
+          "example": "curl -sS --json @order.json https://api.example.com/orders", "lang": "bash" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each `curl -w` variable to the moment it measures (seconds from the start).",
+      "pairs": [
+        ["`%{time_namelookup}`", "DNS finished"],
+        ["`%{time_connect}`", "TCP handshake finished"],
+        ["`%{time_appconnect}`", "TLS handshake finished"],
+        ["`%{time_starttransfer}`", "first byte of the response arrived"],
+        ["`%{time_total}`", "the whole transfer finished"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Users say the orders API is slow. `curl -w` prints `dns 0.004 tcp 0.015 tls 0.041 ttfb 2.870 total 2.912`. Where do you look next?",
+      "options": [
+        "At the server: almost all the time is between TLS done and the first byte, so the app (or something it calls) is slow",
+        "At DNS",
+        "At the network path, with mtr",
+        "At the TLS certificate"
+      ],
+      "answer": 0,
+      "explain": "DNS, TCP and TLS together took 41 ms. The 2.8 s gap before the first byte is the server working: look at its traces, database queries and downstream calls."
+    },
+    {
+      "type": "mcq",
+      "prompt": "One of four backends behind the load balancer returns 500s. They all serve `https://api.example.com`. How do you send a request to backend `10.0.4.23` only, with the certificate still checked?",
+      "options": [
+        "`curl --resolve api.example.com:443:10.0.4.23 https://api.example.com/health`",
+        "`curl -k https://10.0.4.23/health`",
+        "`curl -H 'Host: api.example.com' https://10.0.4.23/health`",
+        "Edit DNS to point at 10.0.4.23"
+      ],
+      "answer": 0,
+      "explain": "`--resolve` keeps the URL's host name, so SNI and certificate checks match. `-k` turns checking off, and `-H Host` with an IP sends no SNI for the name, so TLS may fail or hit the wrong virtual host."
+    },
+    {
+      "type": "blanks",
+      "prompt": "A health check that fails on HTTP errors and never waits more than 5 seconds.",
+      "code": "curl -__1__sS --__2__ 5 http://localhost:8080/health",
+      "blanks": ["f", "max-time"],
+      "bank": ["k", "L", "connect-timeout", "retry"],
+      "explain": "`-f` makes a 500 exit non-zero, so the check fails. `--max-time` caps the whole request. (`--connect-timeout` exists too, but only covers the connection.)"
+    },
+    {
+      "type": "sort",
+      "prompt": "Which flag do you reach for?",
+      "buckets": ["`-w` timings", "`--resolve`", "`-v`"],
+      "items": [
+        ["Find out whether DNS, TLS or the server is slow", 0],
+        ["Test the new server before switching DNS", 1],
+        ["See exactly which request headers curl sent", 2],
+        ["Hit one backend behind the load balancer", 1],
+        ["See why the TLS handshake fails", 2],
+        ["Graph time to first byte in a cron job", 0]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Make it a habit",
+      "body": "Keep the `curl -w` timing line in your shell history or a `~/.curl-format` file and paste its output into every \"it's slow\" thread. Use `--resolve` to test a server before DNS points at it, and `-fsS --max-time` in every script and health check."
+    }
+  ]
+}
