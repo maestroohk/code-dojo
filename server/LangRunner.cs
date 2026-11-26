@@ -153,7 +153,8 @@ public sealed class LangRunner
         }
     }
 
-    static async Task<Result> Exec(string dir, string[] cmd, string? stdin, int cpuMs, int wallMs)
+    /// <summary>Run one command in <paramref name="dir"/> with the runner's limits ("python" means the dojo's Python). Also used by TsCheck, PyTest and PolyViz.</summary>
+    internal static async Task<Result> Exec(string dir, string[] cmd, string? stdin, int cpuMs, int wallMs)
     {
         // "python" means the dojo environment when it exists (checked per run, so setting it up needs no restart).
         var exe = cmd[0] == "python" ? PyEnvPython() ?? "python" : cmd[0].StartsWith("./") ? Path.Combine(dir, cmd[0][2..] + (OperatingSystem.IsWindows() ? ".exe" : "")) : cmd[0];

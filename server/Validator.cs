@@ -87,6 +87,7 @@ public static class Validator
                                 if (rxFlagError is not null) Error(where, "regex card: " + rxFlagError);
                                 else if (rxBuilt.Regex is null) Error(where, "regex card: the pattern does not parse in .NET: " + rxBuilt.Error);
                             }
+                            foreach (var (isError, msg) in await PolyViz.Validate(langs, step)) if (isError) Error(where, msg); else Warn(where, msg);
                             if (step["linq"] is JsonObject linq)
                             {
                                 var q = await LinqViz.Run(runner, new((string?)linq["source"], (string?)linq["query"], (string?)linq["setup"]));

@@ -1,0 +1,224 @@
+{
+  "title": "Time zones, JSON and asyncio",
+  "summary": "Aware datetimes and zoneinfo, JSON that round-trips, and running many I/O calls at once with asyncio.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Aware datetimes",
+      "body": [
+        "A `datetime` without a time zone (\"naive\") is a bug waiting for daylight saving time. Rules that hold up in production:",
+        "",
+        "```python fragment",
+        "from datetime import datetime, timedelta, timezone",
+        "from zoneinfo import ZoneInfo",
+        "",
+        "now = datetime.now(timezone.utc)                       # store and compare in UTC",
+        "berlin = now.astimezone(ZoneInfo(\"Europe/Berlin\"))     # convert only to show a person",
+        "stamp = now.isoformat()                                # '2026-11-26T14:03:00.123456+00:00'",
+        "back = datetime.fromisoformat(stamp)                   # round-trips, offset included",
+        "deadline = now + timedelta(hours=2)",
+        "```",
+        "",
+        "- Never `datetime.utcnow()`: it is deprecated (3.12) and returns a *naive* value.",
+        "- Comparing an aware and a naive datetime raises `TypeError`: good, it catches mixed data.",
+        "- `zoneinfo` reads the operating system's time zone database. **Windows has none**: add the `tzdata` package (`uv add tzdata`) or `ZoneInfo(\"Europe/Berlin\")` raises `ZoneInfoNotFoundError`."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "from datetime import datetime, timedelta, timezone",
+        "",
+        "utc = datetime(2026, 11, 26, 23, 30, tzinfo=timezone.utc)",
+        "cet = timezone(timedelta(hours=1))",
+        "local = utc.astimezone(cet)",
+        "print(local.isoformat())",
+        "print(local == utc, local.date() == utc.date())"
+      ],
+      "answer": [
+        "2026-11-27T00:30:00+01:00",
+        "True False"
+      ],
+      "explain": "Same instant, shown at a different offset: equal as times, but the calendar date differs. This is why reports must say which zone their \"day\" is in."
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe in production, or a bug waiting to happen?",
+      "buckets": [
+        "Safe",
+        "A bug waiting to happen"
+      ],
+      "items": [
+        [
+          "`datetime.now(timezone.utc)`",
+          0
+        ],
+        [
+          "`datetime.utcnow()`",
+          1
+        ],
+        [
+          "`datetime.now()` stored in the database",
+          1
+        ],
+        [
+          "`ZoneInfo(\"America/New_York\")` to show a time to a person",
+          0
+        ],
+        [
+          "`datetime.fromisoformat(\"2026-11-26T09:00:00+00:00\")`",
+          0
+        ],
+        [
+          "adding `timedelta(hours=24)` to a naive local time across a DST change",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "JSON that round-trips",
+      "body": [
+        "`json` maps dicts, lists, strings, numbers, `True`/`False`/`None`. Anything else needs a decision:",
+        "",
+        "```python",
+        "import json",
+        "from datetime import datetime, timezone",
+        "",
+        "event = {\"id\": 7, \"at\": datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc), \"tags\": {\"ops\"}}",
+        "text = json.dumps(event, default=str, sort_keys=True)",
+        "print(text)        # {\"at\": \"2026-11-26 09:00:00+00:00\", \"id\": 7, \"tags\": \"{'ops'}\"}",
+        "```",
+        "",
+        "`default=str` makes it *run*, but look at `tags`: a set became a useless string. Convert on purpose instead: `at.isoformat()`, `sorted(tags)`, `dataclasses.asdict(obj)`. On the way in, `json.loads` gives plain dicts: validate before trusting (pydantic or a dataclass constructor at the boundary). `indent=2` for files people read, `ensure_ascii=False` to keep `ü` readable."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`json.dumps({\"at\": datetime.now(timezone.utc)})` with no other arguments:",
+      "options": [
+        "raises `TypeError: Object of type datetime is not JSON serializable`",
+        "writes an ISO 8601 string",
+        "writes a Unix timestamp",
+        "writes `null`"
+      ],
+      "answer": 0,
+      "explain": "The `json` module only knows the basic types. Convert with `.isoformat()` (or pass `default=`) so the format is a choice you made."
+    },
+    {
+      "type": "learn",
+      "title": "asyncio: many waits at once",
+      "body": [
+        "When a program mostly **waits** (HTTP calls, databases), `asyncio` runs many waits on one thread, like C#'s `async`/`await`:",
+        "",
+        "```python fragment",
+        "import asyncio",
+        "import httpx",
+        "",
+        "async def fetch(client: httpx.AsyncClient, url: str) -> int:",
+        "    r = await client.get(url, timeout=5)",
+        "    return r.status_code",
+        "",
+        "async def main() -> None:",
+        "    limit = asyncio.Semaphore(5)                     # at most 5 requests in flight",
+        "    async with httpx.AsyncClient() as client:",
+        "        async def one(url: str) -> int:",
+        "            async with limit:",
+        "                return await fetch(client, url)",
+        "        async with asyncio.TaskGroup() as tg:          # 3.11+: if one fails, the rest are cancelled",
+        "            tasks = [tg.create_task(one(u)) for u in urls]",
+        "    print([t.result() for t in tasks])",
+        "",
+        "asyncio.run(main())",
+        "```",
+        "",
+        "- `asyncio.gather(*coros)` returns results **in argument order**, whatever finishes first.",
+        "- `async with asyncio.timeout(2):` (3.11+) cancels whatever is inside after 2 seconds.",
+        "- A blocking call (`time.sleep`, `requests.get`) inside `async def` freezes **every** task: use `await asyncio.sleep` and an async client (httpx, aiohttp)."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "import asyncio",
+        "",
+        "async def job(name: str, delay: float) -> str:",
+        "    await asyncio.sleep(delay)",
+        "    print(\"done\", name)",
+        "    return name.upper()",
+        "",
+        "async def main() -> None:",
+        "    results = await asyncio.gather(job(\"slow\", 0.05), job(\"fast\", 0.01))",
+        "    print(results)",
+        "",
+        "asyncio.run(main())"
+      ],
+      "answer": [
+        "done fast",
+        "done slow",
+        "['SLOW', 'FAST']"
+      ],
+      "explain": "Both jobs wait at the same time, so `fast` finishes first and prints first. `gather` still returns the results in the order the jobs were passed."
+    },
+    {
+      "type": "code",
+      "title": "A polite concurrent fetcher",
+      "prompt": [
+        "Write `async def fetch_all(ids: list[int], fetch, limit: int = 3, timeout: float = 1.0) -> list[str]`.",
+        "",
+        "`fetch(id)` is an async function (the tests pass a fake that waits a little). Call it for every id **concurrently**, but with **at most `limit` calls in flight** (`asyncio.Semaphore`), and give each call at most `timeout` seconds (`asyncio.timeout`). Return the results in the order of `ids`. A call that times out gives the string `\"timeout\"` instead of failing the whole batch."
+      ],
+      "starter": [
+        "import asyncio",
+        "",
+        "",
+        "async def fetch_all(ids: list[int], fetch, limit: int = 3, timeout: float = 1.0) -> list[str]:",
+        "    return [await fetch(i) for i in ids]"
+      ],
+      "solution": [
+        "import asyncio",
+        "",
+        "",
+        "async def fetch_all(ids: list[int], fetch, limit: int = 3, timeout: float = 1.0) -> list[str]:",
+        "    gate = asyncio.Semaphore(limit)",
+        "",
+        "    async def one(i: int) -> str:",
+        "        async with gate:",
+        "            try:",
+        "                async with asyncio.timeout(timeout):",
+        "                    return await fetch(i)",
+        "            except TimeoutError:",
+        "                return \"timeout\"",
+        "",
+        "    return await asyncio.gather(*(one(i) for i in ids))"
+      ],
+      "template": [
+        "{{CODE}}",
+        "import asyncio as _a, time as _time",
+        "_state = {\"now\": 0, \"max\": 0}",
+        "async def _fake(i):",
+        "    _state[\"now\"] += 1; _state[\"max\"] = max(_state[\"max\"], _state[\"now\"])",
+        "    try:",
+        "        await _a.sleep(2.0 if i == 99 else 0.05)",
+        "        return f\"item-{i}\"",
+        "    finally:",
+        "        _state[\"now\"] -= 1",
+        "_t0 = _time.perf_counter()",
+        "_got = _a.run(fetch_all(list(range(9)), _fake, limit=3))",
+        "_took = _time.perf_counter() - _t0",
+        "Dojo.eq(\"results in the order of ids\", [f\"item-{i}\" for i in range(9)], _got)",
+        "Dojo.eq(\"never more than 3 calls at once\", 3, _state[\"max\"])",
+        "Dojo.check(\"runs concurrently (9 calls of 50 ms, 3 at a time)\", _took < 0.35, f\"took {_took:.2f}s: are the calls awaited one by one?\")",
+        "Dojo.eq(\"a slow call becomes 'timeout'\", [\"item-1\", \"timeout\", \"item-2\"], _a.run(fetch_all([1, 99, 2], _fake, limit=2, timeout=0.1)))"
+      ],
+      "hints": [
+        "Wrap each call in an inner `async def one(i)` that does `async with gate:` then `async with asyncio.timeout(timeout):`.",
+        "`asyncio.timeout` raises `TimeoutError` when time is up; catch it inside `one`. Then `await asyncio.gather(*(one(i) for i in ids))`."
+      ],
+      "explain": "Semaphore for politeness (rate limits, connection pools), a per-call timeout so one slow server cannot stall the batch, and `gather` for ordered results: the standard shape of a concurrent client."
+    }
+  ]
+}
