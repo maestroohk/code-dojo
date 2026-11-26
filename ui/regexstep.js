@@ -10,16 +10,16 @@ const FLAG_NAMES = { i: 'IgnoreCase', m: 'Multiline', s: 'Singleline', x: 'Ignor
 /** Every sample the step's checks use, so the learner sees what they are working against. */
 function samples(step) {
   const t = step.tests || {};
-  const asText = v => (typeof v === 'string' ? v : v && typeof v === 'object' ? (v.input != null ? asText(v.input) : `${v.prefix || ''}${(v.repeat || '').repeat(Math.min(v.times || 1, 3))}${v.times > 3 ? '…' : ''}${v.suffix || ''}`) : '');
+  const asText = v => (typeof v === 'string' ? v : Array.isArray(v) ? v.join('\n') : v && typeof v === 'object' ? (v.input != null ? asText(v.input) : `${v.prefix || ''}${(v.repeat || '').repeat(Math.min(v.times || 1, 3))}${v.times > 3 ? '…' : ''}${v.suffix || ''}`) : '');
   const out = [];
-  const add = (kind, label, v) => { const s = asText(v); if (s && !out.some(o => o.text === s)) out.push({ kind, label, text: s }); };
+  const add = (kind, label, v) => { const s = asText(v); if (s && !out.some(o => o.text === s && o.label === label)) out.push({ kind, label, text: s }); };
   for (const v of t.match || []) add('match', 'should match fully', v);
   for (const v of t.find || []) add('find', 'should contain a match', v);
   for (const v of t.reject || []) add('reject', 'should not match', v);
   for (const v of t.noFind || []) add('noFind', 'should contain no match', v);
   for (const o of t.all || []) add('all', `should find ${JSON.stringify(o.matches)}`, o.input);
   for (const o of t.captures || []) add('captures', `groups: ${Object.entries(o.groups || {}).map(([k, v]) => `${/^\d+$/.test(k) ? '$' + k : k}=${JSON.stringify(v)}`).join(', ')}`, o.input);
-  for (const o of t.replace || []) add('replace', `→ ${JSON.stringify(typeof o.output === 'string' ? o.output : '')}`, o.input);
+  for (const o of t.replace || []) add('replace', `→ ${JSON.stringify(asText(o.output))}`, o.input);
   for (const o of t.split || []) add('split', `split → ${JSON.stringify(o.parts)}`, o.input);
   return out;
 }

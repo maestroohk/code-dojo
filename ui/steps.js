@@ -298,6 +298,7 @@ function predict(step, ctx) {
   const shown = h('div.revealed');
   return {
     el: h('div.predict', prompt(step), step.setup && sqlData(step.setup, ctx, { open: true, label: 'The data this query runs on' }), h('div', { html: codeBlock(step.code, document.documentElement.dataset.codeLang || 'csharp') }),
+      step.stdin != null && h('div.predict-stdin', h('div.field-label', 'Input it reads (what someone types)'), h('div', { html: codeBlock(Array.isArray(step.stdin) ? step.stdin.join('\n') : String(step.stdin), 'text') })),
       h('label.field', h('span.field-label', 'Output'), input), shown),
     ready: () => input.value.trim().length > 0,
     async check() {
@@ -483,6 +484,8 @@ function blanks(step, ctx) {
   const el = h('div.blanks', h('div.step-head', prompt(step), toggle), typedHelp, codeEl, typedEl, bank);
   const board = new Board(el, { tokens, zones, bank, onChange: () => { board.clearMarks(); ctx.onChange(); } });
   const text = id => tokens.find(t => t.id === id).text;
+  // "also": whole other arrangements that are just as right, e.g. [["Right", "Left"]].
+  const alsoOk = gap => (step.also || []).some(arr => arr.length === accept.length && arr.every((a, i) => strip(String(a)) === strip(gap(i + 1))));
   apply();
 
   const drag = boardStep(el, board, {
@@ -496,7 +499,14 @@ function blanks(step, ctx) {
     ready: () => (typing ? inputs.every(i => i.value.trim()) : drag.ready()),
     focus() { if (typing) inputs[0]?.focus(); },
     async check() {
-      if (!typing) return drag.check();
+      if (!typing) {
+        const r = await drag.check();
+        if (r.correct || !alsoOk(zone => { const id = [...board.where].find(([, z]) => z === 's' + zone)?.[0]; return id ? text(id) : ''; })) return r;
+        board.clearMarks();
+        for (const [id, z] of board.where) if (z) board.tokens.get(id).el.classList.add('right');
+        return { correct: true, detail: '' };
+      }
+      if (alsoOk(zone => inputs[zone - 1]?.value ?? '')) { inputs.forEach(i => { i.classList.remove('wrong'); i.classList.add('right'); }); return { correct: true, typed: true, detail: '' }; }
       let right = 0;
       inputs.forEach((input, i) => {
         const ok = accept[i].some(a => strip(a) === strip(input.value));
