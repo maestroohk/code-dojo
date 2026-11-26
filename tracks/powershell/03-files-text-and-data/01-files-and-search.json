@@ -1,0 +1,190 @@
+{
+  "title": "Files and Select-String",
+  "summary": "Walk folder trees with the flags that matter, search logs with Select-String (grep that returns objects), and handle file names with square brackets.",
+  "minutes": 13,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Walking the file system",
+      "body": [
+        "```powershell",
+        "Get-ChildItem C:\\Logs -Recurse -File -Filter *.log     # every .log file below C:\\Logs",
+        "Get-ChildItem . -Recurse -Depth 1 -Directory            # folders, at most one level down",
+        "Get-ChildItem ~ -Force                                  # include hidden files (dot files on Linux)",
+        "Test-Path C:\\Logs\\app.log                               # True / False; -PathType Leaf or Container",
+        "Join-Path $PSScriptRoot 'config' 'app.json'             # builds a path with the right separator",
+        "Split-Path C:\\Logs\\web\\access.log -Leaf                 # access.log  (-Parent gives C:\\Logs\\web)",
+        "New-Item C:\\Reports\\2026 -ItemType Directory -Force     # creates it and its parents; no error if it exists",
+        "```",
+        "",
+        "**`-Filter` versus `-Include`:** `-Filter *.log` is passed to the file system itself, so only matching names come",
+        "back: fast on a network share with a million files. `-Include` and `-Exclude` are applied by PowerShell after",
+        "reading everything, and they accept several patterns (`-Include *.log, *.txt`). Use `-Filter` when one pattern is",
+        "enough.",
+        "",
+        "`Copy-Item`, `Move-Item` and `Remove-Item` take objects from the pipeline, and **all of them support `-WhatIf`**:",
+        "`... | Remove-Item -WhatIf` prints what *would* be deleted and deletes nothing. Run it first, every time."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "On Linux, what does this print?",
+      "lang": "powershell",
+      "code": ["Join-Path /srv app logs", "Split-Path /srv/app/logs/web.log -Leaf"],
+      "answer": ["/srv/app/logs", "web.log"],
+      "verify": false,
+      "explain": "Since PowerShell 6, `Join-Path` takes any number of child parts. On Windows the same lines would use `\\`. Build paths with `Join-Path` rather than string concatenation and you never get `C:\\Logs\\\\app.log` or a missing separator."
+    },
+    {
+      "type": "learn",
+      "title": "Select-String: grep that returns objects",
+      "body": [
+        "`Select-String` searches text with a regular expression, like `grep`, but each hit is a **`MatchInfo` object**:",
+        "",
+        "```powershell",
+        "Select-String -Path ~/logs/*.log -Pattern 'timed out'",
+        "",
+        "billing.log:57:2026-11-26T09:00:56Z ERROR upstream timed out after 30 s (req bi-4056)",
+        "```",
+        "",
+        "That line is only how it is *displayed*. The object has `Filename`, `Path`, `LineNumber`, `Line` and `Matches`",
+        "(the regex matches, with their groups), so you can keep working with it:",
+        "",
+        "```powershell",
+        "Select-String -Path ~/logs/*.log -Pattern 'timed out' | Group-Object Filename -NoElement",
+        "Select-String -Path ~/logs/*.log -Pattern 'req (\\w+-\\d+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }",
+        "```",
+        "",
+        "| Switch | Does |",
+        "|---|---|",
+        "| `-SimpleMatch` | the pattern is plain text, not a regex (for `$`, `(`, `.` in what you search) |",
+        "| `-CaseSensitive` | match case (the default ignores it, unlike grep) |",
+        "| `-Context 2, 3` | also keep 2 lines before and 3 after each hit |",
+        "| `-NotMatch` | lines that do **not** match |",
+        "| `-List` | only the first hit per file (\"which files mention it?\") |",
+        "| `-Raw` | PowerShell 7: output just the matching lines as strings |"
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Where did the timeouts happen?",
+      "prompt": [
+        "The on-call engineer wants every **upstream timeout** (lines containing `timed out`) across the service logs",
+        "`~/logs/*.log`, as a CSV they can open: `~/answers/timeouts.csv` with exactly the columns **`Filename`** and",
+        "**`LineNumber`**, one row per timeout."
+      ],
+      "setup": ["data.sh"],
+      "checks": [
+        { "name": "timeouts.csv lists every timeout",
+          "cmd": ["python3 - <<'EOF'",
+                  "import csv, os, subprocess, sys",
+                  "p = os.path.expanduser('~/answers/timeouts.csv')",
+                  "if not os.path.exists(p): sys.exit('~/answers/timeouts.csv does not exist yet')",
+                  "rows = list(csv.DictReader(open(p, encoding='utf-8-sig')))",
+                  "cols = list(rows[0].keys()) if rows else []",
+                  "if cols != ['Filename', 'LineNumber']: sys.exit(f'columns are {cols[:5]}, expected Filename, LineNumber')",
+                  "out = subprocess.run('cd ~/logs && grep -n \"timed out\" *.log', shell=True, capture_output=True, text=True).stdout",
+                  "want = sorted((l.split(':')[0], l.split(':')[1]) for l in out.splitlines())",
+                  "got = sorted((r['Filename'], r['LineNumber']) for r in rows)",
+                  "if got != want: sys.exit(f'{len(got)} rows, expected {len(want)}; first expected: {want[:3]}')",
+                  "print(f'ok: {len(got)} timeouts')",
+                  "EOF"],
+          "fail": "Not quite: see what the check found." }
+      ],
+      "hints": [
+        "`Select-String -Path ~/logs/*.log -Pattern 'timed out'` finds them. Pipe one hit to `Get-Member` to see its properties.",
+        "`Filename` and `LineNumber` are properties of each hit, so `Select-Object Filename, LineNumber` keeps just those.",
+        "`Select-String -Path ~/logs/*.log -Pattern 'timed out' | Select-Object Filename, LineNumber | Export-Csv ~/answers/timeouts.csv`"
+      ],
+      "solution": [
+        "Select-String -Path ~/logs/*.log -Pattern 'timed out'",
+        "Select-String -Path ~/logs/*.log -Pattern 'timed out' | Select-Object -First 1 | Get-Member -MemberType Property",
+        "Select-String -Path ~/logs/*.log -Pattern 'timed out' | Select-Object Filename, LineNumber | Export-Csv -Path ~/answers/timeouts.csv",
+        "Import-Csv ~/answers/timeouts.csv | Group-Object Filename -NoElement"
+      ],
+      "explain": "On Windows, `Select-String` is the answer to \"there is no grep\": it reads any text file, handles encodings, and its objects export straight to CSV. For huge trees, `rg` (ripgrep) is faster still; `Select-String` wins when you want objects back."
+    },
+    {
+      "type": "learn",
+      "title": "Square brackets are wildcards",
+      "body": [
+        "In `-Path`, PowerShell expands **wildcards**: `*`, `?` and **`[abc]`** (one of these characters). So",
+        "`report[2026-10].txt` does not mean that file; it means `report` + *one character from 2, 0, 2, 6-1, 0* + `.txt`.",
+        "Nothing matches, and many cmdlets then do **nothing at all, without an error**.",
+        "",
+        "Every file cmdlet has a **`-LiteralPath`** parameter that takes the name exactly as written:",
+        "",
+        "```powershell",
+        "Get-Item -LiteralPath 'report[2026-10].txt'",
+        "Move-Item -LiteralPath $file -Destination ~/archive",
+        "```",
+        "",
+        "Use single quotes so `$` and backticks stay literal too. Objects piped from `Get-ChildItem` are bound by their",
+        "`LiteralPath`, so `Get-ChildItem ~/inbox -Filter 'report*' | Move-Item -Destination ~/archive` is safe. In scripts that",
+        "receive paths from users or other systems, prefer `-LiteralPath`."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Archive the reports with brackets in their names",
+      "prompt": [
+        "A reporting tool drops files like `report[2026-10].txt` into `~/inbox`. Try the obvious first:",
+        "`Move-Item ~/inbox/report[2026-10].txt ~/archive`, then `Get-ChildItem ~/inbox`.",
+        "",
+        "Move **both** `report[...]` files into `~/archive`. Leave `summary[final].txt` and `notes.txt` in the inbox."
+      ],
+      "setup": ["data.sh"],
+      "checks": [
+        { "name": "both reports are in ~/archive",
+          "cmd": "test -f ~/archive/'report[2026-10].txt' && test -f ~/archive/'report[2026-11].txt'",
+          "fail": "`~/archive` should contain `report[2026-10].txt` and `report[2026-11].txt`." },
+        { "name": "and gone from the inbox",
+          "cmd": "test ! -e ~/inbox/'report[2026-10].txt' && test ! -e ~/inbox/'report[2026-11].txt'",
+          "fail": "The reports should be moved, not copied." },
+        { "name": "the other files stay",
+          "cmd": "test -f ~/inbox/'summary[final].txt' && test -f ~/inbox/notes.txt && test \"$(ls ~/archive | wc -l)\" = 2",
+          "fail": "`summary[final].txt` and `notes.txt` should still be in `~/inbox`, and only the two reports in `~/archive`." }
+      ],
+      "hints": [
+        "The first `Move-Item` did nothing: `[2026-10]` was read as a wildcard character class.",
+        "`Move-Item -LiteralPath '~/inbox/report[2026-10].txt' -Destination ~/archive` takes the name as written (`~` still works). Or let `Get-ChildItem` find both.",
+        "`Get-ChildItem ~/inbox -Filter 'report*' | Move-Item -Destination ~/archive` (piped objects are bound literally)."
+      ],
+      "solution": [
+        "Move-Item ~/inbox/report[2026-10].txt ~/archive",
+        "Get-ChildItem ~/inbox",
+        "Get-ChildItem ~/inbox -Filter 'report*' | Move-Item -Destination ~/archive -WhatIf",
+        "Get-ChildItem ~/inbox -Filter 'report*' | Move-Item -Destination ~/archive",
+        "Get-ChildItem ~/inbox, ~/archive"
+      ],
+      "explain": "The same trap bites `Remove-Item`: a clean-up that silently skips every file with `[` in its name. When a file cmdlet \"does nothing\", check the name for `[`, `]`, `*` or `?`, and switch to `-LiteralPath` or to piping the objects."
+    },
+    {
+      "type": "order",
+      "prompt": "Put a safe clean-up of old exports in order.",
+      "lines": [
+        "$cutoff = (Get-Date).AddDays(-90)",
+        "$old = Get-ChildItem D:\\Exports -Recurse -File | Where-Object LastWriteTime -lt $cutoff",
+        "$old | Measure-Object Length -Sum",
+        "$old | Remove-Item -WhatIf",
+        "$old | Remove-Item"
+      ],
+      "explain": "Collect the list once, look at how much it is, rehearse with `-WhatIf`, then delete exactly the same list. Re-running `Get-ChildItem` between the rehearsal and the real run could delete something else."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You need every `.log` and `.txt` file under `\\\\fs01\\share`, which holds two million files. Which line is right and fast?",
+      "options": [
+        "`Get-ChildItem \\\\fs01\\share -Recurse -File -Filter *.log`, then a second run with `-Filter *.txt`",
+        "`Get-ChildItem \\\\fs01\\share -Recurse | Where-Object { $_.Extension -in '.log', '.txt' }`",
+        "`Get-ChildItem \\\\fs01\\share -Recurse -Include *.log, *.txt`",
+        "`Get-ChildItem \\\\fs01\\share -Filter *.log, *.txt -Recurse`"
+      ],
+      "answer": 0,
+      "explain": "`-Filter` takes one pattern and is applied by the file system, so each run only transfers matching names over the network. `-Include` and `Where-Object` are correct but read all two million entries first. `-Filter` does not accept a list."
+    }
+  ]
+}
