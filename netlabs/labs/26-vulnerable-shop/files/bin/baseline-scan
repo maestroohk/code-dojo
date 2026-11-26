@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""baseline-scan: a small, offline stand-in for OWASP ZAP's baseline scan (zap-baseline.py).
+
+Like ZAP's baseline, it only looks (passive rules): it requests a few pages, never attacks, and reports what the
+answers give away. The rule ids and names are ZAP's, so the output reads like a real ZAP report.
+
+  baseline-scan                    scan http://shop:8080
+  baseline-scan http://shop:8080   the same, with the target spelled out
+"""
+import re
+import sys
+import urllib.error
+import urllib.request
+
+target = (sys.argv[1] if len(sys.argv) > 1 else "http://shop:8080").rstrip("/")
+paths = ["/", "/login", "/products/1", "/api/products/999999"]
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+opener = urllib.request.build_opener(NoRedirect)
+
+
+def fetch(path):
+    try:
+        r = opener.open(target + path, timeout=8)
+    except urllib.error.HTTPError as e:
+        r = e
+    body = r.read(200000).decode("utf-8", "replace")
+    return r.status if hasattr(r, "status") else r.code, r.headers, body
+
+
+findings = {}
+
+
+def warn(rid, name, url, detail):
+    findings.setdefault((rid, name), []).append((url, detail))
+
+
+login_cookie = None
+for p in paths:
+    try:
+        status, h, body = fetch(p)
+    except Exception as e:  # noqa: BLE001
+        print("could not fetch %s%s: %s" % (target, p, e))
+        continue
+    url = target + p
+    html = "html" in (h.get("Content-Type") or "")
+    if (h.get("X-Content-Type-Options") or "").lower() != "nosniff":
+        warn(10021, "X-Content-Type-Options Header Missing", url, "")
+    csp = h.get("Content-Security-Policy") or ""
+    if html and not csp:
+        warn(10038, "Content Security Policy (CSP) Header Not Set", url, "")
+    if html and "frame-ancestors" not in csp and not h.get("X-Frame-Options"):
+        warn(10020, "Missing Anti-clickjacking Header", url, "no X-Frame-Options and no CSP frame-ancestors")
+    if h.get("Server"):
+        warn(10036, "Server Leaks Version Information via \"Server\" HTTP Response Header Field", url, "Server: " + h.get("Server"))
+    if h.get("X-Powered-By"):
+        warn(10037, "Server Leaks Information via \"X-Powered-By\" HTTP Response Header Field(s)", url, h.get("X-Powered-By"))
+    if html and not h.get("Referrer-Policy"):
+        warn(10063, "Permissions Policy / Referrer-Policy Header Not Set", url, "no Referrer-Policy")
+    if re.search(r"\bat [A-Z][\w.]+\(|System\.\w+Exception|Microsoft\.AspNetCore\.Diagnostics|Stack trace|Unhandled exception", body):
+        warn(90022, "Application Error Disclosure", url, "the answer (HTTP %d) contains a stack trace or exception details" % status)
+
+# Cookies: sign in as the lab's demo customer to see the session cookie.
+try:
+    req = urllib.request.Request(target + "/login", data=b"username=alice&password=wonderland", method="POST")
+    try:
+        r = opener.open(req, timeout=8)
+    except urllib.error.HTTPError as e:
+        r = e
+    for c in r.headers.get_all("Set-Cookie") or []:
+        name = c.split("=", 1)[0]
+        attrs = c.lower()
+        if "httponly" not in attrs:
+            warn(10010, "Cookie No HttpOnly Flag", target + "/login", name)
+        if "samesite" not in attrs:
+            warn(10054, "Cookie without SameSite Attribute", target + "/login", name)
+        if "secure" not in attrs:
+            warn(10011, "Cookie Without Secure Flag", target + "/login", name + " (expected here: the lab has no HTTPS)")
+except Exception as e:  # noqa: BLE001
+    print("could not sign in to check cookies: %s" % e)
+
+print("baseline-scan of %s (passive rules, ZAP rule ids)" % target)
+print()
+for (rid, name), hits in sorted(findings.items()):
+    print("WARN-NEW: %s [%d] x %d" % (name, rid, len(hits)))
+    for url, detail in hits[:4]:
+        print("\t%s%s" % (url, ("  " + detail) if detail else ""))
+print()
+print("FAIL-NEW: 0\tWARN-NEW: %d\tPASS: %d" % (len(findings), max(0, 9 - len(findings))))
+sys.exit(2 if findings else 0)

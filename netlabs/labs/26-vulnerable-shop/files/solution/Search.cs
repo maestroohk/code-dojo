@@ -1,0 +1,23 @@
+namespace Shop;
+
+public static class Search
+{
+    public static void MapSearch(this WebApplication app)
+    {
+        // Search box on the home page: /api/products/search?q=lamp
+        // The search text travels as a parameter ($q): SQLite treats it as a value, never as SQL,
+        // so quotes in it are just characters ("O'Clock" finds the clock lamp).
+        app.MapGet("/api/products/search", (string? q) =>
+        {
+            const string sql = "SELECT id, name, price_cents FROM products WHERE hidden = 0 AND name LIKE '%' || $q || '%' ORDER BY name";
+            return Results.Ok(Db.Query(sql, ("$q", q ?? "")));
+        });
+
+        // Product details for the mobile app.
+        app.MapGet("/api/products/{id:int}", (int id) =>
+        {
+            var p = Db.Query("SELECT id, name, description, price_cents FROM products WHERE id = $id AND hidden = 0", ("$id", id)).First();
+            return Results.Ok(p);
+        });
+    }
+}
