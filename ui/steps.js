@@ -61,6 +61,8 @@ function typeDrill(target, ctx, onClose) {
     assist: false,          // typing practice: no suggestions or auto-closing
     minLines: Math.max(4, target.split('\n').length + 1),
     onRun: () => run(),
+    // The large view shows the sample to copy, the progress and the output beside the editor.
+    popout: { title: 'Type it', side: () => [h('div', h('div.field-label', 'The sample'), h('pre.code', { html: highlight(target) })), meter, note, out] },
     onChange(value) {
       const mine = squash(value);
       let same = 0;
@@ -97,7 +99,7 @@ function typeDrill(target, ctx, onClose) {
 /** An editor pre-filled with a sample, to change and run. */
 function tryIt(source, ctx, onClose) {
   const out = h('div.output', { hidden: true });
-  const editor = createEditor({ value: source, minLines: Math.max(4, source.split('\n').length + 1), onRun: () => run() });
+  const editor = createEditor({ value: source, minLines: Math.max(4, source.split('\n').length + 1), onRun: () => run(), popout: { title: 'Try it', side: () => [out] } });
   const run = async () => {
     out.hidden = false;
     out.replaceChildren(h('span.muted.small', 'Compiling and running…'));
@@ -258,7 +260,10 @@ function order(step, ctx) {
   // Typing mode: the shuffled lines stay on screen as raw material, and you type the program.
   const strip = s => s.replace(/\s+/g, '');
   let typing = prefersTyping();
-  const editor = createEditor({ assist: false, minLines: step.lines.length + 1, onChange: () => ctx.onChange(), onRun: () => ctx.submit() });
+  const editor = createEditor({
+    assist: false, minLines: step.lines.length + 1, onChange: () => ctx.onChange(), onRun: () => ctx.submit(),
+    popout: { title: 'Put in order', runLabel: 'Check', side: () => [list] },
+  });
   const typedBox = h('div.typed-box', h('p.muted', 'Type the lines above in the right order. Spacing does not matter.'), editor.el);
   const dragHelp = h('p.muted', 'Drag the lines, or use the arrows.');
   const apply = () => {
@@ -557,6 +562,8 @@ function code(step, ctx) {
     onRun: () => ctx.submit(),
     minLines: Math.max(cold ? 10 : 6, starter.split('\n').length + 2),
     assist: !cold,
+    // The large view keeps the task, the buttons and the results beside the code.
+    popout: { title: step.title || 'Code', runLabel: 'Run checks', side: () => [coldBanner, promptEl, toolsEl, panel] },
   });
 
   // A gentle timer for a cold step with a "timeLimit": it never fails the step, but going over costs a star.
@@ -606,20 +613,23 @@ function code(step, ctx) {
     },
   }, '↺ Reset');
 
-  const el = h(`div.code-step${cold ? '.cold' : ''}`,
-    cold && h('div.cold-banner',
+  const coldBanner = cold ? h('div.cold-banner',
       h('div', h('b', ctx.mode === 'practice' ? 'Can you still do it?' : 'Cold rebuild: from memory'),
         h('div.muted.small', ctx.mode === 'practice'
           ? 'You proved this before. Write it again from memory: no starter, no hints, no autocomplete.'
           : 'No starter, no hints, no autocomplete, no solution to reveal. Same tests as before. Write what you remember.')),
-      timer),
+      timer) : null;
+  const promptEl = prompt(step);
+  const toolsEl = h('div.code-tools', !step.template && runBtn, step.setup && dataBtn, resetBtn, status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to check · Ctrl + Shift + F: large view'));
+  const el = h(`div.code-step${cold ? '.cold' : ''}`,
+    coldBanner,
     h('div.code-head', step.title && h('h2', step.title), step.mode === 'fix' && h('span.tag.fix', '🐞 Fix the bug'),
       (step.framework || '').split('+').includes('web') && h('span.tag.web', '🌐 Live web server'),
       (step.framework || '').split('+').includes('efcore') && h('span.tag.web', '🗄 EF Core + SQLite'),
       step.carry && ctx.carried && h('span.tag', 'Your code so far')),
-    prompt(step),
+    promptEl,
     editor.el,
-    h('div.code-tools', !step.template && runBtn, step.setup && dataBtn, resetBtn, status, h('span.spacer'), h('span.muted.small', 'Ctrl + Enter to check')),
+    toolsEl,
     panel);
 
   return {
@@ -634,7 +644,7 @@ function code(step, ctx) {
         passed = r.passed;
         const ms = Date.now() - started;
         const late = cold && overTime(ms, step.timeLimit);
-        if (r.passed) { passedMs = ms; tick(); if (interval) clearInterval(interval); ctx.onPassed?.(editor.value, { cold, ms, inTime: !late }); }
+        if (r.passed) { passedMs = ms; tick(); if (interval) clearInterval(interval); ctx.onPassed?.(editor.value, { cold, ms, inTime: !late }); editor.popIn(); }
         const failed = r.tests.filter(t => !t.pass).length;
         return {
           correct: r.passed, overTime: r.passed && late,

@@ -15,7 +15,16 @@ export const setAutocomplete = on => localStorage.setItem('dojo-autocomplete', o
  * @param path      this editor's file path within those files
  * @param onNavigate (path, line, column) when a definition or reference is in another file
  */
-export function createEditor({ value = '', onChange, onRun, minLines = 6, language, assist = true, files, path = 'Program.cs', onNavigate, references, vocab, onGutterClick } = {}) {
+/**
+ * popout: the pop-out (large view) for this editor.
+ *   title       text for the pop-out's header (default: the file name)
+ *   side        () => [elements] shown beside the code while popped out (the task, the output). They are
+ *               moved into the pop-out and put back where they were when it closes.
+ *   runLabel    label of the header's run button (it calls onRun), e.g. 'Run checks'
+ *   onPopOut    replaces the built-in pop-out entirely (Code spaces makes its whole IDE full screen)
+ *   false       no pop-out button
+ */
+export function createEditor({ value = '', onChange, onRun, minLines = 6, language, assist = true, files, path = 'Program.cs', onNavigate, references, vocab, onGutterClick, popout = {} } = {}) {
   const gutter = h('div.ed-gutter', { 'aria-hidden': 'true' });
   const pre = h('pre.ed-pre', { 'aria-hidden': 'true' });
   const area = h('textarea.ed-area', {
@@ -159,7 +168,10 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
     if (e.defaultPrevented) return;      // the assist already handled this key
     const { selectionStart: s, selectionEnd: en, value: v } = area;
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onRun?.(); return; }
-    if (e.key === 'Escape') { area.blur(); return; }
+    // Ctrl+Shift+F: pop the editor out into a large view (and back).
+    if ((e.key === 'F' || e.key === 'f') && e.shiftKey && (e.ctrlKey || e.metaKey) && popout !== false) { e.preventDefault(); togglePop(); return; }
+    if ((e.key === 'b' || e.key === 'B') && (e.ctrlKey || e.metaKey) && !e.shiftKey && popped) { e.preventDefault(); popped.toggleSide(); return; }
+    if (e.key === 'Escape') { if (popped) { e.preventDefault(); popIn(); area.focus(); } else area.blur(); return; }
 
     if (e.key === 'Tab') {
       e.preventDefault();
@@ -205,11 +217,93 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
     }
   });
 
+  // ---- pop-out: a large view of this editor, with the task and output beside it.
+  let popped = null;          // { modal, homes: [[element, placeholder]] } while popped out
+  if (popout !== false) {
+    const btn = h('button.ed-pop-btn', {
+      type: 'button', title: 'Pop out: a large editor with the task and output beside it (Ctrl+Shift+F)', 'aria-label': 'Pop out the editor',
+      onmousedown: e => e.preventDefault(), onclick: () => togglePop(),
+    }, '⤢');
+    root.prepend(h('div.ed-popbar', btn));
+  }
+  function togglePop() { if (popped) popIn(); else popOut(); }
+  function popOut() {
+    if (popped) return;
+    if (popout?.onPopOut) { popout.onPopOut(); return; }
+    const POP_SIZE = 'dojo-editor-pop-size';
+    let size = Number(localStorage.getItem(POP_SIZE)) || 17;
+    const sizeLabel = h('span.ed-modal-size', `${size}px`);
+    const setSize = d => {
+      size = Math.min(28, Math.max(12, size + d));
+      localStorage.setItem(POP_SIZE, String(size));
+      modal.style.setProperty('--ed-pop-font', `${size}px`);
+      sizeLabel.textContent = `${size}px`;
+      paint();
+    };
+    const sideEls = (popout?.side?.() || []).filter(Boolean);
+    const title = (typeof popout?.title === 'function' ? popout.title() : popout?.title) || path;
+    const main = h('div.ed-modal-main');
+    const side = sideEls.length ? h('div.ed-modal-side') : null;
+    // The side panel (task, results) can be folded away; new results bring it back by themselves.
+    let sideOpen = localStorage.getItem('dojo-pop-side') !== 'closed';
+    const sideBtn = side && h('button.btn.ghost.small', { type: 'button', title: 'Show or hide the task and results (Ctrl+B)', onclick: () => setSide(!sideOpen) });
+    const setSide = (open, remember = true) => {
+      if (!side) return;
+      sideOpen = open;
+      if (remember) localStorage.setItem('dojo-pop-side', open ? 'open' : 'closed');
+      body.classList.toggle('side-hidden', !open);
+      sideBtn.textContent = open ? '◨ Hide side panel' : '◧ Task & results';
+      sideBtn.setAttribute('aria-expanded', String(open));
+    };
+    const body = h(`div.ed-modal-body${side ? '.with-side' : ''}`, main, side);
+    const modal = h('div.ed-modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': `Editor: ${title}` },
+      h('div.ed-modal-head',
+        h('b.ed-modal-title', title),
+        h('span.spacer'),
+        sideBtn,
+        onRun && h('button.btn.primary.small', { type: 'button', onclick: () => onRun() }, `▶ ${popout?.runLabel || 'Run'}`),
+        h('span.ed-modal-zoom',
+          h('button.btn.ghost.small', { type: 'button', title: 'Smaller text', onclick: () => setSize(-1) }, 'A−'),
+          sizeLabel,
+          h('button.btn.ghost.small', { type: 'button', title: 'Larger text', onclick: () => setSize(1) }, 'A+')),
+        h('button.btn.ghost.small', { type: 'button', title: 'Back to the page (Esc)', onclick: () => { popIn(); area.focus(); } }, '⤡ Close  Esc')),
+      body);
+    modal.style.setProperty('--ed-pop-font', `${size}px`);
+    // Move the editor (and the side panels) in, leaving a placeholder to put each one back.
+    const homes = [root, ...sideEls].map(el => { const ph = document.createComment('ed-pop'); el.replaceWith(ph); return [el, ph]; });
+    main.append(root);
+    side?.append(...sideEls);
+    setSide(sideOpen, false);
+    // Results arriving (an .output panel changing) re-open a folded side panel.
+    const watcher = side && new MutationObserver(() => { if (!sideOpen) setSide(true, false); });
+    if (watcher) for (const out of side.querySelectorAll('.output')) watcher.observe(out, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden'] });
+    document.body.append(modal);
+    document.body.classList.add('ed-modal-open');
+    root.classList.add('popped');
+    popped = { modal, homes, watcher, toggleSide: () => setSide(!sideOpen) };
+    paint();
+    area.focus({ preventScroll: true });
+  }
+  function popIn() {
+    if (!popped) return;
+    const { modal, homes, watcher } = popped;
+    popped = null;
+    watcher?.disconnect();
+    for (const [el, ph] of homes) ph.replaceWith(el);
+    modal.remove();
+    if (!document.querySelector('.ed-modal')) document.body.classList.remove('ed-modal-open');
+    root.classList.remove('popped');
+    paint();
+  }
+
   area.value = value;
   paint();
 
   return {
     el: root,
+    /** Open or close the large view (the same as the ⤢ button or Ctrl+Shift+F). */
+    popOut, popIn,
+    get popped() { return !!popped; },
     get value() { return area.value; },
     set value(v) { area.value = v; errorLines = new Set(); warnLines = new Set(); paint(); },
     focus() { area.focus({ preventScroll: true }); },
@@ -246,6 +340,12 @@ export function createEditor({ value = '', onChange, onRun, minLines = 6, langua
     },
   };
 }
+
+// Leaving the page (Back, a link) while an editor is popped out: the pop-out goes with it.
+window.addEventListener('hashchange', () => {
+  document.querySelectorAll('.ed-modal').forEach(m => m.remove());
+  document.body.classList.remove('ed-modal-open');
+});
 
 let measuredFont = null;
 function charWidth(font) {

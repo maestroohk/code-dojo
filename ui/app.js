@@ -1090,10 +1090,13 @@ async function playground() {
     };
     window.addEventListener('message', onMsg);
     leave = () => window.removeEventListener('message', onMsg);
+    const preview = h('div.pg-preview', frame, h('div.ct-head', 'Console'), logs);
     const editor = createEditor({
       value: s.drafts[KEY] ?? sample, minLines: 18,
       onChange: v => { s.drafts[KEY] = v; game.save(); clearTimeout(t); t = setTimeout(render, 400); },
       onRun: render,
+      // The large view keeps the live preview beside the code (moving the frame reloads it, so render again).
+      popout: { title: 'index.html', runLabel: 'Refresh preview', side: () => { setTimeout(render, 0); return [preview]; } },
     });
     page('playground',
       h('div.track-head', h('div', h('h2.track-title', 'Playground'), h('p.muted', 'Try an idea in any language you have installed. Nothing here is graded.'))),
@@ -1106,7 +1109,7 @@ async function playground() {
             h('span.muted.small', s.settings.tailwind ? 'loaded from the Tailwind CDN, so it needs internet' : ''),
             h('span.spacer'),
             h('button.btn.ghost.small', { type: 'button', onclick: async () => { if (await ask('Reset to the example?', { ok: 'Reset' })) { editor.value = sample; delete s.drafts[KEY]; game.save(); render(); } } }, 'Reset'))),
-        h('div.pg-preview', frame, h('div.ct-head', 'Console'), logs)));
+        preview));
     render();
     return;
   }
@@ -1125,11 +1128,14 @@ async function playground() {
     }
     busy = false; runBtn.disabled = false; status.textContent = '';
   };
+  const stdinBox = h('details.stdin', h('summary', 'Program input'), stdin);
   const editor = createEditor({
     value: s.drafts[KEY] ?? sample,
     onChange: v => { s.drafts[KEY] = v; game.save(); },
     onRun: run, minLines: 14,
     onGutterClick: lang.id === 'csharp' ? line => pgDebug?.toggle(line) : undefined,
+    // The large view keeps the program input, the debugger and the output beside the code.
+    popout: { title: `Playground · ${lang.name || lang.id}`, side: () => [stdinBox, pgDebug?.panel, panel] },
   });
   const runBtn = h('button.btn.primary', { type: 'button', onclick: run }, '▶ Run');
   // C#: the time-travel debugger (ui/debugger.js): breakpoints in the gutter, F5 debug, Ctrl+F5 run.
@@ -1145,7 +1151,7 @@ async function playground() {
       h('div.code-tools', runBtn, pgDebug?.button,
         h('button.btn.ghost', { type: 'button', onclick: async () => { if (await ask('Reset to the example?', { ok: 'Reset' })) { editor.value = sample; delete s.drafts[KEY]; game.save(); } } }, 'Reset'),
         status, h('span.spacer'), acToggle(), h('span.muted.small', 'Ctrl+Space suggest · Ctrl+/ comment · Ctrl+Enter run')),
-      h('details.stdin', h('summary', 'Program input'), stdin),
+      stdinBox,
       pgDebug?.panel,
       panel));
 }

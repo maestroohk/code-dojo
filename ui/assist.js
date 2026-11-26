@@ -1,10 +1,17 @@
 import { SQL_KEYWORD_LIST } from './util.js';
+import { markupContext, markupItems, expandAbbreviation, componentsIn, openElement } from './markup-intel.js';
 // Editor assistance, no dependencies: auto-closing brackets, quotes and HTML tags; a completion popup
 // (keywords, words in the file, common library members, HTML tags/attributes, CSS properties and
 // Tailwind classes inside class="..."); Ctrl+Space to complete and Ctrl+/ to toggle comments.
 // Attached to the textarea of ui/editor.js.
 
-const KIND_ICON = { function: 'ƒ', variable: 'x', module: '{}', method: 'ƒ', property: '◆', field: '▪', constant: 'π', event: '⚡', local: 'x', parameter: 'p', namespace: '{}', class: 'C', record: 'R', struct: 'S', interface: 'I', enum: 'E', keyword: 'k' };
+const KIND_ICON = { function: 'ƒ', variable: 'x', module: '{}', method: 'ƒ', property: '◆', field: '▪', constant: 'π', event: '⚡', local: 'x', parameter: 'p', namespace: '{}', class: 'C', record: 'R', struct: 'S', interface: 'I', enum: 'E', keyword: 'k', tag: '<>', component: '<C>', attribute: '=', value: '"', cssprop: '#', snippet: '⇥' };
+
+/** Is the `<` at index lt the start of JSX (not "less than", not a generic like Array<string>)? */
+function jsxAngle(v, lt) {
+  const before = v.slice(Math.max(0, lt - 40), lt).replace(/\s+$/, '');
+  return before === '' || /(?:^|[([{,;:?=&|!>]|\breturn|\byield|\bdefault)$/.test(before);
+}
 // Languages whose completion comes from the server (the `remote` option).
 const REMOTE_LANGS = new Set(['csharp', 'python', 'javascript', 'typescript']);
 const PAIRS = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
@@ -41,9 +48,6 @@ const MEMBERS = {
 };
 MEMBERS.typescript = MEMBERS.javascript;
 
-const HTML_TAGS = 'a abbr article aside audio b blockquote body br button canvas code details dialog div em footer form h1 h2 h3 h4 h5 h6 head header hr html i iframe img input label li link main meta nav ol option p pre script section select small span strong style summary table tbody td textarea th thead title tr ul video'.split(' ');
-const HTML_ATTRS = 'class id style href src alt type name value placeholder disabled checked for title target rel onclick width height role aria-label data-'.split(' ');
-const CSS_PROPS = 'display position top right bottom left width height min-width max-width min-height max-height margin padding border border-radius background background-color color font font-size font-weight font-family line-height letter-spacing text-align text-decoration gap flex flex-direction flex-wrap justify-content align-items align-self grid grid-template-columns grid-template-rows overflow opacity transform transition animation box-shadow cursor z-index content outline'.split(' ');
 
 let tailwind = null;
 /** Tailwind's utility vocabulary, generated once: spacing, sizing, colours, type, layout, effects. */
@@ -88,17 +92,26 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
     const lineStart = v.lastIndexOf('\n', pos - 1) + 1;
     const before = v.slice(lineStart, pos);
     const L = lang();
-    if (isHtml() || L === 'javascript' && /<[a-z]*$/i.test(before) && /<\w/.test(v)) {
-      const cls = before.match(/class(?:Name)?="([^"]*)$/);
-      if (cls) { const word = cls[1].split(/\s+/).pop(); const variant = word.match(/^((?:[a-z0-9]+:)*)/)[1]; return { word: word.slice(variant.length), list: tailwindClasses(), min: 1 }; }
-      const tag = before.match(/<([a-z0-9]*)$/i);
-      if (tag) return { word: tag[1], list: HTML_TAGS, min: 0 };
-      const inTag = /<[a-z][^>]*\s([a-z-]*)$/i.exec(before);
-      if (inTag) return { word: inTag[1], list: HTML_ATTRS, min: 0 };
-      const inStyle = v.lastIndexOf('<style', pos) > v.lastIndexOf('</style>', pos);
-      if (inStyle) { const w = before.match(/([a-z-]*)$/i)[1]; if (/^\s*[a-z-]*$/i.test(before)) return { word: w, list: CSS_PROPS, min: 1 }; }
-      const inScript = v.lastIndexOf('<script', pos) > v.lastIndexOf('</script>', pos);
-      if (!inScript) return null;
+    const jsx = L === 'javascript' || L === 'typescript';
+    // HTML, JSX and CSS: tags, attributes for that tag, values, CSS properties, each with a description.
+    if (isHtml() || jsx || L === 'css') {
+      const mc = L === 'css' ? cssOnly(v, pos) : markupContext(v, pos, { jsx });
+      if (mc && (!jsx || mc.lt === undefined || jsxAngle(v, mc.lt))) {
+        if (mc.kind === 'close') mc.open = openElement(v.slice(0, mc.lt));
+        if (mc.kind === 'value' && (mc.attr === 'class' || mc.attr === 'className')) {
+          // Tailwind: complete the last class, after any variant such as hover: or md:
+          const variant = mc.word.match(/^((?:[a-z0-9-]+:)*)/)[1];
+          return { word: mc.word.slice(variant.length), items: tailwindClasses().map(label => ({ label, kind: 'value' })), min: 1, markup: true };
+        }
+        const items = markupItems(mc, { jsx, components: jsx ? componentsIn(v) : [], tailwind: tailwindClasses });
+        if (items.length) return { word: mc.word, items, min: mc.kind === 'attr' || mc.kind === 'cssprop' ? 1 : 0, markup: true };
+        if (mc.kind !== 'cssvalue') return null;
+      }
+      if (isHtml()) {
+        const inScript = v.lastIndexOf('<script', pos) > v.lastIndexOf('</script>', pos);
+        if (!inScript) return null;
+      }
+      if (L === 'css') return null;
     }
     const dot = before.match(/([A-Za-z_]\w*)\.(\w*)$/);
     const base = L === 'html' ? 'javascript' : L;
@@ -118,11 +131,19 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
     return { word: w[1], list: [...words], min: 2 };
   }
 
+  /** CSS files: a declaration property or value at the caret. */
+  function cssOnly(v, pos) {
+    const ctx = markupContext(`<style>${v.slice(0, pos)}`, pos + 7, { jsx: false });
+    return ctx && (ctx.kind === 'cssprop' || ctx.kind === 'cssvalue') ? ctx : null;
+  }
+
   let asked = 0, timer = null;
   function refresh(force = false) {
     if (!enabled() && !force) return close();
     const ctx = context();
     if (!ctx || (ctx.word.length < ctx.min && !force)) return close();
+    // Markup (HTML/JSX tags, attributes, CSS) is answered here, with descriptions.
+    if (ctx.markup) { clearTimeout(timer); asked++; return show(ctx, ctx.items); }
     // C#, Python, JS/TS: the server knows the real members and what is in scope; ask it (debounced).
     if (remote && REMOTE_LANGS.has(lang())) {
       const ticket = ++asked;
@@ -141,8 +162,10 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
 
   function show(ctx, list) {
     const w = ctx.word.toLowerCase();
-    items = list.filter(x => x.label.toLowerCase().startsWith(w) && x.label !== ctx.word)
-      .sort((a, b) => (a.label.length - b.label.length) || a.label.localeCompare(b.label)).slice(0, 50);
+    // Prefix matches first; markup also matches inside names (typing "click" finds onClick).
+    const score = x => { const l = x.label.toLowerCase(); return l.startsWith(w) ? 0 : ctx.markup && w.length > 1 && l.includes(w) ? 1 : -1; };
+    items = list.filter(x => score(x) >= 0 && x.label !== ctx.word)
+      .sort((a, b) => (score(a) - score(b)) || ((a.sort ?? 1) - (b.sort ?? 1)) || (a.label.length - b.label.length) || a.label.localeCompare(b.label)).slice(0, 50);
     if (!items.length) return close();
     from = area.selectionStart - ctx.word.length;
     sel = 0; open = true;
@@ -181,10 +204,15 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
   }
 
   function accept() {
-    const choice = items[sel].label;
+    const it = items[sel];
+    const text = it.insert ?? it.label;
     area.setSelectionRange(from, area.selectionStart);
-    insert(choice);
+    insert(text);
     close();
+    // Snippets put the caret where you type next: inside "", {} or {{ }}.
+    if (it.caret !== undefined) { const at = from + it.caret; area.setSelectionRange(at, at); }
+    // An attribute that takes known values (type="", target="", class="") shows them straight away.
+    if (/=["']$/.test(area.value.slice(0, area.selectionStart)) || /:\s$/.test(text)) refresh(true);
   }
 
   area.addEventListener('keydown', e => {
@@ -196,6 +224,10 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
       if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); return; }
     }
     if (e.key === ' ' && e.ctrlKey) { e.preventDefault(); refresh(true); return; }
+    // Emmet-style: div.card, ul>li*3, section#hero, ! (an HTML page), then Tab.
+    if (e.key === 'Tab' && !e.shiftKey && s === en && (isHtml() || lang() === 'javascript' || lang() === 'typescript') && expand(v, s)) {
+      e.preventDefault(); e.stopImmediatePropagation(); return;
+    }
     if (e.key === '/' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); toggleComment(); return; }
     if (!enabled()) return;
 
@@ -215,17 +247,20 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
     if (e.key === 'Backspace' && s === en && PAIRS[v[s - 1]] === v[s] && v[s] !== undefined) {
       e.preventDefault(); area.setSelectionRange(s - 1, s + 1); insert(''); return;
     }
-    // HTML: '>' after an opening tag writes the closing tag.
+    // HTML and JSX: '>' after an opening tag writes the closing tag.
     if (e.key === '>' && (isHtml() || lang() === 'javascript' || lang() === 'typescript')) {
       const before = v.slice(0, s);
-      const m = before.match(/<([a-zA-Z][\w-]*)(\s[^<>]*)?$/);
-      if (m && !before.endsWith('/') && !VOID_TAGS.has(m[1].toLowerCase()) && (isHtml() || /^[A-Za-z]/.test(m[1]))) {
+      const m = before.match(/<([a-zA-Z][\w.$-]*)((?:\s(?:[^<>"'{}]|"[^"]*"|'[^']*'|\{[^{}]*\})*)?)$/);
+      // In JS/TS only real JSX: not a generic (Array<string>), not a comparison (a <b), not an arrow (=>).
+      const jsxOk = isHtml() || (m && jsxAngle(v, s - m[0].length));
+      if (m && jsxOk && !before.endsWith('/') && !before.endsWith('=') && !VOID_TAGS.has(m[1].toLowerCase())) {
         e.preventDefault(); insert(`></${m[1]}>`); area.setSelectionRange(s + 1, s + 1); return;
       }
     }
-    // HTML: '</' closes the innermost open tag.
-    if (e.key === '/' && isHtml() && v[s - 1] === '<') {
-      const open = unclosedTag(v.slice(0, s - 1));
+    // HTML and JSX: '</' closes the innermost open element.
+    // In JSX the `<` may follow text (<p>Hello</): what counts is that an element is open.
+    if (e.key === '/' && v[s - 1] === '<' && (isHtml() || lang() === 'javascript' || lang() === 'typescript')) {
+      const open = isHtml() ? unclosedTag(v.slice(0, s - 1)) : openElement(v.slice(0, s - 1));
       if (open) { e.preventDefault(); insert(`/${open}>`); return; }
     }
   }, true);
@@ -234,6 +269,33 @@ export function attachAssist(area, { language = () => 'csharp', enabled = () => 
   area.addEventListener('blur', () => setTimeout(close, 120));
   area.addEventListener('click', close);
   area.addEventListener('scroll', () => open && render());
+
+  /** Expand the abbreviation before the caret. Returns true when it did. */
+  function expand(v, s) {
+    const lineStart = v.lastIndexOf('\n', s - 1) + 1;
+    const line = v.slice(lineStart, s);
+    const m = /([!\w.#>*-]+)$/.exec(line);
+    if (!m) return false;
+    const lead = line.slice(0, line.length - m[1].length);
+    // Only where markup can go: start of a line, or right after a tag, ( or return.
+    if (!/^\s*$|[>(]\s*$|\breturn\s+$/.test(lead)) return false;
+    const jsx = !isHtml();
+    if (isHtml() && markupContext(v, s, { jsx: false })?.kind) return false;       // inside a tag: not here
+    if (jsx) {
+      // In JS/TS a bare word only expands inside JSX; div.card or ul>li always does.
+      const inside = openElement(v.slice(0, s - m[1].length));
+      if (!/[.#>*]/.test(m[1]) && !inside) return false;
+    }
+    const indent = /^\s*/.exec(line)[0];
+    const out = expandAbbreviation(m[1], { jsx, indent });
+    if (!out) return false;
+    const start = s - m[1].length;
+    area.setSelectionRange(start, s);
+    insert(out.text);
+    area.setSelectionRange(start + out.caret, start + out.caret);
+    close();
+    return true;
+  }
 
   function toggleComment() {
     const L = lang();

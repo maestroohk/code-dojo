@@ -114,8 +114,35 @@ const LANGS = {
   json: [JS_TOKEN, new Set(['true', 'false', 'null'])], css: [JS_TOKEN, new Set(['important', 'inherit', 'initial', 'none', 'auto'])],
 };
 
+const MARKUP_LANGS = new Set(['html', 'htm', 'xml', 'svg', 'cshtml', 'razor']);
+const JSX_LANGS = new Set(['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx']);
+const BRACKET_OPEN = '([{', BRACKET_CLOSE = ')]}';
+
 export function highlight(code, lang) {
-  const [TOKEN, KEYWORDS] = LANGS[lang || document.documentElement.dataset.codeLang] || [CS_TOKEN, CS_KEYWORDS];
+  const L = lang || document.documentElement.dataset.codeLang;
+  if (MARKUP_LANGS.has(L)) return highlightMarkup(code);
+  if (L === 'css') return highlightCss(code);
+  const [TOKEN, KEYWORDS] = LANGS[L] || [CS_TOKEN, CS_KEYWORDS];
+  const ctx = { depth: 0 };
+  if (JSX_LANGS.has(L)) return highlightJs(code, 0, false, ctx)[0];
+  return highlightTokens(code, TOKEN, KEYWORDS, ctx);
+}
+
+/** Rainbow brackets: ( [ { take a colour by nesting depth, so matching pairs share one. */
+function bracket(ch, ctx) {
+  if (BRACKET_OPEN.includes(ch)) return `<span class="t-b${ctx.depth++ % 3}">${ch}</span>`;
+  ctx.depth = Math.max(0, ctx.depth - 1);
+  return `<span class="t-b${ctx.depth % 3}">${ch}</span>`;
+}
+
+function identClass(text, code, after, KEYWORDS) {
+  if (KEYWORDS.has(text)) return 't-kw';
+  if (/^\s*\(/.test(code.slice(after, after + 8))) return 't-fn';
+  if (/^[A-Z]/.test(text)) return 't-type';
+  return '';
+}
+
+function highlightTokens(code, TOKEN, KEYWORDS, ctx) {
   let out = '';
   TOKEN.lastIndex = 0;
   let m;
@@ -125,12 +152,262 @@ export function highlight(code, lang) {
     else if (string) out += `<span class="t-str">${esc(text)}</span>`;
     else if (number) out += `<span class="t-num">${text}</span>`;
     else if (ident) {
-      if (KEYWORDS.has(text)) out += `<span class="t-kw">${text}</span>`;
-      else if (/^__\d+__$/.test(text)) out += text;                       // a blank slot, replaced later
-      else if (/^\s*\(/.test(code.slice(TOKEN.lastIndex, TOKEN.lastIndex + 8))) out += `<span class="t-fn">${text}</span>`;
-      else if (/^[A-Z]/.test(text)) out += `<span class="t-type">${text}</span>`;
-      else out += text;
-    } else out += esc(text);
+      if (/^__\d+__$/.test(text)) { out += text; continue; }              // a blank slot, replaced later
+      const cls = identClass(text, code, TOKEN.lastIndex, KEYWORDS);
+      out += cls ? `<span class="${cls}">${text}</span>` : text;
+    } else if (BRACKET_OPEN.includes(text) || BRACKET_CLOSE.includes(text)) out += bracket(text, ctx);
+    else out += esc(text);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- JavaScript / TypeScript with JSX
+
+// Where an expression can start, `<` opens JSX rather than meaning "less than" (or a generic after a name).
+const JSX_AFTER = new Set(['(', '[', '{', ',', ';', ':', '?', '=', '&', '|', '!', 'return', 'yield', 'default', '=>']);
+
+/**
+ * Highlights JS/TS from i. With stopAtBrace, returns at the `}` that closes the expression it was
+ * called for (a JSX `{...}`), without consuming it. Returns [html, index].
+ */
+function highlightJs(code, i, stopAtBrace, ctx) {
+  const TOKEN = new RegExp(JS_TOKEN.source, 'gy');
+  let out = '', depth = 0, prev = '', prev2 = '';
+  while (i < code.length) {
+    TOKEN.lastIndex = i;
+    const m = TOKEN.exec(code);
+    if (!m) break;
+    const [text, comment, string, number, ident] = m;
+    const next = TOKEN.lastIndex;
+    if (comment) { out += `<span class="t-com">${esc(text)}</span>`; i = next; continue; }
+    if (/^\s+$/.test(text)) { out += text; i = next; continue; }
+    if (text === '<' && /[A-Za-z>]/.test(code[next] || '') && (JSX_AFTER.has(prev) || (prev === '>' && prev2 === '=') || prev === '')) {
+      const el = jsxElement(code, i, ctx);
+      if (el) { out += el[0]; i = el[1]; prev = '>'; prev2 = ''; continue; }
+    }
+    if (string) out += `<span class="t-str">${esc(text)}</span>`;
+    else if (number) out += `<span class="t-num">${text}</span>`;
+    else if (ident) {
+      const cls = /^__\d+__$/.test(text) ? '' : identClass(text, code, next, JS_KEYWORDS);
+      out += cls ? `<span class="${cls}">${text}</span>` : text;
+    } else if (text === '{') { depth++; out += bracket(text, ctx); }
+    else if (text === '}') {
+      if (depth === 0 && stopAtBrace) return [out, i];
+      depth--; out += bracket(text, ctx);
+    } else if (BRACKET_OPEN.includes(text) || BRACKET_CLOSE.includes(text)) out += bracket(text, ctx);
+    else out += esc(text);
+    prev2 = prev;
+    prev = ident && !JS_KEYWORDS.has(text) ? 'name' : text === '>' && prev === '=' ? '=>' : text;
+    i = next;
+  }
+  return [out, i];
+}
+
+const P = s => `<span class="t-punct">${esc(s)}</span>`;
+
+/** A JSX `{expression}` at i (code[i] === '{'). Returns [html, index after the closing brace]. */
+function jsxExpression(code, i, ctx) {
+  let out = bracket('{', ctx);
+  const [inner, end] = highlightJs(code, i + 1, true, ctx);
+  out += inner;
+  if (code[end] === '}') return [out + bracket('}', ctx), end + 1];
+  return [out, end];
+}
+
+/**
+ * A JSX element at i (code[i] === '<'): tag or component name, attributes, children, closing tag.
+ * Lenient, because the code is often half-typed: it never fails once the name is read, and stops at
+ * the end of the text. Returns [html, index] or null when this `<` is not JSX after all.
+ */
+function jsxElement(code, i, ctx) {
+  let out = P('<');
+  let j = i + 1;
+  let name = '';
+  if (code[j] !== '>') {
+    const nm = /[A-Za-z_$][\w$.:-]*/y;
+    nm.lastIndex = j;
+    const m = nm.exec(code);
+    if (!m) return null;
+    name = m[0];
+    // `a <b` in plain code: a JSX tag name is followed by a space, `>`, `/` or a newline.
+    if (!/[\s>/]/.test(code[nm.lastIndex] || ' ')) return null;
+    out += `<span class="${/^[A-Z]|\./.test(name) ? 't-comp' : 't-tag'}">${esc(name)}</span>`;
+    j = nm.lastIndex;
+    // Attributes.
+    while (j < code.length) {
+      const c = code[j];
+      if (/\s/.test(c)) { out += c; j++; continue; }
+      if (c === '/' && code[j + 1] === '>') return [out + P('/>'), j + 2];
+      if (c === '>') { out += P('>'); j++; break; }
+      if (c === '{') { const [x, e] = jsxExpression(code, j, ctx); out += x; j = e; continue; }
+      const an = /[A-Za-z_$][\w$:.-]*/y;
+      an.lastIndex = j;
+      const a = an.exec(code);
+      if (!a) { out += esc(c); j++; continue; }
+      out += `<span class="t-attr">${esc(a[0])}</span>`;
+      j = an.lastIndex;
+      const eq = /\s*=\s*/y;
+      eq.lastIndex = j;
+      const e = eq.exec(code);
+      if (!e) continue;
+      out += e[0].replace('=', P('='));
+      j = eq.lastIndex;
+      if (code[j] === '"' || code[j] === "'") {
+        const close = code.indexOf(code[j], j + 1);
+        const end = close < 0 ? code.length : close + 1;
+        out += `<span class="t-aval">${esc(code.slice(j, end))}</span>`;
+        j = end;
+      } else if (code[j] === '{') { const [x, e2] = jsxExpression(code, j, ctx); out += x; j = e2; }
+    }
+  } else { out += P('>'); j++; }                                          // a fragment: <>...</>
+  // Children: text, {expressions}, nested elements, then the closing tag.
+  while (j < code.length) {
+    const c = code[j];
+    if (c === '<' && code[j + 1] === '/') {
+      const cl = /<\/\s*([A-Za-z_$][\w$.:-]*)?\s*>/y;
+      cl.lastIndex = j;
+      const m = cl.exec(code);
+      if (m) {
+        const n = m[1] || '';
+        return [out + P('</') + (n ? `<span class="${/^[A-Z]|\./.test(n) ? 't-comp' : 't-tag'}">${esc(n)}</span>` : '') + P('>'), cl.lastIndex];
+      }
+      out += P('</'); j += 2; continue;
+    }
+    if (c === '<') {
+      const el = jsxElement(code, j, ctx);
+      if (el) { out += el[0]; j = el[1]; continue; }
+      out += esc(c); j++; continue;
+    }
+    if (c === '{') { const [x, e] = jsxExpression(code, j, ctx); out += x; j = e; continue; }
+    let k = j;
+    while (k < code.length && code[k] !== '<' && code[k] !== '{') k++;
+    out += `<span class="t-text">${esc(code.slice(j, k))}</span>`;
+    j = k;
+  }
+  return [out, j];
+}
+
+// ---------------------------------------------------------------- HTML (and XML-like files)
+
+function highlightMarkup(code) {
+  const ctx = { depth: 0 };
+  let out = '', i = 0;
+  const tagCls = n => (/^[A-Z]/.test(n) && !/^[A-Z]+$/.test(n) ? 't-comp' : 't-tag');
+  while (i < code.length) {
+    if (code.startsWith('<!--', i)) {
+      const end = code.indexOf('-->', i + 4);
+      const stop = end < 0 ? code.length : end + 3;
+      out += `<span class="t-com">${esc(code.slice(i, stop))}</span>`;
+      i = stop; continue;
+    }
+    if (/^<![A-Za-z]/.test(code.slice(i, i + 3))) {                        // <!DOCTYPE html>
+      const end = code.indexOf('>', i);
+      const stop = end < 0 ? code.length : end + 1;
+      out += `<span class="t-kw">${esc(code.slice(i, stop))}</span>`;
+      i = stop; continue;
+    }
+    if (code[i] === '<' && /[A-Za-z/?]/.test(code[i + 1] || '')) {
+      const closing = code[i + 1] === '/';
+      const nm = /<\/?\??([A-Za-z][\w.:-]*)/y;
+      nm.lastIndex = i;
+      const m = nm.exec(code);
+      if (!m) { out += esc(code[i++]); continue; }
+      const name = m[1];
+      out += P(m[0].slice(0, m[0].length - name.length)) + `<span class="${tagCls(name)}">${esc(name)}</span>`;
+      i = nm.lastIndex;
+      // Attributes until > or />.
+      while (i < code.length && code[i] !== '>' && !(code[i] === '/' && code[i + 1] === '>') && !(code[i] === '?' && code[i + 1] === '>')) {
+        const c = code[i];
+        if (/\s/.test(c)) { out += c; i++; continue; }
+        const an = /[^\s=>/"']+/y;
+        an.lastIndex = i;
+        const a = an.exec(code);
+        if (!a) {
+          if (c === '"' || c === "'") { const e = code.indexOf(c, i + 1); const s = e < 0 ? code.length : e + 1; out += `<span class="t-aval">${esc(code.slice(i, s))}</span>`; i = s; }
+          else { out += P(c); i++; }
+          continue;
+        }
+        out += `<span class="t-attr">${esc(a[0])}</span>`;
+        i = an.lastIndex;
+        const eq = /\s*=\s*/y;
+        eq.lastIndex = i;
+        const e = eq.exec(code);
+        if (!e) continue;
+        out += e[0].replace('=', P('='));
+        i = eq.lastIndex;
+        const q = code[i];
+        if (q === '"' || q === "'") {
+          const close = code.indexOf(q, i + 1);
+          const stop = close < 0 ? code.length : close + 1;
+          out += `<span class="t-aval">${esc(code.slice(i, stop))}</span>`;
+          i = stop;
+        } else {
+          const uv = /[^\s>]+/y;
+          uv.lastIndex = i;
+          const u = uv.exec(code);
+          if (u) { out += `<span class="t-aval">${esc(u[0])}</span>`; i = uv.lastIndex; }
+        }
+      }
+      if (code[i] === '/' || code[i] === '?') { out += P(code[i] + '>'); i += 2; }
+      else if (code[i] === '>') { out += P('>'); i++; }
+      // The body of <style> and <script> is CSS and JavaScript.
+      const lower = name.toLowerCase();
+      if (!closing && (lower === 'style' || lower === 'script')) {
+        const end = code.toLowerCase().indexOf(`</${lower}`, i);
+        const stop = end < 0 ? code.length : end;
+        const body = code.slice(i, stop);
+        out += lower === 'style' ? highlightCss(body) : highlightJs(body, 0, false, ctx)[0];
+        i = stop;
+      }
+      continue;
+    }
+    if (code[i] === '&') {
+      const ent = /&(#\d+|#x[\da-f]+|[a-z][a-z\d]*);/iy;
+      ent.lastIndex = i;
+      const m = ent.exec(code);
+      if (m) { out += `<span class="t-ent">${esc(m[0])}</span>`; i = ent.lastIndex; continue; }
+    }
+    let k = i + 1;
+    while (k < code.length && code[k] !== '<' && code[k] !== '&') k++;
+    out += `<span class="t-text">${esc(code.slice(i, k))}</span>`;
+    i = k;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- CSS
+
+const CSS_TOKEN = /(\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?)|(@[\w-]+)|(#[\da-fA-F]{3,8}\b)|(-?\d*\.?\d+(?:%|[a-zA-Z]+)?)|(!important)|(--[\w-]+|-?[A-Za-z_][\w-]*)|([\s\S])/g;
+
+function highlightCss(code) {
+  const ctx = { depth: 0 };
+  let out = '', block = 0, inValue = false, m;
+  CSS_TOKEN.lastIndex = 0;
+  while ((m = CSS_TOKEN.exec(code))) {
+    const [text, comment, string, at, hex, num, important, ident] = m;
+    const after = code.slice(CSS_TOKEN.lastIndex, CSS_TOKEN.lastIndex + 40);
+    if (comment) out += `<span class="t-com">${esc(text)}</span>`;
+    else if (string) out += `<span class="t-str">${esc(text)}</span>`;
+    else if (at) out += `<span class="t-kw">${esc(text)}</span>`;
+    else if (hex && inValue) out += `<span class="t-num t-color" style="--sw:${text}">${text}</span>`;
+    else if (num && (inValue || block > 0)) out += `<span class="t-num">${esc(text)}</span>`;
+    else if (important) out += `<span class="t-kw">${text}</span>`;
+    else if (ident) {
+      if (block > 0 && !inValue && /^\s*:/.test(after) && !/^\s*:\s*[a-z-]+\s*[({,]/i.test(after)) out += `<span class="t-prop">${esc(text)}</span>`;
+      else if (inValue) out += `<span class="${/^\s*\(/.test(after) ? 't-fn' : 't-aval'}">${esc(text)}</span>`;
+      else {
+        // A selector: .class, #id, :pseudo or a tag name.
+        const prevCh = code[m.index - 1];
+        out += `<span class="${prevCh === '.' ? 't-type' : prevCh === '#' ? 't-comp' : prevCh === ':' ? 't-fn' : 't-tag'}">${esc(text)}</span>`;
+      }
+    } else if (hex) out += `<span class="t-comp">${esc(text)}</span>`;    // #id in a selector
+    else if (num) out += esc(text);
+    else if (text === '{') { block++; inValue = false; out += bracket(text, ctx); }
+    else if (text === '}') { block = Math.max(0, block - 1); inValue = false; out += bracket(text, ctx); }
+    else if (text === ':' && block > 0 && !inValue) { inValue = true; out += P(':'); }
+    else if (text === ';') { inValue = false; out += P(';'); }
+    else if (text === '(' || text === ')') out += bracket(text, ctx);
+    else out += esc(text);
   }
   return out;
 }

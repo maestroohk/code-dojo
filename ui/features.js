@@ -41,6 +41,10 @@ const FEATURES = [
   { area: 'Tools', items: [
     { name: 'Playground in 7 languages', status: 'done', link: '#/playground', note: 'C#, Python, JavaScript, TypeScript, Java, HTML/CSS/JS with Tailwind; Python charts shown.' },
     { name: 'Editor assistance', status: 'done', note: 'Completion (switchable), auto-closing tags, brackets and quotes, Ctrl+/ comments.' },
+    { name: 'HTML, JSX and CSS IntelliSense', status: 'done', note: 'Tags with descriptions, the attributes each tag takes (className, htmlFor, onClick in JSX), attribute values (type=, target=, rel=), Tailwind classes, your own components, CSS properties and values, and Emmet-style div.card or ul>li*3 + Tab.' },
+    { name: 'Code theme "Dojo Dusk"', status: 'done', note: 'One colour per kind of thing: coral tags, teal components, periwinkle attributes, sage values, slate punctuation; brackets coloured by depth in every language; colour swatches under CSS hex values.' },
+    { name: 'Pop-out editor', status: 'done', note: 'The corner button or Ctrl+Shift+F opens any editor large, with the task and results beside it and its own text size (A−/A+). Ctrl+B folds the side panel; new results bring it back. Esc returns.' },
+    { name: 'Room for the code in Code spaces', status: 'done', link: '#/spaces', note: 'Full screen button; the Problems/Output panel stays folded until a run, build, test or error needs it (Ctrl+J toggles it).' },
     { name: 'C# go to definition, references, hover', status: 'done', note: 'From the real compiler, across files and NuGet packages.' },
     { name: 'Python and TypeScript intelligence', status: 'building', note: 'Definition, references, hover and smarter completion for Python and JS/TS.' },
     { name: 'Workbench', status: 'done', link: '#/workbench', note: 'Run your web apps live, call them, see each request travel through your code; several apps at once.' },

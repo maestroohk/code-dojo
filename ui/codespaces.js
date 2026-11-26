@@ -275,6 +275,8 @@ function ide(page, space) {
           },
           onRun: () => run(),
           onGutterClick: line => toggleBreakpoint(tab, line),
+          // Here the large view is the whole IDE, full screen (explorer, tabs, output and all).
+          popout: { onPopOut: () => toggleFull() },
         });
         tab.el = tab.editor.el;
         tab.editor.setBreakpoints(bps.lines(path));
@@ -583,7 +585,16 @@ function ide(page, space) {
   const bottomBody = h('div.cs-bottom-body');
   let outLines = [];
 
-  function showBottom(tab) { bottomTab = tab; paintBottom(); }
+  // The Problems / Output panel stays folded (just its tab strip) until it has something to show:
+  // running, building or testing opens it, and so do build errors. ▴ ▾ or Ctrl+J folds it by hand.
+  let bottomOpen = localStorage.getItem('dojo-cs-bottom') === 'open';
+  function setBottom(open, remember = true) {
+    bottomOpen = open;
+    if (remember) localStorage.setItem('dojo-cs-bottom', open ? 'open' : 'closed');
+    root?.classList.toggle('bottom-collapsed', !open);
+    paintBottom();
+  }
+  function showBottom(tab) { bottomTab = tab; if (!bottomOpen) setBottom(true, false); else paintBottom(); }
   function paintBottom() {
     const errs = problems.filter(p => p.severity === 'error').length, warns = problems.length - errs;
     const web = runnable()?.kind === 'web' || !!job?.url || webDebugging();
@@ -593,7 +604,8 @@ function ide(page, space) {
       web && h(`button.tab.small${bottomTab === 'request' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('request') }, 'Request'),
       debugging && h(`button.tab.small${bottomTab === 'debug' ? '.active' : ''}`, { type: 'button', onclick: () => showBottom('debug') }, 'Debug output'),
       h('span.spacer'),
-      bottomTab === 'output' && h('button.btn.ghost.small', { type: 'button', onclick: () => { outLines = []; outEl.textContent = ''; } }, 'Clear'));
+      bottomOpen && bottomTab === 'output' && h('button.btn.ghost.small', { type: 'button', onclick: () => { outLines = []; outEl.textContent = ''; } }, 'Clear'),
+      h('button.icon-btn.small.cs-fold', { type: 'button', title: bottomOpen ? 'Fold the panel away (Ctrl+J)' : 'Show the panel (Ctrl+J)', 'aria-expanded': String(bottomOpen), onclick: () => setBottom(!bottomOpen) }, bottomOpen ? '▾' : '▴'));
     put(bottomBody,
       bottomTab === 'problems' && problemsEl,
       bottomTab === 'output' && [outEl, job?.status === 'running' && job.kind === 'run' && stdin],
@@ -993,11 +1005,20 @@ function ide(page, space) {
 
   // ------------------------------------------------------------ layout
 
+  // Full screen: the IDE fills the window, so long files need less scrolling. Esc or the button returns.
+  const fullBtn = h('button.btn.ghost', { type: 'button', title: 'Full screen (Ctrl+Shift+F in the editor, Esc to return)', onclick: () => toggleFull() }, '⤢ Full screen');
+  function toggleFull(on = !root.classList.contains('cs-fullscreen')) {
+    root.classList.toggle('cs-fullscreen', on);
+    document.body.classList.toggle('ed-modal-open', on);
+    fullBtn.textContent = on ? '⤡ Exit full screen' : '⤢ Full screen';
+    active?.editor?.focus();
+  }
+
   const root = h('div.cs-ide',
     h('div.cs-toolbar',
       h('a.back-link.cs-back', { href: '#/spaces' }, '← Spaces'),
       h('b.cs-title', space),
-      targetSel, buildBtn, runBtn, debugBtn, stopBtn, testBtn, installBtn, statusEl, h('span.spacer'), urlEl),
+      targetSel, buildBtn, runBtn, debugBtn, stopBtn, testBtn, installBtn, statusEl, h('span.spacer'), urlEl, fullBtn),
     h('aside.cs-explorer',
       h('div.cs-panel-head', h('b', 'Explorer'), h('span.spacer'),
         h('button.icon-btn.small', { type: 'button', title: 'New file', onclick: () => newEntry('newfile', '') }, '+'),
@@ -1009,15 +1030,18 @@ function ide(page, space) {
     sideEl,
     menu);
   edHost.append(emptyEd);
+  root.classList.toggle('bottom-collapsed', !bottomOpen);
 
   // Keyboard: Ctrl+S save, Ctrl+Shift+B build, F5 run.
   const onKey = e => {
+    if (e.key === 'Escape' && root.classList.contains('cs-fullscreen') && !document.querySelector('.ac-pop:not([hidden]), .modal-back')) { e.preventDefault(); toggleFull(false); return; }
     if (debugging && dbg.key(e)) return;
     if (e.key === 'F9') { e.preventDefault(); if (active?.editor) toggleBreakpoint(active, active.editor.caretLine()); return; }
     if (e.key === 'F5' && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); if (!runBtn.disabled) run(); return; }
     if (e.key === 'F5' && !e.shiftKey && !e.altKey && debuggable()) { e.preventDefault(); startDebug(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); e.shiftKey ? saveAll() : save(); }
     else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); runJob('build'); }
+    else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'j') { e.preventDefault(); setBottom(!bottomOpen); }
     else if (e.key === 'F5') { e.preventDefault(); if (!runBtn.disabled) run(); }
   };
   document.addEventListener('keydown', onKey, true);
@@ -1065,6 +1089,7 @@ function ide(page, space) {
     if (dbgLive) call(`${base}/debug/stop`, {}).catch(() => { });     // a debugged app or waiting program ends with the page
     document.removeEventListener('keydown', onKey, true);
     document.removeEventListener('mousedown', closeMenu, true);
+    document.body.classList.remove('ed-modal-open');                      // leaving while full screen
     window.removeEventListener('beforeunload', onUnload);
     // Leaving the page keeps your work: unsaved files are written to disk.
     tabs.filter(t => t.dirty).forEach(t => call(`${base}/file`, { path: t.path, code: t.editor.value }).catch(() => { }));
