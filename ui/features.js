@@ -108,6 +108,19 @@ const IDEAS = [
   { kind: 'Feature', name: 'Explain my error', why: 'Turn compiler and runtime errors into plain-language explanations with the likely fix (an AI tutor if you add an API key).' },
   { kind: 'Feature', name: 'Code katas with a timer', why: 'Short daily katas with personal-best times and a history chart.' },
   { kind: 'Feature', name: 'Completion certificates', why: 'A page per finished topic summarising what you built and mastered.' },
+  // Suggested by Claude on 26 Nov 2026, for review.
+  { kind: 'Topic', name: 'On-call and incident response', why: 'A live lab with a real Prometheus, Grafana and a misbehaving service: read the alert, find the cause from dashboards and logs, mitigate, then write the postmortem. SLOs, error budgets, runbooks.' },
+  { kind: 'Topic', name: 'Code review and pull requests', why: 'Review realistic PR diffs: find the bug, the missing test and the risky migration, write comments that get acted on, and answer review comments on your own PR. Graded against a rubric.' },
+  { kind: 'Topic', name: '.NET performance and diagnostics', why: 'dotnet-counters, dotnet-trace, dotnet-dump, BenchmarkDotNet and allocation profiling on a slow, leaking service you run locally. Measure, fix, prove it with numbers.' },
+  { kind: 'Topic', name: 'Caching with Redis', why: 'A live Redis lab: cache-aside, TTLs and stampedes, distributed locks, rate limiting with sorted sets, pub/sub, and what happens when Redis restarts.' },
+  { kind: 'Topic', name: 'Front end with React and TypeScript', why: 'Hooks, keys and stale-closure bugs, data fetching, forms with validation and accessibility, graded with Testing Library in real Node.' },
+  { kind: 'Topic', name: 'Releasing safely', why: 'Trunk-based development, feature flags, canary and blue-green releases, database migrations that never take the site down, and rolling back in minutes.' },
+  { kind: 'Topic', name: 'Writing at work', why: 'Design docs, ADRs, RFCs, incident reports and PR descriptions that get approved: compare a weak and a strong version, then write your own against a checklist.' },
+  { kind: 'Feature', name: 'A simulated work week', why: 'A ticket queue that spans topics (a bug report, a flaky test, a slow query, a failing deploy) worked in the real labs and terminals, with a standup summary at the end of each day.' },
+  { kind: 'Feature', name: 'Portfolio export to GitHub', why: 'Push your projects and builds to your own repository with a generated README and screenshots, so your work is something you can show.' },
+  { kind: 'Feature', name: 'Skill radar and gap report', why: 'A chart of strength per area from stars, cold rebuilds and lab passes, with the three modules that would raise your weakest area the most.' },
+  { kind: 'Feature', name: 'Review my solution', why: 'After you pass, an optional reviewer (offline rules, or Claude with your API key) comments on naming, edge cases and idioms, like a senior on a PR.' },
+  { kind: 'Feature', name: 'Reading mode for phones', why: 'Learn cards and toolkits laid out for a small screen, so you can revise on the commute and do the hands-on parts at the desk.' },
 ];
 
 const LABEL = { done: 'Done', partial: 'Partly done', building: 'Being built', planned: 'Planned', blocked: 'Blocked here' };
