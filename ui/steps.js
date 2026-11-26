@@ -208,11 +208,7 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-<<<<<<< HEAD
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), step.testviz && testViz(step.testviz), sqlVisuals(step)),
-=======
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.interleave && interleaveCard(step.interleave), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), sqlVisuals(step)),
->>>>>>> worktree-agent-aa1135615f157eca2
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.interleave && interleaveCard(step.interleave), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), step.testviz && testViz(step.testviz), sqlVisuals(step)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }
