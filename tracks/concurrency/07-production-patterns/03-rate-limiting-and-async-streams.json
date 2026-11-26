@@ -1,0 +1,244 @@
+{
+  "title": "Rate limiting and async streams",
+  "summary": "System.Threading.RateLimiting and ASP.NET Core's rate limiter middleware with per-client partitions, then IAsyncEnumerable for streaming pages with cancellation.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Four limiters, one abstraction",
+      "body": [
+        "`System.Threading.RateLimiting` (part of the ASP.NET Core shared framework since .NET 7, and a NuGet package elsewhere) gives one",
+        "`RateLimiter` API with four algorithms:",
+        "",
+        "| Limiter | Allows | Good for |",
+        "|---|---|---|",
+        "| `FixedWindowRateLimiter` | N per window (resets at window edges) | simple quotas; bursty at edges |",
+        "| `SlidingWindowRateLimiter` | N per window, counted in segments | smoother quotas |",
+        "| `TokenBucketRateLimiter` | a bucket refilled at a rate; bursts up to its size | APIs that allow short bursts |",
+        "| `ConcurrencyLimiter` | N **at the same time** (not per second) | protecting a fragile dependency |",
+        "",
+        "In ASP.NET Core:",
+        "",
+        "```csharp fragment",
+        "builder.Services.AddRateLimiter(o =>",
+        "{",
+        "    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;   // the default is 503",
+        "    o.AddPolicy(\"per-key\", http => RateLimitPartition.GetTokenBucketLimiter(",
+        "        http.Request.Headers[\"X-Api-Key\"].ToString(),",
+        "        _ => new TokenBucketRateLimiterOptions { TokenLimit = 20, TokensPerPeriod = 10, ReplenishmentPeriod = TimeSpan.FromSeconds(1) }));",
+        "});",
+        "app.UseRateLimiter();",
+        "app.MapGet(\"/quotes\", GetQuotes).RequireRateLimiting(\"per-key\");",
+        "```",
+        "",
+        "A **partition** gives each client (API key, user id, IP) its own limiter, so one noisy client cannot use up everyone's quota. The",
+        "limits are per process: with 6 replicas, each allows its own quota (a gateway or Redis-based limiter enforces a global one)."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the requirement to the limiter.",
+      "pairs": [
+        ["\"At most 4 report exports running at once\"", "`ConcurrencyLimiter`"],
+        ["\"100 requests per minute per API key, bursts of 20 are fine\"", "`TokenBucketRateLimiter`"],
+        ["\"1,000 calls per hour, counted smoothly\"", "`SlidingWindowRateLimiter`"],
+        ["\"10 login attempts per 15-minute window\"", "`FixedWindowRateLimiter`"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You add `AddRateLimiter` with a policy and `RequireRateLimiting`, but clients over the limit get **503**, and your alerts page the on-call engineer for an outage. What did you forget?",
+      "options": [
+        "`RejectionStatusCode = 429`: the default rejection status is 503",
+        "`app.UseRouting()`",
+        "A `ConcurrencyLimiter`",
+        "Nothing: 503 is the correct status for rate limiting"
+      ],
+      "answer": 0,
+      "explain": "429 Too Many Requests tells the client (and your dashboards) that this is throttling, not an outage. Add a `Retry-After` header in `OnRejected` when you can compute one."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: production concurrency",
+      "body": "The settings and packages behind the patterns in this module.",
+      "toolkit": [
+        {
+          "cmd": "dotnet add package Microsoft.Extensions.Http.Resilience",
+          "what": "Retries with exponential backoff and jitter, timeouts, circuit breaker and hedging for HttpClient, built on Polly v8.",
+          "flags": [["AddStandardResilienceHandler()", "sensible defaults for a typed client"], ["AddStandardHedgingHandler()", "hedged requests for idempotent reads"]],
+          "example": "builder.Services.AddHttpClient<PartnerClient>().AddStandardResilienceHandler();",
+          "when": "every outgoing HTTP client in a service"
+        },
+        {
+          "cmd": "builder.Services.AddRateLimiter(...) / app.UseRateLimiter()",
+          "what": "Inbound limits per endpoint and per partition (key, user, IP).",
+          "flags": [["RejectionStatusCode", "set 429; the default is 503"], ["OnRejected", "add Retry-After, log the client"], ["RequireRateLimiting / DisableRateLimiting", "per endpoint"]],
+          "example": "app.MapPost(\"/exports\", Export).RequireRateLimiting(\"exports\");",
+          "when": "public APIs, expensive endpoints, login",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "dotnet-counters monitor -n Api --counters Microsoft.AspNetCore.RateLimiting,System.Runtime",
+          "what": "Live rate limiter metrics (requests allowed and rejected, active leases, queued requests) next to the runtime's.",
+          "flags": [["--counters", "the meters to show"]],
+          "example": "dotnet-counters monitor -n Api --counters Microsoft.AspNetCore.RateLimiting",
+          "when": "tuning limits under a load test"
+        },
+        {
+          "cmd": "builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(20))",
+          "what": "How long the host waits for hosted services to stop after SIGTERM (default 30 s).",
+          "flags": [["ShutdownTimeout", "keep it below Kubernetes' terminationGracePeriodSeconds"], ["BackgroundServiceExceptionBehavior", "StopHost (default) or Ignore"]],
+          "example": "spec.terminationGracePeriodSeconds: 45   # in the pod spec, with ShutdownTimeout = 30 s",
+          "when": "any service with background work",
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A quota per API key",
+      "framework": "web",
+      "prompt": [
+        "Protect `GET /quotes` with ASP.NET Core's rate limiter:",
+        "",
+        "- a **fixed window** of **3 requests per minute** for **each value of the `X-Api-Key` header** (a partition per key), no queueing;",
+        "- rejected requests get **429 Too Many Requests**;",
+        "- `GET /health` is **not** limited.",
+        "",
+        "You need `using System.Threading.RateLimiting;` and `using Microsoft.AspNetCore.RateLimiting;` at the top. **Run checks** starts the",
+        "app and calls it."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.MapGet(\"/quotes\", () => \"quote of the day\");",
+        "app.MapGet(\"/health\", () => \"ok\");",
+        "",
+        "app.Run();"
+      ],
+      "solution": [
+        "using System.Threading.RateLimiting;",
+        "using Microsoft.AspNetCore.RateLimiting;",
+        "",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddRateLimiter(o =>",
+        "{",
+        "    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;",
+        "    o.AddPolicy(\"per-key\", http => RateLimitPartition.GetFixedWindowLimiter(",
+        "        http.Request.Headers[\"X-Api-Key\"].ToString(),",
+        "        _ => new FixedWindowRateLimiterOptions { PermitLimit = 3, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));",
+        "});",
+        "var app = builder.Build();",
+        "app.UseRateLimiter();",
+        "",
+        "app.MapGet(\"/quotes\", () => \"quote of the day\").RequireRateLimiting(\"per-key\");",
+        "app.MapGet(\"/health\", () => \"ok\");",
+        "",
+        "app.Run();"
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    static HttpRequestMessage Get(string url, string key) => new(HttpMethod.Get, url) { Headers = { { \"X-Api-Key\", key } } };",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        for (var i = 1; i <= 3; i++)",
+        "            DojoWeb.Status($\"Request {i} with key A is allowed\", 200, await http.SendAsync(Get(\"/quotes\", \"A\")));",
+        "        DojoWeb.Status(\"Request 4 with key A gets 429\", 429, await http.SendAsync(Get(\"/quotes\", \"A\")));",
+        "        DojoWeb.Status(\"Key B has its own quota\", 200, await http.SendAsync(Get(\"/quotes\", \"B\")));",
+        "        for (var i = 0; i < 5; i++) await http.SendAsync(Get(\"/health\", \"A\"));",
+        "        DojoWeb.Status(\"/health is not limited\", 200, await http.SendAsync(Get(\"/health\", \"A\")));",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "`builder.Services.AddRateLimiter(o => { o.RejectionStatusCode = StatusCodes.Status429TooManyRequests; o.AddPolicy(\"per-key\", http => RateLimitPartition.GetFixedWindowLimiter(key, _ => options)); });`",
+        "Then `app.UseRateLimiter();` and `.RequireRateLimiting(\"per-key\")` on `/quotes` only. Options: `new FixedWindowRateLimiterOptions { PermitLimit = 3, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }`."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "IAsyncEnumerable: a stream you await",
+      "body": [
+        "`IAsyncEnumerable<T>` is a sequence whose next item may need waiting: pages from an API, rows from a database, messages from a",
+        "channel. Produce it with `async` + `yield return`; consume it with `await foreach`:",
+        "",
+        "```csharp fragment",
+        "static async IAsyncEnumerable<Order> AllOrdersAsync(OrdersApi api, [EnumeratorCancellation] CancellationToken ct = default)",
+        "{",
+        "    for (var page = 1; ; page++)",
+        "    {",
+        "        var batch = await api.GetPageAsync(page, ct);",
+        "        if (batch.Count == 0) yield break;",
+        "        foreach (var order in batch) yield return order;",
+        "    }",
+        "}",
+        "",
+        "await foreach (var o in AllOrdersAsync(api).WithCancellation(ct)) { ... }",
+        "```",
+        "",
+        "- It is **lazy**: the next page is fetched only when the consumer asks for more. Stop early and no more pages are fetched.",
+        "- `[EnumeratorCancellation]` connects the token given to `WithCancellation(ct)` to your parameter. Without it, that token is ignored.",
+        "- ASP.NET Core can return one from an endpoint and streams it as a JSON array; EF Core's `AsAsyncEnumerable()` streams rows."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Stream every page, lazily",
+      "prompt": [
+        "Write **`static async IAsyncEnumerable<string> StreamAsync(Func<int, CancellationToken, Task<List<string>>> fetchPage, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)`**:",
+        "",
+        "- fetch pages 1, 2, 3, ... with `fetchPage(page, ct)` and yield their items in order;",
+        "- stop at the first empty page;",
+        "- fetch a page **only when the consumer needs its items**, and pass the token on."
+      ],
+      "starter": [
+        "static async IAsyncEnumerable<string> StreamAsync(Func<int, CancellationToken, Task<List<string>>> fetchPage, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)",
+        "{",
+        "    var all = new List<string>();",
+        "    for (var page = 1; ; page++)",
+        "    {",
+        "        var items = await fetchPage(page, CancellationToken.None);",
+        "        if (items.Count == 0) break;",
+        "        all.AddRange(items);",
+        "    }",
+        "    foreach (var item in all) yield return item;",
+        "}"
+      ],
+      "solution": [
+        "static async IAsyncEnumerable<string> StreamAsync(Func<int, CancellationToken, Task<List<string>>> fetchPage, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)",
+        "{",
+        "    for (var page = 1; ; page++)",
+        "    {",
+        "        var items = await fetchPage(page, ct);",
+        "        if (items.Count == 0) yield break;",
+        "        foreach (var item in items) yield return item;",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoPages = new List<List<string>> { new() { \"o1\", \"o2\" }, new() { \"o3\", \"o4\" }, new() { \"o5\" }, new() };",
+        "var dojoFetched = 0;",
+        "var dojoTokens = new List<CancellationToken>();",
+        "async Task<List<string>> DojoFetch(int page, CancellationToken ct) { await Task.Yield(); dojoFetched++; dojoTokens.Add(ct); return dojoPages[page - 1]; }",
+        "var dojoAll = new List<string>();",
+        "await foreach (var o in StreamAsync(DojoFetch)) dojoAll.Add(o);",
+        "Dojo.Eq(\"All items, in order\", new List<string> { \"o1\", \"o2\", \"o3\", \"o4\", \"o5\" }, dojoAll);",
+        "Dojo.Eq(\"It stops at the empty page\", 4, dojoFetched);",
+        "dojoFetched = 0; dojoTokens.Clear();",
+        "using var dojoCts = new CancellationTokenSource();",
+        "var dojoFirst = new List<string>();",
+        "await foreach (var o in StreamAsync(DojoFetch).WithCancellation(dojoCts.Token)) { dojoFirst.Add(o); if (dojoFirst.Count == 3) break; }",
+        "Dojo.Eq(\"Taking 3 items fetches only 2 pages\", 2, dojoFetched);",
+        "Dojo.Check(\"The token from WithCancellation reaches fetchPage\", dojoTokens.All(t => t == dojoCts.Token), \"Pass ct (the [EnumeratorCancellation] parameter) to fetchPage.\");"
+      ],
+      "hints": [
+        "Do not collect everything first: `yield return` each item of a page right after fetching that page.",
+        "`for (var page = 1; ; page++) { var items = await fetchPage(page, ct); if (items.Count == 0) yield break; foreach (var item in items) yield return item; }`"
+      ]
+    }
+  ]
+}
