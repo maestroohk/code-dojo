@@ -92,6 +92,26 @@ The learner can play it, step it with ← →, and scrub backwards.
 Top-level statements; local functions and types after them are fine. Keep it small: tracing stops after
 800 steps. Deterministic, like all code.
 
+**`"pytrace"` / `"tstrace"` — Code in motion for Python and TypeScript.** Steps through a program with every frame's
+names on the left and the objects they point to on the right, joined by arrows: two names for one list share one box,
+so aliasing, mutation, mutable defaults, closures (`captured`) and generators (`yields`) are visible. Python is traced
+with `sys.settrace` (`server/intel/pytrace.py`); TypeScript runs in Node and is traced with the real V8 debugger
+(`server/intel/tstrace.js`). 800 steps at most.
+```json
+"pytrace": { "code": ["a = [1, 2]", "b = a", "b.append(3)", "print(a)"], "stdin": "optional" }
+"tstrace": { "code": ["const a: number[] = [1];", "const b = a;", "b.push(2);"] }
+```
+
+**`"eventloop"` — the event loop, recorded from a real run (TypeScript).** The call stack, the microtask queue (promise
+callbacks, resumption after `await`, `queueMicrotask`), the macrotask queue (`setTimeout`, `setInterval`,
+`setImmediate`), `process.nextTick` and the console, replayed one event at a time with a sentence saying why
+(`server/intel/evloop.js`, using `v8.promiseHooks`). Timers really wait, so keep delays to a few ms. No top-level
+`await`: put it in `async function main()`. Give `"expect"` (the output in order) and `dojo validate` checks it.
+```json
+"eventloop": { "code": ["console.log('A');", "setTimeout(() => console.log('C'), 0);", "Promise.resolve().then(() => console.log('B'));"], "expect": ["A", "B", "C"] }
+```
+`dojo validate` runs every visualizer card and fails it if the code crashes (`"expectError": true` allows that).
+
 **`"linq"` — LINQ in motion.** Runs a query with every operator tapped and replays items flowing
 through each stage, showing streaming (`Where`, `Select`) against buffering (`OrderBy`, `GroupBy`).
 ```json
@@ -491,7 +511,7 @@ samples uses the track default.
 
 Set `"language"` in `track.json` to `"python"`, `"javascript"` or `"typescript"`. Code steps then run
 in that language with the machine's own toolchain (Python 3, Node.js; TypeScript runs through Node,
-which strips the types without checking them). The step format is the same as C#:
+which strips the types). The step format is the same as C#:
 
 - `tests` with `stdin` / `expect` / `expectContains`, compared the same way.
 - `require` / `forbid` regexes, tested with comments removed (string contents are NOT removed here).
@@ -505,6 +525,40 @@ which strips the types without checking them). The step format is the same as C#
 | printed text | `Dojo.capture(lambda: f())` | `Dojo.capture(() => f())` |
 
 Put `{{CODE}}` first and the checks after it. `predict` steps run in the track's language too.
+
+**TypeScript is type checked for real.** Before a TypeScript code step runs, **Check** runs `tsc --strict --noEmit`
+(TypeScript 7, with `@types/node` 22, `--erasableSyntaxOnly`, `--moduleDetection force`; flags in `server/TsCheck.cs`) on
+the template with the learner's code in it. A type error fails the step like a compile error, with the compiler's code
+(`TS2322`) and the learner's line; an error in the template's lines shows as "the tests could not use your code". The
+compiler installs itself with npm into `%USERPROFILE%\code-dojo\tools\tsc` the first time. Without it the step still runs
+with a warning, except steps with `"typecheck": "required"` (steps that teach types), which then fail with a message.
+Test types in a template with `// @ts-expect-error` inside a function that is never called: if that line compiles, tsc
+reports `TS2578 Unused '@ts-expect-error'` and the step fails (see `typescript/05-typescript-types/04-generics`).
+
+**Python graded by pytest.** A Python code step with `"pytest"` is run by real pytest
+(`server/PyTest.cs`), in one of two ways:
+
+```json
+"pytest": { "module": "price.py", "tests": ["from price import total", "def test_total():", "    assert total(2) == 20"] }
+```
+Hidden tests: the learner's code is saved as `module` (default `solution.py`) and the `tests` file runs against it. Every
+test, and every `parametrize` case, is one row named by its pytest id.
+
+```json
+"pytest": { "module": "slugify.py", "minTests": 4, "target": ["def slugify(title): ..."],
+            "mutants": [{ "name": "upper case is kept", "replace": [["title.lower()", "title"]], "hint": "optional" }] }
+```
+The learner writes the tests: their code is a test file (`test_<module>`) for the correct `target`. It must pass there,
+have at least `minTests` tests, and then fail on every mutant (the target with each `replace` applied, or a whole `code`).
+Add `require` rules for `@pytest.mark.parametrize`, `pytest.raises`, `monkeypatch` or `tmp_path` when the step teaches
+them. Optional `"files": { "data/x.csv": [...] }` adds files. Mutants must never write outside the run folder.
+On Windows `Path` equality ignores case: compare `path.name` when case matters.
+
+pytest comes from the dojo's tools environment (`%USERPROFILE%\code-dojo\tools\python`, a venv created on first use with
+pytest and mypy), else the data science environment, else the system Python. Without pytest the step says how to install it.
+
+**mypy.** `"mypy": true` on a Python code step also runs `mypy --strict` on the learner's code (as `solution.py`): one row
+plus the errors on their lines. `"mypy": "required"` fails the step when mypy is not installed; `true` only warns.
 The `--puzzles` alternative-answer search only runs for C#. The learner's line numbers in error
 messages are correct; the one-line helper prelude is accounted for.
 

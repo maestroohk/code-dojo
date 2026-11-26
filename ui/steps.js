@@ -6,6 +6,7 @@ import { createEditor } from './editor.js';
 import { state, save } from './game.js';
 import { linqViz } from './linqviz.js';
 import { codeTrace } from './codetrace.js';
+import { memoryTrace, eventLoop } from './polyviz.js';
 import { sqlGrid } from './sqlgrid.js';
 import { overTime, clock } from './pacing.js';
 // "terminal" (a real shell in a container) and "lab" (a visual or live lab challenge): labsteps.js.
@@ -202,7 +203,7 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.regex && regexCard(step.regex), sqlVisuals(step)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), sqlVisuals(step)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }

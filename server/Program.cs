@@ -126,7 +126,10 @@ app.MapPost("/api/run", async (RunRequest req) =>
         var r = await langs.Run(lang, req.Code ?? "", req.Stdin);
         if (!r.Compiled)
             return Results.Json(new { compiled = false, diagnostics = new[] { new Diag("error", lang.Name, r.CompileOutput, 0, 0, "") } }, json);
-        return Results.Json(new { compiled = true, diagnostics = Array.Empty<Diag>(), r.Stdout, r.Stderr, r.ExitCode, r.TimedOut, r.Truncated, r.Ms, r.Images }, json);
+        // TypeScript: Node runs it without checking types, so tsc's errors are shown beside the output as warnings (TsCheck.cs).
+        var typeNotes = other == "typescript" && await TsCheck.Check(req.Code ?? "", 1, int.MaxValue, null, TimeSpan.Zero) is { } td
+            ? td.Select(d => d with { Severity = "warning" }).ToArray() : [];
+        return Results.Json(new { compiled = true, diagnostics = typeNotes, r.Stdout, r.Stderr, r.ExitCode, r.TimedOut, r.Truncated, r.Ms, r.Images }, json);
     }
     if (content.Language(req.Track ?? "csharp") != "csharp") return Results.BadRequest("unsupported language");
     var (runWeb, runEf) = CSharpRunner.Frameworks(req.Framework ?? content.Framework(req.Track ?? "csharp"));
@@ -216,6 +219,8 @@ app.MapPost("/api/intel", async (CodeIntel.Request req) => Results.Json(await Co
 
 // Code in motion: run a program with every statement traced (line, variables, call stack, output).
 app.MapPost("/api/trace", async (CodeTrace.Request req) => Results.Json(await CodeTrace.Run(runner, req), json));
+// The same for Python and TypeScript (names, objects and references), and the TypeScript event loop (PolyViz.cs).
+PolyViz.Map(app, langs, json);
 
 // Workbench: run learner web apps live, send them requests, and watch the traffic between them.
 app.MapGet("/api/apps", () => Results.Json(apps.List(), json));

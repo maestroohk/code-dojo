@@ -5,7 +5,7 @@ namespace CodeDojo;
 
 /// <summary>
 /// Grades code steps written in languages other than C# (Python, JavaScript, TypeScript), with the
-/// same three kinds of check as C#: require/forbid rules, stdin→stdout tests, and a hidden template
+/// same three kinds of check as C#: require/forbid rules, stdinâ†’stdout tests, and a hidden template
 /// that calls Dojo.eq / Dojo.check / Dojo.throws. The Dojo helpers are a one-line prelude, so the
 /// learner's line numbers are only off by one, and that is corrected in error messages.
 /// </summary>
@@ -52,6 +52,29 @@ public static partial class PolyChecker
             results.Add(new(message, !Regex.IsMatch(bare, pattern, RegexOptions.Singleline), "This exercise asks you to solve it another way."));
 
         var template = step["template"] is JsonArray lines ? string.Join('\n', lines.Select(l => (string?)l)) : (string?)step["template"];
+
+        // Python steps graded by pytest (hidden tests, or the learner's own tests against planted bugs): PyTest.cs.
+        if (language == "python" && step["pytest"] is JsonObject) return await PyTest.Check(step, code, results, extra);
+
+        // TypeScript: the real compiler first (tsc --strict --noEmit, TsCheck.cs). A type error fails the step like a compile error.
+        var notes = new List<Diag>();
+        if (language == "typescript")
+        {
+            var source = string.IsNullOrEmpty(template) ? code : template.Replace("{{CODE}}", code);
+            var first = string.IsNullOrEmpty(template) ? 1 : template.Replace("\r\n", "\n").Split('\n').TakeWhile(l => !l.Contains("{{CODE}}")).Count() + 1;
+            var types = await TsCheck.Check(source, first, code.Replace("\r\n", "\n").Split('\n').Length, extra);
+            if (types is null)
+            {
+                if (TsCheck.Required(step)) results.Add(new("Type checks with tsc --strict", false, TsCheck.MissingMessage()));
+                notes.Add(new("warning", "tsc", TsCheck.MissingMessage(), 0, 0, ""));
+            }
+            else if (types.Any(d => d.Severity == "error")) return new(false, false, types, results, "", "", false, 0);
+            else notes.AddRange(types);
+        }
+        // "mypy": true (or "required") also runs mypy --strict on the learner's code (PyTest.cs).
+        if (language == "python" && step["mypy"] is JsonValue mypyFlag && (mypyFlag.TryGetValue<bool>(out var useMypy) ? useMypy : (string?)mypyFlag == "required"))
+            notes.AddRange(await PyTest.Mypy(code, results, extra, (string?)(mypyFlag.TryGetValue<string>(out var s) ? s : null) == "required"));
+
         // Python runs isolated (-I), so the folder holding the used modules goes on sys.path, on the prelude's one line.
         var prelude = Prelude(language) + (extra is { Count: > 0 } && language == "python" ? "; __import__('sys').path.insert(0, __import__('os').getcwd())" : "");
         var program = prelude + "\n" +(string.IsNullOrEmpty(template) ? code : template.Replace("{{CODE}}", code));
@@ -99,7 +122,7 @@ public static partial class PolyChecker
                 }
             }
         }
-        return new(results.Count > 0 && results.All(r => r.Pass), true, [], results, stdout, stderr, timedOut, ms);
+        return new(results.Count > 0 && results.All(r => r.Pass), true, notes, results, stdout, stderr, timedOut, ms);
     }
 
     static string Prelude(string language) => language == "python" ? PythonPrelude : JsPrelude;
