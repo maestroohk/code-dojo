@@ -1,0 +1,111 @@
+{
+ "title": "Senior's toolkit: passwords and login in .NET",
+ "summary": "The framework APIs for hashing and checking passwords, random secrets, constant-time comparison and rate-limiting the login endpoint.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: passwords and login in .NET",
+   "body": "You built password hashing by hand to understand it. At work you use the framework pieces that already get the details right. These are the ones experienced .NET developers reach for.",
+   "toolkit": [
+    {
+     "cmd": "PasswordHasher<TUser>",
+     "what": "ASP.NET Core Identity's hasher (PBKDF2 with a random salt, versioned format). Use it even without the rest of Identity. Package: `Microsoft.Extensions.Identity.Core`.",
+     "flags": [["HashPassword(user, password)", "returns a self-describing string to store"], ["VerifyHashedPassword(user, hash, attempt)", "returns Failed, Success or SuccessRehashNeeded"], ["SuccessRehashNeeded", "correct password but old settings: hash again and save"]],
+     "example": "var hasher = new PasswordHasher<User>();\nvar result = hasher.VerifyHashedPassword(user, user.PasswordHash, attempt);\nif (result == PasswordVerificationResult.SuccessRehashNeeded)\n    user.PasswordHash = hasher.HashPassword(user, attempt);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "Rfc2898DeriveBytes.Pbkdf2(...)",
+     "what": "One-call PBKDF2 when you control the format yourself. Use the static method; the old `Rfc2898DeriveBytes` constructors are obsolete.",
+     "flags": [["iterations", "OWASP suggests 600,000 for HMAC-SHA256"], ["HashAlgorithmName.SHA256", "never the SHA-1 default of older code"], ["outputLength", "32 bytes is typical"]],
+     "example": "byte[] hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, 600_000, HashAlgorithmName.SHA256, 32);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "RandomNumberGenerator.GetBytes(n)",
+     "what": "Cryptographically secure random bytes for salts, reset tokens and session ids. `Random` is predictable and must never be used for secrets.",
+     "flags": [["GetBytes(16)", "a 16-byte salt"], ["GetHexString(32)", "a random hex string of 32 characters"], ["GetString(choices, length)", "random text from your own alphabet"]],
+     "example": "byte[] salt = RandomNumberGenerator.GetBytes(16);\nstring resetToken = RandomNumberGenerator.GetHexString(64);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "CryptographicOperations.FixedTimeEquals(a, b)",
+     "what": "Compare secrets (hashes, tokens, API keys) in time that does not depend on where they differ, so an attacker cannot learn them byte by byte.",
+     "flags": [["ReadOnlySpan<byte>", "compare bytes; hash or decode strings first"], ["different lengths", "returns false at once (length is not secret)"]],
+     "example": "bool ok = CryptographicOperations.FixedTimeEquals(computed, stored);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "AddRateLimiter(...) + RequireRateLimiting(\"login\")",
+     "what": "Slow down password guessing at the endpoint. Built into ASP.NET Core; combine with lockout per account.",
+     "flags": [["AddFixedWindowLimiter(\"login\", ...)", "N attempts per time window"], ["RejectionStatusCode = 429", "the default is 503, which looks like an outage"], ["app.UseRateLimiter()", "the middleware must be in the pipeline"]],
+     "example": "builder.Services.AddRateLimiter(o =>\n{\n    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;\n    o.AddFixedWindowLimiter(\"login\", w => { w.PermitLimit = 5; w.Window = TimeSpan.FromMinutes(1); });\n});\napp.UseRateLimiter();\napp.MapPost(\"/login\", Login).RequireRateLimiting(\"login\");",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "match",
+   "prompt": "Match each result of `VerifyHashedPassword` to what you do.",
+   "pairs": [
+    ["`PasswordVerificationResult.Success`", "sign the user in"],
+    ["`PasswordVerificationResult.SuccessRehashNeeded`", "sign in, then hash again with current settings and save"],
+    ["`PasswordVerificationResult.Failed`", "reject with the same message as an unknown user"]
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "A penetration test reports that password reset links can be guessed: two links issued a second apart share most of their characters. Which line is the cause?",
+   "options": [
+    "`var token = new Random().Next().ToString(\"x8\");`",
+    "`var token = RandomNumberGenerator.GetHexString(64);`",
+    "`var bytes = RandomNumberGenerator.GetBytes(32);`",
+    "`var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));`"
+   ],
+   "answer": 0,
+   "explain": "`Random` is fast and predictable, and a 32-bit value is far too short anyway. Anything an attacker must not guess comes from `RandomNumberGenerator`, with at least 128 bits."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Hash a new password with PBKDF2 and a fresh salt.",
+   "code": [
+    "byte[] salt = RandomNumberGenerator.__1__(16);",
+    "byte[] hash = Rfc2898DeriveBytes.__2__(password, salt, 600_000, HashAlgorithmName.__3__, 32);"
+   ],
+   "blanks": ["GetBytes", "Pbkdf2", "SHA256"],
+   "bank": ["Next", "HashData", "MD5", "SHA1"]
+  },
+  {
+   "type": "mcq",
+   "prompt": "You added a rate limit to `/login`. Under a guessing attack, monitoring pages the on-call engineer: \"login returning 503 Service Unavailable\". What is wrong?",
+   "options": [
+    "The limiter is working, but it rejects with 503 by default; set `RejectionStatusCode = 429` so clients and alerts see Too Many Requests",
+    "The login service has crashed",
+    "`UseRateLimiter` must come after `MapPost`",
+    "Fixed-window limiters always return 503 and cannot be changed"
+   ],
+   "answer": 0,
+   "explain": "503 says the server is broken; 429 says the client is going too fast. The right code keeps alerts quiet, tells well-behaved clients to back off, and is what API gateways expect."
+  },
+  {
+   "type": "sort",
+   "prompt": "Right tool or a mistake?",
+   "buckets": ["Use it", "Mistake"],
+   "items": [
+    ["`PasswordHasher<User>` for stored passwords", 0],
+    ["`CryptographicOperations.FixedTimeEquals` to check an API key hash", 0],
+    ["`RandomNumberGenerator.GetBytes(16)` for a salt", 0],
+    ["`SHA256.HashData(password)` with no salt", 1],
+    ["`storedKey == providedKey` on raw strings", 1],
+    ["`new Rfc2898DeriveBytes(password, salt)` with its default settings", 1]
+   ],
+   "explain": "A plain SHA-256 is far too fast to slow down guessing. `==` stops at the first different character. The old constructor defaults to SHA-1 and 1,000 iterations."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "When you see auth code in review, check three things: passwords go through a slow, salted hasher; every secret comes from `RandomNumberGenerator`; every secret comparison is fixed-time. Put a rate limit returning 429 on login, reset and any endpoint that checks a code."
+  }
+ ]
+}

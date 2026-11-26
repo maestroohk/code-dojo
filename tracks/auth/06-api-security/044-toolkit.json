@@ -1,0 +1,115 @@
+{
+ "title": "Senior's toolkit: CORS, secrets and object-level checks",
+ "summary": "Test a CORS preflight with curl, configure AddCors, keep secrets in user-secrets and Key Vault, find leaked ones in Git, and check ownership with IAuthorizationService.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: CORS, secrets and object-level checks",
+   "body": "API security incidents are usually ordinary: a CORS policy nobody tested, a key committed to Git, an endpoint that never checked who owns the invoice. These are the commands and APIs experienced developers use to prevent and spot them.",
+   "toolkit": [
+    {
+     "cmd": "curl -i -X OPTIONS -H \"Origin: ...\" -H \"Access-Control-Request-Method: ...\"",
+     "what": "Send the preflight a browser would send and read the `Access-Control-Allow-*` headers that come back. Answers \"why does the SPA get a CORS error?\" in one command.",
+     "flags": [["-X OPTIONS", "the preflight method"], ["-H \"Origin: https://app.example.com\"", "the site the call comes from"], ["-H \"Access-Control-Request-Method: PUT\"", "the method the real call will use"], ["-H \"Access-Control-Request-Headers: authorization,content-type\"", "the headers it will send"]],
+     "example": "curl -i -X OPTIONS https://api.example.com/invoices/7 -H \"Origin: https://app.example.com\" -H \"Access-Control-Request-Method: PUT\" -H \"Access-Control-Request-Headers: authorization,content-type\""
+    },
+    {
+     "cmd": "AddCors(o => o.AddPolicy(...))",
+     "what": "Name exactly which origins, methods and headers may call the API from a browser. CORS protects users' browsers; it does not authenticate anyone.",
+     "flags": [["WithOrigins(\"https://app.example.com\")", "exact origins, scheme and port included"], ["WithMethods / WithHeaders", "what the browser may send"], ["AllowCredentials()", "cookies allowed; cannot be combined with `AllowAnyOrigin()`"], ["app.UseCors(\"spa\")", "turn the policy on in the pipeline"]],
+     "example": "builder.Services.AddCors(o => o.AddPolicy(\"spa\", p => p\n    .WithOrigins(\"https://app.example.com\")\n    .WithMethods(\"GET\", \"PUT\")\n    .WithHeaders(\"authorization\", \"content-type\")));\napp.UseCors(\"spa\");",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "dotnet user-secrets",
+     "what": "Keep development secrets out of the repository. They are stored in your user profile (plain text, not encrypted) and loaded as configuration in the Development environment.",
+     "flags": [["init", "add a `UserSecretsId` to the project"], ["set \"Stripe:ApiKey\" \"sk_test_...\"", "store a value under a configuration key"], ["list", "show every stored value"], ["remove \"Stripe:ApiKey\"", "delete one"]],
+     "example": "dotnet user-secrets init\ndotnet user-secrets set \"Stripe:ApiKey\" \"sk_test_51Hx...\"\ndotnet user-secrets list"
+    },
+    {
+     "cmd": "az keyvault secret show",
+     "what": "Read a secret from Azure Key Vault. Apps read the vault through a managed identity; people use this to check that a value is there and current.",
+     "flags": [["--vault-name kv-shop-prod", "which vault"], ["--name Stripe--ApiKey", "the secret; `--` becomes `:` in .NET configuration"], ["--query value -o tsv", "print only the value, no JSON"]],
+     "example": "az keyvault secret show --vault-name kv-shop-prod --name Stripe--ApiKey --query value -o tsv"
+    },
+    {
+     "cmd": "git log -p -S'sk_live_' --all",
+     "what": "Find every commit that added or removed a string, on every branch. If a secret was ever committed, it is in history: rotate it, do not just delete the line.",
+     "flags": [["-S'text'", "commits that change how often `text` appears"], ["-p", "show the diff"], ["--all", "every branch and tag, not just the current one"]],
+     "example": "git log -p -S'sk_live_' --all",
+     "when": "after a leak report, and alongside a secret scanner such as gitleaks or GitHub secret scanning"
+    },
+    {
+     "cmd": "IAuthorizationService.AuthorizeAsync(User, resource, \"policy\")",
+     "what": "Resource-based authorization: check this user against this particular object (is it their invoice?). The framework's answer to broken object-level authorization.",
+     "flags": [["AuthorizationHandler<TRequirement, TResource>", "where the ownership rule lives"], ["result.Succeeded", "allowed or not"], ["return NotFound()", "on failure, often better than 403: it does not confirm the id exists"]],
+     "example": "var invoice = await db.Invoices.FindAsync([id], ct);\nif (invoice is null) return Results.NotFound();\nvar auth = await authz.AuthorizeAsync(user, invoice, \"InvoiceOwner\");\nreturn auth.Succeeded ? Results.Ok(invoice) : Results.NotFound();",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "The SPA at `https://app.example.com` shows this in the console when it sends PUT with a bearer token. What is the fix?",
+   "code": "Access to fetch at 'https://api.example.com/invoices/7' from origin 'https://app.example.com' has been blocked by CORS policy: Request header field authorization is not allowed by Access-Control-Allow-Headers in preflight response.",
+   "options": [
+    "Add `authorization` to the policy's `WithHeaders(...)` (and check PUT is in `WithMethods`), then confirm with a curl OPTIONS preflight",
+    "Switch the policy to `AllowAnyOrigin().AllowAnyHeader()`",
+    "Send the token in the query string instead",
+    "Disable CORS in the browser"
+   ],
+   "answer": 0,
+   "explain": "The preflight asked whether `authorization` may be sent and the answer did not list it. Allow exactly what the SPA needs. Opening everything works but lets any site's scripts call the API from a user's browser."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each preflight request header to what it asks.",
+   "pairs": [
+    ["`Origin`", "which site the script runs on"],
+    ["`Access-Control-Request-Method`", "which method the real request will use"],
+    ["`Access-Control-Request-Headers`", "which extra headers the real request will send"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Store a test API key for local development, then read the production one from Key Vault.",
+   "code": [
+    "dotnet user-secrets __1__ \"Stripe:ApiKey\" \"sk_test_51Hx...\"",
+    "az keyvault secret show --vault-name kv-shop-prod --name __2__ --query value -o tsv"
+   ],
+   "blanks": ["set", "Stripe--ApiKey"],
+   "bank": ["add", "Stripe:ApiKey", "Stripe.ApiKey", "init"],
+   "explain": "Key Vault secret names cannot contain `:`, so .NET's Key Vault configuration provider maps `--` to `:`."
+  },
+  {
+   "type": "order",
+   "prompt": "A live Stripe key was committed to a public repository an hour ago. Put the response in order.",
+   "lines": [
+    "Revoke the key at Stripe and issue a new one",
+    "Store the new key in Key Vault and redeploy",
+    "Check the provider's logs for anything done with the old key since it leaked",
+    "Add a secret scanner to CI so the next one is caught before it is pushed"
+   ],
+   "explain": "Rotate first: bots scan public repositories within minutes, so deleting the line or rewriting history is too late to be the fix. `git log -p -S'sk_live_' --all` then shows whether other branches hold more copies."
+  },
+  {
+   "type": "sort",
+   "prompt": "Where does each value belong?",
+   "buckets": ["`appsettings.json` in Git", "User secrets (dev only)", "Key Vault or the platform's secret store"],
+   "items": [
+    ["The API's public base URL", 0],
+    ["Log levels", 0],
+    ["Your sandbox payment key on your laptop", 1],
+    ["A local database password", 1],
+    ["The production database connection string", 2],
+    ["The production payment provider key", 2]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Test every CORS change with a curl preflight, not by reloading the SPA. Keep secrets out of Git from the first commit, and when one leaks, rotate it before anything else. On every endpoint that takes an id, ask in review: where do we check that this user may see this object?"
+  }
+ ]
+}

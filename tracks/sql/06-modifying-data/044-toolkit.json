@@ -1,0 +1,119 @@
+{
+ "title": "Senior's toolkit: changing data you cannot afford to lose",
+ "summary": "The transaction habit, RETURNING, upserts, batched deletes and safe read-modify-write, with the dialect spellings.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: changing data you cannot afford to lose",
+   "body": "Every engineer who has fixed data in production by hand has a story about a missing WHERE. Seniors follow the same small ritual every time, so a mistake costs one ROLLBACK instead of a restore from backup.",
+   "toolkit": [
+    {
+     "cmd": "BEGIN; ... ROLLBACK;",
+     "what": "Run every manual UPDATE or DELETE inside a transaction. Check the row count and the result, then COMMIT, or ROLLBACK and nothing happened.",
+     "flags": [["BEGIN", "start a transaction (SQL Server: `BEGIN TRAN`)"], ["ROLLBACK", "undo everything since BEGIN"], ["COMMIT", "make it permanent; only after you checked"]],
+     "example": "BEGIN;\nUPDATE customers SET tier = 'gold' WHERE id IN (12, 48);\n-- psql prints UPDATE 2: is that what you expected?\nCOMMIT;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "SELECT COUNT(*) ... WHERE <same condition>",
+     "what": "Write the WHERE as a SELECT first, see how many rows and which ones, then change only the first line into UPDATE or DELETE.",
+     "flags": [["SELECT COUNT(*)", "how many rows will change"], ["SELECT ... LIMIT 10", "look at a sample of them"]],
+     "example": "SELECT COUNT(*) FROM shelters WHERE closed_at IS NULL AND region = 'north';\nUPDATE shelters SET closed_at = '2026-03-04T02:00:00Z' WHERE closed_at IS NULL AND region = 'north';",
+     "lang": "sql"
+    },
+    {
+     "cmd": "UPDATE ... RETURNING id, stock",
+     "what": "Get back the rows a statement changed, in the same round trip (PostgreSQL, SQLite 3.35+). SQL Server spells it `OUTPUT inserted.id, inserted.stock`.",
+     "flags": [["RETURNING *", "every column of each changed row"], ["INSERT ... RETURNING id", "the generated key without a second query"], ["DELETE ... RETURNING *", "a record of what you removed"]],
+     "example": "UPDATE stock SET qty = qty - 1 WHERE sku = 'A1' AND qty > 0 RETURNING sku, qty;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "INSERT ... ON CONFLICT (sku) DO UPDATE",
+     "what": "Insert, or update the existing row if the key is taken: an upsert (PostgreSQL, SQLite). SQL Server uses `MERGE`; MySQL uses `ON DUPLICATE KEY UPDATE`.",
+     "flags": [["ON CONFLICT (sku)", "the unique column(s) that decide a clash"], ["excluded.qty", "the value you tried to insert"], ["DO NOTHING", "skip duplicates silently"]],
+     "example": "INSERT INTO stock (sku, qty) VALUES ('A1', 5)\nON CONFLICT (sku) DO UPDATE SET qty = stock.qty + excluded.qty;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "UPDATE ... SET stock = stock - 1 WHERE stock > 0",
+     "what": "An atomic read-modify-write: the check and the change happen in one statement, so two requests cannot both sell the last item. Check the affected row count: 0 means sold out.",
+     "flags": [["SET x = x - 1", "change relative to the current value, not a value read earlier"], ["WHERE x > 0", "the business rule, enforced at write time"], ["SELECT ... FOR UPDATE", "PostgreSQL/MySQL: lock rows you read when the logic needs several statements"]],
+     "example": "BEGIN;\nSELECT seats_left FROM shows WHERE id = 9 FOR UPDATE;\nUPDATE shows SET seats_left = seats_left - 2 WHERE id = 9;\nCOMMIT;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "DELETE ... WHERE id IN (SELECT id ... LIMIT 5000)",
+     "what": "Delete or update millions of rows in batches. One giant statement holds locks for minutes and bloats the log; small batches let other work through. Repeat until it affects 0 rows.",
+     "flags": [["LIMIT 5000", "batch size; tune so each batch takes well under a second"], ["repeat until 0 rows", "a loop in a script or job"], ["SQL Server", "`DELETE TOP (5000) FROM ...`"]],
+     "example": "DELETE FROM events\nWHERE id IN (SELECT id FROM events WHERE created_at < '2025-01-01' LIMIT 5000);",
+     "lang": "sql"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "In psql you typed `BEGIN;` and then the line below, meaning to change one customer. psql prints `UPDATE 48213`. What do you type next?",
+   "code": "UPDATE customers SET email = NULL;",
+   "options": [
+    "`ROLLBACK;`, then rewrite it with the `WHERE id = ...` you forgot, and check the count says 1",
+    "`COMMIT;` and restore the emails from last night's backup",
+    "Close psql: the change is not saved yet",
+    "`UPDATE customers SET email = email;` to undo it"
+   ],
+   "answer": 0,
+   "explain": "Inside a transaction nothing is visible to others until COMMIT, and ROLLBACK undoes it all. (Closing psql would also roll back, but say what you mean.) Without the BEGIN, the 48,213 changes would already be permanent."
+  },
+  {
+   "type": "order",
+   "prompt": "Put the steps of a safe manual fix in order.",
+   "lines": [
+    "BEGIN;",
+    "SELECT COUNT(*) FROM orders WHERE status = 'stuck' AND placed_at < '2026-03-01';",
+    "UPDATE orders SET status = 'cancelled' WHERE status = 'stuck' AND placed_at < '2026-03-01' RETURNING id;",
+    "-- check: the UPDATE count matches the SELECT count, and the ids look right",
+    "COMMIT;"
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Add 5 to the stock of `A1`, inserting the row if it does not exist yet.",
+   "code": [
+    "INSERT INTO stock (sku, qty) VALUES ('A1', 5)",
+    "ON CONFLICT (sku) DO __1__ SET qty = stock.qty + __2__.qty;"
+   ],
+   "blanks": ["UPDATE", "excluded"],
+   "bank": ["NOTHING", "inserted", "new"],
+   "explain": "`excluded` is the row you tried to insert. `inserted` is SQL Server's name in `OUTPUT` and triggers, not valid here."
+  },
+  {
+   "type": "mcq",
+   "prompt": "Two web servers handle \"buy the last ticket\" at the same moment. Each runs `SELECT seats_left` (gets 1), checks it is above 0, then runs `UPDATE shows SET seats_left = 0`. Two tickets are sold. Which change fixes it with the least code?",
+   "options": [
+    "One statement: `UPDATE shows SET seats_left = seats_left - 1 WHERE id = 9 AND seats_left > 0`, and treat 0 affected rows as sold out",
+    "Wrap the SELECT and UPDATE in a transaction at the default isolation level",
+    "Add an index on `seats_left`",
+    "Retry the UPDATE if it fails"
+   ],
+   "answer": 0,
+   "explain": "The read and the write were separate, so both saw 1. At the default READ COMMITTED level a transaction alone does not stop that in PostgreSQL or SQL Server. The conditional update checks and changes atomically; `SELECT ... FOR UPDATE` is the alternative when the logic needs several steps."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each spelling to its engine.",
+   "pairs": [
+    ["`UPDATE ... RETURNING *`", "PostgreSQL and SQLite: return the changed rows"],
+    ["`UPDATE ... OUTPUT inserted.*`", "SQL Server: return the changed rows"],
+    ["`INSERT ... ON CONFLICT DO UPDATE`", "PostgreSQL and SQLite: upsert"],
+    ["`INSERT ... ON DUPLICATE KEY UPDATE`", "MySQL: upsert"],
+    ["`DELETE TOP (5000) FROM events`", "SQL Server: delete one batch"]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Never run a manual UPDATE or DELETE outside `BEGIN`, and always run the SELECT with the same WHERE first. In application code, put business rules into the WHERE of the write itself, and check the affected row count."
+  }
+ ]
+}

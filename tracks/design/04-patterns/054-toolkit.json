@@ -1,0 +1,126 @@
+{
+ "title": "Senior's toolkit: patterns the .NET container gives you",
+ "summary": "Strategies, factories, decorators, observers and options as you actually write them in a .NET app.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: patterns the .NET container gives you",
+   "body": "In a modern .NET app you rarely hand-write a pattern from the book. The dependency injection container, events and the options system already do most of it; knowing their APIs is what lets you apply a pattern in five lines.",
+   "toolkit": [
+    {
+     "cmd": "builder.Services.AddKeyedSingleton<INotifier, SmsNotifier>(\"sms\");",
+     "what": "Keyed services (.NET 8+): several implementations of one interface, chosen by a key. A strategy picked by name, with no switch statement.",
+     "flags": [["AddKeyedSingleton / AddKeyedScoped / AddKeyedTransient", "the usual lifetimes, plus a key"], ["[FromKeyedServices(\"sms\")]", "ask for a keyed service in a constructor or endpoint parameter"], ["GetRequiredKeyedService<T>(key)", "resolve by a key known only at run time"]],
+     "example": "builder.Services.AddKeyedSingleton<INotifier, SmsNotifier>(\"sms\");\nbuilder.Services.AddKeyedSingleton<INotifier, EmailNotifier>(\"email\");\n\npublic sealed class Alerts([FromKeyedServices(\"sms\")] INotifier sms) { }",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "IEnumerable<INotifier>",
+     "what": "Register several implementations without keys and inject `IEnumerable<T>` to get all of them, in registration order. The simplest way to run every rule or every channel.",
+     "flags": [["IEnumerable<T>", "every registration of T"], ["T alone", "only the last one registered"]],
+     "example": "builder.Services.AddSingleton<INotifier, SmsNotifier>();\nbuilder.Services.AddSingleton<INotifier, EmailNotifier>();\n\npublic sealed class Hub(IEnumerable<INotifier> all) { }",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "services.AddSingleton<INotifier>(sp => ...)",
+     "what": "A factory registration: you decide how the object is built. Use it to wrap one implementation in another (a decorator) or to pass settings in.",
+     "flags": [["sp => ...", "a lambda that receives the container"], ["sp.GetRequiredService<T>()", "resolve the pieces you are wrapping"]],
+     "example": "builder.Services.AddSingleton<SmtpNotifier>();\nbuilder.Services.AddSingleton<INotifier>(sp =>\n    new LoggingNotifier(sp.GetRequiredService<SmtpNotifier>(), sp.GetRequiredService<ILogger<LoggingNotifier>>()));",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "services.Decorate<INotifier, LoggingNotifier>();",
+     "what": "Decorators in one line with **Scrutor**, a popular third-party package (not part of .NET). It replaces the registration with your wrapper around the original.",
+     "flags": [["Decorate<TService, TDecorator>()", "wrap the existing registration"], ["call it again", "stack another decorator on the outside"], ["Scan(...)", "Scrutor's other feature: register types by convention"]],
+     "example": "builder.Services.AddSingleton<INotifier, SmtpNotifier>();\nbuilder.Services.Decorate<INotifier, RetryingNotifier>();\nbuilder.Services.Decorate<INotifier, LoggingNotifier>();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "public event EventHandler<OrderPlacedEventArgs>? OrderPlaced;",
+     "what": "The observer pattern built into C#. Subscribers add handlers; the owner raises the event without knowing who listens.",
+     "flags": [["+= / -=", "subscribe / unsubscribe; forgetting `-=` keeps the subscriber alive"], ["?.Invoke(this, e)", "raise it safely when nobody subscribed"], ["handlers run in order", "synchronously, one after another, on the raising thread"]],
+     "example": "OrderPlaced?.Invoke(this, new OrderPlacedEventArgs(order.Id));",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "services.AddOptions<HubOptions>().BindConfiguration(\"Hub\")",
+     "what": "The options pattern: bind a settings section to a class, validate it, inject it. Configuration stops leaking into every class as raw strings.",
+     "flags": [["ValidateDataAnnotations()", "check `[Required]`, `[Range]` attributes"], ["ValidateOnStart()", "fail at start-up, not at the first request"], ["IOptions / IOptionsSnapshot / IOptionsMonitor", "read once / per request / with live reload"]],
+     "example": "builder.Services.AddOptions<HubOptions>()\n    .BindConfiguration(\"Hub\")\n    .ValidateDataAnnotations()\n    .ValidateOnStart();",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "You switched the notifiers to `AddKeyedSingleton<INotifier, SmsNotifier>(\"sms\")`. Now a request fails with this. Why?",
+   "code": "System.InvalidOperationException: Unable to resolve service for type 'INotifier' while attempting to activate 'Alerts'.",
+   "options": [
+    "A keyed registration is invisible to a plain `INotifier` parameter; `Alerts` must ask for `[FromKeyedServices(\"sms\")] INotifier`",
+    "Keyed services only work with `AddKeyedScoped`",
+    "`Alerts` must be registered as keyed too",
+    "Keys must be enums, not strings"
+   ],
+   "answer": 0,
+   "explain": "Keyed and unkeyed registrations are separate. Either keep an unkeyed default registration as well, or have each consumer say which key it wants."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each options interface to how it behaves.",
+   "pairs": [
+    ["`IOptions<T>`", "read once, the same value for the app's lifetime"],
+    ["`IOptionsSnapshot<T>`", "recomputed once per request (scope)"],
+    ["`IOptionsMonitor<T>`", "always current, with an `OnChange` callback"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Register an email notifier under the key \"email\" and ask for it in a constructor.",
+   "code": [
+    "builder.Services.__1__<INotifier, EmailNotifier>(\"email\");",
+    "",
+    "public sealed class Receipts([__2__(\"email\")] INotifier notifier) { }"
+   ],
+   "blanks": ["AddKeyedSingleton", "FromKeyedServices"],
+   "bank": ["AddSingleton", "FromServices", "Inject"],
+   "explain": "`AddSingleton` has no key parameter. `[FromServices]` is the MVC attribute for unkeyed services; keyed ones need `[FromKeyedServices]`."
+  },
+  {
+   "type": "predict",
+   "prompt": "Two observers subscribe to the same event. What does this print?",
+   "code": [
+    "var hub = new Hub();",
+    "hub.Sent += m => Console.WriteLine($\"log: {m}\");",
+    "hub.Sent += m => Console.WriteLine($\"audit: {m}\");",
+    "hub.Send(\"hi\");",
+    "",
+    "class Hub",
+    "{",
+    "    public event Action<string>? Sent;",
+    "    public void Send(string m) => Sent?.Invoke(m);",
+    "}"
+   ],
+   "answer": ["log: hi", "audit: hi"],
+   "explain": "Handlers run synchronously in the order they subscribed. If the first one throws, the second never runs: one reason a message bus or a `Channel` is used when observers must be isolated."
+  },
+  {
+   "type": "sort",
+   "prompt": "Which mechanism fits the job?",
+   "buckets": ["Keyed service", "`IEnumerable<T>`", "Decorator"],
+   "items": [
+    ["Use the payment provider named in config (`\"stripe\"` or `\"adyen\"`)", 0],
+    ["Send through the channel the user picked, by name", 0],
+    ["Run every validation rule on an order", 1],
+    ["Notify through every channel that is registered", 1],
+    ["Log every call to `INotifier` without editing the notifiers", 2],
+    ["Retry failed sends of one provider", 2]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "When you are about to write a `switch` that picks an implementation, reach for keyed services or `IEnumerable<T>`. When you want to add logging, caching or retries around something, write a decorator and register it, instead of editing the class. Read settings through validated options, never through raw configuration strings."
+  }
+ ]
+}

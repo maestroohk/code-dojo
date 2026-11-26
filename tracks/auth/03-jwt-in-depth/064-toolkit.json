@@ -1,0 +1,119 @@
+{
+ "title": "Senior's toolkit: reading, minting and validating JWTs",
+ "summary": "Decode a token in the shell or jwt.ms, mint test tokens with dotnet user-jwts, and validate with JsonWebTokenHandler and the right parameters.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: reading, minting and validating JWTs",
+   "body": "When an API says 401, the first question is always \"what is in the token?\". These are the ways experienced developers read a token, make one for local testing, and configure validation so it checks what matters.",
+   "toolkit": [
+    {
+     "cmd": "cut -d. -f2 | tr '_-' '/+' | base64 -d",
+     "what": "Read a JWT's payload in the shell: take the middle part, turn base64url into base64, add the missing `=` padding, decode. Nothing leaves your machine.",
+     "flags": [["cut -d. -f2", "the payload (`-f1` is the header)"], ["tr '_-' '/+'", "base64url uses `-` and `_` where base64 uses `+` and `/`"], ["padding loop", "base64url drops `=`, which `base64 -d` needs back"], ["| jq .", "pretty-print the claims"]],
+     "example": "p=$(cut -d. -f2 <<<\"$TOKEN\" | tr '_-' '/+'); while (( ${#p} % 4 )); do p+=\"=\"; done; base64 -d <<<\"$p\" | jq ."
+    },
+    {
+     "cmd": "https://jwt.ms",
+     "what": "Microsoft's token decoder: paste a token and see its header and claims explained. It decodes in the browser, but treat real production tokens as secrets anyway: they are live credentials until they expire.",
+     "flags": [["Claims tab", "each claim with a short explanation"], ["exp / nbf / iat", "shown as readable dates"]],
+     "example": "https://jwt.ms/#id_token=eyJhbGciOi...",
+     "lang": "text"
+    },
+    {
+     "cmd": "dotnet user-jwts create",
+     "what": "Mint a signed token for local development that your API's JwtBearer setup accepts. It writes the signing key to user secrets and the issuer and audience to `appsettings.Development.json`.",
+     "flags": [["--name ana", "the user name in the token"], ["--role admin", "add a role claim (repeat for more)"], ["--scope \"tasks:write\"", "add a scope"], ["--audience https://localhost:5001", "which audience to put in `aud`"]],
+     "example": "dotnet user-jwts create --name ana --role admin --scope \"tasks:write\"\ndotnet user-jwts list\ndotnet user-jwts print <id> --show-all",
+     "when": "testing protected endpoints without a real identity provider"
+    },
+    {
+     "cmd": "curl -H \"Authorization: Bearer $TOKEN\"",
+     "what": "Call the API with a token and read the answer. On a 401 the `WWW-Authenticate` header often says why.",
+     "flags": [["-i", "show response headers, including `WWW-Authenticate`"], ["-H \"Authorization: Bearer ...\"", "send the token"], ["-v", "everything, including the request headers curl sent"]],
+     "example": "curl -i -H \"Authorization: Bearer $TOKEN\" https://localhost:5001/tasks"
+    },
+    {
+     "cmd": "JsonWebTokenHandler.ValidateTokenAsync",
+     "what": "The current .NET token validator (package `Microsoft.IdentityModel.JsonWebTokens`), used by JwtBearer itself. It returns a result instead of throwing.",
+     "flags": [["result.IsValid", "true only if signature, issuer, audience and lifetime all pass"], ["result.Exception", "why it failed (IDX error code inside)"], ["result.ClaimsIdentity", "the user's claims when valid"]],
+     "example": "var result = await new JsonWebTokenHandler().ValidateTokenAsync(token, parameters);\nif (!result.IsValid) logger.LogWarning(result.Exception, \"Token rejected\");",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "new TokenValidationParameters { ... }",
+     "what": "What validation checks. Set the issuer, audience and the algorithms you expect, never fewer.",
+     "flags": [["ValidIssuer / ValidAudience", "the `iss` and `aud` you accept"], ["ValidAlgorithms = [\"RS256\"]", "reject `none` and algorithm-swap tricks"], ["ClockSkew", "allowed clock drift; default 5 minutes"], ["IssuerSigningKey", "the key, or keys from JWKS via `Authority`"]],
+     "example": "var parameters = new TokenValidationParameters\n{\n    ValidIssuer = \"https://idp.example.com/\",\n    ValidAudience = \"api://tasks\",\n    ValidAlgorithms = [\"RS256\"],\n    IssuerSigningKey = key,\n    ClockSkew = TimeSpan.FromSeconds(30),\n};",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "match",
+   "prompt": "Match each part of the shell decode to its job.",
+   "pairs": [
+    ["`cut -d. -f2`", "take the payload between the two dots"],
+    ["`tr '_-' '/+'`", "turn base64url characters into base64"],
+    ["`while (( ${#p} % 4 )); do p+=\"=\"; done`", "put back the padding base64url removed"],
+    ["`base64 -d`", "decode the bytes to JSON text"],
+    ["`jq .`", "pretty-print the claims"]
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "A token whose `exp` was 3 minutes ago is still accepted by your API. A tester files a bug. What explains it?",
+   "options": [
+    "`ClockSkew` defaults to 5 minutes, so tokens are accepted up to 5 minutes past `exp`; lower it if that matters",
+    "The API does not check `exp` at all",
+    "The tester's clock is wrong",
+    "`exp` is measured in minutes, not seconds"
+   ],
+   "answer": 0,
+   "explain": "Clock skew allows for servers whose clocks drift apart. Five minutes is generous; many teams set 30 seconds to 2 minutes, which still covers normal drift."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Mint a local token for user `ana` with the `admin` role, then call the API with it.",
+   "code": [
+    "dotnet user-jwts __1__ --name ana __2__ admin",
+    "curl -i -H \"__3__: Bearer $TOKEN\" https://localhost:5001/admin/users"
+   ],
+   "blanks": ["create", "--role", "Authorization"],
+   "bank": ["new", "--scope", "Cookie", "X-Token"]
+  },
+  {
+   "type": "mcq",
+   "prompt": "Every call returns 401 and the log says the following. What do you check first?",
+   "code": "IDX10214: Audience validation failed. Audiences: 'api://orders'. Did not match: validationParameters.ValidAudience: 'api://tasks' or validationParameters.ValidAudiences: 'null'.",
+   "options": [
+    "The token was issued for `api://orders`, not for this API: request a token for `api://tasks` (or fix `ValidAudience` if the API's name really changed)",
+    "The signing key is wrong",
+    "The token has expired",
+    "The user lacks the admin role"
+   ],
+   "answer": 0,
+   "explain": "IDX10214 is audience, IDX10223 is lifetime (expired), and signature problems are IDX10503 or IDX10511-style messages. Decode the token and compare `aud` with what the API expects."
+  },
+  {
+   "type": "sort",
+   "prompt": "Safe validation setting, or a hole?",
+   "buckets": ["Safe", "Hole"],
+   "items": [
+    ["`ValidAlgorithms = [\"RS256\"]`", 0],
+    ["`ValidAudience = \"api://tasks\"`", 0],
+    ["`ClockSkew = TimeSpan.FromSeconds(30)`", 0],
+    ["`ValidateAudience = false` because the audience kept failing", 1],
+    ["`ValidateLifetime = false` in production", 1],
+    ["`SignatureValidator = (t, p) => new JsonWebToken(t)`", 1]
+   ],
+   "explain": "Turning a check off to make a 401 go away hides the bug and opens the door: any token from that issuer, for any API, at any time, or not signed at all."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "On any 401, decode the token first and compare `iss`, `aud`, `exp` and the claims with what the API expects; the IDX code in the log tells you which check failed. Use `dotnet user-jwts` for local tests, and never fix a validation failure by switching the check off."
+  }
+ ]
+}

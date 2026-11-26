@@ -1,0 +1,154 @@
+{
+ "title": "Senior's toolkit: authenticated encryption",
+ "summary": "AesGcm and ChaCha20Poly1305 as you use them in .NET, age for files, and the legacy tools you will meet and should not copy.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: authenticated encryption",
+   "body": "At work you encrypt fields and files with an AEAD (encryption plus a tag that detects tampering), and you meet old CBC data and `openssl enc` scripts that you must read without copying. These are the tools.",
+   "toolkit": [
+    {
+     "cmd": "new AesGcm(key, tagSizeInBytes: 16)",
+     "what": "AES-GCM in .NET. Pass the tag size explicitly: the constructor without it is obsolete (SYSLIB0053).",
+     "flags": [["key", "16, 24 or 32 bytes; use 32 (AES-256)"], ["nonce", "12 bytes, never reused with the same key"], ["tag", "16 bytes, stored next to the ciphertext"], ["associatedData", "context that is authenticated but not encrypted, e.g. the record id"]],
+     "example": "using var gcm = new AesGcm(key, tagSizeInBytes: 16);\nbyte[] nonce = RandomNumberGenerator.GetBytes(12);\ngcm.Encrypt(nonce, plaintext, ciphertext, tag, associatedData: recordId);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "gcm.Decrypt(nonce, ciphertext, tag, plaintext, associatedData)",
+     "what": "Checks the tag, then decrypts. If anything differs from encryption (key, nonce, ciphertext, tag or associated data) it throws `AuthenticationTagMismatchException`, a `CryptographicException`.",
+     "flags": [["throws on a bad tag", "never catch it and carry on with the output"], ["same associatedData", "must be byte-for-byte what was passed to `Encrypt`"]],
+     "example": "try { gcm.Decrypt(nonce, ct, tag, pt, recordId); }\ncatch (AuthenticationTagMismatchException) { return Results.Problem(\"tampered or wrong key\"); }",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "ChaCha20Poly1305",
+     "what": "The other AEAD in the box: same shape as `AesGcm` (32-byte key, 12-byte nonce, 16-byte tag). Fast on CPUs without AES instructions.",
+     "flags": [["ChaCha20Poly1305.IsSupported", "false where the OS crypto library lacks it; check before relying on it"], ["AesGcm.IsSupported", "the same check for AES-GCM"]],
+     "example": "if (!ChaCha20Poly1305.IsSupported) throw new PlatformNotSupportedException();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "CryptographicOperations.ZeroMemory(buffer)",
+     "what": "Wipe a key or plaintext buffer when you are done, in a way the JIT will not optimise away.",
+     "flags": [["buffer", "a `Span<byte>`: a DEK, a decrypted secret, a password's bytes"]],
+     "example": "try { Use(key); } finally { CryptographicOperations.ZeroMemory(key); }",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "aes.DecryptCbc(ciphertext, iv)",
+     "what": "One-shot CBC on an `Aes` object, for reading old data. CBC has no tag: only use it with a separate HMAC checked first (encrypt-then-MAC), and plan to migrate to GCM.",
+     "flags": [["iv", "16 bytes, random per message"], ["PaddingMode.PKCS7", "the default padding; padding errors shown to callers become a padding oracle"]],
+     "example": "using var aes = Aes.Create();\naes.Key = key;\nbyte[] plain = aes.DecryptCbc(ciphertext, iv, PaddingMode.PKCS7);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "age",
+     "what": "Modern file encryption (X25519 and ChaCha20-Poly1305) with tiny keys and no options to get wrong. A common choice for backups and secrets in repos.",
+     "flags": [["-r age1...", "encrypt to this recipient's public key (repeat for several)"], ["-p", "encrypt with a passphrase instead"], ["-d -i key.txt", "decrypt with this identity (private key) file"], ["-o out", "where to write the output"]],
+     "example": "age-keygen -o key.txt\nage -r age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p -o db.dump.age db.dump\nage -d -i key.txt -o db.dump db.dump.age"
+    },
+    {
+     "cmd": "openssl enc -aes-256-cbc",
+     "what": "You will find this in old scripts. It has no authentication tag (it does not support GCM), so tampering is not detected. Without `-pbkdf2` the key comes from a single fast hash of the password. Prefer `age`.",
+     "flags": [["-pbkdf2 -iter 600000", "derive the key with PBKDF2 instead of the legacy one-pass KDF"], ["-d", "decrypt"], ["-salt", "random salt (the default)"]],
+     "example": "openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in old-backup.enc -out old-backup.tar",
+     "when": "only to decrypt something that already exists"
+    }
+   ]
+  },
+  {
+   "type": "predict",
+   "prompt": "What does this print?",
+   "code": [
+    "using System.Security.Cryptography;",
+    "",
+    "using var gcm = new AesGcm(new byte[32], tagSizeInBytes: 16);",
+    "byte[] pt = \"hello world\"u8.ToArray();",
+    "byte[] ct = new byte[pt.Length];",
+    "byte[] tag = new byte[16];",
+    "gcm.Encrypt(new byte[12], pt, ct, tag);",
+    "Console.WriteLine($\"{ct.Length} {tag.Length} {12 + ct.Length + tag.Length}\");"
+   ],
+   "answer": "11 16 39",
+   "explain": "GCM is a stream mode: the ciphertext is exactly as long as the plaintext. What you store is nonce (12) + ciphertext + tag (16), so every record grows by 28 bytes. (A zero key and zero nonce are fine for a length demo, never for real data.)"
+  },
+  {
+   "type": "mcq",
+   "prompt": "After a deploy, reading encrypted customer notes fails on every row with `AuthenticationTagMismatchException`. Old rows decrypted fine yesterday. What do you check first?",
+   "options": [
+    "What changed in the inputs to `Decrypt`: the key (or key version), the nonce/tag layout, or the associated data (e.g. `Id.ToString()` became `Id.ToString(\"N\")`)",
+    "The database corrupted every row overnight",
+    "AES-GCM tags expire after 24 hours",
+    "Catch the exception and use the plaintext buffer anyway"
+   ],
+   "answer": 0,
+   "explain": "The tag fails whenever any input differs from encryption. A failure on *every* row right after a deploy points at code or config: the wrong key, a changed byte layout, or associated data built differently. Never use the output of a failed decrypt."
+  },
+  {
+   "type": "mcq",
+   "prompt": "What is the serious bug in this pull request?",
+   "code": [
+    "static readonly byte[] Nonce = new byte[12];",
+    "",
+    "public byte[] Seal(byte[] key, byte[] plaintext)",
+    "{",
+    "    using var gcm = new AesGcm(key, tagSizeInBytes: 16);",
+    "    var ct = new byte[plaintext.Length]; var tag = new byte[16];",
+    "    gcm.Encrypt(Nonce, plaintext, ct, tag);",
+    "    return [.. ct, .. tag];",
+    "}"
+   ],
+   "options": [
+    "Every message uses the same nonce with the same key, which leaks the XOR of plaintexts and lets an attacker forge tags; use `RandomNumberGenerator.GetBytes(12)` per message and store it with the ciphertext",
+    "The tag should be 12 bytes, not 16",
+    "`AesGcm` must be a static field to be fast",
+    "The ciphertext array should be 16 bytes longer"
+   ],
+   "answer": 0,
+   "explain": "Nonce reuse is the one GCM mistake you cannot recover from: keystreams repeat and the authentication key can be recovered. A random 12-byte nonce is safe for up to about 2^32 messages per key; rotate keys before that."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Set up AES-256-GCM correctly.",
+   "code": [
+    "byte[] nonce = RandomNumberGenerator.GetBytes(__1__);",
+    "using var gcm = new AesGcm(key, tagSizeInBytes: __2__);"
+   ],
+   "blanks": ["12", "16"],
+   "bank": ["32", "8", "24"],
+   "explain": "GCM's standard nonce is 12 bytes and its full tag is 16. 32 is the key size for AES-256."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each `age` option to what it does.",
+   "pairs": [
+    ["`-r age1...`", "encrypts to a recipient's public key"],
+    ["`-p`", "encrypts with a passphrase"],
+    ["`-d`", "decrypts"],
+    ["`-i key.txt`", "names the private key file to decrypt with"],
+    ["`-o out`", "chooses the output file"]
+   ]
+  },
+  {
+   "type": "sort",
+   "prompt": "Where does each belong?",
+   "buckets": ["Use for new code", "Existing data only, plan to migrate", "Never"],
+   "items": [
+    ["`AesGcm` with a random 12-byte nonce", 0],
+    ["`ChaCha20Poly1305`", 0],
+    ["`age` for files and backups", 0],
+    ["AES-CBC with an HMAC checked first", 1],
+    ["`openssl enc -aes-256-cbc -pbkdf2` backups", 1],
+    ["AES in ECB mode", 2],
+    ["A fixed nonce or IV", 2]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Every time you encrypt, ask three questions: where does the nonce come from, where is the tag stored, and what associated data binds this ciphertext to its row. When you find CBC or `openssl enc` in a codebase, write down how it will be migrated instead of copying the pattern."
+  }
+ ]
+}

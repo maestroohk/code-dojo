@@ -1,0 +1,122 @@
+{
+ "title": "Senior's toolkit: dates, JSON, files and messy data",
+ "summary": "Time-zone-correct date buckets, half-open ranges, JSON operators, CSV in and out from the client, latest-per-key and gap filling.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: dates, JSON, files and messy data",
+   "body": "Real data arrives as CSV exports and JSON payloads, with timestamps in UTC and a business that thinks in local days. These are the functions and client commands people use to get it in, shape it and get answers out.",
+   "toolkit": [
+    {
+     "cmd": "date_trunc('day', created_at AT TIME ZONE 'Europe/London')",
+     "what": "PostgreSQL: bucket timestamps into local days, weeks or months. Store `timestamptz` (UTC inside) and convert only when grouping or displaying.",
+     "flags": [["date_trunc('week', ts)", "also 'hour', 'day', 'month' (weeks start on Monday)"], ["AT TIME ZONE 'Europe/London'", "turn a timestamptz into local wall-clock time"], ["SQLite", "`date(ts)`, `strftime('%Y-%m', ts)`, `date(ts, '-7 days')`"]],
+     "example": "SELECT date_trunc('day', created_at AT TIME ZONE 'Europe/London') AS local_day, COUNT(*)\nFROM orders\nGROUP BY 1\nORDER BY 1;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "ts >= start AND ts < next_start",
+     "what": "Half-open ranges for time filters. `BETWEEN '2026-03-01' AND '2026-03-31'` misses everything after midnight on the 31st.",
+     "flags": [[">= start", "include the first instant"], ["< next_start", "exclude the next period's first instant"]],
+     "example": "SELECT COUNT(*) FROM orders\nWHERE created_at >= '2026-03-01' AND created_at < '2026-04-01';",
+     "lang": "sql"
+    },
+    {
+     "cmd": "payload ->> 'status'",
+     "what": "Read fields from JSON columns. Pull out what you filter on often into a real column or an index.",
+     "flags": [["-> / ->>", "PostgreSQL: get a field as JSON / as text"], ["#>> '{user,id}'", "PostgreSQL: a nested path as text"], ["@> '{\"status\":\"paid\"}'", "PostgreSQL jsonb: contains; can use a GIN index"], ["json_extract(p, '$.user.id')", "SQLite (also `p ->> '$.user.id'`, 3.38+)"]],
+     "example": "SELECT payload ->> 'status' AS status, COUNT(*)\nFROM webhooks\nWHERE payload @> '{\"type\": \"refund\"}'\nGROUP BY 1;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "\\copy (SELECT ...) TO 'out.csv' WITH (FORMAT csv, HEADER)",
+     "what": "psql: export a query to a CSV file on **your** machine, or load one with `FROM`. Unlike server-side `COPY`, it needs no superuser and no file access on the server.",
+     "flags": [["TO 'file.csv'", "export"], ["FROM 'file.csv'", "import into a table"], ["FORMAT csv, HEADER", "CSV with a header row"]],
+     "example": "\\copy (SELECT * FROM refunds WHERE day >= '2026-03-01') TO 'refunds.csv' WITH (FORMAT csv, HEADER)"
+    },
+    {
+     "cmd": ".import --csv --skip 1 raw.csv staging",
+     "what": "sqlite3: load a CSV file into a table. Load into a staging table first, check it, then insert into the real tables with SQL.",
+     "flags": [["--csv", "parse the file as CSV"], ["--skip 1", "skip the header line (when the table already exists)"], [".once out.csv", "with `.mode csv` and `.headers on`: send the next query's output to a file"]],
+     "example": ".import --csv --skip 1 bank-export.csv staging\n.mode csv\n.headers on\n.once mismatches.csv\nSELECT * FROM staging WHERE amount < 0;"
+    },
+    {
+     "cmd": "SELECT DISTINCT ON (email) ...",
+     "what": "PostgreSQL: keep exactly one row per key, the first by the ORDER BY. The shortest way to get the latest record per customer from a messy table; elsewhere use `ROW_NUMBER()`.",
+     "flags": [["DISTINCT ON (email)", "one row per email"], ["ORDER BY email, updated_at DESC", "must start with the same columns; decides which row wins"]],
+     "example": "SELECT DISTINCT ON (email) email, name, updated_at\nFROM customers_raw\nORDER BY email, updated_at DESC;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "generate_series('2026-03-01'::date, '2026-03-31', interval '1 day')",
+     "what": "PostgreSQL: a row for every day, to LEFT JOIN your data onto so empty days show as 0 instead of vanishing from the chart. In SQLite, generate the days with a recursive CTE.",
+     "flags": [["start, stop, step", "inclusive of both ends"], ["LEFT JOIN ... COALESCE(n, 0)", "turn missing days into zeros"]],
+     "example": "SELECT d::date AS day, COUNT(o.id) AS orders\nFROM generate_series('2026-03-01'::date, '2026-03-31', interval '1 day') AS d\nLEFT JOIN orders o ON o.created_at >= d AND o.created_at < d + interval '1 day'\nGROUP BY 1\nORDER BY 1;",
+     "lang": "sql"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "The New York shop's Monday sales report includes orders placed on Sunday evening. `created_at` is a `timestamptz`, and the report runs `GROUP BY date_trunc('day', created_at)` on a server whose time zone is UTC. What is wrong?",
+   "options": [
+    "Days are cut at UTC midnight, not New York midnight; convert first with `created_at AT TIME ZONE 'America/New_York'` before truncating",
+    "`date_trunc` rounds to the nearest day instead of down",
+    "`timestamptz` loses the time zone, so the data is corrupt",
+    "Weeks start on Sunday in PostgreSQL"
+   ],
+   "answer": 0,
+   "explain": "Sunday 20:00 in New York is Monday 01:00 UTC (00:00 in summer), so a UTC bucket puts Sunday evening into Monday. Decide which time zone a business \"day\" belongs to, and convert before bucketing."
+  },
+  {
+   "type": "mcq",
+   "prompt": "Finance says March refunds total 18,420, but your query says 17,905. The missing refunds were all issued on the afternoon of 31 March. Why?",
+   "code": "SELECT SUM(amount) FROM refunds WHERE issued_at BETWEEN '2026-03-01' AND '2026-03-31';",
+   "options": [
+    "`'2026-03-31'` means midnight at the start of the 31st, so the rest of that day is excluded; use `issued_at >= '2026-03-01' AND issued_at < '2026-04-01'`",
+    "BETWEEN excludes both ends",
+    "SUM ignores negative amounts",
+    "The dates must be written as `'31/03/2026'`"
+   ],
+   "answer": 0,
+   "explain": "BETWEEN is inclusive, but a date literal compared with a timestamp is the first instant of that day. A half-open range is correct for any precision and any month length."
+  },
+  {
+   "type": "blanks",
+   "prompt": "From psql, export March refunds to a CSV file on your laptop, with a header row.",
+   "code": "\\copy (SELECT * FROM refunds WHERE issued_at >= '2026-03-01') __1__ 'refunds.csv' WITH (FORMAT __2__, HEADER)",
+   "blanks": ["TO", "csv"],
+   "bank": ["FROM", "json", "INTO"],
+   "explain": "`TO` writes a file, `FROM` reads one. `csv` is the format that handles commas and quotes inside values properly."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each PostgreSQL JSON operator to what it returns.",
+   "pairs": [
+    ["`payload -> 'user'`", "the field as JSON, for further navigation"],
+    ["`payload ->> 'status'`", "the field as text"],
+    ["`payload #>> '{user,id}'`", "a nested value as text"],
+    ["`payload @> '{\"type\":\"refund\"}'`", "true if the document contains that pair"]
+   ]
+  },
+  {
+   "type": "sort",
+   "prompt": "PostgreSQL or SQLite?",
+   "buckets": ["PostgreSQL", "SQLite"],
+   "items": [
+    ["`date_trunc('month', ts)`", 0],
+    ["`strftime('%Y-%m', ts)`", 1],
+    ["`\\copy ... TO 'out.csv'`", 0],
+    ["`.import --csv raw.csv staging`", 1],
+    ["`SELECT DISTINCT ON (email) ...`", 0],
+    ["`json_extract(payload, '$.user.id')`", 1]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Store times in UTC, filter them with half-open ranges, and convert to the business time zone only when you bucket or display. Load outside data into a staging table and check it with SQL before it touches real tables."
+  }
+ ]
+}

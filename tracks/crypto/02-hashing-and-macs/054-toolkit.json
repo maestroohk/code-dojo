@@ -1,0 +1,141 @@
+{
+ "title": "Senior's toolkit: hashes, HMACs and key derivation",
+ "summary": "Check a download, verify a webhook signature by hand, compare MACs safely and derive keys with the right KDF.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: hashes, HMACs and key derivation",
+   "body": "Hashes and MACs show up at work as checksums on downloads, signatures on webhooks and keys derived from passwords. These are the commands and .NET calls people use for each.",
+   "toolkit": [
+    {
+     "cmd": "sha256sum",
+     "what": "SHA-256 of files on Linux (macOS: `shasum -a 256`). Release pages publish these so you can check a download was not changed.",
+     "flags": [["-c SHA256SUMS", "check every file listed in a checksum file"], ["--ignore-missing", "with `-c`: skip listed files you did not download"]],
+     "example": "sha256sum -c SHA256SUMS --ignore-missing",
+     "when": "before you install a binary or trust an artifact"
+    },
+    {
+     "cmd": "Get-FileHash",
+     "what": "The same on Windows PowerShell. The hash comes back in upper-case hex.",
+     "flags": [["-Algorithm SHA256", "the hash to use (SHA256 is the default)"], ["-Path", "the file to hash"]],
+     "example": "(Get-FileHash .\\setup.exe -Algorithm SHA256).Hash",
+     "lang": "powershell"
+    },
+    {
+     "cmd": "openssl dgst -sha256 -hmac",
+     "what": "Hash or HMAC any input from the shell. Use it to recompute a webhook signature by hand and see who is wrong.",
+     "flags": [["-sha256", "the digest to use"], ["-hmac key", "compute HMAC with this key instead of a plain hash"], ["-binary", "raw bytes out, to pipe into `base64` when the header is Base64"]],
+     "example": "printf '%s' \"$BODY\" | openssl dgst -sha256 -hmac \"$WEBHOOK_SECRET\""
+    },
+    {
+     "cmd": "SHA256.HashData(data)",
+     "what": "One-shot hashing in .NET: no object to create or dispose. There are overloads for a `Stream`, which read it to the end.",
+     "flags": [["HashData(byte[])", "hash bytes in memory"], ["HashDataAsync(stream, ct)", "hash a file or upload without loading it all"]],
+     "example": "await using var file = File.OpenRead(path);\nbyte[] digest = await SHA256.HashDataAsync(file, ct);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "HMACSHA256.HashData(key, data)",
+     "what": "One-shot HMAC. The standard way to sign webhooks, cookies and API requests with a shared secret.",
+     "flags": [["key", "the shared secret, at least 32 random bytes"], ["data", "the exact bytes that were sent, not a re-serialized copy"]],
+     "example": "byte[] mac = HMACSHA256.HashData(secret, rawBody);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "CryptographicOperations.FixedTimeEquals(a, b)",
+     "what": "Compare two MACs or tokens in time that does not depend on where they first differ, so an attacker cannot learn the right value byte by byte.",
+     "flags": [["a, b", "`ReadOnlySpan<byte>`; compare bytes, not hex strings"]],
+     "example": "bool ok = CryptographicOperations.FixedTimeEquals(expected, given);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "IncrementalHash.CreateHMAC",
+     "what": "Feed a hash or HMAC in pieces, as data arrives, then read the result once.",
+     "flags": [["CreateHash(HashAlgorithmName.SHA256)", "a plain incremental hash"], ["AppendData(chunk)", "add the next piece"], ["GetHashAndReset()", "the final value; the object can be reused"]],
+     "example": "using var h = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, key);\nh.AppendData(header);\nh.AppendData(body);\nbyte[] mac = h.GetHashAndReset();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "Rfc2898DeriveBytes.Pbkdf2 / HKDF.DeriveKey",
+     "what": "The two KDFs in the box. PBKDF2 is deliberately slow, for passwords. HKDF is fast, for turning one strong secret into several independent keys.",
+     "flags": [["Pbkdf2(password, salt, 600_000, HashAlgorithmName.SHA256, 32)", "a 32-byte key from a password (OWASP's iteration count for SHA-256)"], ["HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, 32, salt, info)", "a 32-byte key; a different `info` gives an unrelated key"]],
+     "example": "byte[] encKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, master, 32, salt: null, info: \"orders:enc:v1\"u8.ToArray());",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "predict",
+   "prompt": "What does this print? (SHA-256 of `abc` is a standard test vector.)",
+   "code": [
+    "using System.Security.Cryptography;",
+    "",
+    "byte[] d = SHA256.HashData(\"abc\"u8.ToArray());",
+    "Console.WriteLine(d.Length);",
+    "Console.WriteLine(Convert.ToHexStringLower(d)[..16]);"
+   ],
+   "answer": ["32", "ba7816bf8f01cfea"],
+   "explain": "SHA-256 always gives 32 bytes, whatever the input size. `ba7816bf...` is the published test vector for `abc`, worth recognising when you check an implementation."
+  },
+  {
+   "type": "mcq",
+   "prompt": "Your GitHub webhook endpoint rejects every delivery, even though the secret is right. What is the bug?",
+   "code": [
+    "var payload = await req.ReadFromJsonAsync<PushEvent>(ct);",
+    "byte[] body = JsonSerializer.SerializeToUtf8Bytes(payload);",
+    "byte[] expected = HMACSHA256.HashData(secret, body);",
+    "byte[] given = Convert.FromHexString(req.Headers[\"X-Hub-Signature-256\"].ToString()[\"sha256=\".Length..]);",
+    "if (!CryptographicOperations.FixedTimeEquals(expected, given)) return Results.Unauthorized();"
+   ],
+   "options": [
+    "The MAC is computed over a re-serialized body; it must be over the exact raw bytes received",
+    "`FixedTimeEquals` cannot compare HMACs",
+    "GitHub signs with SHA-1, so `HMACSHA256` can never match",
+    "`Convert.FromHexString` only accepts upper-case hex"
+   ],
+   "answer": 0,
+   "explain": "Re-serializing changes whitespace, property order and escaping, so the bytes differ and so does the HMAC. Read the raw body first (`await new StreamReader(req.Body).ReadToEndAsync()` or into a `MemoryStream`), verify it, then parse it. To debug, recompute by hand with `openssl dgst -sha256 -hmac` on the saved raw body."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Verify a webhook whose header is `sha256=<lowercase hex>`. `rawBody` holds the exact bytes received.",
+   "code": [
+    "byte[] expected = HMACSHA256.__1__(secret, rawBody);",
+    "byte[] given = Convert.__2__(header[\"sha256=\".Length..]);",
+    "bool ok = CryptographicOperations.__3__(expected, given);"
+   ],
+   "blanks": ["HashData", "FromHexString", "FixedTimeEquals"],
+   "bank": ["ComputeHash", "FromBase64String", "SequenceEqual", "Equals"],
+   "explain": "One-shot `HashData`, decode the hex the header carries, then compare bytes in constant time. `SequenceEqual` stops at the first difference, which leaks timing."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each tool to the job it is for.",
+   "pairs": [
+    ["`sha256sum -c SHA256SUMS`", "check downloads against a published checksum list"],
+    ["`openssl dgst -sha256 -hmac`", "recompute a webhook signature by hand"],
+    ["`SHA256.HashDataAsync(stream)`", "hash a 4 GB upload without loading it into memory"],
+    ["`Rfc2898DeriveBytes.Pbkdf2`", "turn a user's password into a key"],
+    ["`HKDF.DeriveKey`", "split one strong master key into per-purpose keys"]
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "In review you see `HKDF.DeriveKey(HashAlgorithmName.SHA256, Encoding.UTF8.GetBytes(password), 32, salt, info)` used to make a key from a user's password. What do you say?",
+   "options": [
+    "HKDF is fast, so an attacker can try billions of guesses; use a slow password KDF such as PBKDF2 with 600,000 iterations or Argon2id",
+    "Fine, as long as the salt is random",
+    "Use SHA-512 instead of SHA-256 and it is safe",
+    "Fine, but the output should be 64 bytes"
+   ],
+   "answer": 0,
+   "explain": "HKDF assumes its input is already high-entropy, like a random key or an ECDH secret. Passwords are low-entropy, so they need a KDF that makes each guess expensive. A salt stops precomputed tables, not fast guessing."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "When a signature does not verify, save the raw bytes and recompute it with `openssl dgst` before changing code: you learn at once which side is wrong. In review, look for three things: MACs over the raw body, `FixedTimeEquals` for the comparison, and a slow KDF wherever a password goes in."
+  }
+ ]
+}

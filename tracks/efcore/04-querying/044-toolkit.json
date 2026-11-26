@@ -1,0 +1,135 @@
+{
+ "title": "Senior's toolkit: writing and tracing queries",
+ "summary": "Projections, no-tracking reads, safe raw SQL, LIKE, compiled queries and tags that let you find a query in a database trace.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: writing and tracing queries",
+   "body": "Most EF Core performance and security problems are in how queries are written. These are the APIs experienced developers use to read only what they need, keep raw SQL safe, and find their query in a busy database.",
+   "toolkit": [
+    {
+     "cmd": ".Select(b => new BookDto(...))",
+     "what": "Project straight into the shape the caller needs. Only those columns are read, and nothing is tracked.",
+     "flags": [["Select into a record or DTO", "fewer columns, no change tracking"], ["navigation inside Select", "EF Core writes the JOIN for you, no Include needed"]],
+     "example": "await db.Books.Select(b => new BookRow(b.Id, b.Title, b.Author.Name)).ToListAsync(ct);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": ".AsNoTracking()",
+     "what": "Read entities without tracking them. Faster and uses less memory for read-only work such as API GETs and reports.",
+     "flags": [["AsNoTracking()", "no tracking; the same row twice gives two objects"], ["AsNoTrackingWithIdentityResolution()", "no tracking, but one object per row"], ["UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)", "make it the default for the context"]],
+     "example": "var books = await db.Books.AsNoTracking().Where(b => b.Year > 2000).ToListAsync(ct);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "db.Books.FromSql($\"...\")",
+     "what": "Run your own SQL safely. Interpolated values become parameters, never pasted text, so they cannot inject SQL.",
+     "flags": [["FromSql($\"... {value}\")", "parameterised; the safe default"], ["FromSqlRaw(sql, params)", "plain string; only with constant SQL and explicit parameters"], ["db.Database.SqlQuery<T>($\"...\")", "map raw SQL to a type that is not an entity"]],
+     "example": "db.Books.FromSql($\"SELECT * FROM Books WHERE Author = {author}\").Where(b => b.Year > 2000)",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "EF.Functions.Like(b.Title, \"%sql%\")",
+     "what": "SQL LIKE inside LINQ, with `%` and `_` wildcards. `EF.Functions` holds other database functions too.",
+     "flags": [["%", "any run of characters"], ["_", "exactly one character"]],
+     "example": "db.Books.Where(b => EF.Functions.Like(b.Title, $\"%{term}%\"))",
+     "lang": "csharp"
+    },
+    {
+     "cmd": ".TagWith(\"...\")",
+     "what": "Put a comment at the top of the generated SQL. A DBA looking at a slow-query report can then see which code sent it.",
+     "flags": [["TagWith(\"text\")", "adds `-- text` to the SQL"], ["TagWithCallSite()", "adds the file and line that built the query"]],
+     "example": "db.Orders.TagWith(\"Orders page: open orders\").Where(o => o.Status == Status.Open)",
+     "lang": "csharp",
+     "when": "any query that might show up in a database trace"
+    },
+    {
+     "cmd": "EF.CompileAsyncQuery(...)",
+     "what": "Translate a hot query once and reuse it. Saves the LINQ-to-SQL work on every call; worth it only on very frequent queries.",
+     "flags": [["(AppDb db, int id) => ...", "the context and parameters the query takes"], ["static readonly field", "compile once for the whole app"]],
+     "example": "static readonly Func<AppDb, int, Task<Book?>> ById =\n    EF.CompileAsyncQuery((AppDb db, int id) => db.Books.FirstOrDefault(b => b.Id == id));",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "A security review flags this search. A user typed `x' OR 1=1 --`. What is the fix?",
+   "code": [
+    "var books = db.Books",
+    "    .FromSqlRaw($\"SELECT * FROM Books WHERE Title = '{title}'\")",
+    "    .ToList();"
+   ],
+   "options": [
+    "Use `FromSql($\"SELECT * FROM Books WHERE Title = {title}\")` so the value is sent as a parameter",
+    "Escape single quotes in `title` with `Replace(\"'\", \"''\")`",
+    "Switch to `FromSqlInterpolated` but keep the quotes around `{title}`",
+    "Add `.AsNoTracking()`"
+   ],
+   "answer": 0,
+   "explain": "`FromSqlRaw` takes the string as it is, so the interpolation pastes user text into SQL. `FromSql` turns each `{value}` into a parameter. Do not put quotes around the placeholder: the parameter is already a value, not text in the SQL."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each API to its job.",
+   "pairs": [
+    ["`AsNoTracking()`", "read-only results, no change tracking"],
+    ["`AsNoTrackingWithIdentityResolution()`", "no tracking, one object per row"],
+    ["`TagWith(\"...\")`", "a comment in the SQL to find it later"],
+    ["`EF.Functions.Like`", "SQL LIKE with wildcards"],
+    ["`EF.CompileAsyncQuery`", "translate a hot query once"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "A read-only list for an API: tag it, do not track it, and read only three columns.",
+   "code": [
+    "var rows = await db.Books",
+    "    .__1__(\"GET /books\")",
+    "    .__2__()",
+    "    .Where(b => EF.Functions.__3__(b.Title, $\"%{term}%\"))",
+    "    .__4__(b => new BookRow(b.Id, b.Title, b.Author.Name))",
+    "    .ToListAsync(ct);"
+   ],
+   "blanks": ["TagWith", "AsNoTracking", "Like", "Select"],
+   "bank": ["Include", "AsTracking", "Contains", "FromSqlRaw"]
+  },
+  {
+   "type": "predict",
+   "prompt": "What does the first line of the generated SQL say?",
+   "code": [
+    "using var db = new AppDb();",
+    "var q = db.Orders.TagWith(\"Orders page\").Where(o => o.Total > 100);",
+    "Console.WriteLine(q.ToQueryString().Split('\\n')[0].Trim());",
+    "",
+    "class Order { public int Id { get; set; } public int Total { get; set; } }",
+    "class AppDb : DbContext",
+    "{",
+    "    public DbSet<Order> Orders => Set<Order>();",
+    "    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseSqlite(\"Data Source=:memory:\");",
+    "}"
+   ],
+   "answer": "-- Orders page",
+   "explain": "`TagWith` adds the text as a SQL comment before the SELECT. In a slow-query report, that line tells you which page sent the query."
+  },
+  {
+   "type": "sort",
+   "prompt": "Tracked or not tracked?",
+   "buckets": ["`AsNoTracking()` or a projection", "Tracked (the default)"],
+   "items": [
+    ["GET /books returning a list as JSON", 0],
+    ["A monthly sales report", 0],
+    ["Export 50,000 rows to CSV", 0],
+    ["Load an order, change its status, `SaveChanges`", 1],
+    ["Load a user and add a role to them", 1]
+   ],
+   "explain": "Tracking is what lets `SaveChanges` find your edits. If you are not going to save, do not pay for it."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Write read paths as `AsNoTracking` or `Select` projections and tag every query that matters with `TagWith`. Never build SQL text from user input: if you need raw SQL, use `FromSql` with interpolated values, and read the SQL with `ToQueryString()` before review."
+  }
+ ]
+}

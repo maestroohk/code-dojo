@@ -1,0 +1,127 @@
+{
+ "title": "Senior's toolkit: tracking, saving and conflicts",
+ "summary": "See what SaveChanges will do, update in bulk without loading, handle concurrency conflicts and use transactions with cancellation.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: tracking, saving and conflicts",
+   "body": "Saving is where data gets lost: a silent overwrite, an update that loaded 100,000 rows, a half-finished transfer. These are the APIs experienced developers use to see, control and protect what gets written.",
+   "toolkit": [
+    {
+     "cmd": "db.ChangeTracker.DebugView.ShortView",
+     "what": "One line per tracked entity with its key and state. Print it right before `SaveChanges` to see what will be sent.",
+     "flags": [["ShortView", "type, key and state"], ["LongView", "plus every property, with modified ones marked"]],
+     "example": "Console.WriteLine(db.ChangeTracker.DebugView.ShortView);\n// Order {Id: 7} Modified\n// OrderLine {Id: 31} Added",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "db.Entry(entity).State",
+     "what": "Read or set the state of one entity, and look at its original and current values.",
+     "flags": [["State = EntityState.Modified", "mark every property as changed"], ["Property(x => x.Name).IsModified = true", "mark only one column"], ["OriginalValues / CurrentValues", "what was loaded against what you have now"]],
+     "example": "var e = db.Entry(order);\nConsole.WriteLine($\"{e.State} {e.Property(o => o.Status).OriginalValue} -> {order.Status}\");",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "ExecuteUpdateAsync / ExecuteDeleteAsync",
+     "what": "One UPDATE or DELETE statement for every matching row, without loading them. The tracker does not see these changes.",
+     "flags": [["SetProperty(x => x.Col, value)", "the column and its new value; chain for more columns"], ["returns int", "the number of rows affected"], ["runs immediately", "no `SaveChanges` needed, and it ignores tracked entities"]],
+     "example": "await db.Sessions\n    .Where(s => s.ExpiresAt < now)\n    .ExecuteDeleteAsync(ct);\n\nawait db.Products\n    .Where(p => p.CategoryId == id)\n    .ExecuteUpdateAsync(s => s.SetProperty(p => p.Price, p => p.Price * 1.05m), ct);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "IsRowVersion() / IsConcurrencyToken()",
+     "what": "Optimistic concurrency. The UPDATE includes the original token in its WHERE; if someone else changed the row, zero rows match and EF Core throws instead of overwriting their work.",
+     "flags": [["IsRowVersion() or [Timestamp]", "SQL Server `rowversion`, set by the database on every write"], ["IsConcurrencyToken()", "any property you change yourself, such as a `Version` number"]],
+     "example": "b.Property(t => t.Version).IsConcurrencyToken();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "catch (DbUpdateConcurrencyException ex)",
+     "what": "Someone changed or deleted the row since you read it. Reload and retry, or tell the user, usually with HTTP 409 or 412.",
+     "flags": [["ex.Entries", "the entities that conflicted"], ["entry.GetDatabaseValuesAsync()", "what is in the database now (null if deleted)"], ["entry.OriginalValues.SetValues(db)", "accept their version as the new baseline, then retry"]],
+     "example": "catch (DbUpdateConcurrencyException ex)\n{\n    var current = await ex.Entries[0].GetDatabaseValuesAsync(ct);\n    return current is null ? Results.NotFound() : Results.Conflict();\n}",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "await db.Database.BeginTransactionAsync(ct)",
+     "what": "Group several `SaveChanges` calls (or a save plus an `ExecuteUpdate`) so they all commit or none do. A single `SaveChanges` is already one transaction.",
+     "flags": [["await using var tx", "rolls back automatically if you never commit"], ["tx.CommitAsync(ct)", "make it permanent"], ["ct", "pass the request's CancellationToken to every async call"]],
+     "example": "await using var tx = await db.Database.BeginTransactionAsync(ct);\nawait db.SaveChangesAsync(ct);\nawait db.Accounts.Where(a => a.Id == to).ExecuteUpdateAsync(s => s.SetProperty(a => a.Balance, a => a.Balance + amount), ct);\nawait tx.CommitAsync(ct);",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "Two support agents edit the same ticket. Agent A saves, then agent B saves, and A's change is gone. No error was logged. What fixes this?",
+   "options": [
+    "Add a concurrency token (`IsConcurrencyToken()` or a `rowversion`), then catch `DbUpdateConcurrencyException` and return 409 so B reloads",
+    "Wrap B's `SaveChanges` in a transaction",
+    "Call `SaveChanges` twice",
+    "Use `AsNoTracking()` when loading the ticket"
+   ],
+   "answer": 0,
+   "explain": "Without a token, the UPDATE matches by id alone, so the last writer wins silently. With a token, B's UPDATE says `WHERE Id = 7 AND Version = 3`, finds no row and throws. A transaction does not help: each save was already atomic."
+  },
+  {
+   "type": "mcq",
+   "prompt": "A nightly job that marks old carts as abandoned takes 40 minutes and uses 6 GB of memory.",
+   "code": [
+    "var carts = db.Carts.Where(c => c.UpdatedAt < cutoff).ToList();",
+    "foreach (var c in carts) c.Status = CartStatus.Abandoned;",
+    "db.SaveChanges();"
+   ],
+   "options": [
+    "Replace it with `ExecuteUpdateAsync(s => s.SetProperty(c => c.Status, CartStatus.Abandoned), ct)`: one UPDATE, nothing loaded",
+    "Add `AsNoTracking()` to the query",
+    "Call `SaveChanges` inside the loop",
+    "Raise the job's memory limit"
+   ],
+   "answer": 0,
+   "explain": "The loop loads and tracks every row, then sends one UPDATE per row. `ExecuteUpdateAsync` sends a single `UPDATE ... WHERE UpdatedAt < @cutoff`. `AsNoTracking` would make it worse: nothing would be saved at all."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Delete expired sessions in one statement and log how many went.",
+   "code": [
+    "int removed = await db.Sessions",
+    "    .Where(s => s.ExpiresAt < now)",
+    "    .__1__(__2__);",
+    "logger.LogInformation(\"Removed {Count} expired sessions\", removed);"
+   ],
+   "blanks": ["ExecuteDeleteAsync", "ct"],
+   "bank": ["RemoveRange", "SaveChangesAsync", "ToListAsync", "default"]
+  },
+  {
+   "type": "match",
+   "prompt": "Match each API to what it tells you or does.",
+   "pairs": [
+    ["`ChangeTracker.DebugView.ShortView`", "every tracked entity and its state"],
+    ["`Entry(e).OriginalValues`", "the values as they were loaded"],
+    ["`DbUpdateConcurrencyException`", "someone changed the row since you read it"],
+    ["`ExecuteUpdateAsync`", "one UPDATE with no entities loaded"],
+    ["`BeginTransactionAsync`", "several saves commit together or not at all"]
+   ]
+  },
+  {
+   "type": "sort",
+   "prompt": "Which way of writing fits the job?",
+   "buckets": ["Load, change, `SaveChangesAsync`", "`ExecuteUpdateAsync` / `ExecuteDeleteAsync`"],
+   "items": [
+    ["Change one order's address from a form", 0],
+    ["Rename a product, with a concurrency check", 0],
+    ["Add a line to an order, with validation in the entity", 0],
+    ["Purge 2 million log rows older than 90 days", 1],
+    ["Raise every price in a category by 5%", 1],
+    ["Mark all expired coupons inactive", 1]
+   ],
+   "explain": "Single-entity edits want the tracker: validation, concurrency tokens, related entities. Set-based changes over many rows want one statement."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Give every entity that two people can edit a concurrency token, and decide what the user sees on a conflict. Use `ExecuteUpdateAsync` for anything that touches many rows, and pass the request's `CancellationToken` to every `SaveChangesAsync` and `ToListAsync`."
+  }
+ ]
+}

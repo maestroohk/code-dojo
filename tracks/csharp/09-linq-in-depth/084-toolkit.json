@@ -1,0 +1,113 @@
+{
+ "title": "Senior's toolkit: modern LINQ operators",
+ "summary": "The .NET 6 to .NET 10 operators that replace hand-written loops and clumsy GroupBy chains, and how to measure a pipeline.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: modern LINQ operators",
+   "body": "Recent .NET versions added operators for the jobs people used to write by hand: counting by key, totalling by key, batching, indexing, left joins. Knowing them makes queries shorter, faster and easier to review.",
+   "toolkit": [
+    {
+     "cmd": "CountBy(x => x.Key)",
+     "what": "Count items per key in one pass, without building groups (.NET 9). Returns `KeyValuePair<TKey, int>` items.",
+     "flags": [["keySelector", "what to count by"], ["keyComparer", "optional, e.g. `StringComparer.OrdinalIgnoreCase`"], ["GroupBy(...).Select(g => g.Count())", "the old way: keeps every item of every group in memory"]],
+     "example": "foreach (var (status, n) in tickets.CountBy(t => t.Status))\n    Console.WriteLine($\"{status}: {n}\");",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "AggregateBy(keySelector, seed, func)",
+     "what": "Fold items into one running value per key, such as a total per customer, in one pass (.NET 9).",
+     "flags": [["seed", "the starting value for each key, e.g. `0m`"], ["func", "(running value, item) => new running value"], ["result", "`KeyValuePair<TKey, TAccumulate>` per key"]],
+     "example": "var revenue = orders.AggregateBy(o => o.CustomerId, 0m, (sum, o) => sum + o.Total);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "Index()",
+     "what": "Get each item with its position as an `(Index, Item)` tuple (.NET 9), instead of a separate counter or `Select((x, i) => ...)`.",
+     "flags": [["(int Index, T Item)", "the tuple each element becomes"], ["deconstruct", "`foreach (var (i, line) in lines.Index())`"]],
+     "example": "foreach (var (i, line) in File.ReadLines(path).Index())\n    if (line.Length > 200) Console.WriteLine($\"line {i + 1} is too long\");",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "Chunk(500)",
+     "what": "Split a sequence into arrays of at most N items. The usual way to send rows to a database or an API in batches.",
+     "flags": [["size", "the batch size; the last batch can be smaller"], ["T[]", "each batch is an array"]],
+     "example": "foreach (var batch in ids.Chunk(500))\n    await api.DeleteManyAsync(batch, ct);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "LeftJoin(inner, outerKey, innerKey, result)",
+     "what": "A left outer join in one call (new in .NET 10): every outer item, with the match or `null`. Before .NET 10 it took `GroupJoin` + `SelectMany` + `DefaultIfEmpty`, which you will still see in older code.",
+     "flags": [["outer items", "all kept"], ["inner", "`null` when there is no match"], ["RightJoin", "the mirror image, also .NET 10"]],
+     "example": "var rows = customers.LeftJoin(orders, c => c.Id, o => o.CustomerId,\n    (c, o) => new { c.Name, Total = o?.Total ?? 0m });",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "ExceptBy  IntersectBy  UnionBy",
+     "what": "Set operations by a key (.NET 6): \"customers with no order\", \"users in both lists\", without writing a comparer.",
+     "flags": [["ExceptBy(keys, x => x.Id)", "items whose key is not in `keys`"], ["IntersectBy(keys, x => x.Id)", "items whose key is in `keys`"], ["UnionBy(other, x => x.Id)", "both lists, first one wins per key"]],
+     "example": "var neverOrdered = customers.ExceptBy(orders.Select(o => o.CustomerId), c => c.Id);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "BenchmarkDotNet: Mean, Allocated",
+     "what": "When a LINQ pipeline is on a hot path, compare it with a loop in a benchmark before rewriting it. Read Mean (time per call) and Allocated (bytes per call) together.",
+     "flags": [["[MemoryDiagnoser]", "adds the Allocated and Gen0 columns"], ["Ratio", "time compared with the baseline"], ["dotnet run -c Release -- --filter *Revenue*", "run only some benchmarks (with `BenchmarkSwitcher.FromAssembly(...).Run(args)`)"]],
+     "example": "dotnet run -c Release -- --filter *Revenue*"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "A nightly job runs `events.GroupBy(e => e.Country).Select(g => new { g.Key, Count = g.Count() })` over 50 million events and its memory climbs to 12 GB before it is killed. What is the smallest change that fixes it?",
+   "options": [
+    "`events.CountBy(e => e.Country)`: it keeps only one counter per country instead of every event of every group",
+    "Add `.ToList()` before `GroupBy`",
+    "Use `OrderBy(e => e.Country)` before grouping",
+    "Run the job on a machine with 32 GB"
+   ],
+   "answer": 0,
+   "explain": "`GroupBy` has to buffer every element of every group before the first group is yielded. `CountBy` streams and stores one integer per key, so memory depends on the number of countries, not on the number of events."
+  },
+  {
+   "type": "predict",
+   "prompt": "What does this print?",
+   "code": [
+    "var statuses = new[] { \"open\", \"done\", \"open\", \"late\", \"open\" };",
+    "foreach (var (status, n) in statuses.CountBy(s => s))",
+    "    Console.WriteLine($\"{status} {n}\");",
+    "Console.WriteLine(Enumerable.Range(1, 7).Chunk(3).Count());",
+    "foreach (var (i, name) in new[] { \"a\", \"b\" }.Index())",
+    "    Console.Write($\"{i}{name} \");"
+   ],
+   "answer": ["open 3", "done 1", "late 1", "3", "0a 1b"],
+   "explain": "`CountBy` yields keys in the order they were first seen. Seven items in chunks of three give three chunks (3, 3, 1). `Index()` numbers from 0."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each operator to the job.",
+   "pairs": [
+    ["`CountBy`", "tickets per status"],
+    ["`AggregateBy`", "revenue per customer"],
+    ["`Chunk(500)`", "delete ids in batches of 500"],
+    ["`Index()`", "line numbers while reading a file"],
+    ["`ExceptBy`", "customers who never ordered"],
+    ["`LeftJoin`", "every customer, with their order or null"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Total revenue per customer in one pass.",
+   "code": "var revenue = orders.__1__(o => o.CustomerId, __2__, (sum, o) => sum + o.Total);",
+   "blanks": ["AggregateBy", "0m"],
+   "bank": ["CountBy", "GroupBy", "Aggregate", "null"],
+   "explain": "`AggregateBy` takes a key, a seed for each key and a fold function. `Aggregate` produces a single value for the whole sequence, not one per key. The seed is `0m` because `Total` is a `decimal`."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "When you see `GroupBy` followed by `Count()` or `Sum()`, reach for `CountBy` or `AggregateBy`. Batch external calls with `Chunk`. On hot paths, compare the query with a loop in BenchmarkDotNet and choose with the numbers, not by taste."
+  }
+ ]
+}

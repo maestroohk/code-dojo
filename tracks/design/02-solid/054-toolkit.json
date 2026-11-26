@@ -1,0 +1,130 @@
+{
+ "title": "Senior's toolkit: interfaces, navigation and DI lifetimes",
+ "summary": "Extract interfaces, find every caller and implementation, and register dependencies with the right lifetime.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: interfaces, navigation and DI lifetimes",
+   "body": "SOLID at work is mostly done with the IDE and the dependency injection container: find who depends on what, pull an interface out, and register the implementation with a lifetime that will not bite you in production.",
+   "toolkit": [
+    {
+     "cmd": "Shift+F12",
+     "what": "Find all references: every caller of a method or user of a type. Run it before you change a signature, so you know the blast radius.",
+     "flags": [["Shift+F12", "Visual Studio and VS Code"], ["Alt+F7", "Rider (Find Usages)"]],
+     "example": "Cursor on PayrollCalculator.Calculate, Shift+F12",
+     "when": "before changing or splitting a class others depend on",
+     "lang": "text"
+    },
+    {
+     "cmd": "Ctrl+F12",
+     "what": "Go to implementation: jump from an interface or abstract member to the classes that implement it. F12 alone lands on the interface, which is rarely what you want.",
+     "flags": [["Ctrl+F12", "Visual Studio and VS Code"], ["F12", "go to definition (the interface itself)"]],
+     "example": "Cursor on IPayslipSender.Send, Ctrl+F12",
+     "lang": "text"
+    },
+    {
+     "cmd": "Extract interface",
+     "what": "Generate an interface from a class's public members and make the class implement it. The first step of inverting a dependency.",
+     "flags": [["Ctrl+. on the class name", "Visual Studio and VS Code: Extract interface..."], ["Ctrl+Shift+R", "Rider: Refactor This, then Extract Interface"], ["choose members", "include only what callers need (interface segregation)"]],
+     "example": "Ctrl+. on class SmtpMailer, Extract interface, name it IMailer, tick Send only",
+     "lang": "text"
+    },
+    {
+     "cmd": "builder.Services.AddScoped<IPayrollStore, SqlPayrollStore>();",
+     "what": "Register an implementation for an interface in ASP.NET Core's container. Classes ask for `IPayrollStore` in their constructor and never `new` the concrete type.",
+     "flags": [["AddSingleton", "one instance for the whole app; must be thread-safe"], ["AddScoped", "one instance per request (per scope); the norm for DbContext and units of work"], ["AddTransient", "a new instance every time it is asked for"]],
+     "example": "builder.Services.AddSingleton(TimeProvider.System);\nbuilder.Services.AddScoped<IPayrollStore, SqlPayrollStore>();\nbuilder.Services.AddTransient<IPayslipFormatter, PdfPayslipFormatter>();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "public sealed class PayrollService(IPayrollStore store, TimeProvider clock)",
+     "what": "Constructor injection with a C# 12 primary constructor. The dependencies are visible in one line, and a long list is a sign the class does too much.",
+     "flags": [["primary constructor", "parameters are in scope in the whole class body"], ["sealed", "says the class is not designed for inheritance"]],
+     "example": "public sealed class PayrollService(IPayrollStore store, TimeProvider clock)\n{\n    public Task RunAsync(CancellationToken ct) => store.CloseMonthAsync(clock.GetUtcNow(), ct);\n}",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "ValidateScopes / ValidateOnBuild",
+     "what": "Container checks that fail at start-up on a missing registration or a scoped service captured by a singleton. On by default in the Development environment; turn them on everywhere if start-up time allows.",
+     "flags": [["ValidateOnBuild", "construct-check every registration when the app starts"], ["ValidateScopes", "refuse to resolve a scoped service from the root or from a singleton"]],
+     "example": "builder.Host.UseDefaultServiceProvider(o =>\n{\n    o.ValidateScopes = true;\n    o.ValidateOnBuild = true;\n});",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "services.TryAddSingleton<IClock, SystemClock>();",
+     "what": "Register only if nobody registered that service yet (namespace `Microsoft.Extensions.DependencyInjection.Extensions`). Libraries use it for defaults the app can override.",
+     "flags": [["TryAdd*", "no-op when the service type is already registered"], ["Add*", "adds another registration; the last one wins for single resolves"]],
+     "example": "services.TryAddSingleton<IClock, SystemClock>();",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "match",
+   "prompt": "Match each lifetime to what the container does.",
+   "pairs": [
+    ["`AddSingleton`", "one instance shared by the whole app"],
+    ["`AddScoped`", "one instance per HTTP request"],
+    ["`AddTransient`", "a new instance on every resolve"]
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "The app refuses to start in Development with this error. What is the design problem?",
+   "code": [
+    "System.AggregateException: Some services are not able to be constructed",
+    "(Error while validating the service descriptor 'ServiceType: IPayslipCache Lifetime: Singleton",
+    "ImplementationType: PayslipCache': Cannot consume scoped service 'PayrollDbContext' from singleton 'IPayslipCache'.)"
+   ],
+   "options": [
+    "A singleton holds a scoped DbContext, so one context would be shared by every request; make the cache scoped or have it create a scope (or use `IDbContextFactory`) when it needs the database",
+    "`PayrollDbContext` is not registered; add `AddDbContext`",
+    "Singletons cannot have constructor parameters",
+    "The error only happens in Development, so it is safe to ignore in production"
+   ],
+   "answer": 0,
+   "explain": "This is a captive dependency. In production, without the check, the singleton would keep the first request's DbContext forever: stale data and thread-safety bugs. The check exists to catch it at start-up."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Register the store once per request and the system clock once for the whole app.",
+   "code": [
+    "builder.Services.__1__<IPayrollStore, SqlPayrollStore>();",
+    "builder.Services.__2__(TimeProvider.System);"
+   ],
+   "blanks": ["AddScoped", "AddSingleton"],
+   "bank": ["AddTransient", "TryAddEnumerable", "AddHostedService"],
+   "explain": "A store that wraps a DbContext follows the request scope. `TimeProvider.System` is one shared, thread-safe instance, so it is a singleton; only the singleton overload takes a ready-made instance."
+  },
+  {
+   "type": "sort",
+   "prompt": "Which IDE action answers the question?",
+   "buckets": ["Find all references (Shift+F12)", "Go to implementation (Ctrl+F12)", "Extract interface"],
+   "items": [
+    ["Who calls `Payroll.Calculate` before I change its signature?", 0],
+    ["Which classes use `TaxTable`?", 0],
+    ["Which classes implement `IPayslipSender`?", 1],
+    ["Where is the real code behind `store.SaveAsync` in this constructor-injected class?", 1],
+    ["`ReportService` news up `SmtpMailer` and I want to swap it in tests", 2],
+    ["Callers only need `Send` from a class with 12 public methods", 2]
+   ]
+  },
+  {
+   "type": "order",
+   "prompt": "`ReportService` creates `new SmtpMailer()` inside a method. Put the steps of inverting that dependency in order.",
+   "lines": [
+    "Shift+F12 on SmtpMailer to see who creates and uses it",
+    "Extract interface IMailer from SmtpMailer with only Send",
+    "Take IMailer as a constructor parameter of ReportService instead of calling new",
+    "Register builder.Services.AddScoped<IMailer, SmtpMailer>()",
+    "Run the tests, then add one that passes a fake IMailer"
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Before you change a class, press Shift+F12 and read who depends on it. When you see `new` of something that talks to the outside world, extract an interface and inject it. Pick the lifetime on purpose, and keep scope validation on so a captive dependency fails at start-up instead of in production."
+  }
+ ]
+}

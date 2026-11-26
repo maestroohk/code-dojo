@@ -1,0 +1,107 @@
+{
+ "title": "Senior's toolkit: talking to an identity provider",
+ "summary": "Read a discovery document, get a client-credentials token with curl, make a PKCE pair with openssl, and configure AddOpenIdConnect.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: talking to an identity provider",
+   "body": "OAuth and OpenID Connect problems are solved by looking at the real HTTP: what the provider publishes, what you sent, what came back. These are the commands and settings experienced developers use with Entra ID, Auth0, Okta or Keycloak.",
+   "toolkit": [
+    {
+     "cmd": "curl -s .../.well-known/openid-configuration | jq",
+     "what": "Every OpenID provider publishes its endpoints, signing keys location and supported features here. Read it before configuring anything.",
+     "flags": [["issuer", "must match the `iss` in tokens exactly, trailing slash included"], ["jwks_uri", "where the public signing keys are"], ["token_endpoint / authorization_endpoint", "where the flows send you"], ["code_challenge_methods_supported", "should list `S256`"]],
+     "example": "curl -s https://idp.example.com/.well-known/openid-configuration | jq '{issuer, jwks_uri, token_endpoint}'"
+    },
+    {
+     "cmd": "curl -d grant_type=client_credentials",
+     "what": "Get a token for a service (no user) straight from the token endpoint. The quickest way to see whether a client id, secret and scope are right.",
+     "flags": [["-u \"$CLIENT_ID:$CLIENT_SECRET\"", "send the client credentials as HTTP Basic"], ["-d grant_type=client_credentials", "the flow"], ["-d scope=...", "what the token is for; on Entra it is `api://<app>/.default`"]],
+     "example": "curl -s -u \"$CLIENT_ID:$CLIENT_SECRET\" -d grant_type=client_credentials -d scope=api://orders/.default https://idp.example.com/oauth2/token | jq ."
+    },
+    {
+     "cmd": "openssl rand / openssl dgst -sha256 -binary",
+     "what": "Make a PKCE pair by hand to test an authorization-code flow: a random `code_verifier`, and its SHA-256 in base64url as the `code_challenge`.",
+     "flags": [["openssl rand -base64 48", "random verifier material (64 characters)"], ["tr '+/' '-_' | tr -d '=\\n'", "base64 to base64url, no padding"], ["openssl dgst -sha256 -binary", "raw SHA-256 bytes of the verifier"]],
+     "example": "v=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\\n')\nc=$(printf %s \"$v\" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+    },
+    {
+     "cmd": "AddOpenIdConnect(o => ...)",
+     "what": "Sign users in to a server-rendered ASP.NET Core app with an OpenID provider, using the authorization-code flow with PKCE, and keep the session in a cookie.",
+     "flags": [["Authority", "the issuer URL; metadata is read from its discovery document"], ["ResponseType = \"code\"", "authorization-code flow"], ["UsePkce", "on by default; keep it on"], ["MapInboundClaims = false", "keep claim names as the provider sent them (`sub`, not a long URI)"]],
+     "example": "builder.Services.AddAuthentication(o =>\n{\n    o.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;\n    o.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;\n})\n.AddCookie()\n.AddOpenIdConnect(o =>\n{\n    o.Authority = \"https://idp.example.com/\";\n    o.ClientId = builder.Configuration[\"Oidc:ClientId\"];\n    o.ClientSecret = builder.Configuration[\"Oidc:ClientSecret\"];\n    o.ResponseType = \"code\";\n    o.MapInboundClaims = false;\n    o.SaveTokens = true;\n});",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "DevTools > Network > Preserve log",
+     "what": "Watch the redirect dance: the authorize request, the callback with `code` and `state`, and any `error=` the provider returns. Without Preserve log the redirects wipe the list.",
+     "flags": [["Preserve log", "keep requests across redirects"], ["Query string of the callback", "`code`, `state`, or `error` and `error_description`"]],
+     "example": "F12 > Network > Preserve log > sign in > click /signin-oidc",
+     "lang": "text"
+    }
+   ]
+  },
+  {
+   "type": "match",
+   "prompt": "Match each discovery document field to what it is for.",
+   "pairs": [
+    ["`issuer`", "must equal the `iss` claim in tokens"],
+    ["`jwks_uri`", "where the API fetches public signing keys"],
+    ["`token_endpoint`", "where codes and client credentials are exchanged for tokens"],
+    ["`authorization_endpoint`", "where the browser is sent to sign in"]
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "Users sometimes land on an error page after signing in. The app log shows this while handling `/signin-oidc`. What is the likely cause?",
+   "code": [
+    "OpenIdConnectProtocolException: Message contains error: 'invalid_grant',",
+    "error_description: 'AADSTS54005: OAuth2 Authorization code was already redeemed, please retry with a new valid code or use an existing refresh token.'"
+   ],
+   "options": [
+    "The authorization code was used twice, for example a retried or refreshed callback; codes are single-use, so restart the sign-in",
+    "The client secret has expired",
+    "The user typed the wrong password",
+    "PKCE must be turned off"
+   ],
+   "answer": 0,
+   "explain": "`invalid_grant` means the code (or refresh token) is not acceptable: already used, expired, issued to another client, or the PKCE verifier or redirect URI does not match the original request. The `error_description` tells you which."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Get a service token with the client credentials flow.",
+   "code": "curl -s __1__ \"$CLIENT_ID:$CLIENT_SECRET\" -d grant_type=__2__ -d scope=api://orders/.default https://idp.example.com/oauth2/token",
+   "blanks": ["-u", "client_credentials"],
+   "bank": ["-H", "authorization_code", "password", "-b"]
+  },
+  {
+   "type": "order",
+   "prompt": "Put the steps of the authorization-code flow with PKCE in order, as you would see them in the Network tab.",
+   "lines": [
+    "The app makes a code_verifier and sends its SHA-256 as code_challenge to /authorize",
+    "The user signs in at the provider",
+    "The provider redirects to /signin-oidc with code and state",
+    "The app checks state, then POSTs code and code_verifier to the token endpoint",
+    "The provider returns the id_token and access_token"
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "After sign-in, `User.FindFirst(\"sub\")` is null, although jwt.ms shows a `sub` claim in the id token. What is the fix?",
+   "options": [
+    "Set `MapInboundClaims = false`; by default `sub` is renamed to the long `nameidentifier` claim type URI",
+    "Add `sub` to the requested scopes",
+    "Set `SaveTokens = true`",
+    "Turn off PKCE"
+   ],
+   "answer": 0,
+   "explain": "The handler maps short JWT claim names to old WS-Federation URIs unless told not to. Turning mapping off makes the claims in code match what you see in the token."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Before configuring a new provider, read its discovery document; when a flow fails, open the Network tab with Preserve log and read the `error` and `error_description` the provider sent. Test service credentials with one curl call before writing any code."
+  }
+ ]
+}

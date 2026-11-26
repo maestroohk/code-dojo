@@ -1,0 +1,112 @@
+{
+ "title": "Senior's toolkit: counting and summarising without surprises",
+ "summary": "COUNT variants, FILTER, duplicate finders, string aggregation, medians and subtotals, with the dialect differences that matter.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: counting and summarising without surprises",
+   "body": "Aggregates answer most business questions, and most wrong numbers in a report come from counting the wrong thing. These are the forms analysts and backend engineers use daily.",
+   "toolkit": [
+    {
+     "cmd": "COUNT(*)  COUNT(col)  COUNT(DISTINCT col)",
+     "what": "Three different questions. Say which one you mean, every time.",
+     "flags": [["COUNT(*)", "rows"], ["COUNT(rider_id)", "rows where rider_id is not NULL"], ["COUNT(DISTINCT rider_id)", "different non-NULL riders"]],
+     "example": "SELECT COUNT(*) AS trips, COUNT(DISTINCT rider_id) AS riders\nFROM trips\nWHERE started_at >= '2026-03-01';",
+     "lang": "sql"
+    },
+    {
+     "cmd": "COUNT(*) FILTER (WHERE ...)",
+     "what": "Several conditional counts or sums in one pass (PostgreSQL, SQLite 3.30+). SQL Server and MySQL use `SUM(CASE WHEN ... THEN 1 ELSE 0 END)`.",
+     "flags": [["FILTER (WHERE status = 'late')", "only these rows feed this aggregate"], ["works on any aggregate", "`SUM(fare) FILTER (WHERE ...)`, `AVG(...) FILTER (...)`"]],
+     "example": "SELECT day,\n       COUNT(*) AS trips,\n       COUNT(*) FILTER (WHERE status = 'late') AS late,\n       SUM(fare) FILTER (WHERE paid) AS paid_fares\nFROM trips\nGROUP BY day;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "GROUP BY key HAVING COUNT(*) > 1",
+     "what": "The duplicate finder. Run it on any column you believe is unique before you join on it or trust a count.",
+     "flags": [["GROUP BY email", "one group per value"], ["HAVING COUNT(*) > 1", "keep only values that occur more than once"]],
+     "example": "SELECT email, COUNT(*) AS n\nFROM riders\nGROUP BY email\nHAVING COUNT(*) > 1\nORDER BY n DESC;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "string_agg(name, ', ' ORDER BY name)",
+     "what": "Join a group's values into one string: handy for reports and for eyeballing what is inside a group.",
+     "flags": [["string_agg(x, sep ORDER BY x)", "PostgreSQL, and SQLite 3.44+"], ["group_concat(x, sep)", "older SQLite and MySQL"], ["STRING_AGG(x, sep) WITHIN GROUP (ORDER BY x)", "SQL Server"]],
+     "example": "SELECT rider_id, string_agg(city, ', ' ORDER BY city) AS cities\nFROM trips\nGROUP BY rider_id;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "percentile_cont(0.5) WITHIN GROUP (ORDER BY fare)",
+     "what": "The median and other percentiles (PostgreSQL; SQL Server has it as a window function). Averages hide skew: a p50 and p95 tell the real story.",
+     "flags": [["percentile_cont(0.5)", "the median, interpolated"], ["percentile_cont(0.95)", "the 95th percentile"], ["percentile_disc", "an actual value from the data, no interpolation"]],
+     "example": "SELECT city,\n       percentile_cont(0.5) WITHIN GROUP (ORDER BY fare) AS median_fare,\n       percentile_cont(0.95) WITHIN GROUP (ORDER BY fare) AS p95_fare\nFROM trips\nGROUP BY city;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "GROUP BY ROLLUP (city, day)",
+     "what": "Subtotals and a grand total in one query (PostgreSQL, SQL Server; MySQL writes `GROUP BY city, day WITH ROLLUP`; not SQLite). The subtotal rows have NULL in the rolled-up columns.",
+     "flags": [["ROLLUP (a, b)", "groups (a, b), (a) and ()"], ["GROUPING SETS ((a), (b))", "exactly the groupings you list"], ["GROUPING(a)", "1 on a subtotal row, so you can label it"]],
+     "example": "SELECT city, day, SUM(fare) AS revenue\nFROM trips\nGROUP BY ROLLUP (city, day)\nORDER BY city, day;",
+     "lang": "sql"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "The dashboard says **4,312 riders** last week. Product says there are only about 1,050 active riders. The query is below. What is wrong?",
+   "code": "SELECT COUNT(*) AS riders FROM trips WHERE started_at >= '2026-03-02' AND started_at < '2026-03-09';",
+   "options": [
+    "It counts trips, not riders; use `COUNT(DISTINCT rider_id)`",
+    "The date range is one day too long",
+    "`COUNT(*)` skips NULL rows, so it should be `COUNT(1)`",
+    "It needs `GROUP BY rider_id`"
+   ],
+   "answer": 0,
+   "explain": "One rider takes many trips. `COUNT(*)` counts rows of the table you are reading, so the grain is trips. `COUNT(1)` is the same as `COUNT(*)`, and `GROUP BY rider_id` would give one count per rider, not the number of riders."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Per day, count all trips and the late ones, but only for busy days with more than 100 trips.",
+   "code": [
+    "SELECT day, COUNT(*) AS trips,",
+    "       COUNT(*) __1__ (WHERE status = 'late') AS late",
+    "FROM trips",
+    "GROUP BY day",
+    "__2__ COUNT(*) > 100;"
+   ],
+   "blanks": ["FILTER", "HAVING"],
+   "bank": ["WHERE", "OVER", "CASE"],
+   "explain": "`FILTER (WHERE ...)` restricts one aggregate. `HAVING` filters groups after aggregation; `WHERE` runs before grouping and cannot see `COUNT(*)`."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each expression to what it returns.",
+   "pairs": [
+    ["`COUNT(*)`", "the number of rows, NULLs included"],
+    ["`COUNT(tip)`", "the number of rows where tip is not NULL"],
+    ["`COUNT(DISTINCT rider_id)`", "the number of different riders"],
+    ["`SUM(tip)` over zero rows", "NULL, not 0"],
+    ["`AVG(tip)`", "the mean of the non-NULL tips only"]
+   ]
+  },
+  {
+   "type": "sort",
+   "prompt": "Does the condition go in WHERE or in HAVING?",
+   "buckets": ["WHERE", "HAVING"],
+   "items": [
+    ["only trips in March", 0],
+    ["only cities with more than 1,000 trips", 1],
+    ["skip cancelled trips", 0],
+    ["riders whose average fare is over 20", 1],
+    ["only trips paid by card", 0],
+    ["days where the late share is above 10%", 1]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Before you report a number, say its grain out loud (\"one row per trip\") and pick the COUNT that matches the question. Run the duplicate finder on any key you assume is unique, and show a median next to an average whenever the data might be skewed."
+  }
+ ]
+}

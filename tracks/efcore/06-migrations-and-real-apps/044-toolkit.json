@@ -1,0 +1,120 @@
+{
+ "title": "Senior's toolkit: migrations from laptop to production",
+ "summary": "The dotnet ef migrations commands, idempotent scripts and bundles for CI, rolling back, and catching a forgotten migration.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: migrations from laptop to production",
+   "body": "Migrations are easy on a laptop and dangerous in production. Teams generate them locally, review the SQL, and let the pipeline apply them, never the app on start-up. These are the commands that make that work.",
+   "toolkit": [
+    {
+     "cmd": "dotnet ef migrations add",
+     "what": "Compare the model with the last snapshot and write a migration class for the difference. Always read it: a rename can come out as drop plus add.",
+     "flags": [["-o Data/Migrations", "(`--output-dir`) where the files go"], ["--project src/Shop.Data", "the project that holds the DbContext and migrations"], ["--startup-project src/Shop.Api", "the project whose configuration and services are used"]],
+     "example": "dotnet ef migrations add AddOrderNotes --project src/Shop.Data --startup-project src/Shop.Api -o Migrations"
+    },
+    {
+     "cmd": "dotnet ef migrations list",
+     "what": "Every migration, and which ones are still pending on the database the tools connect to.",
+     "flags": [["--connection \"...\"", "check a different database than the configured one"], ["--no-connect", "list from the code only, without a database"]],
+     "example": "dotnet ef migrations list --startup-project src/Shop.Api"
+    },
+    {
+     "cmd": "dotnet ef migrations remove",
+     "what": "Delete the last migration and put the snapshot back. Only for a migration nobody else has applied yet.",
+     "flags": [["--force", "also revert it on your local database if you already applied it"]],
+     "example": "dotnet ef migrations remove"
+    },
+    {
+     "cmd": "dotnet ef migrations script --idempotent",
+     "what": "Write the SQL for the migrations. An idempotent script checks the history table first, so it is safe to run on a database at any version. This is what you review and what CI applies.",
+     "flags": [["--idempotent", "each migration runs only if it has not been applied"], ["-o migrate.sql", "(`--output`) write to a file"], ["From To", "only the migrations between two names, for example `AddRating AddOrderNotes`"]],
+     "example": "dotnet ef migrations script --idempotent -o artifacts/migrate.sql"
+    },
+    {
+     "cmd": "dotnet ef migrations bundle",
+     "what": "Build one executable that applies the migrations. CI builds it once and the deploy step runs it against each environment.",
+     "flags": [["--self-contained -r linux-x64", "runs on a machine without the .NET SDK"], ["-o efbundle", "the output file name"], ["--connection \"...\"", "(when running the bundle) the target database"]],
+     "example": "dotnet ef migrations bundle --self-contained -r linux-x64 -o efbundle\n./efbundle --connection \"$DB_CONNECTION\""
+    },
+    {
+     "cmd": "dotnet ef database update",
+     "what": "Apply migrations to the database. With a migration name it moves to exactly that version, rolling back newer ones; `0` removes them all.",
+     "flags": [["AddRating", "go to this migration, up or down"], ["0", "roll back every migration"], ["--connection \"...\"", "target a database other than the configured one"]],
+     "example": "dotnet ef database update AddRating",
+     "when": "your own dev database; production gets the reviewed script or bundle"
+    },
+    {
+     "cmd": "dotnet ef migrations has-pending-model-changes",
+     "what": "Fail if the model has changes that no migration captures yet. Put it in CI so a forgotten `migrations add` breaks the build, not the deploy. In code: `db.Database.HasPendingModelChanges()`.",
+     "flags": [["exit code", "non-zero when a migration is missing"]],
+     "example": "dotnet ef migrations has-pending-model-changes --startup-project src/Shop.Api"
+    }
+   ]
+  },
+  {
+   "type": "order",
+   "prompt": "You added a `Notes` column to `Order`. Put the steps from your laptop to production in order.",
+   "lines": [
+    "dotnet ef migrations add AddOrderNotes",
+    "Read the generated migration and fix anything that drops data",
+    "dotnet ef database update (on your dev database) and run the tests",
+    "Commit the migration, the snapshot and the code together",
+    "CI: dotnet ef migrations script --idempotent -o migrate.sql",
+    "Deploy: apply migrate.sql, then roll out the new app version"
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "You renamed `Customer.Name` to `Customer.FullName`. The generated migration looks like this. What do you do before merging?",
+   "code": [
+    "migrationBuilder.DropColumn(name: \"Name\", table: \"Customers\");",
+    "migrationBuilder.AddColumn<string>(name: \"FullName\", table: \"Customers\", nullable: false, defaultValue: \"\");"
+   ],
+   "options": [
+    "Replace both lines with `migrationBuilder.RenameColumn(name: \"Name\", table: \"Customers\", newName: \"FullName\");`, or every customer's name is lost",
+    "Nothing: EF Core copies the data across automatically",
+    "Run `dotnet ef migrations remove` and give up on the rename",
+    "Apply it and restore the names from a backup afterwards"
+   ],
+   "answer": 0,
+   "explain": "EF Core cannot tell a rename from a delete plus an add, so it sometimes generates the destructive version. Reading every migration before merging is the habit that catches it."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each option to what it does.",
+   "pairs": [
+    ["`--idempotent`", "the script is safe on a database at any version"],
+    ["`--startup-project`", "the project whose configuration and services are used"],
+    ["`-o Data/Migrations` (migrations add)", "the folder for the migration files"],
+    ["`database update 0`", "roll back every migration"],
+    ["`--self-contained -r linux-x64` (bundle)", "runs where the .NET SDK is not installed"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "The CI step that produces the reviewed SQL for deployment.",
+   "code": "dotnet ef migrations __1__ __2__ -o artifacts/migrate.sql --startup-project src/Shop.Api",
+   "blanks": ["script", "--idempotent"],
+   "bank": ["add", "remove", "--force", "--no-connect"]
+  },
+  {
+   "type": "mcq",
+   "prompt": "The API runs on four instances and calls `db.Database.Migrate()` at start-up. After a deploy with a slow migration (an index on a big table), the instances fail their health checks, get restarted, and the rollout loops. What is the usual fix?",
+   "options": [
+    "Apply migrations once from the pipeline (idempotent script or bundle) before the new version rolls out, and remove `Migrate()` from start-up",
+    "The connection string is wrong on two instances",
+    "SQL Server cannot run migrations in parallel, so use SQLite",
+    "Call `EnsureCreated()` before `Migrate()`"
+   ],
+   "answer": 0,
+   "explain": "Start-up migration ties the schema change to the app's start, needs the app to hold DDL rights, and a failure takes the app down. (EF Core 9+ takes a lock so instances wait for each other instead of colliding, which makes the start-up delay worse, not better.) One controlled step in the deploy is safer and can be reviewed. Never mix `EnsureCreated` with migrations."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Read every generated migration before you commit it, and add `has-pending-model-changes` to CI so a missing one fails the build. In production, apply a reviewed idempotent script or a bundle from the pipeline, never `Migrate()` on start-up."
+  }
+ ]
+}

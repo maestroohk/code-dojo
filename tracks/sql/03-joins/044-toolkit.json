@@ -1,0 +1,118 @@
+{
+ "title": "Senior's toolkit: joins you can trust",
+ "summary": "Find the join paths, check the grain, write anti-joins that survive NULLs, and reconcile two systems.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: joins you can trust",
+   "body": "A join that runs is not a join that is right. Experienced people look up the foreign keys first, check that the \"one\" side really is one, and compare row counts before and after.",
+   "toolkit": [
+    {
+     "cmd": "PRAGMA foreign_key_list(orders);",
+     "what": "Show a table's foreign keys, which tell you how tables join. In psql, `\\d orders` lists them under \"Foreign-key constraints\" and \"Referenced by\".",
+     "flags": [["PRAGMA foreign_key_list(t)", "SQLite: the columns of t that point to other tables"], ["\\d orders", "psql: keys out of and into the table"]],
+     "example": "PRAGMA foreign_key_list(order_lines);",
+     "lang": "sql"
+    },
+    {
+     "cmd": "SELECT COUNT(*) before and after the join",
+     "what": "The fan-out check. If joining orders to payments turns 1,000 orders into 1,300 rows, some orders have several payments and every SUM over orders is now inflated.",
+     "flags": [["count the left table", "the grain you expect"], ["count the join", "more rows means a one-to-many you did not plan for"], ["aggregate first", "sum the many side in a subquery or CTE, then join"]],
+     "example": "SELECT COUNT(*) FROM orders;\nSELECT COUNT(*) FROM orders o JOIN payments p ON p.order_id = o.id;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "LEFT JOIN ... WHERE right.id IS NULL",
+     "what": "The anti-join: rows with no match. `NOT EXISTS` says the same thing and is often clearer; both are safe with NULLs, unlike `NOT IN`.",
+     "flags": [["LEFT JOIN + IS NULL", "keep left rows whose match is missing"], ["NOT EXISTS (SELECT 1 ...)", "the same, written as a question"], ["NOT IN (subquery)", "returns nothing if the subquery yields one NULL"]],
+     "example": "SELECT c.id, c.name\nFROM customers c\nWHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);",
+     "lang": "sql"
+    },
+    {
+     "cmd": "FULL OUTER JOIN",
+     "what": "Reconcile two sources: rows only in A, only in B, and in both with different values (PostgreSQL, SQL Server, SQLite 3.39+).",
+     "flags": [["FULL JOIN ... ON a.id = b.id", "every row from both sides"], ["WHERE a.id IS NULL OR b.id IS NULL", "rows missing on one side"], ["OR a.amount IS DISTINCT FROM b.amount", "rows that disagree"]],
+     "example": "SELECT COALESCE(l.id, b.id) AS id, l.amount AS ledger, b.amount AS bank\nFROM ledger l\nFULL JOIN bank b ON b.id = l.id\nWHERE l.id IS NULL OR b.id IS NULL OR l.amount IS DISTINCT FROM b.amount;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "JOIN LATERAL / CROSS APPLY",
+     "what": "Join each row to a subquery that can use that row's columns: the clean way to get \"the latest order per customer\" (PostgreSQL `LATERAL`, SQL Server `CROSS APPLY` / `OUTER APPLY`).",
+     "flags": [["LEFT JOIN LATERAL (...) ON true", "keep customers with no orders"], ["ORDER BY ... LIMIT 1 inside", "the top row per outer row"]],
+     "example": "SELECT c.name, last.placed_at\nFROM customers c\nLEFT JOIN LATERAL (\n  SELECT placed_at FROM orders o\n  WHERE o.customer_id = c.id\n  ORDER BY placed_at DESC LIMIT 1\n) last ON true;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "short aliases, every column qualified",
+     "what": "`o.id`, `c.id`: always say which table a column comes from once two tables are involved. It prevents \"ambiguous column\" errors and silent mistakes when someone adds a column with the same name later.",
+     "flags": [["FROM orders o", "a short alias per table"], ["o.customer_id = c.id", "qualify both sides of every condition"]],
+     "example": "SELECT o.id, c.name, o.total\nFROM orders o\nJOIN customers c ON c.id = o.customer_id;",
+     "lang": "sql"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "After adding a join to `payments`, March revenue went from 84,200 to 109,460. Nothing else changed. What happened?",
+   "code": [
+    "SELECT SUM(o.total) AS revenue",
+    "FROM orders o",
+    "JOIN payments p ON p.order_id = o.id",
+    "WHERE o.placed_at >= '2026-03-01' AND o.placed_at < '2026-04-01';"
+   ],
+   "options": [
+    "Some orders have several payments (split or retried), so their total is counted once per payment; aggregate payments per order first, or use EXISTS",
+    "The join dropped orders without payments, which raised the total",
+    "SUM double-counts NULLs",
+    "The date filter must move into the ON clause"
+   ],
+   "answer": 0,
+   "explain": "A one-to-many join repeats the \"one\" side. Dropping unmatched orders would lower the total, not raise it. Count rows before and after the join to catch this before anyone sees the report."
+  },
+  {
+   "type": "mcq",
+   "prompt": "This query should list customers who never ordered. It returns **zero rows**, although you know there are some. Why?",
+   "code": "SELECT id FROM customers WHERE id NOT IN (SELECT customer_id FROM orders);",
+   "options": [
+    "At least one `orders.customer_id` is NULL, and `x NOT IN (..., NULL)` is never true; use `NOT EXISTS` or a LEFT JOIN anti-join",
+    "`NOT IN` only works with literal lists",
+    "The subquery needs `DISTINCT`",
+    "`customers.id` must be indexed"
+   ],
+   "answer": 0,
+   "explain": "`NOT IN` means `<> every value`, and `id <> NULL` is UNKNOWN, so no row passes. `NOT EXISTS` asks a yes/no question per customer and ignores NULLs."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Two ways to list customers with no orders.",
+   "code": [
+    "SELECT c.id FROM customers c",
+    "LEFT JOIN orders o ON o.customer_id = c.id",
+    "WHERE o.__1__ IS NULL;",
+    "",
+    "SELECT c.id FROM customers c",
+    "WHERE __2__ (SELECT 1 FROM orders o WHERE o.customer_id = c.id);"
+   ],
+   "blanks": ["id", "NOT EXISTS"],
+   "bank": ["NOT IN", "EXISTS", "total"],
+   "explain": "Test a column of the right table that can never be NULL in a real match, such as its primary key. A nullable column like `total` would also match orders whose total is NULL."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each join to the job.",
+   "pairs": [
+    ["`JOIN`", "only orders that have a customer"],
+    ["`LEFT JOIN`", "every customer, with their orders if any"],
+    ["`NOT EXISTS`", "customers who never ordered"],
+    ["`FULL JOIN`", "compare the ledger with the bank export"],
+    ["`JOIN LATERAL`", "each customer's most recent order"]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Before you trust a join, know the keys (read the foreign keys), know the grain (count before and after) and qualify every column. Write \"has no match\" as `NOT EXISTS`, never as `NOT IN` over a column that can be NULL."
+  }
+ ]
+}

@@ -1,0 +1,129 @@
+{
+ "title": "Senior's toolkit: keys, signatures and TLS",
+ "summary": "Generate and inspect key pairs, sign and verify from the shell and in .NET, and see what a TLS server really sends.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: keys, signatures and TLS",
+   "body": "Public-key crypto at work means making key pairs, checking signatures between two systems and debugging TLS connections. These are the commands and APIs for each.",
+   "toolkit": [
+    {
+     "cmd": "openssl genpkey",
+     "what": "Generate a private key (PEM, PKCS#8) for any algorithm.",
+     "flags": [["-algorithm ED25519", "an Ed25519 signing key"], ["-algorithm EC -pkeyopt ec_paramgen_curve:P-256", "a P-256 key for ECDSA or ECDH"], ["-algorithm RSA -pkeyopt rsa_keygen_bits:3072", "an RSA-3072 key"], ["-out key.pem", "where to write it"]],
+     "example": "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out signing-key.pem"
+    },
+    {
+     "cmd": "openssl pkey",
+     "what": "Read a key: extract the public half to share, or print what is inside.",
+     "flags": [["-pubout", "write the public key (SubjectPublicKeyInfo PEM)"], ["-noout -text", "print the key's components instead of the key"], ["-pubin", "the input is a public key"]],
+     "example": "openssl pkey -in signing-key.pem -pubout -out signing-pub.pem"
+    },
+    {
+     "cmd": "openssl dgst -sha256 -sign",
+     "what": "Sign a file with an EC or RSA key, or verify a signature. Prints `Verified OK` on success. Its ECDSA signatures are DER-encoded.",
+     "flags": [["-sign key.pem", "sign with this private key"], ["-verify pub.pem", "verify with this public key"], ["-signature sig.bin", "the signature to check"]],
+     "example": "openssl dgst -sha256 -sign signing-key.pem -out release.sig release.zip\nopenssl dgst -sha256 -verify signing-pub.pem -signature release.sig release.zip"
+    },
+    {
+     "cmd": "ssh-keygen -t ed25519",
+     "what": "Make the SSH key you use for Git hosts and servers, and print key fingerprints to compare with what a server shows.",
+     "flags": [["-t ed25519", "the key type to use today"], ["-C \"you@laptop\"", "a comment that says whose key it is"], ["-f ~/.ssh/id_work", "the file name"], ["-lf key.pub", "show the fingerprint of an existing key"]],
+     "example": "ssh-keygen -t ed25519 -C \"dev@laptop-2026\" -f ~/.ssh/id_work"
+    },
+    {
+     "cmd": "openssl s_client -connect",
+     "what": "Open a TLS connection and print the handshake: protocol, cipher, and the certificate chain the server really sends.",
+     "flags": [["-connect host:443", "where to connect"], ["-servername host", "send SNI, so a shared server picks the right certificate"], ["-showcerts", "print every certificate in the chain, not just the leaf"], ["</dev/null", "close stdin so it exits after the handshake"]],
+     "example": "openssl s_client -connect api.example.com:443 -servername api.example.com -showcerts </dev/null"
+    },
+    {
+     "cmd": "openssl x509 -noout",
+     "what": "Read a certificate: who it is for, who issued it, when it expires, which names it covers.",
+     "flags": [["-subject -issuer", "the certificate's owner and its issuer"], ["-dates", "notBefore and notAfter"], ["-ext subjectAltName", "the host names it is valid for"], ["-fingerprint -sha256", "the fingerprint to pin or compare"]],
+     "example": "openssl s_client -connect api.example.com:443 -servername api.example.com </dev/null 2>/dev/null | openssl x509 -noout -subject -dates -ext subjectAltName"
+    },
+    {
+     "cmd": "ECDsa.Create(ECCurve.NamedCurves.nistP256)",
+     "what": ".NET signing with ECDSA. Keys move between systems as PEM. .NET's default signature format is the 64-byte IEEE P1363 form, not DER.",
+     "flags": [["SignData(data, HashAlgorithmName.SHA256)", "sign; returns 64 bytes for P-256"], ["VerifyData(data, sig, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence)", "verify a DER signature from OpenSSL, Java or Go"], ["ImportFromPem(pem) / ExportSubjectPublicKeyInfoPem()", "read a PEM key / write the public key as PEM"]],
+     "example": "using var ec = ECDsa.Create();\nec.ImportFromPem(File.ReadAllText(\"signing-pub.pem\"));\nbool ok = ec.VerifyData(zip, sig, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "RSA.Create(3072)",
+     "what": "RSA in .NET. Always name the padding: OAEP with SHA-256 to encrypt, PSS to sign. PKCS#1 v1.5 encryption is the legacy padding that allows oracle attacks.",
+     "flags": [["Encrypt(data, RSAEncryptionPadding.OaepSHA256)", "encrypt a small secret such as a DEK"], ["SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pss)", "sign with PSS"]],
+     "example": "using var rsa = RSA.Create(3072);\nbyte[] wrapped = rsa.Encrypt(dek, RSAEncryptionPadding.OaepSHA256);",
+     "lang": "csharp"
+    }
+   ]
+  },
+  {
+   "type": "predict",
+   "prompt": "What does this print?",
+   "code": [
+    "using System.Security.Cryptography;",
+    "",
+    "using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);",
+    "byte[] sig = ec.SignData(\"pay 10\"u8.ToArray(), HashAlgorithmName.SHA256);",
+    "Console.WriteLine(sig.Length);",
+    "Console.WriteLine(ec.VerifyData(\"pay 10\"u8.ToArray(), sig, HashAlgorithmName.SHA256));",
+    "Console.WriteLine(ec.VerifyData(\"pay 90\"u8.ToArray(), sig, HashAlgorithmName.SHA256));"
+   ],
+   "answer": ["64", "True", "False"],
+   "explain": "A P-256 signature in .NET's default format is two 32-byte numbers side by side. ECDSA signatures are randomised, so the bytes change every run, but the length and the verify results do not. Change one character and verification fails."
+  },
+  {
+   "type": "mcq",
+   "prompt": "A Go service signs messages with ECDSA P-256. Your .NET code imports its public key from PEM and calls `ec.VerifyData(data, sig, HashAlgorithmName.SHA256)`. It always returns `False`, and the signatures are 70 to 72 bytes long. Why?",
+   "options": [
+    "The signatures are DER-encoded; pass `DSASignatureFormat.Rfc3279DerSequence` to `VerifyData`",
+    "Go uses a different P-256 curve from .NET",
+    "The PEM import silently failed, so the key is random",
+    "ECDSA cannot be verified on a different platform from the one that signed"
+   ],
+   "answer": 0,
+   "explain": "OpenSSL, Go and Java write ECDSA signatures as a DER sequence (about 70-72 bytes for P-256). .NET defaults to the fixed 64-byte P1363 form. The length is the clue: same key, same math, different envelope."
+  },
+  {
+   "type": "mcq",
+   "prompt": "`curl https://billing.internal` fails with `SSL certificate problem: unable to get local issuer certificate`, but it works in the browser. `openssl s_client -connect billing.internal:443 -servername billing.internal -showcerts` shows one certificate and `verify error:num=20`. What is the likely fix?",
+   "options": [
+    "Configure the server to send its intermediate certificate with the leaf (the full chain)",
+    "Use `curl -k` in the service config",
+    "Renew the certificate; it has expired",
+    "Switch the server to TLS 1.3"
+   ],
+   "answer": 0,
+   "explain": "Browsers often fetch or cache missing intermediates; curl and most HTTP clients do not. `-showcerts` printing only the leaf confirms the server sends an incomplete chain. `-k` turns verification off, which defeats TLS."
+  },
+  {
+   "type": "blanks",
+   "prompt": "See every certificate the server sends for `api.example.com`, the right one on a shared IP.",
+   "code": "openssl s_client -connect api.example.com:443 __1__ api.example.com __2__ </dev/null",
+   "blanks": ["-servername", "-showcerts"],
+   "bank": ["-host", "-cert", "-verify"],
+   "explain": "`-servername` sends SNI, without which a shared server may hand you its default certificate. `-showcerts` prints the whole chain."
+  },
+  {
+   "type": "sort",
+   "prompt": "Which command do you reach for?",
+   "buckets": ["`openssl s_client`", "`openssl x509`", "`openssl genpkey`", "`ssh-keygen`"],
+   "items": [
+    ["See which certificate a server really presents", 0],
+    ["Check that SNI picks the right certificate on a shared host", 0],
+    ["Find out when a certificate file expires", 1],
+    ["List the host names a downloaded certificate covers", 1],
+    ["Create a P-256 private key for signing releases", 2],
+    ["Create the key you add to your GitHub account", 3]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "When two systems disagree about a signature, compare formats before keys: PEM or DER, P1363 or DER signature, which padding. When a TLS call fails, run `openssl s_client -servername -showcerts` first and read the chain; it answers most certificate tickets in a minute."
+  }
+ ]
+}

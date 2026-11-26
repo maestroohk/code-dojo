@@ -1,0 +1,125 @@
+{
+ "title": "Senior's toolkit: auditing TLS and weak crypto",
+ "summary": "Test which TLS versions and ciphers a server accepts, find weak algorithms in code, and check post-quantum readiness.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: auditing TLS and weak crypto",
+   "body": "Security reviews and pen-test reports land on engineers as tickets: \"server accepts TLS 1.0\", \"MD5 in use\", \"what is our post-quantum plan?\". These are the tools to check the claim yourself and prove the fix.",
+   "toolkit": [
+    {
+     "cmd": "openssl s_client -tls1_2",
+     "what": "Force one TLS version to see whether a server accepts it. OpenSSL 3 refuses TLS 1.0 and 1.1 itself at its default security level, so lower it when you test for them.",
+     "flags": [["-tls1_2 / -tls1_3", "offer only this version"], ["-tls1_1 -cipher 'DEFAULT@SECLEVEL=0'", "test for TLS 1.1 (the client would otherwise refuse)"], ["-brief", "print just the protocol, cipher and peer"], ["-groups X25519MLKEM768", "offer only the hybrid post-quantum key exchange (OpenSSL 3.5+)"]],
+     "example": "openssl s_client -connect shop.example.com:443 -servername shop.example.com -tls1_3 -brief </dev/null"
+    },
+    {
+     "cmd": "nmap --script ssl-enum-ciphers",
+     "what": "List every TLS version and cipher suite a server accepts, each graded A to F. Quick evidence for or against a scanner finding.",
+     "flags": [["--script ssl-enum-ciphers", "run the TLS enumeration script"], ["-p 443", "the port (add others, e.g. 8443)"]],
+     "example": "nmap --script ssl-enum-ciphers -p 443 shop.example.com",
+     "when": "only against hosts you own or are allowed to test"
+    },
+    {
+     "cmd": "testssl.sh",
+     "what": "A thorough TLS audit script: protocols, ciphers, certificate, known vulnerabilities, with a report you can attach to the ticket.",
+     "flags": [["-p", "protocols only"], ["-U", "check known vulnerabilities (Heartbleed, ROBOT, ...)"], ["--jsonfile out.json", "machine-readable results for CI"]],
+     "example": "testssl.sh -p -U --jsonfile tls-report.json shop.example.com:443"
+    },
+    {
+     "cmd": "openssl list -kem-algorithms",
+     "what": "See which algorithms your OpenSSL build offers. OpenSSL 3.5 and later list ML-KEM and ML-DSA.",
+     "flags": [["-kem-algorithms", "key encapsulation (ML-KEM)"], ["-signature-algorithms", "signatures (ML-DSA, SLH-DSA)"], ["openssl version", "check you have 3.5 or later"]],
+     "example": "openssl version && openssl list -kem-algorithms"
+    },
+    {
+     "cmd": "MLKem.IsSupported",
+     "what": ".NET 10 ships `MLKem`, `MLDsa` and `SlhDsa`, backed by the OS crypto library. Check support before you depend on them.",
+     "flags": [["MLKem.GenerateKey(MLKemAlgorithm.MLKem768)", "a new ML-KEM-768 key pair"], ["Encapsulate(out ciphertext, out sharedSecret)", "sender side: a secret plus what to send"], ["Decapsulate(ciphertext)", "receiver side: the same secret"]],
+     "example": "if (MLKem.IsSupported)\n{\n    using var kem = MLKem.GenerateKey(MLKemAlgorithm.MLKem768);\n    kem.Encapsulate(out byte[] ciphertext, out byte[] secret);\n}",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "dotnet_diagnostic.CA5351.severity = error",
+     "what": "The .NET analyzers flag weak crypto at build time: CA5351 for broken algorithms (MD5, DES, RC2), CA5350 for weak ones (SHA-1, TripleDES). Raising them to errors stops new uses.",
+     "flags": [["CA5351", "broken cryptographic algorithm"], ["CA5350", "weak cryptographic algorithm"], ["CA5379", "weak key-derivation hash (PBKDF2 with SHA-1)"]],
+     "example": "# .editorconfig\n[*.cs]\ndotnet_diagnostic.CA5351.severity = error\ndotnet_diagnostic.CA5350.severity = error"
+    },
+    {
+     "cmd": "rg -n",
+     "what": "A fast first inventory of crypto in a codebase, for a crypto-agility or post-quantum review.",
+     "flags": [["-n", "show line numbers"], ["-g '*.cs'", "only C# files"], ["-i", "ignore case"]],
+     "example": "rg -n -g '*.cs' 'MD5|SHA1|TripleDES|CipherMode\\.ECB|RSA\\.Create\\(1024'"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "A scanner reports that `legacy.example.com` accepts TLS 1.0. You check, and see this. Is the scanner wrong?",
+   "code": [
+    "$ openssl s_client -connect legacy.example.com:443 -tls1 </dev/null",
+    "...:error:...:no protocols available:..."
+   ],
+   "options": [
+    "Not proven: OpenSSL 3 refuses TLS 1.0 on your side at its default security level; retry with `-cipher 'DEFAULT@SECLEVEL=0'` or use `nmap --script ssl-enum-ciphers`",
+    "Yes: the error proves the server rejects TLS 1.0",
+    "Yes: TLS 1.0 can no longer be negotiated by any software",
+    "No: the error means the server only speaks TLS 1.0"
+   ],
+   "answer": 0,
+   "explain": "\"no protocols available\" is a client-side error: your OpenSSL would not even offer TLS 1.0. The server never got a say. Lower the client's security level, or use a tool built to enumerate, before you close the finding."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each tool to the question it answers.",
+   "pairs": [
+    ["`nmap --script ssl-enum-ciphers`", "Which versions and cipher suites does this server accept?"],
+    ["`openssl s_client -tls1_3 -brief`", "Does this server speak TLS 1.3, and with which cipher?"],
+    ["`openssl list -kem-algorithms`", "Does my OpenSSL build have ML-KEM?"],
+    ["`CA5351` as an error", "How do we stop anyone adding MD5 again?"],
+    ["`rg -n 'MD5|SHA1|TripleDES'`", "Where does our code use weak algorithms today?"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Enumerate the TLS versions and ciphers of `shop.example.com` on port 443.",
+   "code": "nmap __1__ ssl-enum-ciphers __2__ 443 shop.example.com",
+   "blanks": ["--script", "-p"],
+   "bank": ["-sV", "--port", "--scan"],
+   "explain": "`--script` runs an NSE script and `-p` chooses the ports. `-sV` is a real nmap option (version detection) but does not list ciphers."
+  },
+  {
+   "type": "sort",
+   "prompt": "Sort the findings from a crypto inventory.",
+   "buckets": ["Replace now", "Fine today, on the post-quantum plan", "Fine, keep"],
+   "items": [
+    ["MD5 password hashes", 0],
+    ["TripleDES for card data", 0],
+    ["RSA-1024 signing key", 0],
+    ["ECDH P-256 key exchange", 1],
+    ["RSA-3072 signatures on releases", 1],
+    ["AES-256-GCM for data at rest", 2],
+    ["HMAC-SHA256 on webhooks", 2],
+    ["SHA-256 file checksums", 2]
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "Your team can migrate one thing to post-quantum crypto this year. Which first, and why?",
+   "options": [
+    "Key exchange (hybrid X25519 + ML-KEM in TLS), because traffic recorded today can be decrypted once a quantum computer exists",
+    "Code-signing signatures, because they are the oldest",
+    "AES-256, because Grover's algorithm breaks it",
+    "SHA-256 checksums, because they are everywhere"
+   ],
+   "answer": 0,
+   "explain": "\"Harvest now, decrypt later\" makes confidentiality urgent: the attack works on recordings. A signature only has to resist forgery until it is checked, so signatures can follow. AES-256 and SHA-256 stay strong enough against known quantum attacks."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "When a scanner or pen-test finding arrives, reproduce it with `nmap` or `openssl s_client` before you fix it, and run the same command after the fix as proof. Keep the weak-crypto analyzers as errors and a crypto inventory up to date, so the next algorithm change is a configuration change, not a rewrite."
+  }
+ ]
+}

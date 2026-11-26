@@ -1,0 +1,118 @@
+{
+ "title": "Senior's toolkit: key vaults, KMS and secrets",
+ "summary": "Read and create keys in Azure Key Vault and AWS KMS, wrap DEKs from .NET, keep Data Protection keys safe and find leaked secrets.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: key vaults, KMS and secrets",
+   "body": "In production, keys live in a key vault or KMS, apps reach them with a managed identity, and secrets never sit in Git. These are the commands and SDK calls you use to work that way.",
+   "toolkit": [
+    {
+     "cmd": "az keyvault secret show",
+     "what": "Read a secret from Azure Key Vault. `secret set` writes a new version; old versions stay until you purge them.",
+     "flags": [["--vault-name kv-prod", "the vault"], ["--name DbPassword", "the secret"], ["--query value", "only the value, not the whole JSON"], ["-o tsv", "plain text, no quotes, for scripts"]],
+     "example": "az keyvault secret show --vault-name kv-prod --name DbPassword --query value -o tsv"
+    },
+    {
+     "cmd": "az keyvault key create",
+     "what": "Create a key-encryption key (KEK) that never leaves the vault. Apps ask the vault to wrap and unwrap with it.",
+     "flags": [["--kty RSA-HSM", "an RSA key held in an HSM (Premium vault)"], ["--size 3072", "the key size"], ["--ops wrapKey unwrapKey", "allow only these operations"]],
+     "example": "az keyvault key create --vault-name kv-prod --name payments-kek --kty RSA-HSM --size 3072 --ops wrapKey unwrapKey"
+    },
+    {
+     "cmd": "CryptographyClient.WrapKeyAsync",
+     "what": "Envelope encryption from .NET (`Azure.Security.KeyVault.Keys.Cryptography`): wrap a locally generated DEK with the vault's KEK, store the wrapped DEK, unwrap it when you read.",
+     "flags": [["KeyWrapAlgorithm.RsaOaep256", "the wrap algorithm for an RSA KEK"], ["result.EncryptedKey", "the wrapped DEK to store with the data"], ["result.KeyId", "the exact key version used; store it for rotation"]],
+     "example": "var crypto = new CryptographyClient(kekId, new DefaultAzureCredential());\nWrapResult w = await crypto.WrapKeyAsync(KeyWrapAlgorithm.RsaOaep256, dek, ct);\nUnwrapResult u = await crypto.UnwrapKeyAsync(KeyWrapAlgorithm.RsaOaep256, w.EncryptedKey, ct);",
+     "when": "`DefaultAzureCredential` is fine on a laptop; in production, name the credential you mean",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "aws kms generate-data-key",
+     "what": "AWS's envelope encryption in one call: a fresh DEK in plaintext (use it, then wipe it) and the same DEK encrypted under your KMS key (store it).",
+     "flags": [["--key-id alias/payments", "the KMS key to wrap under"], ["--key-spec AES_256", "a 256-bit DEK"], ["Plaintext / CiphertextBlob", "the two Base64 fields in the response"]],
+     "example": "aws kms generate-data-key --key-id alias/payments --key-spec AES_256"
+    },
+    {
+     "cmd": "AddDataProtection()",
+     "what": "ASP.NET Core's key ring for cookies, antiforgery tokens and `IDataProtector`. By default keys live on the local disk, which a container loses on redeploy.",
+     "flags": [["SetApplicationName(\"shop\")", "instances that share keys must share this name"], ["PersistKeysToAzureBlobStorage(blobUri, credential)", "keep the key ring somewhere every instance can reach"], ["ProtectKeysWithAzureKeyVault(keyUri, credential)", "encrypt the key ring at rest with a vault key"]],
+     "example": "builder.Services.AddDataProtection()\n    .SetApplicationName(\"shop\")\n    .PersistKeysToAzureBlobStorage(blobUri, credential)\n    .ProtectKeysWithAzureKeyVault(keyUri, credential);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "dotnet user-secrets",
+     "what": "Development secrets stored outside the repository, in your user profile, and read through normal configuration. Not encrypted, not for production.",
+     "flags": [["init", "add a `UserSecretsId` to the project"], ["set \"Payments:ApiKey\" \"...\"", "store a value under a configuration key"], ["list", "show what is set"]],
+     "example": "dotnet user-secrets set \"Payments:ApiKey\" \"sk_test_123\" --project src/Shop"
+    },
+    {
+     "cmd": "gitleaks git",
+     "what": "Scan Git history for committed keys, tokens and passwords. Run it in CI and as a pre-commit hook.",
+     "flags": [["-v", "print each finding"], ["--redact", "hide the secret values in the output"], ["--report-path leaks.json", "write findings to a file for CI"]],
+     "example": "gitleaks git -v --redact"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "After every deploy of the containerised shop, all users are logged out and form posts fail. The log says: `The key {6b2e...} was not found in the key ring.` What is the fix?",
+   "options": [
+    "Persist the Data Protection key ring to shared storage (blob, Redis or a database), set one `SetApplicationName`, and protect it with a vault key",
+    "Make cookies last longer",
+    "Turn off antiforgery validation",
+    "Restart the containers one at a time"
+   ],
+   "answer": 0,
+   "explain": "Each new container generated a fresh key ring on its own disk, so cookies and antiforgery tokens protected by the old keys cannot be read. Shared, persisted keys survive deploys and work across instances."
+  },
+  {
+   "type": "order",
+   "prompt": "Put the steps of reading one envelope-encrypted record in order.",
+   "lines": [
+    "Load the row: wrapped DEK, KEK version, nonce, ciphertext, tag",
+    "Call `UnwrapKeyAsync` with the KEK version stored on the row",
+    "Decrypt the ciphertext with `AesGcm` and the unwrapped DEK",
+    "Wipe the DEK with `CryptographicOperations.ZeroMemory`",
+    "Return the plaintext to the caller"
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Print only the value of the `DbPassword` secret, as plain text, for a script.",
+   "code": "az keyvault secret show --vault-name kv-prod --name DbPassword __1__ value __2__ tsv",
+   "blanks": ["--query", "-o"],
+   "bank": ["--value", "--field", "--format"],
+   "explain": "`--query` takes a JMESPath expression over the JSON result and `-o tsv` prints it without quotes. Both work on every `az` command."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each tool to the situation.",
+   "pairs": [
+    ["`dotnet user-secrets set`", "keep a dev API key out of appsettings.json"],
+    ["`az keyvault secret show`", "read the production DB password in a break-glass shell"],
+    ["`aws kms generate-data-key`", "get a fresh DEK and its wrapped copy in one call"],
+    ["`CryptographyClient.WrapKeyAsync`", "protect a DEK with a key that never leaves the HSM"],
+    ["`gitleaks git`", "find a key someone committed last year"]
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "`gitleaks` finds a live payment API key committed six months ago in a private repository. What do you do first?",
+   "options": [
+    "Rotate (revoke and replace) the key, then check its usage logs; cleaning history comes after",
+    "Rewrite Git history to remove it and force-push",
+    "Nothing: the repository is private",
+    "Delete the file in a new commit"
+   ],
+   "answer": 0,
+   "explain": "Assume a secret that was in Git is compromised: clones, forks, CI logs and backups all have it. Rotation is the only step that makes the leaked value useless. History rewriting is clean-up, not a fix."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Before a service ships, ask where each key lives, which identity can use it, and how it rotates. Put `gitleaks` in CI on day one, keep dev secrets in `user-secrets`, and when a secret leaks, rotate first and investigate second."
+  }
+ ]
+}

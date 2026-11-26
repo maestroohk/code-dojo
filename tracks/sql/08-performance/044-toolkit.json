@@ -1,0 +1,129 @@
+{
+ "title": "Senior's toolkit: finding and fixing slow queries",
+ "summary": "Query plans in SQLite and PostgreSQL, the statistics that drive them, finding the worst queries in production, and adding indexes without downtime.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: finding and fixing slow queries",
+   "body": "Performance work is measure, explain, change, measure again. These are the commands a senior runs when the dashboard is slow, in the order they usually need them.",
+   "toolkit": [
+    {
+     "cmd": "SELECT query, calls, mean_exec_time, total_exec_time FROM pg_stat_statements",
+     "what": "PostgreSQL's record of every query shape and the time it took (the `pg_stat_statements` extension). Sort by total time to find what costs the most overall, not just the slowest single call.",
+     "flags": [["ORDER BY total_exec_time DESC", "the biggest overall cost first"], ["mean_exec_time", "average milliseconds per call"], ["calls", "how often it runs (an N+1 shows up as a huge number)"]],
+     "example": "SELECT left(query, 80) AS query, calls, round(mean_exec_time) AS mean_ms, round(total_exec_time) AS total_ms\nFROM pg_stat_statements\nORDER BY total_exec_time DESC\nLIMIT 10;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "EXPLAIN (ANALYZE, BUFFERS)",
+     "what": "PostgreSQL: run the query and show the real plan with actual times, actual row counts and pages read. ANALYZE really executes it, so wrap an UPDATE or DELETE in `BEGIN; ... ROLLBACK;`.",
+     "flags": [["ANALYZE", "execute and report actual time and rows"], ["BUFFERS", "shared hit (from memory) vs read (from disk)"], ["rows=... vs actual rows=...", "a big gap means bad estimates, usually stale statistics"]],
+     "example": "EXPLAIN (ANALYZE, BUFFERS)\nSELECT * FROM orders WHERE customer_id = 42 ORDER BY placed_at DESC LIMIT 20;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "EXPLAIN QUERY PLAN",
+     "what": "SQLite: show the plan without running the query. Look for `SCAN` on big tables and `USE TEMP B-TREE` for sorts.",
+     "flags": [["SCAN t", "reads every row"], ["SEARCH t USING INDEX ix (col=?)", "an index lookup"], ["USING COVERING INDEX", "answered from the index alone"], ["USE TEMP B-TREE FOR ORDER BY", "an extra sort step"]],
+     "example": "EXPLAIN QUERY PLAN\nSELECT * FROM orders WHERE customer_id = 42 ORDER BY placed_at DESC;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "CREATE INDEX CONCURRENTLY",
+     "what": "PostgreSQL: build an index without blocking writes. A plain CREATE INDEX blocks inserts and updates on the table until it finishes.",
+     "flags": [["CONCURRENTLY", "no write lock; slower, and cannot run inside a transaction"], ["INVALID index after a failure", "drop it and run again"], ["DROP INDEX CONCURRENTLY", "remove one the same way"]],
+     "example": "CREATE INDEX CONCURRENTLY ix_orders_customer_placed ON orders (customer_id, placed_at DESC);",
+     "lang": "sql"
+    },
+    {
+     "cmd": "INCLUDE (total)",
+     "what": "Add non-key columns to an index so the query never touches the table: a covering index (PostgreSQL 11+, SQL Server). In SQLite, append the column to the index key instead.",
+     "flags": [["key columns", "what you filter and sort on, equality columns first"], ["INCLUDE (...)", "extra columns carried only for reading"]],
+     "example": "CREATE INDEX CONCURRENTLY ix_orders_customer ON orders (customer_id, placed_at) INCLUDE (total);",
+     "lang": "sql"
+    },
+    {
+     "cmd": "ANALYZE orders;",
+     "what": "Refresh the statistics the planner uses to estimate row counts (PostgreSQL and SQLite). After a big load or delete, stale statistics cause terrible plans.",
+     "flags": [["ANALYZE t", "one table"], ["ANALYZE", "the whole database"], ["autovacuum", "PostgreSQL normally does it for you, but can lag behind bulk changes"]],
+     "example": "ANALYZE orders;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "log_min_duration_statement = '500ms'",
+     "what": "PostgreSQL setting: log every statement slower than the threshold, with its duration. The cheapest way to catch slow queries you did not know about.",
+     "flags": [["'500ms'", "the threshold"], ["auto_explain", "an extension that also logs the plan of slow queries"]],
+     "example": "ALTER DATABASE shop SET log_min_duration_statement = '500ms';",
+     "lang": "sql"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "The customer page takes 800 ms. `EXPLAIN (ANALYZE, BUFFERS)` shows this. What do you do?",
+   "code": [
+    "Seq Scan on orders  (cost=0.00..104235.00 rows=12 width=64) (actual time=0.031..812.442 rows=12 loops=1)",
+    "  Filter: (customer_id = 42)",
+    "  Rows Removed by Filter: 4999988",
+    "  Buffers: shared hit=2101 read=52134",
+    "Planning Time: 0.120 ms",
+    "Execution Time: 812.501 ms"
+   ],
+   "options": [
+    "Add an index on `orders (customer_id)`, built with `CREATE INDEX CONCURRENTLY`, then re-run the EXPLAIN to confirm an Index Scan",
+    "Run `ANALYZE orders`: the estimate is wrong",
+    "Increase the server's memory, since most pages were read from disk",
+    "Add `LIMIT 12` to the query"
+   ],
+   "answer": 0,
+   "explain": "It read 5 million rows to keep 12. The estimate (12) matches the actual (12), so statistics are fine: the plan has no better choice because there is no index. More memory would only make the full scan a little faster."
+  },
+  {
+   "type": "mcq",
+   "prompt": "After last night's bulk import, a report that used to take 200 ms takes 40 seconds. The plan shows `Nested Loop (rows=1) (actual rows=480000)`. What is the most likely fix?",
+   "options": [
+    "`ANALYZE` the imported tables, so the planner knows how many rows there are now",
+    "Drop and recreate every index",
+    "Rewrite the query as a CTE",
+    "Restart PostgreSQL"
+   ],
+   "answer": 0,
+   "explain": "The planner expected 1 row and got 480,000, so it chose a nested loop that is only good for tiny inputs. Fresh statistics after a bulk change usually bring the old plan back."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each SQLite plan line to what it means.",
+   "pairs": [
+    ["`SCAN orders`", "reads every row of the table"],
+    ["`SEARCH orders USING INDEX ix_cust (customer_id=?)`", "looks up the rows through an index"],
+    ["`SEARCH orders USING COVERING INDEX ix_cust_total (customer_id=?)`", "answers from the index without reading the table"],
+    ["`USE TEMP B-TREE FOR ORDER BY`", "sorts the result in an extra step"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "On a busy PostgreSQL table, add an index without blocking writes, and carry `total` so the query never visits the table.",
+   "code": "CREATE INDEX __1__ ix_orders_customer ON orders (customer_id) __2__ (total);",
+   "blanks": ["CONCURRENTLY", "INCLUDE"],
+   "bank": ["ONLINE", "WITH", "UNIQUE"],
+   "explain": "`CONCURRENTLY` is PostgreSQL's non-blocking build (SQL Server's equivalent is `WITH (ONLINE = ON)`). `INCLUDE` adds a column that is stored but not part of the key."
+  },
+  {
+   "type": "order",
+   "prompt": "The dashboard got slow in production. Put the steps in order.",
+   "lines": [
+    "Find the top queries by total_exec_time in pg_stat_statements",
+    "Run EXPLAIN (ANALYZE, BUFFERS) on the worst one",
+    "Create the missing index with CREATE INDEX CONCURRENTLY",
+    "Run EXPLAIN (ANALYZE, BUFFERS) again to confirm the new plan",
+    "Watch mean_exec_time drop for that query"
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Never guess at a slow query: find it by total time, read its real plan, change one thing and measure again. On a live PostgreSQL table every new index is `CONCURRENTLY`, and after any bulk load you run `ANALYZE`."
+  }
+ ]
+}

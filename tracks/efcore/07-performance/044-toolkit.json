@@ -1,0 +1,136 @@
+{
+ "title": "Senior's toolkit: measuring and tuning EF Core",
+ "summary": "Count the queries, split them, pool contexts, page with keys, retry transient failures and watch EF Core's live counters.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: measuring and tuning EF Core",
+   "body": "EF Core performance work starts with measuring: how many commands did this request run, and how long did each take? These are the tools experienced developers use to find the problem and the switches they change to fix it.",
+   "toolkit": [
+    {
+     "cmd": "LogTo(..., (id, level) => id == RelationalEventId.CommandExecuted)",
+     "what": "Log only executed SQL commands, each with its duration. Count the lines for one request to spot an N+1.",
+     "flags": [["RelationalEventId.CommandExecuted", "one event per command that ran"], ["CoreEventId / RelationalEventId", "every event EF Core raises has an id you can filter on"]],
+     "example": "o.LogTo(Console.WriteLine, (id, level) => id == RelationalEventId.CommandExecuted);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery)",
+     "what": "Make split queries the default for the whole context, then opt single queries back in with `AsSingleQuery()` where one JOIN is better.",
+     "flags": [["SplitQuery", "one query per collection Include"], ["AsSingleQuery()", "per-query override"]],
+     "example": "o.UseSqlServer(cs, sql => sql.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery));",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "AddDbContextPool<AppDb>(...)",
+     "what": "Reuse context instances across requests instead of building a new one each time. Helps busy APIs; the context must not keep per-request state in its own fields.",
+     "flags": [["poolSize", "maximum kept instances (default 1024)"], ["AddPooledDbContextFactory<T>", "pooling for code that creates contexts itself, such as background jobs"]],
+     "example": "builder.Services.AddDbContextPool<AppDb>(o => o.UseSqlServer(cs));",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "Where(o => o.Id > lastId).OrderBy(o => o.Id).Take(20)",
+     "what": "Keyset (seek) paging: continue after the last key seen. Stays fast on page 5,000, where `Skip(100000)` makes the database read and throw away 100,000 rows.",
+     "flags": [["OrderBy on a unique key", "or a key plus a tie-breaker such as `(Date, Id)`"], ["an index on the key", "so the seek is an index range scan"]],
+     "example": "await db.Orders.Where(o => o.Id > lastId).OrderBy(o => o.Id).Take(20).ToListAsync(ct);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "EnableRetryOnFailure()",
+     "what": "Retry commands that failed for transient reasons (a failover, a dropped connection) on SQL Server, Azure SQL or PostgreSQL. With it on, wrap your own transactions in the execution strategy.",
+     "flags": [["maxRetryCount", "how many attempts (default 6)"], ["maxRetryDelay", "the longest wait between attempts"], ["db.Database.CreateExecutionStrategy()", "run a manual transaction so the whole block is retried"]],
+     "example": "o.UseSqlServer(cs, sql => sql.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorNumbersToAdd: null));",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "dotnet ef dbcontext optimize",
+     "what": "Generate a compiled model so a context with hundreds of entities starts faster. Regenerate it whenever the model changes.",
+     "flags": [["-o CompiledModels", "the output folder"], ["-n Shop.Data.CompiledModels", "the namespace"]],
+     "example": "dotnet ef dbcontext optimize -o CompiledModels -n Shop.Data.CompiledModels",
+     "when": "start-up time is dominated by building the model"
+    },
+    {
+     "cmd": "dotnet-counters monitor",
+     "what": "Watch live counters in a running app: queries per second, SaveChanges per second, query cache hit rate, active contexts.",
+     "flags": [["-n Shop.Api", "(`--name`) attach to the process by name"], ["--counters Microsoft.EntityFrameworkCore", "EF Core's own counters"], ["-p 1234", "(`--process-id`) attach by process id"]],
+     "example": "dotnet-counters monitor -n Shop.Api --counters Microsoft.EntityFrameworkCore"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "With command logging on, one call to `GET /orders` prints 51 `Executed DbCommand` lines: one for the orders and one per order for its customer. What is the fix?",
+   "options": [
+    "Load the customers in the same query, with `Include(o => o.Customer)` or a `Select` projection that reads `o.Customer.Name`",
+    "Turn on `AddDbContextPool`",
+    "Add `EnableRetryOnFailure()`",
+    "Make the 50 queries run in parallel"
+   ],
+   "answer": 0,
+   "explain": "That is the N+1 pattern, usually from lazy loading or a query inside a loop. One query (or two with split queries) replaces 51 round trips. Pooling and retries do not change the number of queries."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each tool to the problem it addresses.",
+   "pairs": [
+    ["`LogTo` filtered on `CommandExecuted`", "how many commands a request runs"],
+    ["`AsSplitQuery` / `UseQuerySplittingBehavior`", "row explosion from several collection Includes"],
+    ["`AddDbContextPool`", "the cost of creating a context per request"],
+    ["Keyset paging", "deep pages that get slower and slower"],
+    ["`EnableRetryOnFailure`", "errors during a database failover"],
+    ["`dotnet ef dbcontext optimize`", "slow start-up with a very large model"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Return the next page of orders after the last id the client saw.",
+   "code": [
+    "var page = await db.Orders",
+    "    .AsNoTracking()",
+    "    .Where(o => o.Id __1__ lastId)",
+    "    .__2__(o => o.Id)",
+    "    .__3__(20)",
+    "    .ToListAsync(ct);"
+   ],
+   "blanks": [">", "OrderBy", "Take"],
+   "bank": ["<", "Skip", "OrderByDescending", "First"],
+   "explain": "Filter past the last key, order by that key, take one page. No `Skip`: the database seeks straight to the right place in the index."
+  },
+  {
+   "type": "mcq",
+   "prompt": "After turning on `EnableRetryOnFailure`, this code throws `InvalidOperationException: The configured execution strategy 'SqlServerRetryingExecutionStrategy' does not support user-initiated transactions.` What is the fix?",
+   "code": [
+    "await using var tx = await db.Database.BeginTransactionAsync(ct);",
+    "// ... two SaveChangesAsync calls ...",
+    "await tx.CommitAsync(ct);"
+   ],
+   "options": [
+    "Run the whole block inside `db.Database.CreateExecutionStrategy().ExecuteAsync(...)` so a retry repeats the entire transaction",
+    "Remove the transaction",
+    "Turn retries off again",
+    "Call `CommitAsync` twice"
+   ],
+   "answer": 0,
+   "explain": "A retry in the middle of your transaction could repeat half of it. The execution strategy runs your delegate again from the start, so the transaction is retried as one unit."
+  },
+  {
+   "type": "sort",
+   "prompt": "Measure first, or change a setting?",
+   "buckets": ["Measure: find out what is happening", "Change: the fix once you know"],
+   "items": [
+    ["Log executed commands for one request", 0],
+    ["`dotnet-counters monitor --counters Microsoft.EntityFrameworkCore`", 0],
+    ["`ToQueryString()` on the slow query", 0],
+    ["Switch `Skip/Take` to keyset paging", 1],
+    ["Add `AsSplitQuery()`", 1],
+    ["Register with `AddDbContextPool`", 1]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "For any endpoint that feels slow, count its commands and read its SQL before changing code; most fixes are fewer queries, fewer columns or a missing index. Keep pooling, retries and compiled models for when measurements show the cost is really there."
+  }
+ ]
+}

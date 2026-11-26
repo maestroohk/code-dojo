@@ -1,0 +1,114 @@
+{
+ "title": "Senior's toolkit: window functions without the traps",
+ "summary": "Top-1 per group, explicit frames, LAG with defaults, named windows, and how to filter on a window result.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: window functions without the traps",
+   "body": "Windows answer the questions reports ask most: latest per customer, running totals, change since yesterday, moving averages. The traps are the default frame and where you can filter, so seniors always spell both out.",
+   "toolkit": [
+    {
+     "cmd": "ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)",
+     "what": "Number the rows inside each group. `rn = 1` is the latest (or best) row per group, the standard way to deduplicate.",
+     "flags": [["PARTITION BY climber_id", "restart numbering for each climber"], ["ORDER BY climbed_at DESC, id DESC", "newest first, with a tie-breaker so the result is stable"], ["RANK / DENSE_RANK", "ties share a number (RANK leaves gaps, DENSE_RANK does not)"]],
+     "example": "SELECT *, ROW_NUMBER() OVER (PARTITION BY climber_id ORDER BY climbed_at DESC, id DESC) AS rn\nFROM climbs;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "ROWS BETWEEN 6 PRECEDING AND CURRENT ROW",
+     "what": "An explicit frame: exactly which rows feed the aggregate. Without one, an ORDER BY window uses `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which includes every tied row.",
+     "flags": [["ROWS", "count physical rows"], ["RANGE", "include peers with the same ORDER BY value"], ["UNBOUNDED PRECEDING", "from the start of the partition"], ["CURRENT ROW / n FOLLOWING", "where the frame ends"]],
+     "example": "SELECT day, steps,\n       AVG(steps) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS avg_7d\nFROM daily_steps;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "LAG(score, 1, 0) OVER (...)",
+     "what": "Read a value from the previous (LAG) or next (LEAD) row: day-over-day change, time between events.",
+     "flags": [["LAG(x)", "the previous row's x, NULL on the first row"], ["LAG(x, 1, 0)", "offset 1, and 0 instead of NULL"], ["LEAD(x)", "the next row's x"]],
+     "example": "SELECT day, score, score - LAG(score) OVER (PARTITION BY climber_id ORDER BY day) AS change\nFROM scores;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "WINDOW w AS (PARTITION BY ... ORDER BY ...)",
+     "what": "Name a window once and reuse it (PostgreSQL, SQLite 3.28+, MySQL 8, SQL Server 2022). Several columns then share one definition that cannot drift.",
+     "flags": [["WINDOW w AS (...)", "after WHERE/GROUP BY/HAVING, before ORDER BY"], ["OVER w", "use it"], ["OVER (w ROWS ...)", "reuse it and add a frame"]],
+     "example": "SELECT day, score,\n       LAG(score) OVER w AS prev,\n       MAX(score) OVER w AS best_so_far\nFROM scores\nWINDOW w AS (PARTITION BY climber_id ORDER BY day);",
+     "lang": "sql"
+    },
+    {
+     "cmd": "WITH ranked AS (...) SELECT ... WHERE rn = 1",
+     "what": "Windows are computed after WHERE, so you cannot filter on them there. Wrap the query in a CTE or subquery. Snowflake, BigQuery and DuckDB also offer `QUALIFY rn = 1`.",
+     "flags": [["CTE + WHERE rn = 1", "portable top-1 per group"], ["WHERE rn <= 3", "top 3 per group"], ["QUALIFY", "not in PostgreSQL, SQLite or SQL Server"]],
+     "example": "WITH ranked AS (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY placed_at DESC) AS rn\n  FROM orders\n)\nSELECT * FROM ranked WHERE rn = 1;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "LAST_VALUE(x) OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)",
+     "what": "With the default frame, LAST_VALUE returns the current row, not the last of the partition. Give it the whole partition, or use FIRST_VALUE with the opposite ORDER BY.",
+     "flags": [["FIRST_VALUE(x)", "works with the default frame"], ["UNBOUNDED FOLLOWING", "extend the frame to the end of the partition"]],
+     "example": "SELECT day, FIRST_VALUE(score) OVER (PARTITION BY climber_id ORDER BY day DESC) AS latest_score\nFROM scores;",
+     "lang": "sql"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "A running total of payments shows the same value, 500, on both rows for 3 March (amounts 200 and 300). Finance expected 200 then 500. What is going on?",
+   "code": "SELECT paid_on, amount, SUM(amount) OVER (ORDER BY paid_on) AS running FROM payments;",
+   "options": [
+    "The default frame is `RANGE`, so rows with the same `paid_on` are peers and all included; use `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` and add a tie-breaker such as `id` to the ORDER BY",
+    "SUM cannot be used as a window function",
+    "The rows need `PARTITION BY paid_on`",
+    "The amounts are stored as text"
+   ],
+   "answer": 0,
+   "explain": "`RANGE` treats ties as one step. `ROWS` adds one row at a time, and a unique tie-breaker makes the order of the two 3 March rows stable between runs."
+  },
+  {
+   "type": "mcq",
+   "prompt": "You want each customer's latest order and write the query below. SQLite replies `misuse of window function row_number()` (PostgreSQL: `window functions are not allowed in WHERE`). How do you fix it?",
+   "code": [
+    "SELECT * FROM orders",
+    "WHERE ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY placed_at DESC) = 1;"
+   ],
+   "options": [
+    "Compute `rn` in a CTE or subquery, then filter `WHERE rn = 1` outside it",
+    "Move the condition to HAVING",
+    "Use `GROUP BY customer_id` with the window function",
+    "Add `QUALIFY` before `WHERE`"
+   ],
+   "answer": 0,
+   "explain": "WHERE runs before windows are computed, and HAVING runs before them too. Only a query around the window can filter on it. `QUALIFY` exists in some warehouses, not in SQLite or PostgreSQL."
+  },
+  {
+   "type": "blanks",
+   "prompt": "A 7-day moving average per user: the current row and the 6 rows before it.",
+   "code": [
+    "SELECT user_id, day,",
+    "       AVG(steps) OVER (PARTITION BY user_id ORDER BY day",
+    "                        __1__ BETWEEN __2__ PRECEDING AND CURRENT ROW) AS avg_7d",
+    "FROM daily_steps;"
+   ],
+   "blanks": ["ROWS", "6"],
+   "bank": ["RANGE", "7", "UNBOUNDED"],
+   "explain": "Six earlier rows plus the current one make seven. `ROWS` counts rows; `RANGE` would mean a range of `day` values. This assumes one row per user per day, so check for gaps first."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each function to the question it answers.",
+   "pairs": [
+    ["`ROW_NUMBER()`", "the latest login per user"],
+    ["`DENSE_RANK()`", "medal positions where ties share a place and none is skipped"],
+    ["`LAG(x)`", "how much the score changed since the previous day"],
+    ["`SUM(x) OVER (ORDER BY day ROWS UNBOUNDED PRECEDING)`", "the running total of sales"],
+    ["`FIRST_VALUE(x)`", "the first price a product was ever sold at"]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Every time you write `OVER (ORDER BY ...)` with an aggregate, write the frame too, and give the ORDER BY a unique tie-breaker. For top-N per group, reach for `ROW_NUMBER()` in a CTE before anything cleverer."
+  }
+ ]
+}

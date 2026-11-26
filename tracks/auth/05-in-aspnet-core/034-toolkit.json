@@ -1,0 +1,115 @@
+{
+ "title": "Senior's toolkit: JwtBearer, policies and debugging a 401",
+ "summary": "Configure the real JwtBearer handler, write policies, protect endpoints by default, and find out why a request is 401 or 403.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: JwtBearer, policies and debugging a 401",
+   "body": "You built a bearer handler by hand to see how it works. In a real API you configure Microsoft's `JwtBearer` handler and authorization policies, and you debug them from their logs. These are the pieces experienced developers set up and check.",
+   "toolkit": [
+    {
+     "cmd": "AddAuthentication().AddJwtBearer(...)",
+     "what": "Validate bearer tokens from your identity provider. With `Authority` set, the handler reads the discovery document and the signing keys itself, and refreshes them when keys rotate.",
+     "flags": [["Authority", "the issuer URL; keys come from its `jwks_uri`"], ["Audience", "this API's identifier, checked against `aud`"], ["MapInboundClaims = false", "keep `sub`, `scope` and `roles` as the token spells them"]],
+     "example": "builder.Services.AddAuthentication().AddJwtBearer(o =>\n{\n    o.Authority = \"https://idp.example.com/\";\n    o.Audience = \"api://tasks\";\n    o.MapInboundClaims = false;\n});",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "AddAuthorizationBuilder().AddPolicy(...)",
+     "what": "Name a rule once (a role, a claim, any condition) and apply it to endpoints. Rules live in one place instead of `if` checks scattered through handlers.",
+     "flags": [["RequireRole(\"admin\")", "the user has this role claim"], ["RequireClaim(\"tenant\")", "the claim exists (optionally with given values)"], ["RequireAssertion(ctx => ...)", "any custom condition"], ["SetFallbackPolicy(...)", "the rule for endpoints that say nothing: secure by default"]],
+     "example": "builder.Services.AddAuthorizationBuilder()\n    .AddPolicy(\"admin\", p => p.RequireRole(\"admin\"))\n    .SetFallbackPolicy(new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());",
+     "lang": "csharp"
+    },
+    {
+     "cmd": ".RequireAuthorization(\"admin\") / [Authorize(Policy = \"admin\")]",
+     "what": "Apply a policy to a minimal API endpoint or group, or to an MVC controller or action. `AllowAnonymous()` opens one endpoint when a fallback policy protects the rest.",
+     "flags": [["RequireAuthorization()", "any authenticated user"], ["RequireAuthorization(\"admin\")", "a named policy"], ["MapGroup(\"/admin\").RequireAuthorization(\"admin\")", "a whole group at once"], ["AllowAnonymous()", "public endpoint, such as `/health`"]],
+     "example": "var admin = app.MapGroup(\"/admin\").RequireAuthorization(\"admin\");\napp.MapGet(\"/health\", () => \"ok\").AllowAnonymous();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "\"Microsoft.AspNetCore.Authentication\": \"Debug\"",
+     "what": "Turn up the authentication log category in `appsettings.Development.json`. JwtBearer then logs exactly why it rejected a token, with an IDX code.",
+     "flags": [["IDX10214", "audience did not match"], ["IDX10223", "token expired"], ["IDX10503 / IDX10511", "signature check failed, often a wrong or missing key"], ["IDX10205", "issuer did not match"]],
+     "example": "{\n  \"Logging\": {\n    \"LogLevel\": {\n      \"Default\": \"Information\",\n      \"Microsoft.AspNetCore.Authentication\": \"Debug\"\n    }\n  }\n}",
+     "lang": "text"
+    },
+    {
+     "cmd": "curl -i ... | grep -i www-authenticate",
+     "what": "On a 401, JwtBearer adds a `WWW-Authenticate` header that names the problem. Read it before reading code.",
+     "flags": [["Bearer (no error)", "no token was sent at all"], ["error=\"invalid_token\"", "a token arrived but failed validation"], ["error_description=...", "the reason, such as an expired token or a wrong audience"]],
+     "example": "curl -si -H \"Authorization: Bearer $TOKEN\" https://localhost:5001/tasks | grep -i www-authenticate"
+    }
+   ]
+  },
+  {
+   "type": "sort",
+   "prompt": "401 or 403? Sort each situation by the status the API should return.",
+   "buckets": ["401 Unauthorized", "403 Forbidden"],
+   "items": [
+    ["No `Authorization` header", 0],
+    ["The token expired an hour ago", 0],
+    ["The token is for another API's audience", 0],
+    ["A valid user token calls an admin-only endpoint", 1],
+    ["A valid token lacks the required `tasks:write` scope", 1]
+   ],
+   "explain": "401 means \"I do not know who you are\" (authentication failed). 403 means \"I know who you are, and you may not\" (authorization failed). Getting this right tells the client whether to sign in again or give up."
+  },
+  {
+   "type": "mcq",
+   "prompt": "Every request returns 401 with this header. What does it tell you?",
+   "code": "WWW-Authenticate: Bearer error=\"invalid_token\", error_description=\"The signature key was not found\"",
+   "options": [
+    "The token was signed with a key the API does not know: check `Authority` points at the issuer that minted it, or that its `kid` is in the JWKS",
+    "The client sent no token",
+    "The user is missing a role",
+    "The token's audience is wrong"
+   ],
+   "answer": 0,
+   "explain": "\"Signature key was not found\" means no key with the token's `kid` was available. Common causes: a token from a different tenant or environment, or a test token from `dotnet user-jwts` sent to an API configured for the real provider."
+  },
+  {
+   "type": "order",
+   "prompt": "Put the middleware in the order ASP.NET Core needs it.",
+   "lines": [
+    "app.UseRouting();",
+    "app.UseCors();",
+    "app.UseAuthentication();",
+    "app.UseAuthorization();",
+    "app.MapGroup(\"/admin\").RequireAuthorization(\"admin\");"
+   ],
+   "explain": "Authentication sets `HttpContext.User`; authorization then reads it to apply policies. In the reverse order every policy sees an anonymous user. CORS comes before both, so preflight requests are answered without a token."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Protect every endpoint by default, with an admin policy for the admin group and a public health check.",
+   "code": [
+    "builder.Services.AddAuthorizationBuilder()",
+    "    .AddPolicy(\"admin\", p => p.__1__(\"admin\"))",
+    "    .__2__(new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());",
+    "",
+    "app.MapGroup(\"/admin\").__3__(\"admin\");",
+    "app.MapGet(\"/health\", () => \"ok\").__4__();"
+   ],
+   "blanks": ["RequireRole", "SetFallbackPolicy", "RequireAuthorization", "AllowAnonymous"],
+   "bank": ["RequireClaim", "SetDefaultPolicy", "RequireHost", "DisableAntiforgery"]
+  },
+  {
+   "type": "match",
+   "prompt": "Match each IDX code in the JwtBearer log to its meaning.",
+   "pairs": [
+    ["`IDX10214`", "audience validation failed"],
+    ["`IDX10223`", "the token has expired"],
+    ["`IDX10205`", "issuer validation failed"],
+    ["`IDX10503`", "signature validation failed"]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Start every API with a fallback policy that requires an authenticated user, and open endpoints on purpose with `AllowAnonymous`. When a call fails, read the `WWW-Authenticate` header and the Debug authentication log before changing configuration: they name the failing check."
+  }
+ ]
+}

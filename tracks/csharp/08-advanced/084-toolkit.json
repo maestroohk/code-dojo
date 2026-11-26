@@ -1,0 +1,118 @@
+{
+ "title": "Senior's toolkit: tests, wiring and shipping",
+ "summary": "dotnet test options, DI registration, options and secrets, benchmarking, and packing a .NET tool.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: tests, wiring and shipping",
+   "body": "Advanced C# at work is mostly plumbing: running the right tests, wiring services with the right lifetime, keeping secrets out of git, proving a speed-up with numbers, and shipping a tool. These are the commands and APIs for each.",
+   "toolkit": [
+    {
+     "cmd": "dotnet test",
+     "what": "Run the test projects. A few options turn a slow, opaque run into a fast, informative one.",
+     "flags": [["--filter \"FullyQualifiedName~OrderDesk\"", "only matching tests (`~` contains, `=` exact, `Category=Slow` for a trait)"], ["--logger \"console;verbosity=detailed\"", "every test's name, result and output"], ["--blame-hang-timeout 2m", "if a test hangs for 2 minutes, dump the process and name the test"], ["--collect \"XPlat Code Coverage\"", "write a Cobertura coverage file (needs the coverlet.collector package)"]],
+     "example": "dotnet test --filter \"FullyQualifiedName~OrderDesk\" --blame-hang-timeout 2m"
+    },
+    {
+     "cmd": "builder.Services.AddScoped<IOrderRepository, SqlOrderRepository>()",
+     "what": "Register a service with Microsoft.Extensions.DependencyInjection. The lifetime decides how long one instance lives, and getting it wrong is a real production bug.",
+     "flags": [["AddSingleton", "one instance for the whole app: must be thread-safe"], ["AddScoped", "one per request in ASP.NET Core: the usual choice for a DbContext"], ["AddTransient", "a new instance every time it is asked for"], ["captive dependency", "a singleton must never hold a scoped service"]],
+     "example": "builder.Services.AddSingleton(TimeProvider.System);\nbuilder.Services.AddScoped<IOrderRepository, SqlOrderRepository>();\nbuilder.Services.AddTransient<PdfRenderer>();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "builder.Services.AddOptions<SmtpOptions>()",
+     "what": "Bind a configuration section to a class, check it, and fail at start-up instead of on the first email. Services receive it as `IOptions<SmtpOptions>`.",
+     "flags": [[".BindConfiguration(\"Smtp\")", "read the `Smtp` section of appsettings, environment variables and secrets"], [".ValidateDataAnnotations()", "apply `[Required]`, `[Range]` on the class"], [".ValidateOnStart()", "throw at start-up if it is invalid"], ["IOptionsMonitor<T>", "when the value can change while the app runs"]],
+     "example": "builder.Services.AddOptions<SmtpOptions>()\n    .BindConfiguration(\"Smtp\")\n    .ValidateDataAnnotations()\n    .ValidateOnStart();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "dotnet user-secrets set",
+     "what": "Keep development passwords and API keys out of the repository. They are stored in your user profile and read like appsettings, in the Development environment.",
+     "flags": [["init", "add a UserSecretsId to the project (once)"], ["set \"Smtp:Password\" \"...\"", "store a value; `:` nests sections"], ["list", "show what is stored"], ["--project src/Api", "which project, when you are not in its folder"]],
+     "example": "dotnet user-secrets set \"Smtp:Password\" \"dev-only-password\" --project src/Api"
+    },
+    {
+     "cmd": "BenchmarkDotNet",
+     "what": "Measure a speed-up properly: warm-up, many iterations, statistics and allocations. A `Stopwatch` around one call is not evidence.",
+     "flags": [["[Benchmark(Baseline = true)]", "the version the others are compared to (Ratio column)"], ["[MemoryDiagnoser]", "add the Allocated column: bytes per call"], ["[Params(10, 10_000)]", "run each benchmark for several input sizes"], ["dotnet run -c Release", "benchmarks must run in Release; it refuses Debug"]],
+     "example": "[MemoryDiagnoser]\npublic class ParseBench\n{\n    [Benchmark(Baseline = true)] public int Split() => Parser.WithSplit(Line);\n    [Benchmark] public int Span() => Parser.WithSpan(Line);\n}\n// Program.cs: BenchmarkRunner.Run<ParseBench>();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "dotnet pack",
+     "what": "Build a NuGet package. With `<PackAsTool>true</PackAsTool>` in the project, the package is a .NET tool that anyone can install as a command.",
+     "flags": [["-c Release", "pack the optimised build"], ["-o ./nupkg", "where to write the .nupkg"], ["<ToolCommandName>sk</ToolCommandName>", "(csproj) the command people type"]],
+     "example": "dotnet pack -c Release -o ./nupkg"
+    },
+    {
+     "cmd": "dotnet tool install",
+     "what": "Install a .NET tool, from nuget.org or from a local folder of packages.",
+     "flags": [["--global (-g)", "available everywhere on your machine"], ["--add-source ./nupkg", "also look in this folder for the package"], ["dotnet tool update", "the same options, to move to a newer version"], ["--local", "pin it in the repo's tool manifest, restored with `dotnet tool restore`"]],
+     "example": "dotnet tool install --global --add-source ./nupkg sk"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "The CI job has been \"running tests\" for 5 hours with no output and is finally killed. Locally all tests pass. What do you add to the `dotnet test` command so the next run tells you which test hangs?",
+   "options": [
+    "`--blame-hang-timeout 5m`, which dumps the process and names the test that was running when it hung",
+    "`--logger \"console;verbosity=quiet\"`",
+    "`--collect \"XPlat Code Coverage\"`",
+    "`--no-build`"
+   ],
+   "answer": 0,
+   "explain": "Blame mode records which tests started and did not finish, and with a hang timeout it takes a dump and stops the run. A hang that only happens in CI is often a deadlock (`.Result` with a sync context) or a test waiting on a network resource."
+  },
+  {
+   "type": "mcq",
+   "prompt": "The app refuses to start in Development with this message. What is wrong?",
+   "code": "System.InvalidOperationException: Cannot consume scoped service 'Shop.Data.AppDbContext' from singleton 'Shop.Reports.ReportCache'.",
+   "options": [
+    "`ReportCache` is a singleton that takes an `AppDbContext`, so one DbContext would live forever and be shared by every request; make the cache create a scope (`IServiceScopeFactory`) or change its lifetime",
+    "`AppDbContext` needs to be registered as a singleton too",
+    "The connection string is missing",
+    "Development mode cannot run singletons"
+   ],
+   "answer": 0,
+   "explain": "This is the captive dependency check, on by default in Development. Making the DbContext a singleton would \"fix\" the message and create a thread-safety bug. Keep the DbContext scoped and let the singleton create a scope when it needs one."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each lifetime or option to its meaning.",
+   "pairs": [
+    ["`AddSingleton`", "one instance for the whole app"],
+    ["`AddScoped`", "one instance per request"],
+    ["`AddTransient`", "a new instance every time"],
+    ["`.ValidateOnStart()`", "bad configuration fails at start-up"],
+    ["`[MemoryDiagnoser]`", "shows bytes allocated per call"]
+   ]
+  },
+  {
+   "type": "order",
+   "prompt": "Put the steps of shipping `sk` as a .NET tool and installing it locally in order.",
+   "lines": [
+    "Add <PackAsTool>true</PackAsTool> and <ToolCommandName>sk</ToolCommandName> to the csproj",
+    "dotnet pack -c Release -o ./nupkg",
+    "dotnet tool install --global --add-source ./nupkg sk",
+    "sk --help"
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Store the development API key outside the repository.",
+   "code": "dotnet user-secrets __1__ \"Weather__2__ApiKey\" \"dev-key-123\" --project src/Api",
+   "blanks": ["set", ":"],
+   "bank": ["add", ".", "__", "init"],
+   "explain": "`set` stores the value, and `:` separates configuration sections, so it binds to `Weather.ApiKey`. (In environment variables the separator is `__`, because `:` is not allowed everywhere.)"
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Rerun only the failing tests with `--filter`, and give CI a `--blame-hang-timeout` so a hang tells you its name. Think about the lifetime every time you register a service, validate options at start-up, and never put a secret in appsettings.json. Show a BenchmarkDotNet table before you claim a speed-up in review."
+  }
+ ]
+}

@@ -1,0 +1,120 @@
+{
+ "title": "Senior's toolkit: async in production",
+ "summary": "Cancellation, timeouts, HttpClient done right, and the tools for diagnosing a hung or starved service.",
+ "minutes": 8,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: async in production",
+   "body": "Async bugs show up under load: requests that hang, a thread pool that runs dry, calls that never time out. These are the APIs that prevent them and the tools for finding them in a running process.",
+   "toolkit": [
+    {
+     "cmd": "CancellationToken ct",
+     "what": "Accept a token in every async method and pass it to every async call inside. In ASP.NET Core, an endpoint's `CancellationToken` parameter is cancelled when the client disconnects.",
+     "flags": [["new CancellationTokenSource(TimeSpan.FromSeconds(5))", "a token that cancels itself after a timeout"], ["CancellationTokenSource.CreateLinkedTokenSource(ct)", "combine the caller's token with your own timeout"], ["ct.ThrowIfCancellationRequested()", "check inside a long CPU loop"]],
+     "example": "app.MapGet(\"/report\", async (ReportService svc, CancellationToken ct) =>\n    Results.Ok(await svc.BuildAsync(ct)));",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "await Task.WhenAll(tasks)",
+     "what": "Start independent calls together and wait for all of them. The results come back in the same order as the tasks, whatever finishes first.",
+     "flags": [["results[i]", "matches tasks[i]"], ["await throws", "only the first exception; look at `whenAll.Exception.InnerExceptions` for all"], ["Task.WhenAny", "the first one to finish, e.g. for a race against a fallback"]],
+     "example": "var (user, orders) = (GetUserAsync(id, ct), GetOrdersAsync(id, ct));\nawait Task.WhenAll(user, orders);\nreturn new Profile(user.Result, orders.Result);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "task.WaitAsync(TimeSpan.FromSeconds(3), ct)",
+     "what": "Stop waiting for a task after a timeout (throws `TimeoutException`) or when a token is cancelled. The task itself keeps running, so prefer passing a token to the call when you can.",
+     "flags": [["TimeSpan", "the longest you will wait"], ["ct", "also stop waiting on cancellation"], ["TimeoutException", "what you catch when time is up"]],
+     "example": "var price = await quoteClient.GetAsync(sku).WaitAsync(TimeSpan.FromSeconds(3), ct);",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "builder.Services.AddHttpClient<WeatherClient>()",
+     "what": "Let `IHttpClientFactory` create and recycle `HttpClient` handlers, so you avoid both socket exhaustion (a new HttpClient per call) and stale DNS (one forever). Add timeouts and retries with the Microsoft.Extensions.Http.Resilience package.",
+     "flags": [["typed client", "a class that takes `HttpClient` in its constructor"], ["c.BaseAddress", "set once, in configuration"], [".AddStandardResilienceHandler()", "timeouts, retries with backoff and a circuit breaker"]],
+     "example": "builder.Services.AddHttpClient<WeatherClient>(c => c.BaseAddress = new Uri(\"https://api.weather.example/\"))\n    .AddStandardResilienceHandler();",
+     "lang": "csharp"
+    },
+    {
+     "cmd": "dotnet-counters monitor",
+     "what": "Watch a running .NET process's live metrics: CPU, GC, exceptions per second, and the thread pool. Install once with `dotnet tool install -g dotnet-counters`.",
+     "flags": [["-n MyApi", "attach by process name (or -p <pid>)"], ["--counters System.Runtime", "the runtime counters, including thread pool queue length and thread count"], ["dotnet-counters ps", "list the .NET processes you can attach to"]],
+     "example": "dotnet-counters monitor -n MyApi --counters System.Runtime",
+     "when": "the service is slow or hangs under load and you need to see why"
+    },
+    {
+     "cmd": "dotnet-stack report",
+     "what": "Print the managed call stack of every thread in a running process. When 200 threads all sit in `Task.Result` or `.Wait()`, you have found the sync-over-async call.",
+     "flags": [["-p <pid>", "the process id"], ["-n MyApi", "or the process name"]],
+     "example": "dotnet-stack report -n MyApi > stacks.txt",
+     "when": "a hang in an environment where you cannot attach a debugger"
+    },
+    {
+     "cmd": "Parallel Stacks and Tasks windows",
+     "what": "Visual Studio's debugger views of every thread and every async task at once, grouped by identical stacks. A deadlock or a pile-up of awaiting tasks is visible at a glance.",
+     "flags": [["Debug > Windows > Parallel Stacks", "threads or tasks as a merged graph"], ["Debug > Windows > Tasks", "each task, its status and what it is awaiting"], ["Break All", "pause the hung app first"]],
+     "example": "Break All, Debug > Windows > Parallel Stacks, switch the view to Tasks",
+     "lang": "text"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "Under load the API stops answering. `dotnet-counters` shows the thread pool queue length climbing past 2,000 and the thread count rising slowly, while CPU stays at 5%. `dotnet-stack report` shows hundreds of threads waiting in `Task.Result`. What is the cause?",
+   "options": [
+    "Sync-over-async: code blocks a thread with `.Result` on an async call, so the thread pool starves; make the call chain `await` all the way up",
+    "The server needs more CPU cores",
+    "The garbage collector is running too often",
+    "The database is down"
+   ],
+   "answer": 0,
+   "explain": "Low CPU, a growing queue and blocked threads are the classic starvation picture. Every blocked thread waits for work that needs another thread to run; the pool only adds threads slowly. The fix is `await`, not a bigger pool."
+  },
+  {
+   "type": "predict",
+   "prompt": "What does this print?",
+   "code": [
+    "async Task<int> Work(int ms, int value) { await Task.Delay(ms); return value; }",
+    "",
+    "var results = await Task.WhenAll(Work(30, 1), Work(10, 2), Work(20, 3));",
+    "Console.WriteLine(string.Join(\",\", results));",
+    "",
+    "using var cts = new CancellationTokenSource();",
+    "cts.Cancel();",
+    "try { await Task.Delay(2000, cts.Token); Console.WriteLine(\"done\"); }",
+    "catch (OperationCanceledException) { Console.WriteLine(\"cancelled\"); }"
+   ],
+   "answer": ["1,2,3", "cancelled"],
+   "explain": "`WhenAll` returns results in the order the tasks were passed, not the order they finished. A cancelled token makes `Delay` throw `TaskCanceledException`, which is an `OperationCanceledException`."
+  },
+  {
+   "type": "match",
+   "prompt": "Match each tool or API to its job.",
+   "pairs": [
+    ["`dotnet-counters monitor`", "watch thread pool queue length live"],
+    ["`dotnet-stack report`", "dump every thread's stack from a running process"],
+    ["`WaitAsync(timeout, ct)`", "stop waiting for a slow task"],
+    ["`AddHttpClient<T>()`", "pooled, recycled HttpClient handlers"],
+    ["`CreateLinkedTokenSource(ct)`", "combine the caller's cancellation with your own timeout"]
+   ]
+  },
+  {
+   "type": "blanks",
+   "prompt": "Give the call 5 seconds, but also stop if the request is aborted.",
+   "code": [
+    "using var cts = CancellationTokenSource.__1__(ct);",
+    "cts.__2__(TimeSpan.FromSeconds(5));",
+    "var data = await client.GetStringAsync(url, cts.__3__);"
+   ],
+   "blanks": ["CreateLinkedTokenSource", "CancelAfter", "Token"],
+   "bank": ["Cancel", "WaitAsync", "Delay", "IsCancellationRequested"],
+   "explain": "The linked source cancels when either the request's token or the timer fires. Pass `cts.Token`, and dispose the source (`using`) so its timer is released."
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Every async method takes a `CancellationToken` and passes it on, and every outgoing call has a timeout. Never block on `.Result` or `.Wait()` in server code. When a service hangs, look before you guess: `dotnet-counters` for the thread pool, `dotnet-stack` or Parallel Stacks for where the threads are stuck."
+  }
+ ]
+}

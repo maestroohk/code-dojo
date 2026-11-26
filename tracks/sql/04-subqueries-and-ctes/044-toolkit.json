@@ -1,0 +1,121 @@
+{
+ "title": "Senior's toolkit: building big queries in steps",
+ "summary": "CTEs you can debug one step at a time, safe recursion, temporary tables for investigations, and editing long queries in the client.",
+ "minutes": 7,
+ "steps": [
+  {
+   "type": "learn",
+   "title": "Senior's toolkit: building big queries in steps",
+   "body": "Real investigations need queries of 50 lines or more. Seniors build them as named steps, check each step on its own, keep intermediate results in temporary tables, and edit them in a real editor, not on one long prompt line.",
+   "toolkit": [
+    {
+     "cmd": "WITH step AS (...) SELECT ...",
+     "what": "Name each step of a query. To debug, swap the final SELECT for `SELECT * FROM step LIMIT 10` and look at what each step really produces.",
+     "flags": [["WITH a AS (...), b AS (...)", "later steps can read earlier ones"], ["one idea per step", "filter, then aggregate, then join"], ["SELECT * FROM a LIMIT 10", "inspect a step while building"]],
+     "example": "WITH paid AS (\n  SELECT customer_id, SUM(amount) AS total FROM payments GROUP BY customer_id\n)\nSELECT * FROM paid ORDER BY total DESC LIMIT 10;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "WITH RECURSIVE",
+     "what": "Walk trees and graphs: org charts, category trees, bills of materials. Always add a depth limit, because real data has cycles.",
+     "flags": [["anchor UNION ALL step", "the start rows, then how to get the next level"], ["WHERE depth < 20", "a guard against cycles and runaway data"], ["CYCLE id SET is_cycle USING path", "PostgreSQL 14+: detect cycles for you"]],
+     "example": "WITH RECURSIVE chain(id, manager_id, depth) AS (\n  SELECT id, manager_id, 0 FROM staff WHERE id = 7\n  UNION ALL\n  SELECT s.id, s.manager_id, c.depth + 1\n  FROM staff s JOIN chain c ON s.id = c.manager_id\n  WHERE c.depth < 20\n)\nSELECT * FROM chain;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "EXISTS (SELECT 1 ...)",
+     "what": "Ask \"is there at least one?\" per row. It stops at the first match and never multiplies rows, unlike a join.",
+     "flags": [["EXISTS", "true if the subquery returns any row"], ["NOT EXISTS", "true if it returns none; safe with NULLs"], ["SELECT 1", "the select list does not matter inside EXISTS"]],
+     "example": "SELECT b.id FROM builds b\nWHERE EXISTS (SELECT 1 FROM downloads d WHERE d.build_id = b.id AND d.ip NOT LIKE '10.%');",
+     "lang": "sql"
+    },
+    {
+     "cmd": "CREATE TEMP TABLE suspects AS SELECT ...",
+     "what": "Save an intermediate result for the rest of your session. Later queries are fast and stable while you investigate, and the table disappears when you disconnect.",
+     "flags": [["TEMP", "visible only to your connection, dropped at the end of the session"], ["AS SELECT ...", "create and fill it in one statement"]],
+     "example": "CREATE TEMP TABLE suspects AS\nSELECT DISTINCT user_id FROM downloads WHERE build_id = 412;\nSELECT COUNT(*) FROM suspects;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "AS MATERIALIZED / AS NOT MATERIALIZED",
+     "what": "Tell the planner whether to compute a CTE once or fold it into the main query (PostgreSQL 12+, SQLite 3.35+). Use it when a plan shows the CTE is run the wrong way.",
+     "flags": [["MATERIALIZED", "compute once and reuse, like a temporary result"], ["NOT MATERIALIZED", "inline it so filters can be pushed into it"]],
+     "example": "WITH recent AS MATERIALIZED (\n  SELECT * FROM downloads WHERE at >= '2026-03-01'\n)\nSELECT ip, COUNT(*) FROM recent GROUP BY ip;",
+     "lang": "sql"
+    },
+    {
+     "cmd": "\\e  \\i  .read",
+     "what": "Edit and run long queries from files instead of the prompt line.",
+     "flags": [["\\e", "psql: open the last query in $EDITOR, run it when you save and quit"], ["\\i query.sql", "psql: run a file"], [".read query.sql", "sqlite3: run a file"]],
+     "example": "\\i investigations/leaked-build.sql"
+    }
+   ]
+  },
+  {
+   "type": "mcq",
+   "prompt": "A recursive CTE that walks the reporting chain ran for ten minutes and was killed. It worked fine last month. What is the most likely cause?",
+   "code": [
+    "WITH RECURSIVE chain(id, manager_id) AS (",
+    "  SELECT id, manager_id FROM staff WHERE id = 7",
+    "  UNION ALL",
+    "  SELECT s.id, s.manager_id FROM staff s JOIN chain c ON s.id = c.manager_id",
+    ")",
+    "SELECT * FROM chain;"
+   ],
+   "options": [
+    "Someone created a cycle (A manages B, B manages A), so the recursion never ends; add a depth column with `WHERE depth < 20` or use `CYCLE` in PostgreSQL",
+    "`UNION ALL` is slower than `UNION`",
+    "The staff table grew past the recursion limit of SQL",
+    "Recursive CTEs need an index on `manager_id` to finish"
+   ],
+   "answer": 0,
+   "explain": "A recursive CTE stops only when a step returns no new rows. On a cycle that never happens. A depth guard costs nothing on good data and turns a hang into a result you can inspect."
+  },
+  {
+   "type": "blanks",
+   "prompt": "Complete the reporting-chain query with a cycle guard.",
+   "code": [
+    "WITH __1__ chain(id, manager_id, depth) AS (",
+    "  SELECT id, manager_id, 0 FROM staff WHERE id = 7",
+    "  __2__",
+    "  SELECT s.id, s.manager_id, c.depth + 1",
+    "  FROM staff s JOIN chain c ON s.id = c.manager_id",
+    "  WHERE c.depth < 20",
+    ")",
+    "SELECT * FROM chain;"
+   ],
+   "blanks": ["RECURSIVE", ["UNION ALL", "UNION"]],
+   "bank": ["LATERAL", "INTERSECT", "JOIN"],
+   "explain": "`WITH RECURSIVE` lets the CTE refer to itself. The anchor and the recursive step are combined with `UNION ALL` (or `UNION`, which also removes duplicate rows)."
+  },
+  {
+   "type": "order",
+   "prompt": "Arrange the query so each step reads only steps defined before it.",
+   "lines": [
+    "WITH paid AS (",
+    "  SELECT customer_id, SUM(amount) AS total FROM payments GROUP BY customer_id",
+    "),",
+    "big AS (",
+    "  SELECT customer_id FROM paid WHERE total > 1000",
+    ")",
+    "SELECT c.name FROM customers c JOIN big b ON b.customer_id = c.id;"
+   ]
+  },
+  {
+   "type": "match",
+   "prompt": "Match each tool to the situation.",
+   "pairs": [
+    ["`WITH ... AS (...)`", "a 60-line query you want to read and debug in parts"],
+    ["`CREATE TEMP TABLE ... AS`", "keep a list of suspect users for the next hour of questions"],
+    ["`EXISTS`", "builds that were downloaded at least once from outside"],
+    ["`AS MATERIALIZED`", "the plan re-runs an expensive CTE for every reference"],
+    ["`\\e`", "fix line 40 of the query you just ran in psql"]
+   ]
+  },
+  {
+   "type": "learn",
+   "title": "Make it a habit",
+   "body": "Write long queries as named steps and run each step on its own before trusting the whole. Keep investigation queries in a `.sql` file you run with `\\i` or `.read`, so you can repeat them tomorrow and paste them into the incident notes."
+  }
+ ]
+}
