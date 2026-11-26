@@ -1,0 +1,141 @@
+{
+  "title": "Fan-out: WhenAll, WhenAny, WhenEach and PLINQ",
+  "summary": "Combine tasks the right way, process results as they complete with .NET 9's Task.WhenEach, and know when PLINQ helps and when it hurts.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three ways to wait for many tasks",
+      "body": [
+        "- **`await Task.WhenAll(tasks)`**: wait for all; results come back in the order of the tasks; failures are collected (the `await`",
+        "  throws the first, the returned task holds them all).",
+        "- **`await Task.WhenAny(tasks)`**: returns the first task to finish (it does not throw; await the returned task to get its result",
+        "  or exception). Good for a race or a timeout; a loop of `WhenAny` + remove over *n* tasks costs O(n²).",
+        "- **`await foreach (var t in Task.WhenEach(tasks))`** (.NET 9): yields each task **as it completes**, in completion order, in O(n).",
+        "  Show the first results while the slow ones still run, or stop early.",
+        "",
+        "```csharp fragment",
+        "await foreach (Task<Quote> done in Task.WhenEach(quoteTasks))",
+        "{",
+        "    if (done.IsCompletedSuccessfully) Show(done.Result);   // completed: .Result does not block here",
+        "}",
+        "```"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the need to the combinator.",
+      "pairs": [
+        ["All results, in a fixed order, before going on", "`Task.WhenAll`"],
+        ["Whichever answers first wins", "`Task.WhenAny`"],
+        ["Handle each result the moment it arrives", "`Task.WhenEach`"],
+        ["At most 4 at a time over a long list", "`Parallel.ForEachAsync`"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Five price lookups are started together. They finish in the order 4, 2, 1, 5, 3. In what order does `await foreach (var t in Task.WhenEach(tasks))` hand them to you?",
+      "options": ["4, 2, 1, 5, 3", "1, 2, 3, 4, 5", "3, 5, 1, 2, 4", "All at once, after the last one"],
+      "answer": 0,
+      "explain": "`WhenEach` yields in completion order, which is its whole point. `WhenAll` gives results in the original order, but only after everything is done."
+    },
+    {
+      "type": "learn",
+      "title": "PLINQ and Parallel.For: CPU work only",
+      "body": [
+        "`.AsParallel()` (PLINQ) and `Parallel.For/ForEach` split **CPU-bound** work over cores using pool threads.",
+        "",
+        "```csharp fragment",
+        "var hashes = files.AsParallel().WithDegreeOfParallelism(4).Select(f => Sha256(f.Bytes)).ToList();",
+        "```",
+        "",
+        "It helps when each item is real computation (hashing, parsing, image work) over a **large, in-memory** set, on a machine with spare",
+        "cores. It **hurts** when:",
+        "",
+        "- the work is **I/O** (HTTP, database): PLINQ blocks pool threads waiting. Use async and `Parallel.ForEachAsync` instead;",
+        "- the set is small or the work per item tiny: partitioning and merging cost more than they save;",
+        "- it runs **inside a web request**: it takes pool threads from other requests; a busy server has no spare cores anyway;",
+        "- the lambda touches shared state (a `List.Add`, a counter): a race. Return values and let PLINQ combine them.",
+        "",
+        "`AsOrdered()` keeps the input order at a cost. Always measure (BenchmarkDotNet) before and after."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Will PLINQ (or `Parallel.ForEach`) help here?",
+      "buckets": ["Likely helps", "Likely hurts"],
+      "items": [
+        ["A nightly batch computing checksums of 50,000 in-memory blobs on a 16-core worker", 0],
+        ["Calling a REST API for each of 200 customer ids", 1],
+        ["Summing 30 numbers", 1],
+        ["Parsing 2 million log lines already loaded into memory, in a CLI tool", 0],
+        ["Inside an ASP.NET Core endpoint under heavy load, filtering a 50-item list", 1],
+        ["`.AsParallel().ForAll(x => results.Add(x))` with a `List<T>`", 1]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print? (`AsOrdered` keeps the input order in the results.)",
+      "code": [
+        "var squares = Enumerable.Range(1, 6).AsParallel().AsOrdered().Select(n => n * n).ToList();",
+        "Console.WriteLine(string.Join(\",\", squares));",
+        "Console.WriteLine(Enumerable.Range(1, 1000).AsParallel().Sum());"
+      ],
+      "answer": ["1,4,9,16,25,36", "500500"],
+      "explain": "Without `AsOrdered` the order of the list would depend on scheduling. `Sum` is an aggregation PLINQ combines correctly, whatever the order."
+    },
+    {
+      "type": "code",
+      "title": "The first three answers",
+      "prompt": [
+        "A search page asks several suppliers at once and shows the **first three successful answers** as soon as they exist; failures are",
+        "skipped.",
+        "",
+        "Write **`static async Task<List<string>> FirstThreeAsync(IEnumerable<Task<string>> lookups)`** returning the first three",
+        "successful results **in the order they completed** (fewer if there are not three). Do not wait for the remaining lookups once you",
+        "have three.",
+        "",
+        "`Task.WhenEach` (.NET 9) is the natural tool. The tests complete the lookups one by one in a chosen order."
+      ],
+      "starter": [
+        "static async Task<List<string>> FirstThreeAsync(IEnumerable<Task<string>> lookups)",
+        "{",
+        "    var all = await Task.WhenAll(lookups);",
+        "    return all.Take(3).ToList();",
+        "}"
+      ],
+      "solution": [
+        "static async Task<List<string>> FirstThreeAsync(IEnumerable<Task<string>> lookups)",
+        "{",
+        "    var results = new List<string>();",
+        "    await foreach (var done in Task.WhenEach(lookups))",
+        "    {",
+        "        if (!done.IsCompletedSuccessfully) continue;",
+        "        results.Add(done.Result);",
+        "        if (results.Count == 3) break;",
+        "    }",
+        "    return results;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSources = Enumerable.Range(0, 5).Select(_ => new TaskCompletionSource<string>()).ToArray();",
+        "var dojoTask = FirstThreeAsync(dojoSources.Select(s => s.Task).ToList());",
+        "dojoSources[3].SetResult(\"supplier-4\");",
+        "dojoSources[1].SetException(new InvalidOperationException(\"503 from supplier-2\"));",
+        "dojoSources[0].SetResult(\"supplier-1\");",
+        "dojoSources[4].SetResult(\"supplier-5\");",
+        "var dojoDone = await Task.WhenAny(dojoTask, Task.Delay(2000)) == dojoTask;",
+        "Dojo.Check(\"It returns without waiting for the last lookup\", dojoDone, \"Lookup 3 never answers: stop once you have three results.\");",
+        "if (dojoDone) Dojo.Eq(\"The first three successes, in completion order\", new List<string> { \"supplier-4\", \"supplier-1\", \"supplier-5\" }, await dojoTask);",
+        "var dojoFew = await FirstThreeAsync(new[] { Task.FromResult(\"only\"), Task.FromException<string>(new TimeoutException()) });",
+        "Dojo.Eq(\"With fewer successes, it returns what there is\", new List<string> { \"only\" }, dojoFew);"
+      ],
+      "hints": [
+        "`await foreach (var done in Task.WhenEach(lookups))` gives tasks in completion order. Skip the ones that are not `IsCompletedSuccessfully`.",
+        "Add `done.Result` to a list and `break` out of the loop when it has three."
+      ],
+      "explain": "Breaking out of `await foreach` stops waiting; the lookups still running keep running unless you cancel them, so in production pass a token you cancel once you have enough."
+    }
+  ]
+}

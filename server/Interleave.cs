@@ -459,8 +459,8 @@ public static class Interleave
                 {
                     var name = ls.Expression.ToString();
                     var tmp = "__lk" + ++_tmp;
-                    var expr = ((ExpressionSyntax)Visit(ls.Expression)!).ToFullString().Trim();
-                    var body = ((StatementSyntax)Visit(ls.Statement)!).ToFullString();
+                    var expr = ((ExpressionSyntax)Visit(ls.Expression)!).ToString();
+                    var body = ((StatementSyntax)Visit(ls.Statement)!).ToString();
                     var end = Line(ls.Statement.GetLastToken());
                     return [Stmt($"{{ var {tmp} = (object)({expr}); __Sched.Enter({tmp}, {Lit(name)}, {g}, {l}); try {body} finally {{ __Sched.Exit({tmp}, {Lit(name)}, {g}, {end}); }} }}")
                         .WithLeadingTrivia(s.GetLeadingTrivia())];
@@ -491,9 +491,9 @@ public static class Interleave
                     target = p.Operand; next = r + (p.Kind() == SyntaxKind.PreIncrementExpression ? " + 1" : " - 1"); break;
                 case AssignmentExpressionSyntax a when a.Kind() != SyntaxKind.SimpleAssignmentExpression:
                     var op = a.OperatorToken.Text[..^1];
-                    target = a.Left; next = $"{r} {op} ({((ExpressionSyntax)Visit(a.Right)!).ToFullString().Trim()})"; break;
+                    target = a.Left; next = $"{r} {op} ({((ExpressionSyntax)Visit(a.Right)!).ToString()})"; break;
                 case AssignmentExpressionSyntax a when a.Right.DescendantNodesAndSelf().Any(n => SyntaxFactory.AreEquivalent(n, a.Left)):
-                    target = a.Left; simple = true; next = ((ExpressionSyntax)Visit(a.Right)!).ToFullString().Trim(); break;
+                    target = a.Left; simple = true; next = ((ExpressionSyntax)Visit(a.Right)!).ToString(); break;
             }
             if (target is null || !Touches(target)) return null;
             if (target is not (IdentifierNameSyntax or MemberAccessExpressionSyntax or ElementAccessExpressionSyntax)) return null;
@@ -515,7 +515,7 @@ public static class Interleave
             if (Type(inv) != "System.Threading.SemaphoreSlim") return null;
             var method = ma.Name.Identifier.Text;
             if (method is not ("Wait" or "Release")) return null;
-            var recv = ((ExpressionSyntax)Visit(ma.Expression)!).ToFullString().Trim();
+            var recv = ((ExpressionSyntax)Visit(ma.Expression)!).ToString();
             return Stmt($"__Sched.{(method == "Wait" ? "SemWait" : "SemRelease")}({recv}, {Lit(ma.Expression.ToString())}, {g}, {l});");
         }
 
@@ -582,7 +582,7 @@ public static class Interleave
             var l = Line(e);
             if (isVoid && Split(e, g, l) is { } split) return Block(split);
             var k = Touches(e) ? Atomic(e) ? 6 : 5 : 0;
-            var visited = ((ExpressionSyntax)Visit(e)!).ToFullString().Trim();
+            var visited = ((ExpressionSyntax)Visit(e)!).ToString();
             return Block(Stmt($"__Sched.Y({g}, {l}, {k});"), Stmt(isVoid ? visited + ";" : "return " + visited + ";"));
         }
     }

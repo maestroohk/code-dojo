@@ -1,0 +1,186 @@
+{
+  "title": "Channels and backpressure",
+  "summary": "Channel<T> as an in-process queue, why it must be bounded, the full modes, completion, and a producer/consumer pipeline that slows its producer down.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Channel<T>: an async queue between producers and consumers",
+      "body": [
+        "`System.Threading.Channels` (in the BCL since .NET Core 3.0) is the modern in-process queue: writers `await WriteAsync`, readers",
+        "`await foreach` over `ReadAllAsync`, and nobody blocks a thread.",
+        "",
+        "```csharp fragment",
+        "var channel = Channel.CreateBounded<Order>(new BoundedChannelOptions(capacity: 100)",
+        "{",
+        "    FullMode = BoundedChannelFullMode.Wait,   // a full channel makes WriteAsync wait: backpressure",
+        "    SingleReader = false, SingleWriter = true",
+        "});",
+        "",
+        "// producer                                   // consumer (one or many)",
+        "await channel.Writer.WriteAsync(order, ct);   await foreach (var o in channel.Reader.ReadAllAsync(ct))",
+        "channel.Writer.Complete();                         await HandleAsync(o, ct);",
+        "```",
+        "",
+        "**Always bound it.** `Channel.CreateUnbounded` never pushes back: when consumers are slower than producers (a slow database, a",
+        "dependency down), the queue grows until the process runs out of memory. A bounded channel turns overload into *waiting*, which",
+        "travels back to whoever produces the work: that is **backpressure**."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "A bounded channel is full. Match each `BoundedChannelFullMode` to what `WriteAsync` does.",
+      "pairs": [
+        ["`Wait`", "waits until a reader makes room (backpressure)"],
+        ["`DropOldest`", "removes the oldest item to make room, and writes"],
+        ["`DropNewest`", "removes the newest item already queued, and writes"],
+        ["`DropWrite`", "silently drops the item being written"]
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "using System.Threading.Channels;",
+        "",
+        "var ch = Channel.CreateBounded<int>(2);",
+        "Console.WriteLine(ch.Writer.TryWrite(1));",
+        "Console.WriteLine(ch.Writer.TryWrite(2));",
+        "Console.WriteLine(ch.Writer.TryWrite(3));",
+        "Console.WriteLine(ch.Reader.Count);",
+        "ch.Reader.TryRead(out var first);",
+        "Console.WriteLine(first);",
+        "Console.WriteLine(ch.Writer.TryWrite(3));"
+      ],
+      "answer": ["True", "True", "False", "2", "1", "True"],
+      "explain": "`TryWrite` never waits: with the default `Wait` mode it returns false when full. Reading 1 makes room, so 3 fits now. A channel is FIFO."
+    },
+    {
+      "type": "learn",
+      "title": "Completion and errors",
+      "body": [
+        "- The producer calls `Writer.Complete()` when it has no more items. Readers drain what is left; `ReadAllAsync` then ends, and",
+        "  `Reader.Completion` completes.",
+        "- `Writer.Complete(exception)` ends the channel with an error: `Reader.Completion` faults with it, so consumers can stop too.",
+        "- With **several consumers**, start them all, then `await Task.WhenAll(consumers)` after completing the writer: that is a clean",
+        "  drain.",
+        "- `SingleReader = true` / `SingleWriter = true` are promises that let the channel use a faster implementation; break the promise and",
+        "  you get corrupted state, not an exception.",
+        "",
+        "Channels are the backbone of background work in ASP.NET Core: an endpoint writes a job, a `BackgroundService` reads and runs it",
+        "(module 7). A bounded channel there is how a burst of requests waits instead of filling memory."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An endpoint enqueues e-mails into `Channel.CreateUnbounded<Email>()`, and a background service sends them. The mail provider is down for an hour. What happens?",
+      "options": [
+        "The queue grows for the whole hour and the process may run out of memory; restarts lose everything queued",
+        "Requests start failing with 503 automatically",
+        "The channel drops old e-mails once it reaches its default capacity",
+        "WriteAsync waits until the provider is back"
+      ],
+      "answer": 0,
+      "explain": "Unbounded means no limit and no pushback. Bound it, choose what happens when full (wait with a timeout, or reject with 503 / 429), and for work that must survive a restart use a durable queue (RabbitMQ, Kafka, a database outbox) instead of memory."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which full mode fits each case?",
+      "buckets": ["`Wait`", "`DropOldest`", "`DropWrite`"],
+      "items": [
+        ["Order events: none may be lost; slow the producer instead", 0],
+        ["Live position updates for a map: only the latest few matter", 1],
+        ["Debug telemetry samples: losing new ones under load is fine", 2],
+        ["An import job reading a 10 GB file faster than it can write to the database", 0]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A pipeline that pushes back",
+      "prompt": [
+        "Write **`static async Task<int> RunPipelineAsync(IAsyncEnumerable<int> source, Func<int, Task> handle, int capacity, int consumers)`**:",
+        "",
+        "- one producer reads `source` and writes every item into a **bounded** channel of `capacity` with `FullMode = Wait`;",
+        "- `consumers` consumer tasks read the channel and `await handle(item)` for each item;",
+        "- when the source ends, complete the writer, wait for all consumers to finish, and return how many items were handled.",
+        "",
+        "The tests hold `handle` closed and count how far the producer read: with capacity 2 and one stuck consumer, it may read at most",
+        "**4** items (1 being handled, 2 in the channel, 1 waiting to be written)."
+      ],
+      "starter": [
+        "static async Task<int> RunPipelineAsync(IAsyncEnumerable<int> source, Func<int, Task> handle, int capacity, int consumers)",
+        "{",
+        "    var channel = System.Threading.Channels.Channel.CreateUnbounded<int>();",
+        "    var handled = 0;",
+        "    var workers = Enumerable.Range(0, consumers).Select(async _ =>",
+        "    {",
+        "        await foreach (var item in channel.Reader.ReadAllAsync())",
+        "        {",
+        "            await handle(item);",
+        "            Interlocked.Increment(ref handled);",
+        "        }",
+        "    }).ToList();",
+        "    await foreach (var item in source) await channel.Writer.WriteAsync(item);",
+        "    channel.Writer.Complete();",
+        "    await Task.WhenAll(workers);",
+        "    return handled;",
+        "}"
+      ],
+      "solution": [
+        "static async Task<int> RunPipelineAsync(IAsyncEnumerable<int> source, Func<int, Task> handle, int capacity, int consumers)",
+        "{",
+        "    var channel = System.Threading.Channels.Channel.CreateBounded<int>(new System.Threading.Channels.BoundedChannelOptions(capacity)",
+        "    {",
+        "        FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait,",
+        "        SingleWriter = true,",
+        "    });",
+        "    var handled = 0;",
+        "    var workers = Enumerable.Range(0, consumers).Select(async _ =>",
+        "    {",
+        "        await foreach (var item in channel.Reader.ReadAllAsync())",
+        "        {",
+        "            await handle(item);",
+        "            Interlocked.Increment(ref handled);",
+        "        }",
+        "    }).ToList();",
+        "    await foreach (var item in source) await channel.Writer.WriteAsync(item);",
+        "    channel.Writer.Complete();",
+        "    await Task.WhenAll(workers);",
+        "    return handled;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoRead = 0;",
+        "var dojoGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);",
+        "async IAsyncEnumerable<int> DojoSource(int n)",
+        "{",
+        "    for (var i = 1; i <= n; i++) { await Task.Yield(); Interlocked.Increment(ref dojoRead); yield return i; }",
+        "}",
+        "async Task DojoHandle(int item) => await dojoGate.Task;",
+        "var dojoRun = RunPipelineAsync(DojoSource(20), DojoHandle, 2, 1);",
+        "for (var i = 0; i < 100 && Volatile.Read(ref dojoRead) < 4; i++) await Task.Delay(10);",
+        "await Task.Delay(100);",
+        "var dojoReadWhileStuck = Volatile.Read(ref dojoRead);",
+        "Dojo.Check(\"With the consumer stuck, the producer stops after 4 items\", dojoReadWhileStuck <= 4,",
+        "    $\"The producer read {dojoReadWhileStuck} of 20 items while nothing was being consumed: the channel is not pushing back.\");",
+        "dojoGate.SetResult();",
+        "Dojo.Eq(\"Once unstuck, all 20 items are handled\", 20, await dojoRun);",
+        "var dojoSum = 0;",
+        "Dojo.Eq(\"Three consumers handle 50 items\", 50, await RunPipelineAsync(DojoSource(50), async x => { await Task.Yield(); Interlocked.Add(ref dojoSum, x); }, 5, 3));",
+        "Dojo.Eq(\"Every item is handled exactly once\", 1275, dojoSum);"
+      ],
+      "require": [
+        { "pattern": "CreateBounded", "message": "Uses a bounded channel" }
+      ],
+      "hints": [
+        "Change `CreateUnbounded<int>()` to `CreateBounded<int>(new BoundedChannelOptions(capacity) { FullMode = BoundedChannelFullMode.Wait })` (with the full namespace).",
+        "The rest of the starter is right: start the consumers first, write everything, `Complete()`, then `await Task.WhenAll(workers)`."
+      ],
+      "explain": [
+        "Start consumers *before* producing, or a bounded channel deadlocks itself: the producer waits for room that nobody makes. Counting",
+        "with `Interlocked` matters here: three consumers increment `handled` at the same time."
+      ]
+    }
+  ]
+}
