@@ -5,7 +5,11 @@ namespace CodeDojo;
 
 public record TestResult(string Name, bool Pass, string Detail);
 public record CheckResult(bool Passed, bool Compiled, List<Diag> Diagnostics, List<TestResult> Tests,
-    string Stdout, string Stderr, bool TimedOut, long Ms);
+    string Stdout, string Stderr, bool TimedOut, long Ms)
+{
+    /// <summary>What an OpenTelemetry web step captured (spans and logs, CSharpRunner.Otel.cs), for the waterfall on the page.</summary>
+    public JsonNode? Telemetry { get; init; }
+}
 
 /// <summary>
 /// Grades a "code" step. A step can combine three kinds of check:
@@ -37,7 +41,8 @@ public sealed class Checker(CSharpRunner runner)
         // The learner writes the tests: they run against the real code and against planted bugs (XunitCheck.cs).
         if (step["xunit"] is JsonObject spec && spec["target"] is not null)
             return await XunitCheck.LearnerTests(runner, spec, code, results, files, web, efCore);
-        var (program, diags) = runner.Compile(wrapped is null ? code : "", (string?)step["template"], web, efCore: efCore, extra: files, xunit: xunit);
+        var otel = CSharpRunner.HasOtel((string?)step["framework"]);
+        var (program, diags) = runner.Compile(wrapped is null ? code : "", (string?)step["template"], web, efCore: efCore, extra: files, xunit: xunit, otel: otel);
         if (program is null)
             return new(false, false, diags, results, "", "", false, 0);
 
@@ -93,13 +98,20 @@ public sealed class Checker(CSharpRunner runner)
                     }
                 }
             }
-            return new(results.Count > 0 && results.All(r => r.Pass), true, diags, results, stdout, stderr, timedOut, ms);
+            return new(results.Count > 0 && results.All(r => r.Pass), true, diags, results, stdout, stderr, timedOut, ms) { Telemetry = program.Otel ? ReadTelemetry(program) : null };
         }
     }
 
     static IEnumerable<(string Pattern, string Message)> Rules(JsonObject step, string key) =>
         (step[key] as JsonArray ?? []).OfType<JsonObject>()
             .Select(r => ((string?)r["pattern"] ?? "", (string?)r["message"] ?? key));
+
+    static JsonNode? ReadTelemetry(Compiled program)
+    {
+        var path = Path.Combine(program.Dir, CSharpRunner.OtelDumpFile);
+        try { return File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) : null; }
+        catch (System.Text.Json.JsonException) { return null; }
+    }
 
     static string FirstLine(string s) => s.Split('\n').FirstOrDefault(l => l.Trim().Length > 0)?.Trim() ?? "The program exited with an error.";
 

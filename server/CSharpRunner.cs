@@ -11,8 +11,10 @@ public record Mark(string Name, bool Pass, string Detail);
 public record RunOutput(string Stdout, string Stderr, int ExitCode, bool TimedOut, bool Truncated, long Ms, List<Mark> Marks);
 
 /// <summary>A compiled learner program sitting in its own temp folder. Dispose deletes it.</summary>
-public sealed class Compiled(string dir, string dll, bool web = false, bool efCore = false, bool xunit = false) : IDisposable
+public sealed class Compiled(string dir, string dll, bool web = false, bool efCore = false, bool xunit = false, bool otel = false) : IDisposable
 {
+    /// <summary>Uses the OpenTelemetry SDK (framework "otel"): larger CPU budget, and its telemetry is captured (CSharpRunner.Otel.cs).</summary>
+    public bool Otel => otel;
     public string Dir => dir;
     public string Dll => dll;
     /// <summary>An ASP.NET Core program: runs with a private port and is tested over HTTP.</summary>
@@ -32,7 +34,7 @@ public sealed class Compiled(string dir, string dll, bool web = false, bool efCo
 /// `dotnet` process so an infinite loop or a crash can never take the dojo down.
 /// One run at a time: this is a laptop tool, not a build farm.
 /// </summary>
-public sealed class CSharpRunner
+public sealed partial class CSharpRunner
 {
     public const string UserFile = "Program.cs";
     public const string TestFile = "tests";
@@ -94,12 +96,14 @@ public sealed class CSharpRunner
         _liveSupport = CSharpSyntaxTree.ParseText(LiveSupportSource, Parse, path: "DojoLive.cs", encoding: Encoding.UTF8);
         _ef = new(() => EfLib.Prepare(webDir), LazyThreadSafetyMode.ExecutionAndPublication);
         _tests = new(() => TestLib.Prepare(), LazyThreadSafetyMode.ExecutionAndPublication);
+        _otel = new(() => OtelLib.Prepare(), LazyThreadSafetyMode.ExecutionAndPublication);
         _webDirVersion = Path.GetFileName(webDir);
         _intelRefs = new(() =>
         {
             List<MetadataReference> all = [.. _webRefs];
             try { all.AddRange(_ef.Value.Refs); } catch { }      // no EF assemblies next to the server: intelligence still works for everything else
             try { all.AddRange(_tests.Value.Refs); } catch { }   // the same for the test libraries
+            try { all.AddRange(_otel.Value.Refs); } catch { }    // and OpenTelemetry
             return all;
         });
     }
@@ -418,7 +422,7 @@ public sealed class CSharpRunner
     /// <param name="xunit">Reference xUnit v3, NSubstitute, FakeTimeProvider and TestHost, and give the program xUnit's entry point
     /// (framework "xunit"): running it runs every test in it (RunTests, ReadXunit). Top-level statements still win as the entry point.</param>
     public (Compiled? Program, List<Diag> Diagnostics) Compile(string code, string? template = null, bool web = false, bool live = false, bool efCore = false,
-        IEnumerable<(string Path, string Text)>? extra = null, bool xunit = false)
+        IEnumerable<(string Path, string Text)>? extra = null, bool xunit = false, bool otel = false)
     {
         var tree = CSharpSyntaxTree.ParseText(BuildSource(code, template), Parse, path: "Source.cs", encoding: Encoding.UTF8);
         web |= live;
@@ -439,6 +443,15 @@ public sealed class CSharpRunner
             // TestHost and the Microsoft.Extensions abstractions come from the ASP.NET Core shared framework.
             refs = (efCore ? refs : _webRefs).Concat(tests.Refs);
             trees = [.. trees, tests.Support];
+        }
+        OtelLib? otelLib = null;
+        if (otel && !live)
+        {
+            otelLib = _otel.Value;
+            // The SDK's Microsoft.Extensions.* dependencies come from the ASP.NET Core shared framework, also for console steps.
+            refs = (refs == _refs ? _webRefs : refs).Concat(otelLib.Refs);
+            trees = [.. trees, otelLib.Support];
+            if (web) trees = [.. trees, otelLib.WebSupport];
         }
         if (extra is not null)
             trees = [.. trees, .. extra.Select(e => CSharpSyntaxTree.ParseText(e.Text, Parse, path: e.Path, encoding: Encoding.UTF8))];
@@ -475,15 +488,18 @@ public sealed class CSharpRunner
             return (null, diags);
         }
         File.WriteAllText(Path.Combine(dir, "Exercise.runtimeconfig.json"),
-            tests is not null ? TestRuntimeConfig(tests, efCore ? _ef.Value.Dir : null) : efCore ? _ef.Value.RuntimeConfig : web ? _webRuntimeConfig : _runtimeConfig);
+            tests is not null ? TestRuntimeConfig(tests, efCore ? _ef.Value.Dir : null, otelLib?.Dir)
+            : otelLib is not null ? OtelRuntimeConfig(otelLib, efCore ? _ef.Value.Dir : null)
+            : efCore ? _ef.Value.RuntimeConfig : web ? _webRuntimeConfig : _runtimeConfig);
         // A test assembly is not a web server: its tests host the app themselves (TestServer), so no port is handed out.
-        return (new Compiled(dir, dll, web && tests is null, efCore, tests is not null), diags);
+        return (new Compiled(dir, dll, web && tests is null, efCore, tests is not null, otelLib is not null), diags);
     }
 
-    string TestRuntimeConfig(TestLib tests, string? efDir)
+    string TestRuntimeConfig(TestLib tests, string? efDir, string? otelDir = null)
     {
         var props = new Dictionary<string, object> { ["Dojo.TestLibDir"] = tests.Dir };
         if (efDir is not null) props["Dojo.LibDir"] = efDir;
+        if (otelDir is not null) props["Dojo.OtelDir"] = otelDir;
         return System.Text.Json.JsonSerializer.Serialize(new
         {
             runtimeOptions = new
@@ -575,7 +591,7 @@ public sealed class CSharpRunner
     public async Task<RunOutput> Run(Compiled program, string? stdin, int wallMs = WallLimitMs, int cpuMs = CpuLimitMs)
     {
         // xUnit's runner JITs a fair amount before the first test, like EF Core: the same larger CPU budget.
-        if ((program.EfCore || program.Xunit) && cpuMs == CpuLimitMs) cpuMs = EfCpuLimitMs;
+        if ((program.EfCore || program.Xunit || program.Otel) && cpuMs == CpuLimitMs) cpuMs = EfCpuLimitMs;
         await Gate.WaitAsync();
         try
         {
