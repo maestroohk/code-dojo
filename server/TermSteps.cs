@@ -214,9 +214,9 @@ public sealed partial class TermSteps : IAsyncDisposable
         Exec(name, user, script, seconds, null, env);
 
     Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, Action<string>? onLine, params string[] env) =>
-        Exec(name, user, script, seconds, onLine, "bash", env);
+        ExecIn(name, user, script, seconds, onLine, "bash", env);
 
-    Task<NetLabs.Result> Exec(string name, string user, string script, int seconds, Action<string>? onLine, string shell, params string[] env)
+    Task<NetLabs.Result> ExecIn(string name, string user, string script, int seconds, Action<string>? onLine, string shell, params string[] env)
     {
         var args = new List<string> { "exec", "-u", user, "-w", Home, "-e", "HOME=" + (user == "root" ? "/root" : Home), "-e", "DOJO_FILES=" + FilesIn };
         foreach (var e in env) { args.Add("-e"); args.Add(e); }
@@ -440,7 +440,7 @@ public sealed partial class TermSteps : IAsyncDisposable
             // Typed one line at a time, like the learner would: a command that stops on purpose (a revert that
             // conflicts) does not end the script. The checks afterwards decide.
             var machine = MachineFor(spec.Image);
-            var sol = await Exec(name, User, "cd ~\n" + spec.Solution, Math.Max(180, machine.SetupSeconds), (Action<string>?)null, machine.Shell, "GIT_EDITOR=true", "EDITOR=true", "DOJO_LINE_TERM=1");
+            var sol = await ExecIn(name, User, "cd ~\n" + spec.Solution, Math.Max(180, machine.SetupSeconds), null, machine.Shell, "GIT_EDITOR=true", "EDITOR=true", "DOJO_LINE_TERM=1");
             var after = await ChecksOn(name, spec);
             foreach (var row in after.Where(r => !r.Pass))
                 problems.Add($"after the solution, check \"{row.Name}\" fails: {row.Detail?.Replace("\n", " | ")}");
