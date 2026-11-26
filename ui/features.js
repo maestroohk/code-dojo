@@ -69,7 +69,7 @@ const FEATURES = [
     { name: 'Time-travel debugger', status: 'done', note: 'Breakpoints, stepping in all directions, variables, watch and call stack. Console programs ask for input while they are recorded; web apps are recorded per request.' },
     { name: 'Debugging web APIs', status: 'done', note: 'Debug a web project: it runs on a private port, every request is recorded on its own (list with status, time, breakpoint hits, exceptions), and any request opens in the debugger. Code spaces only, C# only.' },
     { name: 'Database studio', status: 'done', link: '#/db', note: 'SQLite, PostgreSQL, SQL Server and MySQL, each run for real: databases, tables, result grids, errors on the right line, Explain, schema and ER diagram, stop and start with data kept. Each engine speaks its own dialect (GO batches, DELIMITER, TOP).' },
-    { name: 'Data science tools setup', status: 'done', link: '#/track/datascience', note: 'One click installs numpy, pandas and matplotlib into the dojo’s own environment.' },
+    { name: 'Data science tools setup', status: 'done', link: '#/track/datascience', note: 'One click installs numpy, pandas, matplotlib, scikit-learn, scipy and statsmodels into the dojo’s own environment.' },
     { name: 'Real Next.js projects', status: 'done', link: '#/spaces', note: 'New space → Next.js + Tailwind: npm install, next dev with hot reload (loopback only), Stop ends every process, next build with TypeScript errors in Problems, next start.' },
   ] },
   { area: 'Game', items: [

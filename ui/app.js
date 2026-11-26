@@ -1197,7 +1197,7 @@ async function playground() {
   page('playground',
     h('div.track-head', h('div', h('h2.track-title', 'Playground'), h('p.muted', 'Try an idea in any language you have installed. Break something on purpose, see what happens. Nothing here is graded.'))),
     tabs,
-    lang.id === 'python' && pyenvBanner({ reason: 'Charts and data work in Python need numpy, pandas and matplotlib.' }),
+    lang.id === 'python' && pyenvBanner({ reason: 'Charts, data and models in Python need numpy, pandas, matplotlib and scikit-learn.' }),
     h('div.playground',
       editor.el,
       h('div.code-tools', runBtn, pgDebug?.button,

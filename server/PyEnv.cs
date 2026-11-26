@@ -4,13 +4,17 @@ using System.Text;
 namespace CodeDojo;
 
 /// <summary>
-/// The dojo's own Python environment for data science (numpy, pandas, matplotlib), set up from the app
+/// The dojo's own Python environment for data science (numpy, pandas, matplotlib, scikit-learn, scipy, statsmodels), set up from the app
 /// with one click: a virtual environment in %USERPROFILE%\code-dojo\pyenv (or DOJO_PYENV), kept apart
 /// from the system Python. Setup runs in the background; the page polls its log.
 /// </summary>
 public static class PyEnv
 {
-    public static readonly string[] Packages = ["numpy", "pandas", "matplotlib"];
+    /// <summary>(pip distribution name, import name). tzdata makes zoneinfo work on Windows.</summary>
+    public static readonly (string Dist, string Import)[] Wanted =
+        [("numpy", "numpy"), ("pandas", "pandas"), ("matplotlib", "matplotlib"), ("scikit-learn", "sklearn"),
+         ("scipy", "scipy"), ("statsmodels", "statsmodels"), ("tzdata", "tzdata")];
+    public static readonly string[] Packages = [.. Wanted.Select(w => w.Dist)];
 
     static readonly object Gate = new();
     static readonly List<string> Log = [];
@@ -45,8 +49,8 @@ public static class PyEnv
         if (python is null) return new { ready = false, dir = Dir, systemPython = system.Ok ? system.Out.Trim() : null, packages = Array.Empty<object>(), state = _state };
         var check = await Probe(python, "-c",
             "import importlib.util as u, importlib.metadata as m\n" +
-            "for p in ['numpy','pandas','matplotlib']:\n" +
-            "    print(p, m.version(p) if u.find_spec(p) else '-')");
+            $"for d, i in [{string.Join(", ", Wanted.Select(w => $"('{w.Dist}', '{w.Import}')"))}]:\n" +
+            "    print(d, m.version(d) if u.find_spec(i) else '-')");
         var packages = check.Out.Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(l => l.Trim().Split(' ')).Where(p => p.Length == 2)
             .Select(p => new { name = p[0], version = p[1] == "-" ? null : p[1] }).ToArray();
@@ -66,7 +70,7 @@ public static class PyEnv
                 if (made != 0) throw new InvalidOperationException("Could not create the environment. Is Python 3 installed and on PATH? (python --version)");
             }
             var py = LangRunner.PyEnvPython() ?? throw new InvalidOperationException("The environment was created but its Python was not found.");
-            Say("Installing numpy, pandas and matplotlib from PyPI (about 100 MB, a few minutes) …");
+            Say($"Installing {string.Join(", ", Packages)} from PyPI (about 250 MB, a few minutes) …");
             var code = await Stream(py, ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", .. Packages], Say);
             if (code != 0) throw new InvalidOperationException("pip could not install the packages. Check that this machine can reach pypi.org.");
             Say("Done. Data science lessons and the Python playground now use this environment.");

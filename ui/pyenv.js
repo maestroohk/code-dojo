@@ -2,7 +2,7 @@
 // matplotlib) is missing, e.g. on a second machine. One click creates it; the log streams in.
 import { h, api } from './util.js';
 
-export function pyenvBanner({ reason = 'Data science lessons need numpy, pandas and matplotlib.' } = {}) {
+export function pyenvBanner({ reason = 'Data science lessons need numpy, pandas, matplotlib and scikit-learn.' } = {}) {
   const box = h('div.pyenv', { hidden: true });
   let timer = null;
 
@@ -40,7 +40,7 @@ export function pyenvBanner({ reason = 'Data science lessons need numpy, pandas 
       try { r = await api('pyenv/log'); } catch { return; }
       log.textContent = r.log.slice(-14).join('\n');
       log.scrollTop = log.scrollHeight;
-      if (r.state === 'done') { clearInterval(timer); status.textContent = 'Ready. numpy, pandas and matplotlib are installed.'; setTimeout(refresh, 2500); }
+      if (r.state === 'done') { clearInterval(timer); status.textContent = 'Ready. numpy, pandas, matplotlib, scikit-learn, scipy and statsmodels are installed.'; setTimeout(refresh, 2500); }
       if (r.state === 'failed') { clearInterval(timer); status.textContent = 'Setup failed. The log below says why; you can try again.'; box.append(h('button.btn.ghost', { type: 'button', onclick: start }, 'Try again')); }
     }, 1200);
   }
