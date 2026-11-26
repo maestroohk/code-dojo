@@ -27,6 +27,7 @@ const DEFAULTS = () => ({
   challenge: { day: null, key: null, idx: null, done: false, solved: false, streak: 0, best: 0, last: null, wins: 0 },
   accuracy: {},       // track id -> { right, total }: first-try answers, for topic mastery
   rewards: { title: null, theme: 'copper', titles: {}, levelSeen: 0 },
+  notes: [],          // the learner's notes and highlights per lesson step (notes.js); older saves get []
 });
 
 /** Nested objects that later versions grew new fields in: merged field by field on load. */

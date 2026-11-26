@@ -28,6 +28,9 @@ import * as builds from './builds.js';
 import { welcomeView, pathPanel, shouldWelcome } from './welcome.js';
 import * as gamify from './gamify.js';
 import * as pacing from './pacing.js';
+import { installSearch, searchButton } from './search.js';   // Ctrl+K: search everything
+import * as notes from './notes.js';                         // notes and highlights per step, #/notes
+import { glossaryView } from './glossary.js';
 
 const app = document.getElementById('app');
 let tracks = [];
@@ -85,7 +88,9 @@ function header(active) {
       link('#/projects', 'Projects', 'projects'),
       link('#/builds', 'Builds', 'builds'),
       moreMenu(active, [['#/workbench', 'Workbench', 'workbench'], ['#/spaces', 'Code spaces', 'spaces'], ['#/db', 'Databases', 'db'],
-        ['#/playground', 'Playground', 'playground'], ['#/features', "What's in the dojo", 'features'], ['#/profile', 'Profile', 'profile']])),
+        ['#/playground', 'Playground', 'playground'], ['#/glossary', 'Glossary', 'glossary'], ['#/notes', 'Notes', 'notes'],
+        ['#/features', "What's in the dojo", 'features'], ['#/profile', 'Profile', 'profile']])),
+    searchButton(),
     h('div.stats',
       h(`div.stat.streak${days > 0 && game.state.days[game.dayKey()] ? '.lit' : ''}`, { title: `${days}-day streak${gamify.freezes() ? ` · ${gamify.freezes()} streak freeze${gamify.freezes() === 1 ? '' : 's'}` : ''}` },
         h('span', '🔥'), h('b', days), gamify.freezes() > 0 && h('span.stat-freeze', '❄'.repeat(gamify.freezes()))),
@@ -475,7 +480,7 @@ function moduleSection(track, m, label, nextKey) {
   const done = m.lessons.filter(l => game.isDone(game.lessonKey(track, m, l))).length;
   const blocker = !project && game.gateBlocker(track, m);
   const rusty = !project && m.gate && pacing.isRusty(game.state, track, m);
-  return h(`section.module${project ? '.project' : ''}${rusty ? '.rusty' : ''}${blocker && !game.state.settings.freeRoam ? '.gated' : ''}`,
+  return h(`section.module${project ? '.project' : ''}${rusty ? '.rusty' : ''}${blocker && !game.state.settings.freeRoam ? '.gated' : ''}`, { id: `m-${m.id}` },
     h('div.module-head',
       h('div.module-num', label),
       h('div.module-text', h('h2', m.title), h('p.muted', m.summary || ''),
@@ -562,6 +567,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
   const mainBtn = h('button.btn.primary.big', { type: 'button', onclick: submit }, 'Check');
   const backBtn = h('button.btn.ghost.big', { type: 'button', onclick: back, title: 'Previous step' }, '← Back');
   const typeTag = h('span.tag');
+  const stepNotes = notes.playerNotes(tracks);   // "✎ Notes" beside the step title, and highlights on learn cards
 
   app.replaceChildren(
     h('div.player',
@@ -571,7 +577,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
       detour && h('div.detour-bar',
         h('span', 'Studying for ', h('b', detour.title)),
         h('a.btn.primary.small', { href: detour.back }, '← Back to the project')),
-      h('main.play-main', h('div.play-meta', typeTag, h('span.muted.small', title)),
+      h('main.play-main', h('div.play-meta', typeTag, h('span.muted.small', title), stepNotes.button),
         prereqs.length > 0 && h('div.prereqs',
           h('span.muted.small', 'Learn it first:'),
           prereqs.map(k => {
@@ -594,7 +600,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
     submit();
   };
   document.addEventListener('keydown', onKey);
-  leave = () => { document.removeEventListener('keydown', onKey); current?.view.destroy?.(); };
+  leave = () => { document.removeEventListener('keydown', onKey); current?.view.destroy?.(); stepNotes.destroy(); };
 
   async function quit() {
     if (answered > 0 && pos < total &&
@@ -657,6 +663,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
     typeTag.textContent = TYPE_LABEL[item.step.type] || item.step.type;
     typeTag.className = `tag type-${item.step.type}`;
     stage.replaceChildren(view.el);
+    stepNotes.setStep({ key: item.lessonKey, idx: item.idx, step: item.step, el: view.el });
     stage.classList.remove('enter'); void stage.offsetWidth; stage.classList.add('enter');
     progress.firstChild.style.width = `${(furthest / total) * 100}%`;
     if (pos < furthest) review();
@@ -849,7 +856,7 @@ function dataSetupFor(items, pos) {
   return undefined;
 }
 
-async function lessonView(trackId, moduleId, lessonId) {
+async function lessonView(trackId, moduleId, lessonId, stepArg) {
   const track = tracks.find(t => t.id === trackId);
   document.documentElement.dataset.codeLang = track?.language || 'csharp';
   const module = track?.modules.find(m => m.id === moduleId);
@@ -868,13 +875,22 @@ async function lessonView(trackId, moduleId, lessonId) {
   clearTimeout(slow);
 
   const items = lesson.steps.map((step, idx) => ({ step, lessonKey: key, idx, track: trackId, module: moduleId, lesson: lessonId }));
-  const startAt = returning ? detour.step : 0;
+  // #/lesson/t/m/l/N opens at step N (search results, notes). Part-way into an unfinished lesson is a peek: it does
+  // not count as finishing it (the earlier steps were never answered).
+  const deep = !returning && Number.isInteger(+stepArg) && +stepArg > 1 ? Math.min(+stepArg - 1, lesson.steps.length - 1) : 0;
+  const peek = deep > 0 && !game.isDone(key);
+  const startAt = returning ? detour.step : deep;
   if (returning) setDetour(null);
   const start = () => play({
     title: `${module.title} · ${lesson.title}`, items, mode: 'lesson',
     startAt, prereqs: lesson.prereqs || [], detour: onDetour ? detour : null,
     meta: { key, lesson: meta, project: game.isProject(module), moduleKey: `${trackId}/${moduleId}` },
     onFinish(r) {
+      if (peek) {
+        toast(h('div', h('b', 'Not marked as finished'), h('div', 'You opened this lesson part-way through. Start it from the beginning to finish it.')));
+        location.hash = trackHash(trackId);
+        return;
+      }
       const starCount = game.starsFor(r.mistakes);
       const bonus = Math.round((r.boss ? 50 : 20) * (r.replay ? 0.3 : 1)) + (starCount === 3 && !r.replay ? 15 : 0);
       const before = game.state.lessons[key];
@@ -1287,13 +1303,15 @@ function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   switch (parts[0]) {
     case undefined: if (shouldWelcome()) { location.replace('#/welcome'); return; } return home();
-    case 'track': return trackView(parts[1]);
+    case 'track': trackView(parts[1]); if (parts[2]) document.getElementById(`m-${parts[2]}`)?.scrollIntoView({ block: 'start' }); return;
+    case 'glossary': return glossaryView(page, tracks, parts[1]);
+    case 'notes': return notes.notesView(page, tracks, { isOpen: k => { const f = lessonByKey(k); return !f || game.isUnlocked(f.track, f.module, f.module.lessons.indexOf(f.lesson)); } });
     case 'labs': if (parts[1] === 'net' || parts[1] === 'linux') { leave = netLabs(page, parts[2], parts[1]); return; } return labsView(parts[1], parts[2]);
     case 'workbench': leave = workbench(page); return;
     case 'spaces': leave = codeSpaces(page, parts[1]); return;
     case 'features': return featuresView(page);
     case 'db': leave = dbStudio(page); return;
-    case 'lesson': return lessonView(parts[1], parts[2], parts[3]);
+    case 'lesson': return lessonView(parts[1], parts[2], parts[3], parts[4]);
     case 'practice': return practiceView();
     case 'quick': return quickView();
     case 'challenge': return challengeView();
@@ -1340,6 +1358,7 @@ async function boot() {
   await new Promise(r => setTimeout(r, Math.max(250, 900 - (Date.now() - started))));
   window.addEventListener('hashchange', route);
   window.addEventListener('beforeunload', saveHud);
+  installSearch(() => tracks);
   route();
 }
 
