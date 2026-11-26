@@ -702,6 +702,21 @@ public sealed class CSharpRunner
         }
         """;
 
+    /// <summary>Extra global usings for free runs only (never graded): the namespaces lesson samples use most.</summary>
+    public static readonly (string Path, string Text)[] PlaygroundUsings =
+    [("Playground.cs", """
+        global using System.Diagnostics;
+        global using System.Globalization;
+        global using System.Collections.Concurrent;
+        global using System.Net;
+        global using System.Net.Http;
+        global using System.Security.Cryptography;
+        global using System.Security.Cryptography.X509Certificates;
+        global using System.Text.Json;
+        global using System.Text.Json.Serialization;
+        global using System.Text.RegularExpressions;
+        """)];
+
     /// <summary>Compiled into every learner program: test helpers plus predictable console behaviour.</summary>
     const string SupportSource = """
         global using System;

@@ -70,7 +70,7 @@ export function terminalStep(step, ctx) {
   const setState = (s, isBusy = false) => { state = s; busy = isBusy; resetBtn.disabled = isBusy; ctx.onChange(); };
 
   function banner(kind, title, text, ...extra) {
-    notice.replaceChildren(h(`div.nl-banner.${kind}`, h('b', title), text && h('p', text), ...extra));
+    notice.replaceChildren(h(`div.nl-banner.${kind}`, h('b', title), text ? h('p', text) : '', ...extra));
   }
 
   async function open(action = 'open') {

@@ -453,9 +453,9 @@ export function inline(s) {
   }).join('');
 }
 
-export function codeBlock(code, lang = 'csharp', { fragment = false } = {}) {
+export function codeBlock(code, lang = 'csharp', { fragment = false, continues = false } = {}) {
   const plain = lang === 'text' || lang === 'output' || lang === 'txt';
-  return `<pre class="code${plain ? ' plain' : ''}"${plain ? '' : ` data-code="${esc(code)}" data-lang="${esc(lang)}"${fragment ? ' data-fragment="1"' : ''}`}><code>${plain ? esc(code) : highlight(code, lang === 'csharp' || lang === 'cs' ? 'csharp' : lang)}</code></pre>`;
+  return `<pre class="code${plain ? ' plain' : ''}"${plain ? '' : ` data-code="${esc(code)}" data-lang="${esc(lang)}"${fragment ? ' data-fragment="1"' : ''}${continues ? ' data-continues="1"' : ''}`}><code>${plain ? esc(code) : highlight(code, lang === 'csharp' || lang === 'cs' ? 'csharp' : lang)}</code></pre>`;
 }
 
 /** The language id a fence tag means, for deciding what can run where. */
@@ -473,12 +473,13 @@ export function md(text) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     // ```lang fragment: a piece of a program, shown and typed but not offered to run on its own.
-    const fence = line.match(/^\s*```([\w+-]*)(\s+fragment)?\s*$/);
+    // ```lang continues: runs together with the earlier samples on the same card (like notebook cells).
+    const fence = line.match(/^\s*```([\w+-]*)(?:\s+(fragment|continues))?\s*$/);
     if (fence) {
       flush();
       const body = [];
       while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i]);
-      out.push(codeBlock(body.join('\n'), fence[1] || document.documentElement.dataset.codeLang || 'csharp', { fragment: !!fence[2] }));
+      out.push(codeBlock(body.join('\n'), fence[1] || document.documentElement.dataset.codeLang || 'csharp', { fragment: fence[2] === 'fragment', continues: fence[2] === 'continues' }));
       continue;
     }
     const heading = line.match(/^(#{1,3})\s+(.*)$/);

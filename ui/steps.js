@@ -102,21 +102,50 @@ function typeDrill(target, ctx, onClose) {
   return el;
 }
 
+/**
+ * Python samples on cards often use the usual aliases (pd, np, plt) without importing them, as notebooks do.
+ * "Try it" adds the import lines at the top, in plain sight, so the sample runs on its own.
+ */
+const PY_ALIASES = [[/\bpd\./, 'import pandas as pd'], [/\bnp\./, 'import numpy as np'], [/\bplt\./, 'import matplotlib.pyplot as plt']];
+export function withImports(source, lang) {
+  if (lang !== 'python') return source;
+  const missing = PY_ALIASES.filter(([use, line]) => use.test(source) && !source.includes(line)).map(([, line]) => line);
+  return missing.length ? [...missing, '', source].join('\n') : source;
+}
+
+/** The code samples of a learn card's body in the given language, in order (fences as md() reads them). */
+function cardSamples(body, lang) {
+  const lines = (Array.isArray(body) ? body.join('\n') : String(body ?? '')).replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const f = lines[i].match(/^\s*```([\w+-]*)(?:\s+(fragment|continues))?\s*$/);
+    if (!f) continue;
+    const code = [];
+    while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) code.push(lines[i]);
+    if (langId(f[1] || lang) === lang) out.push(code.join('\n'));
+  }
+  return out;
+}
+
 /** An editor pre-filled with a sample, to change and run. */
 function tryIt(source, ctx, onClose) {
   const out = h('div.output', { hidden: true });
+  // A sample that reads input gets a box for what you would type at the keyboard.
+  const reads = /\binput\(|Console\.ReadLine|\breadline\(|process\.stdin/.test(source);
+  const stdin = reads ? h('textarea.answer.mono.stdin-box', { rows: 2, spellcheck: false, placeholder: 'What you would type when it asks, one line per answer' }) : null;
   const editor = createEditor({ value: source, minLines: Math.max(4, source.split('\n').length + 1), onRun: () => run(), popout: { title: 'Try it', side: () => [out] } });
   const run = async () => {
     out.hidden = false;
     out.replaceChildren(h('span.muted.small', 'Compiling and running…'));
-    try { const r = await api('run', { track: ctx.track, code: editor.value, setup: ctx.dataSetup }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
+    try { const r = await api('run', { track: ctx.track, code: editor.value, setup: ctx.dataSetup, stdin: stdin?.value }); editor.mark(r.diagnostics); renderRunOutput(out, r); }
     catch { out.replaceChildren(h('div.diag.error', 'Could not reach the dojo server. Is it still running?')); }
   };
   setTimeout(() => editor.focus());
   return h('div.drill', ctx.dataSetup && sqlData(ctx.dataSetup, ctx), editor.el,
+    stdin && h('label.field', h('span.field-label', 'Input'), stdin),
     h('div.code-tools', h('button.btn.ghost', { type: 'button', onclick: run }, '▶ Run'),
       h('button.btn.ghost', { type: 'button', onclick: onClose }, 'Close'),
-      h('span.muted.small', ctx.dataSetup ? 'Change anything and run it. It runs against the tables above; your changes are thrown away when you close it.' : 'Change anything and run it. Some samples are fragments and need the lines around them.')), out);
+      h('span.muted.small', ctx.dataSetup ? 'Change anything and run it. It runs against the tables above; your changes are thrown away when you close it.' : 'Change anything and run it.')), out);
 }
 
 /**
@@ -146,16 +175,26 @@ function sqlData(setup, ctx, { open = false, label = 'The tables' } = {}) {
 
 function learn(step, ctx) {
   const prose = h('div.prose', { html: md(step.body) });
+  const trackLang = langId(document.documentElement.dataset.codeLang || 'csharp');
+  // The lesson's earlier samples in the track's language (earlier cards, then this card), for "continues" samples.
+  const earlier = (ctx.earlierCards || []).flatMap(card => cardSamples(card.body, trackLang));
   // Every code sample can be typed out or experimented with, right under the card.
   for (const pre of prose.querySelectorAll('pre.code[data-code]')) {
-    const source = pre.dataset.code;
-    if (squash(source).length < 12) continue;
+    const sample = pre.dataset.code;
+    const sameLang = langId(pre.dataset.lang) === trackLang;
+    // A "continues" sample runs after the lesson's samples before it, like a notebook cell, so "Try it" opens the whole program.
+    const source = pre.dataset.continues && earlier.length
+      ? [...earlier, `${trackLang === 'python' ? '#' : trackLang === 'sql' ? '--' : '//'} ---- this sample, after the earlier ones in the lesson ----`, sample].join('\n')
+      : sample;
+    if (sameLang) earlier.push(sample);
+    const runSource = withImports(source, trackLang);
+    if (squash(sample).length < 12) continue;
     // "Try it" only where the sample can really run here: the track's own language, and not a marked fragment.
-    const runnable = !pre.dataset.fragment && langId(pre.dataset.lang) === langId(document.documentElement.dataset.codeLang || 'csharp');
+    const runnable = !pre.dataset.fragment && sameLang;
     const slot = h('div.sample-slot');
     let paid = false;       // a sample earns its typing XP once per visit to the card
     const once = { ...ctx, bonus: (xp, kind) => (paid ? 0 : ((paid = true), ctx.bonus?.(xp, kind) ?? 0)) };
-    const open = make => { slot.replaceChildren(make(source, once, () => slot.replaceChildren())); };
+    const open = make => { slot.replaceChildren(make(make === typeDrill ? sample : runSource, once, () => slot.replaceChildren())); };
     const bar = h('div.sample-bar',
       h('button.mini', { type: 'button', onclick: () => open(typeDrill), title: 'Retype this sample to build muscle memory' }, '⌨ Type it'),
       runnable && h('button.mini', { type: 'button', onclick: () => open(tryIt), title: 'Edit and run this sample' }, '▶ Try it'));

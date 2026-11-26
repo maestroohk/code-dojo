@@ -183,7 +183,7 @@ const LABS = [
   { id: 'linq', icon: '⇶', title: 'LINQ in motion', category: 'C#',
     text: 'Type a query and watch every item travel through Where, Select, OrderBy and GroupBy in the order it really happens. See deferred execution and buffering with your own eyes.' },
   { id: 'net', icon: '🌐', title: 'Live network labs', category: 'Networking & security',
-    text: 'Ten hands-on labs on real Docker networks: addressing, routing, packet capture, DNS, NAT, scanning, firewalls, TLS, logs and SSH. Terminals right in the page. Needs Docker Desktop.' },
+    text: 'Thirteen hands-on labs on real containers: addressing, routing, packet capture, DNS, NAT, scanning, firewalls, TLS, logs and SSH, plus an Apache Camel and Kong gateway stack and real RabbitMQ and Kafka brokers. Terminals right in the page. Needs Docker Desktop.' },
   { id: 'linux', icon: '🐧', title: 'Linux missions', category: 'Linux',
     text: 'Twelve story-driven missions as the new sysadmin of a biscuit company: files, pipes, permissions, processes, full disks, text surgery, scripts, cron, users, packages, and a boss-fight incident night. Needs Docker Desktop.' },
 ];
@@ -632,6 +632,8 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
       // SQL: the tables this step works on. A step without its own setup (a learn card's "Try it") borrows the
       // nearest setup in the same lesson, looking forward first, so samples run against the lesson's data.
       dataSetup: dataSetupFor(items, pos),
+      // Learn cards before this one in the same lesson: a "continues" sample runs after their samples (like notebook cells).
+      earlierCards: items.slice(0, pos).filter(i => i.lessonKey === item.lessonKey && i.step.type === 'learn').map(i => i.step),
       track: item.track, module: item.module, lesson: item.lesson, idx: item.idx,
       // "uses": the learner's own earlier pieces travel with the check (builds.js, Pacing.cs).
       uses: step => builds.usesPayload(tracks, item.track, step),
@@ -711,7 +713,7 @@ function play({ title, items, mode, meta, onFinish, startAt = 0, prereqs = [], d
   function setFeedback(kind, titleText, bodyHtml) {
     feedback.hidden = false;
     feedback.className = `feedback ${kind}`;
-    feedback.replaceChildren(h('div.fb-title', titleText), bodyHtml && h('div.fb-body', { html: bodyHtml }));
+    feedback.replaceChildren(h('div.fb-title', titleText), bodyHtml ? h('div.fb-body', { html: bodyHtml }) : '');
   }
 
   function award(correctNow) {

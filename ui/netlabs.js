@@ -422,10 +422,11 @@ function labPage(page, id, cleanups, kind) {
     const done = lab.tasks.filter(t => t.done).length;
     progress.replaceChildren(h('span', `${done}/${lab.tasks.length} tasks`),
       h('div.bar', h('div.bar-fill', { style: { width: `${(done / Math.max(1, lab.tasks.length)) * 100}%` } })),
-      done > 0 && h('button.btn.ghost.small', { type: 'button', onclick: async () => {
+      // replaceChildren prints a bare `false`, so pass an empty string when there is no button.
+      done > 0 ? h('button.btn.ghost.small', { type: 'button', onclick: async () => {
         if (!await ask('Forget your progress on this lab?', { ok: 'Reset', danger: true })) return;
         await api(`netlabs/${id}/reset`, {}); load();
-      } }, 'Reset progress'));
+      } }, 'Reset progress') : '');
   }
 
   let first = true;

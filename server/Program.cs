@@ -130,7 +130,21 @@ app.MapPost("/api/run", async (RunRequest req) =>
     }
     if (content.Language(req.Track ?? "csharp") != "csharp") return Results.BadRequest("unsupported language");
     var (runWeb, runEf) = CSharpRunner.Frameworks(req.Framework ?? content.Framework(req.Track ?? "csharp"));
-    var (program, diags) = runner.Compile(req.Code ?? "", req.Template, runWeb, efCore: runEf);
+    // A free run (Try it, the Run button) also sees the namespaces samples use most, so a sample that leaves out its
+    // using lines still runs. Graded checks never get these.
+    var playground = req.Template is null ? CSharpRunner.PlaygroundUsings : null;
+    var (program, diags) = runner.Compile(req.Code ?? "", req.Template, runWeb, efCore: runEf, extra: playground);
+    // A sample that only declares types (a class, a record, an interface) has no entry point (CS5001). It still
+    // compiles, and that is worth knowing: say so instead of showing a confusing error.
+    if (program is null && req.Template is null && diags.Count(d => d.Severity == "error") == 1 && diags.Any(d => d.Id == "CS5001"))
+    {
+        var code = req.Code ?? "";
+        var lines = code.Replace("\r\n", "\n").Split('\n');
+        var head = lines.TakeWhile(l => l.TrimStart().StartsWith("using ") || l.Trim().Length == 0 || l.TrimStart().StartsWith("//")).Count();
+        var wrapped = string.Join("\n", lines.Take(head)) + "\nSystem.Console.WriteLine(\"It compiles. This sample only declares types: add lines at the top that use them, then Run again.\");\n" + string.Join("\n", lines.Skip(head));
+        var (typesOnly, typeDiags) = runner.Compile(wrapped, null, runWeb, efCore: runEf, extra: playground);
+        if (typesOnly is not null) (program, diags) = (typesOnly, typeDiags.Where(d => d.Severity != "error").ToList());
+    }
     if (program is null) return Results.Json(new { compiled = false, diagnostics = diags }, json);
     using (program)
     {
