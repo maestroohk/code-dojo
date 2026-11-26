@@ -453,9 +453,15 @@ export function inline(s) {
   }).join('');
 }
 
-export function codeBlock(code, lang = 'csharp') {
+export function codeBlock(code, lang = 'csharp', { fragment = false } = {}) {
   const plain = lang === 'text' || lang === 'output' || lang === 'txt';
-  return `<pre class="code${plain ? ' plain' : ''}"${plain ? '' : ` data-code="${esc(code)}"`}><code>${plain ? esc(code) : highlight(code, lang === 'csharp' || lang === 'cs' ? 'csharp' : lang)}</code></pre>`;
+  return `<pre class="code${plain ? ' plain' : ''}"${plain ? '' : ` data-code="${esc(code)}" data-lang="${esc(lang)}"${fragment ? ' data-fragment="1"' : ''}`}><code>${plain ? esc(code) : highlight(code, lang === 'csharp' || lang === 'cs' ? 'csharp' : lang)}</code></pre>`;
+}
+
+/** The language id a fence tag means, for deciding what can run where. */
+export function langId(tag) {
+  const t = String(tag || '').toLowerCase();
+  return ({ cs: 'csharp', 'c#': 'csharp', py: 'python', ts: 'typescript', js: 'javascript', sqlite: 'sql' })[t] || t;
 }
 
 export function md(text) {
@@ -466,12 +472,13 @@ export function md(text) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const fence = line.match(/^\s*```(\w*)\s*$/);
+    // ```lang fragment: a piece of a program, shown and typed but not offered to run on its own.
+    const fence = line.match(/^\s*```([\w+-]*)(\s+fragment)?\s*$/);
     if (fence) {
       flush();
       const body = [];
       while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i]);
-      out.push(codeBlock(body.join('\n'), fence[1] || 'csharp'));
+      out.push(codeBlock(body.join('\n'), fence[1] || document.documentElement.dataset.codeLang || 'csharp', { fragment: !!fence[2] }));
       continue;
     }
     const heading = line.match(/^(#{1,3})\s+(.*)$/);

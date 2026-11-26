@@ -1,6 +1,6 @@
 // One renderer per exercise type. Each returns:
 //   { el, ready(), check() -> Promise<{ correct, detail? }>, reveal(), lock(on), focus?() }
-import { h, md, inline, esc, shuffle, tidy, highlight, codeBlock, api, ask } from './util.js';
+import { h, md, inline, esc, shuffle, tidy, highlight, codeBlock, api, ask, langId } from './util.js';
 import { enableDrag, Board } from './dnd.js';
 import { createEditor } from './editor.js';
 import { state, save } from './game.js';
@@ -150,13 +150,15 @@ function learn(step, ctx) {
   for (const pre of prose.querySelectorAll('pre.code[data-code]')) {
     const source = pre.dataset.code;
     if (squash(source).length < 12) continue;
+    // "Try it" only where the sample can really run here: the track's own language, and not a marked fragment.
+    const runnable = !pre.dataset.fragment && langId(pre.dataset.lang) === langId(document.documentElement.dataset.codeLang || 'csharp');
     const slot = h('div.sample-slot');
     let paid = false;       // a sample earns its typing XP once per visit to the card
     const once = { ...ctx, bonus: (xp, kind) => (paid ? 0 : ((paid = true), ctx.bonus?.(xp, kind) ?? 0)) };
     const open = make => { slot.replaceChildren(make(source, once, () => slot.replaceChildren())); };
     const bar = h('div.sample-bar',
       h('button.mini', { type: 'button', onclick: () => open(typeDrill), title: 'Retype this sample to build muscle memory' }, '⌨ Type it'),
-      h('button.mini', { type: 'button', onclick: () => open(tryIt), title: 'Edit and run this sample' }, '▶ Try it'));
+      runnable && h('button.mini', { type: 'button', onclick: () => open(tryIt), title: 'Edit and run this sample' }, '▶ Try it'));
     pre.after(bar, slot);
   }
   return {
