@@ -1,14 +1,21 @@
 // The Kubernetes builder's simulator: pure JavaScript, no DOM (runs in the browser and in Node tests).
-// A model is { blocks }: the Internet (your users), an Ingress, Services, Deployments, ConfigMaps,
-// Secrets and PersistentVolumeClaims. Unlike Compose there are no wires in the model: Kubernetes objects
-// find each other by name (an Ingress rule names a Service, a Deployment names its ConfigMap) and by
-// labels (a Service selects pods). The board draws a wire wherever a reference resolves.
-// apply() works out every pod's state, every Service's endpoints and what each request from outside
-// gets; rollout() plays a rolling update step by step; deletePods() shows which data survives.
+// A model is { blocks }: the Internet (your users), Gateways and HTTPRoutes (the Gateway API,
+// gateway.networking.k8s.io/v1), the legacy Ingress, Services, Deployments, ConfigMaps, Secrets and
+// PersistentVolumeClaims. Unlike Compose there are no wires in the model: Kubernetes objects find each
+// other by name (an HTTPRoute's parentRef names a Gateway, its backendRef names a Service, a Deployment
+// names its ConfigMap) and by labels (a Service selects pods). The board draws a wire wherever a
+// reference resolves.
+// apply() works out every pod's state, every Service's endpoints, every Gateway's and HTTPRoute's status
+// conditions and what each request from outside gets: listener (port, hostname) -> HTTPRoute rule (the
+// Gateway API's precedence: hostname, Exact, longest PathPrefix, most header matches, oldest route, rule
+// order) -> weighted backendRef -> Service -> a Ready pod. rollout() plays a rolling update step by step;
+// deletePods() shows which data survives.
 
 export const KINDS = {
   client: { label: 'Internet', icon: '🌍' },
-  ingress: { label: 'Ingress', icon: '🚪' },
+  gateway: { label: 'Gateway', icon: '⛩' },
+  httproute: { label: 'HTTPRoute', icon: '🔀' },
+  ingress: { label: 'Ingress (legacy)', icon: '🚪' },
   service: { label: 'Service', icon: '⚖' },
   deployment: { label: 'Deployment', icon: '📦' },
   configmap: { label: 'ConfigMap', icon: '📝' },
@@ -28,7 +35,9 @@ export const IMAGE_NAMES = Object.keys(IMAGES);
 const PERIOD = 5, FAILS = 3;   // probe period and failureThreshold
 
 export const DEFAULTS = {
-  client: { via: '', host: 'shop.example.com', paths: ['/'], count: 4 },
+  client: { via: '', host: 'shop.example.com', port: 80, headers: [], paths: ['/'], count: 4 },
+  gateway: { className: 'envoy', listeners: [{ name: 'http', protocol: 'HTTP', port: 80, hostname: '', cert: '' }] },
+  httproute: { parents: [], hostnames: [], rules: [] },
   ingress: { rules: [] },
   service: { type: 'ClusterIP', selector: '', port: 80, targetPort: 80, nodePort: 30080 },
   deployment: { image: 'shop-web:1.0', replicas: 2, labels: 'app=web', readiness: false, readyPath: '/healthz', readyPort: 8080,
@@ -65,8 +74,14 @@ export function refs(m) {
   const out = [];
   const add = (from, to, kind, label, extra = {}) => out.push({ id: `R-${kind}-${from.id}-${extra.rule ?? (to ? to.id : extra.ref)}`, from: from.id, to: to?.id || null, kind, label, ...extra });
   for (const c of ofKind(m, 'client')) if (c.via) {
-    const t = m.blocks.find(b => (b.kind === 'ingress' || b.kind === 'service') && b.name === c.via);
-    add(c, t, 'via', t?.kind === 'service' ? `:${t.nodePort}` : '', { ref: c.via });
+    const t = entryOf(m, c.via);
+    add(c, t, 'via', t?.kind === 'service' ? `:${t.nodePort}` : t?.kind === 'gateway' ? `:${c.port || 80}` : '', { ref: c.via });
+  }
+  for (const g of ofKind(m, 'gateway')) g.listeners.forEach((l, i) => { if (l.protocol === 'HTTPS' && l.cert) add(g, named(m, 'secret', l.cert), 'cert', `${l.name} tls`, { rule: `c${i}`, ref: l.cert }); });
+  for (const r of ofKind(m, 'httproute')) {
+    r.parents.forEach((p, i) => add(r, named(m, 'gateway', p.name), 'parent', p.section ? `parentRef · ${p.section}` : 'parentRef', { rule: `p${i}`, ref: p.name, parent: i }));
+    r.rules.forEach((rule, ri) => rule.backends.forEach((be, bi) => add(r, named(m, 'service', be.service), 'backend',
+      `${rule.type === 'Exact' ? '=' : ''}${rule.path || '/'}${rule.backends.length > 1 ? ` w${weightOf(be)}` : ''}`, { rule: `b${ri}-${bi}`, ref: be.service, ri, bi })));
   }
   for (const ing of ofKind(m, 'ingress')) ing.rules.forEach((r, i) => add(ing, named(m, 'service', r.service), 'rule', `${r.host ? r.host : '*'}${r.path || '/'}`, { rule: i, ref: r.service }));
   for (const s of ofKind(m, 'service')) {
@@ -83,14 +98,38 @@ export function refs(m) {
   return out;
 }
 
-export const TARGETS = { client: ['ingress', 'service'], ingress: ['service'], service: ['deployment'], deployment: ['configmap', 'secret', 'pvc'], configmap: [], secret: [], pvc: [] };
+/** What the Internet's "sends requests to" names: a Gateway, a (legacy) Ingress or a NodePort Service. */
+export const entryOf = (m, name) => ['gateway', 'ingress', 'service'].map(k => named(m, k, name)).find(Boolean);
+export const weightOf = be => (be.weight === '' || be.weight == null ? 1 : Math.max(0, Number(be.weight) || 0));
+
+export const TARGETS = { client: ['gateway', 'ingress', 'service'], gateway: ['secret'], httproute: ['gateway', 'service'], ingress: ['service'], service: ['deployment'], deployment: ['configmap', 'secret', 'pvc'], configmap: [], secret: [], pvc: [] };
 export const canWire = (m, from, to) => !!from && !!to && from.id !== to.id && TARGETS[from.kind].includes(to.kind);
 
 /** Dragging one object onto another writes the reference, as you would in YAML. Returns a message or false. */
 export function connect(m, fromId, toId) {
   const f = byId(m, fromId), t = byId(m, toId);
   if (!canWire(m, f, t)) return false;
-  if (f.kind === 'client') { f.via = t.name; return `The Internet now sends requests to ${t.name}.`; }
+  if (f.kind === 'client') { f.via = t.name; return `The Internet now sends requests to ${t.name}${t.kind === 'gateway' ? ` (port ${f.port || 80})` : ''}.`; }
+  if (f.kind === 'gateway') {
+    const l = f.listeners.find(x => x.protocol === 'HTTPS' && !x.cert);
+    if (l) { l.cert = t.name; return `Listener ${l.name} now terminates TLS with the certificate in Secret ${t.name}.`; }
+    let name = 'https', i = 1;
+    while (f.listeners.some(x => x.name === name)) name = `https-${++i}`;
+    f.listeners.push({ name, protocol: 'HTTPS', port: 443, hostname: f.listeners[0]?.hostname || '', cert: t.name });
+    return `Added listener ${name} (HTTPS, port 443) with tls.certificateRefs → Secret ${t.name}.`;
+  }
+  if (f.kind === 'httproute' && t.kind === 'gateway') {
+    if (f.parents.some(p => p.name === t.name)) return `${f.name} already names ${t.name} in its parentRefs.`;
+    f.parents.push({ name: t.name, section: '' });
+    return `${f.name} now asks to attach to Gateway ${t.name} (parentRefs). The Gateway's controller decides whether it is Accepted.`;
+  }
+  if (f.kind === 'httproute') {
+    const be = { service: t.name, port: t.port, weight: 1 };
+    const empty = f.rules.find(r => !r.backends.length);
+    if (empty) { empty.backends.push(be); return `Rule ${empty.type} ${empty.path} now sends to ${t.name}:${t.port}.`; }
+    f.rules.push({ type: 'PathPrefix', path: '/', header: '', backends: [be] });
+    return `Added the rule "PathPrefix / → ${t.name}:${t.port}". Click the HTTPRoute to edit its path, or to add a second backend with a weight.`;
+  }
   if (f.kind === 'ingress') { f.rules.push({ host: '', path: '/', service: t.name, port: t.port }); return `Added the rule "any host, path / → ${t.name}:${t.port}". Click the Ingress to edit it.`; }
   if (f.kind === 'service') { f.selector = t.labels; return `${f.name} now selects ${t.labels}: the labels on ${t.name}'s pods.`; }
   if (t.kind === 'pvc') { f.claim = t.name; f.mountPath ||= IMAGES[f.image]?.data || '/data'; return `${f.name} mounts the claim ${t.name} at ${f.mountPath}.`; }
@@ -105,6 +144,9 @@ export function unref(m, r) {
   if (!f) return;
   if (r.kind === 'via') f.via = '';
   if (r.kind === 'rule') f.rules.splice(r.rule, 1);
+  if (r.kind === 'parent') f.parents.splice(r.parent, 1);
+  if (r.kind === 'backend') f.rules[r.ri]?.backends.splice(r.bi, 1);
+  if (r.kind === 'cert') { const l = f.listeners[Number(String(r.rule).slice(1))]; if (l) l.cert = ''; }
   if (r.kind === 'select') f.selector = '';
   if (r.kind === 'env') f.envFrom = f.envFrom.filter(x => x !== `${r.refKind}:${r.ref}`);
   if (r.kind === 'claim') { f.claim = ''; }
@@ -173,10 +215,162 @@ function noEndpointsWhy(m, s, e, pods) {
   return `${s.name} selects ${e.selected.length} pod${e.selected.length === 1 ? '' : 's'}, but none is Ready: ${e.selected[0].why}`;
 }
 
+// ---------------------------------------------------------------- Gateway API
+
+/** GatewayClasses installed in this cluster (kubectl get gatewayclass): name -> controllerName. */
+export const GATEWAY_CLASSES = { envoy: 'gateway.envoyproxy.io/gatewayclass-controller' };
+export const GATEWAY_ADDRESS = '203.0.113.10';
+const lower = s => String(s ?? '').trim().toLowerCase();
+const list = (xs, none = 'none') => (xs.length ? xs.join(', ') : none);
+
+/** Does a hostname pattern ('' = any, '*.example.com' = suffix match of one or more labels) match a host? */
+export function hostMatch(pattern, host) {
+  const p = lower(pattern), x = lower(host);
+  if (!p) return true;
+  if (p.startsWith('*.')) return x.endsWith(p.slice(1)) && x.length > p.length - 1;
+  return p === x;
+}
+/** Do a listener's hostname and a route's hostname have any host in common? */
+export function hostsIntersect(a, b) {
+  a = lower(a); b = lower(b);
+  if (!a || !b) return true;
+  const wa = a.startsWith('*.'), wb = b.startsWith('*.');
+  if (wa && wb) return a.endsWith(b.slice(1)) || b.endsWith(a.slice(1));
+  if (wa) return hostMatch(a, b);
+  if (wb) return hostMatch(b, a);
+  return a === b;
+}
+/** HTTPRoute path match. Exact: the whole path. PathPrefix: element by element, a trailing / ignored (/api matches /api, /api/, /api/x, not /apiary). */
+export function pathMatch(type, value, path) {
+  if (type === 'Exact') return path === value;
+  const v = String(value || '/').replace(/\/+$/, '');
+  return !v || path === v || path.startsWith(v + '/');
+}
+/** "x-canary: always" (or x-canary=always) -> ['x-canary', 'always']; null when empty or malformed. */
+export function headerOf(s) {
+  const m = String(s || '').match(/^\s*([A-Za-z0-9-]+)\s*[:=]\s*(.*?)\s*$/);
+  return m ? [m[1].toLowerCase(), m[2]] : null;
+}
+const ruleText = r => `${r.type === 'Exact' ? 'Exact' : 'PathPrefix'} ${r.path || '/'}${headerOf(r.header) ? ` + header ${headerOf(r.header).join(': ')}` : ''}`;
+const hostRank = hn => (!hn ? 0 : hn.startsWith('*.') ? hn.length : 1000 + hn.length);
+
+/** Why a backendRef does not resolve, or null. */
+export function backendProblem(m, be) {
+  const s = named(m, 'service', be.service);
+  if (!s) return { reason: 'BackendNotFound', why: `backendRef "${be.service}" names no Service (Services here: ${list(ofKind(m, 'service').map(x => x.name))}).` };
+  if (Number(be.port) !== Number(s.port)) return { reason: 'BackendNotFound', why: `backendRef ${be.service}:${be.port}: Service ${s.name} has no port ${be.port} (it exposes ${s.port}). A backendRef names the Service's port, not the pod's.` };
+  return null;
+}
+
+/** Status of a Gateway: { accepted, programmed, address, why, listeners: [{ l, ok, reason, why, attached }] }. */
+export function gatewayStatus(m, g) {
+  const seen = new Set();
+  const listeners = g.listeners.map(l => {
+    const key = `${l.port}|${lower(l.hostname)}`;
+    let ok = true, reason = 'Programmed', why = '';
+    if (seen.has(key)) { ok = false; reason = 'HostnameConflict'; why = `another listener of ${g.name} already uses port ${l.port} with hostname ${l.hostname || '(any)'}: Conflicted.`; }
+    else if (l.protocol === 'HTTPS') {
+      const s = l.cert && named(m, 'secret', l.cert);
+      const d = s ? dataOf(s) : {};
+      if (!l.cert) { ok = false; reason = 'InvalidCertificateRef'; why = `HTTPS listener ${l.name} has no tls.certificateRefs: it needs a Secret with tls.crt and tls.key.`; }
+      else if (!s) { ok = false; reason = 'InvalidCertificateRef'; why = `listener ${l.name} names the certificate Secret "${l.cert}", which does not exist.`; }
+      else if (!d['tls.crt'] || !d['tls.key']) { ok = false; reason = 'InvalidCertificateRef'; why = `Secret ${s.name} has no tls.crt and tls.key keys, so listener ${l.name} has no certificate to offer.`; }
+    }
+    seen.add(key);
+    return { l, ok, reason, why, attached: 0 };
+  });
+  const cls = GATEWAY_CLASSES[g.className];
+  if (!cls) return { accepted: false, programmed: false, address: '', listeners,
+    why: `gatewayClassName "${g.className}" names no GatewayClass in this cluster (kubectl get gatewayclass lists: ${Object.keys(GATEWAY_CLASSES).join(', ')}). No controller owns ${g.name}: its status stays "Waiting for controller", ADDRESS is empty, PROGRAMMED Unknown, and nothing listens. The request times out.` };
+  for (const r of ofKind(m, 'httproute')) for (const p of routeStatus(m, r).parents) if (p.gw === g) for (const l of p.listeners) { const x = listeners.find(y => y.l === l); if (x) x.attached++; }
+  return { accepted: true, programmed: listeners.some(x => x.ok), address: GATEWAY_ADDRESS, listeners, controller: cls, why: '' };
+}
+
+/** Status of an HTTPRoute: per parentRef Accepted (with the listeners it attached to), and ResolvedRefs. */
+export function routeStatus(m, r) {
+  const parents = r.parents.map(p => {
+    const base = { ref: p, gw: null, accepted: false, listeners: [] };
+    const gw = named(m, 'gateway', p.name);
+    if (!gw) return { ...base, reason: 'NoSuchGateway', why: `parentRef "${p.name}" names no Gateway (Gateways here: ${list(ofKind(m, 'gateway').map(x => x.name))}). No controller picks the route up, so it has no status for that parent and gets no traffic.` };
+    if (!GATEWAY_CLASSES[gw.className]) return { ...base, gw, reason: 'Pending', why: `Gateway ${gw.name} has no controller (gatewayClassName "${gw.className}" is not installed), so nobody accepts the route.` };
+    let ls = gw.listeners.filter(l => l.protocol === 'HTTP' || l.protocol === 'HTTPS');
+    if (p.section) {
+      ls = ls.filter(l => l.name === p.section);
+      if (!ls.length) return { ...base, gw, reason: 'NoMatchingParent', why: `Accepted: False (NoMatchingParent): sectionName "${p.section}" names no listener of ${gw.name} (its listeners: ${list(gw.listeners.map(l => l.name))}).` };
+    }
+    const hit = ls.filter(l => !r.hostnames.length || r.hostnames.some(hn => hostsIntersect(l.hostname, hn)));
+    if (!hit.length) return { ...base, gw, reason: 'NoMatchingListenerHostname', why: `Accepted: False (NoMatchingListenerHostname): none of the route's hostnames (${r.hostnames.join(', ')}) fits a listener of ${gw.name} (${ls.map(l => `${l.name} accepts ${l.hostname || 'any host'}`).join('; ')}).` };
+    return { ...base, gw, accepted: true, reason: 'Accepted', why: '', listeners: hit };
+  });
+  const refsBad = [];
+  r.rules.forEach((rule, ri) => rule.backends.forEach((be, bi) => { const bad = backendProblem(m, be); if (bad) refsBad.push({ ri, bi, be, ...bad }); }));
+  return { parents, resolved: !refsBad.length, refsBad };
+}
+
+/** Smooth weighted round robin: deterministic, and 9:1 over ten requests is exactly 9 and 1. */
+function pickWeighted(state, live) {
+  const total = live.reduce((a, x) => a + x.w, 0);
+  live.forEach((x, i) => { state[i] = (state[i] || 0) + x.w; });
+  let best = 0;
+  live.forEach((x, i) => { if (state[i] > state[best]) best = i; });
+  state[best] -= total;
+  return live[best];
+}
+
+function viaGateway(m, gw, req, pods, rr, chain, out) {
+  const gs = gatewayStatus(m, gw);
+  if (!gs.accepted) return out(0, gs.why);
+  const onPort = gs.listeners.filter(x => Number(x.l.port) === Number(req.port));
+  if (!onPort.length) return out(0, `Gateway ${gw.name} (${gs.address}) has no listener on port ${req.port} (listeners: ${list(gw.listeners.map(l => `${l.name} :${l.port}`))}): connection refused.`);
+  const fits = onPort.filter(x => hostMatch(x.l.hostname, req.host)).sort((a, b) => hostRank(lower(b.l.hostname)) - hostRank(lower(a.l.hostname)));
+  if (!fits.length) return out(404, `no listener of ${gw.name} on port ${req.port} accepts the host "${req.host}" (${onPort.map(x => `${x.l.name}: ${x.l.hostname || 'any'}`).join('; ')}), so the Gateway answers 404.`);
+  const L = fits[0];
+  if (!L.ok) return out(0, `listener ${L.l.name} is not programmed: ${L.why} The connection is reset before any HTTP is spoken.`);
+  const cands = [], notes = [];
+  ofKind(m, 'httproute').forEach((r, order) => {
+    const st = routeStatus(m, r);
+    const mine = st.parents.filter(p => p.ref.name === gw.name);
+    if (!mine.some(p => p.listeners.includes(L.l))) {
+      const p = mine.find(x => !x.accepted);
+      if (p) notes.push(`HTTPRoute ${r.name} is not attached: ${p.why}`);
+      else if (mine.length) notes.push(`HTTPRoute ${r.name} is attached to another listener of ${gw.name}, not ${L.l.name}.`);
+      return;
+    }
+    const hosts = r.hostnames.filter(hn => hostsIntersect(L.l.hostname, hn));
+    let hx = 0, ha = 0;
+    if (hosts.length) {
+      const hm = hosts.filter(hn => hostMatch(hn, req.host));
+      if (!hm.length) { notes.push(`HTTPRoute ${r.name} is for ${hosts.join(', ')}, not ${req.host}.`); return; }
+      for (const hn of hm) { if (!hn.startsWith('*.')) hx = Math.max(hx, hn.length); ha = Math.max(ha, hn.length); }
+    }
+    r.rules.forEach((rule, ri) => {
+      const hdr = headerOf(rule.header);
+      const pOk = pathMatch(rule.type, rule.path, req.path), hOk = !hdr || req.headers[hdr[0]] === hdr[1];
+      if (pOk && hOk) cands.push({ r, rule, ri, order, hx, ha, exact: rule.type === 'Exact' ? 1 : 0, plen: rule.type === 'Exact' ? 0 : String(rule.path || '/').replace(/\/+$/, '').length, hn: hdr ? 1 : 0 });
+      else if (!pOk && rule.type === 'Exact' && req.path.startsWith(String(rule.path).replace(/\/+$/, '') + '/')) notes.push(`${r.name}'s rule Exact ${rule.path} matches only ${rule.path} itself, not ${req.path} (PathPrefix would).`);
+      else if (pOk && !hOk) notes.push(`${r.name}'s rule ${ruleText(rule)} needs the header ${hdr.join(': ')}, which this request does not send.`);
+    });
+  });
+  cands.sort((a, b) => b.hx - a.hx || b.ha - a.ha || b.exact - a.exact || b.plen - a.plen || b.hn - a.hn || a.order - b.order || a.r.name.localeCompare(b.r.name) || a.ri - b.ri);
+  if (!cands.length) return out(404, `no rule of an HTTPRoute attached to ${gw.name}/${L.l.name} matches ${req.host}${req.path}, so the Gateway answers 404.${notes.length ? ' ' + notes.slice(0, 3).join(' ') : ofKind(m, 'httproute').length ? '' : ' There is no HTTPRoute at all: a Gateway alone routes nothing.'}`);
+  const c = cands[0];
+  chain.push(c.r.id);
+  const at = `HTTPRoute ${c.r.name}, rule ${ruleText(c.rule)}`;
+  if (!c.rule.backends.length) return out(500, `${at} matched, but the rule has no backendRefs: there is nowhere to send it, so the Gateway answers 500.`);
+  const live = c.rule.backends.map((be, i) => ({ be, i, w: weightOf(be) })).filter(x => x.w > 0);
+  if (!live.length) return out(500, `${at} matched, but every backendRef has weight 0: no traffic may go anywhere, so the Gateway answers 500.`);
+  const pick = pickWeighted(rr[`${c.r.id}#${c.ri}`] ||= [], live);
+  const total = live.reduce((a, x) => a + x.w, 0);
+  const share = c.rule.backends.length > 1 ? ` (weight ${pick.w} of ${total}, ${Math.round(100 * pick.w / total)}%)` : '';
+  const bad = backendProblem(m, pick.be);
+  if (bad) return out(500, `${at} matched and picked backendRef ${pick.be.service}:${pick.be.port}${share}, which does not resolve: ${bad.why} The route reports ResolvedRefs: False, and requests meant for that backend get 500.`);
+  return { svc: named(m, 'service', pick.be.service), port: pick.be.port, at: `${at} → ${pick.be.service}:${pick.be.port}${share}: `, hint: notes.filter(n => /Exact/.test(n)).join(' ') };
+}
+
 // ---------------------------------------------------------------- requests
 
 function routeIngress(m, ing, req) {
-  const cands = ing.rules.map((r, i) => ({ r, i })).filter(({ r }) => !r.host || r.host === req.host).filter(({ r }) => req.path.startsWith(r.path || '/'));
+  const cands = ing.rules.map((r, i) => ({ r, i })).filter(({ r }) => !r.host || lower(r.host) === lower(req.host)).filter(({ r }) => pathMatch('PathPrefix', r.path, req.path));
   cands.sort((a, b) => (b.r.path || '/').length - (a.r.path || '/').length || a.i - b.i);
   return cands[0] || null;
 }
@@ -185,12 +379,18 @@ function routeIngress(m, ing, req) {
 function request(m, req, pods, rr) {
   const client = ofKind(m, 'client')[0];
   const chain = [client.id];
-  const out = (code, why) => ({ code, why, chain });
-  if (!client.via) return out(0, 'The Internet is not pointed at anything yet: drag its ▶ onto an Ingress or a Service.');
-  const entry = m.blocks.find(b => (b.kind === 'ingress' || b.kind === 'service') && b.name === client.via);
+  let at = '';
+  const out = (code, why) => ({ code, why: at + why, chain });
+  if (!client.via) return out(0, 'The Internet is not pointed at anything yet: drag its ▶ onto a Gateway (or a NodePort Service).');
+  const entry = entryOf(m, client.via);
   if (!entry) return out(0, `There is nothing called "${client.via}" to send requests to.`);
-  let svc, port;
-  if (entry.kind === 'ingress') {
+  let svc, port, hint = '';
+  if (entry.kind === 'gateway') {
+    chain.push(entry.id);
+    const hop = viaGateway(m, entry, req, pods, rr, chain, out);
+    if (!hop.svc) return hop;
+    ({ svc, port, at, hint } = hop);
+  } else if (entry.kind === 'ingress') {
     chain.push(entry.id);
     const hit = routeIngress(m, entry, req);
     if (!hit) return out(404, `${entry.name} has no rule for ${req.host}${req.path}, so the ingress controller's default backend answers 404.${entry.rules.some(r => r.host && r.host !== req.host) ? ` (A rule's host must equal the Host header, "${req.host}".)` : ''}`);
@@ -200,7 +400,7 @@ function request(m, req, pods, rr) {
     port = svc.port;
   } else {
     svc = entry;
-    if (svc.type !== 'NodePort') return out(0, `${svc.name} is a ClusterIP Service: its address exists only inside the cluster, so a request from the Internet never arrives (connection timed out). Use type NodePort, or put an Ingress in front.`);
+    if (svc.type !== 'NodePort') return out(0, `${svc.name} is a ClusterIP Service: its address exists only inside the cluster, so a request from the Internet never arrives (connection timed out). Use type NodePort, or put a Gateway in front.`);
     port = svc.nodePort;
   }
   chain.push(svc.id);
@@ -213,7 +413,7 @@ function request(m, req, pods, rr) {
   if (Number(svc.targetPort) !== img.port) return { ...out(502, `${svc.name} forwarded port ${port} to pod ${pod.name} on targetPort ${svc.targetPort}, but the app listens on ${img.port}: connection refused, 502.`), pod };
   if (pod.broken) return { ...out(500, `pod ${pod.name} (${pod.image}) answered 500: this release is broken, and nothing stopped traffic from reaching it.`), pod };
   if (pod.booting) return { ...out(502, `pod ${pod.name} is in the endpoints, but its app is still starting: connection refused. Without a readiness probe, "container started" counts as Ready.`), pod };
-  if (!img.serves(req.path)) return { ...out(404, `the request reached pod ${pod.name}, which runs ${pod.image}. That app has no page at ${req.path}: 404. Is ${svc.name} selecting the right pods?`), pod };
+  if (!img.serves(req.path)) return { ...out(404, `the request reached pod ${pod.name}, which runs ${pod.image}. That app has no page at ${req.path}: 404. ${hint || `Is ${svc.name} selecting the right pods, and did the right rule match?`}`), pod };
   return { ...out(200, `${pod.name} (${pod.image}) answered 200.`), pod };
 }
 
@@ -225,20 +425,25 @@ export function apply(m) {
   const client = ofKind(m, 'client')[0];
   const rr = {};
   const results = [];
+  const headers = Object.fromEntries((client?.headers || []).map(headerOf).filter(Boolean));
   if (client?.via) for (const path of client.paths.length ? client.paths : ['/']) for (let i = 0; i < Math.max(1, Math.min(12, client.count)); i++) {
-    results.push({ path, host: client.host, ...request(m, { host: client.host, path }, pods, rr) });
+    results.push({ path, host: client.host, ...request(m, { host: client.host, path, port: Number(client.port) || 80, headers }, pods, rr) });
   }
   const endpoints = Object.fromEntries(ofKind(m, 'service').map(s => {
     const e = endpointsOf(m, s, pods);
     return [s.id, { ...e, why: e.ready.length ? '' : noEndpointsWhy(m, s, e, pods) }];
   }));
-  return { pods, endpoints, results };
+  const gateways = Object.fromEntries(ofKind(m, 'gateway').map(g => [g.id, gatewayStatus(m, g)]));
+  const routes = Object.fromEntries(ofKind(m, 'httproute').map(r => [r.id, routeStatus(m, r)]));
+  return { pods, endpoints, gateways, routes, results };
 }
+
+const HOST_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 
 function check(m) {
   const seen = new Set();
   for (const b of m.blocks) {
-    if (b.kind === 'client') continue;
+    if (b.kind === 'client') { if (b.headers?.some(x => !headerOf(x))) return `Internet: write each header as Name: value, like x-canary: always.`; continue; }
     if (!validName(b.name)) return `"${b.name}" is not a valid name: lower-case letters, digits and -, starting and ending with a letter or digit.`;
     const k = b.kind + ':' + b.name;
     if (seen.has(k)) return `Two ${KINDS[b.kind].label}s are called "${b.name}". Names are unique per kind.`;
@@ -249,6 +454,25 @@ function check(m) {
       if (Number(b.maxSurge) === 0 && Number(b.maxUnavailable) === 0) return `${b.name}: maxSurge and maxUnavailable cannot both be 0, or a rollout could never make progress.`;
     }
     if (b.kind === 'service' && b.type === 'NodePort' && (b.nodePort < 30000 || b.nodePort > 32767)) return `${b.name}: a nodePort must be between 30000 and 32767.`;
+    if (b.kind === 'gateway') {
+      if (!b.listeners.length) return `Gateway ${b.name}: spec.listeners needs at least one listener.`;
+      const names = new Set();
+      for (const l of b.listeners) {
+        if (!validName(l.name)) return `Gateway ${b.name}: listener name "${l.name}" is not valid (lower-case letters, digits and -).`;
+        if (names.has(l.name)) return `Gateway ${b.name}: two listeners are called ${l.name}. Listener names are unique within a Gateway.`;
+        names.add(l.name);
+        if (!(Number(l.port) >= 1 && Number(l.port) <= 65535)) return `Gateway ${b.name}: listener ${l.name} needs a port from 1 to 65535.`;
+        if (l.hostname && !HOST_RE.test(lower(l.hostname))) return `Gateway ${b.name}: "${l.hostname}" is not a valid listener hostname (a DNS name, optionally starting with *.; no IP addresses, no port).`;
+      }
+    }
+    if (b.kind === 'httproute') {
+      for (const hn of b.hostnames) if (!HOST_RE.test(lower(hn))) return `HTTPRoute ${b.name}: "${hn}" is not a valid hostname (a DNS name, optionally starting with *.; no scheme, path or port).`;
+      for (const r of b.rules) {
+        if (!String(r.path || '').startsWith('/')) return `HTTPRoute ${b.name}: a path match value must start with / (got "${r.path}").`;
+        if (r.header && !headerOf(r.header)) return `HTTPRoute ${b.name}: write a header match as Name: value, like x-canary: always.`;
+        for (const be of r.backends) if (!(Number(be.port) >= 1 && Number(be.port) <= 65535)) return `HTTPRoute ${b.name}: backendRef ${be.service} needs a port (a backendRef to a Service must name one).`;
+      }
+    }
   }
   return null;
 }
@@ -344,7 +568,7 @@ const kv = (pairs, ind) => pairs.map(([k, v]) => `${ind}${k}: ${q(v)}`);
 export function toYaml(m) {
   const docs = [];
   for (const b of ofKind(m, 'configmap')) docs.push(['apiVersion: v1', 'kind: ConfigMap', 'metadata:', `  name: ${b.name}`, ...(b.data.length ? ['data:', ...kv(Object.entries(dataOf(b)), '  ')] : ['data: {}'])]);
-  for (const b of ofKind(m, 'secret')) docs.push(['apiVersion: v1', 'kind: Secret', 'metadata:', `  name: ${b.name}`, 'type: Opaque', 'stringData:                 # stored base64-encoded: that is not encryption',
+  for (const b of ofKind(m, 'secret')) docs.push(['apiVersion: v1', 'kind: Secret', 'metadata:', `  name: ${b.name}`, `type: ${'tls.crt' in dataOf(b) ? 'kubernetes.io/tls' : 'Opaque'}`, 'stringData:                 # stored base64-encoded: that is not encryption',
     ...(b.data.length ? kv(Object.entries(dataOf(b)), '  ') : [])].map(l => (b.data.length || !l.startsWith('stringData') ? l : 'stringData: {}')));
   for (const b of ofKind(m, 'pvc')) docs.push(['apiVersion: v1', 'kind: PersistentVolumeClaim', 'metadata:', `  name: ${b.name}`, 'spec:', '  accessModes: [ReadWriteOnce]', '  resources:', '    requests:', `      storage: ${b.size || '1Gi'}`]);
   for (const d of ofKind(m, 'deployment')) {
@@ -368,8 +592,34 @@ export function toYaml(m) {
     docs.push(['apiVersion: v1', 'kind: Service', 'metadata:', `  name: ${s.name}`, 'spec:', `  type: ${s.type}`, ...(sel.length ? ['  selector:', ...kv(sel, '    ')] : ['  selector: {}']),
       '  ports:', `    - port: ${s.port}`, `      targetPort: ${s.targetPort}`, ...(s.type === 'NodePort' ? [`      nodePort: ${s.nodePort}`] : [])]);
   }
+  for (const g of ofKind(m, 'gateway')) {
+    const L = ['apiVersion: gateway.networking.k8s.io/v1', 'kind: Gateway', 'metadata:', `  name: ${g.name}`, 'spec:', `  gatewayClassName: ${q(g.className)}`];
+    if (!g.listeners.length) L.push('  listeners: []');
+    else L.push('  listeners:', ...g.listeners.flatMap(l => [`    - name: ${q(l.name)}`, `      protocol: ${l.protocol}`, `      port: ${l.port}`,
+      ...(l.hostname ? [`      hostname: ${q(l.hostname)}`] : []),
+      ...(l.protocol === 'HTTPS' ? ['      tls:', '        mode: Terminate', '        certificateRefs:', '          - kind: Secret', `            name: ${q(l.cert || '')}`] : []),
+      '      allowedRoutes:', '        namespaces:', '          from: Same']));
+    docs.push(L);
+  }
+  for (const r of ofKind(m, 'httproute')) {
+    const L = ['apiVersion: gateway.networking.k8s.io/v1', 'kind: HTTPRoute', 'metadata:', `  name: ${r.name}`, 'spec:'];
+    L.push(...(r.parents.length ? ['  parentRefs:', ...r.parents.flatMap(p => [`    - name: ${q(p.name)}`, ...(p.section ? [`      sectionName: ${q(p.section)}`] : [])])] : ['  parentRefs: []              # attached to nothing']));
+    if (r.hostnames.length) L.push('  hostnames:', ...r.hostnames.map(hn => `    - ${q(hn)}`));
+    if (!r.rules.length) L.push('  rules: []');
+    else {
+      L.push('  rules:');
+      for (const rule of r.rules) {
+        const hdr = headerOf(rule.header);
+        L.push('    - matches:', '        - path:', `            type: ${rule.type === 'Exact' ? 'Exact' : 'PathPrefix'}`, `            value: ${q(rule.path || '/')}`,
+          ...(hdr ? ['          headers:', `            - name: ${q(hdr[0])}`, `              value: ${q(hdr[1])}`] : []));
+        if (!rule.backends.length) L.push('      backendRefs: []');
+        else L.push('      backendRefs:', ...rule.backends.flatMap(be => [`        - name: ${q(be.service)}`, `          port: ${be.port}`, ...(rule.backends.length > 1 || weightOf(be) !== 1 ? [`          weight: ${weightOf(be)}`] : [])]));
+      }
+    }
+    docs.push(L);
+  }
   for (const ing of ofKind(m, 'ingress')) {
-    const L = ['apiVersion: networking.k8s.io/v1', 'kind: Ingress', 'metadata:', `  name: ${ing.name}`, 'spec:'];
+    const L = ['apiVersion: networking.k8s.io/v1', 'kind: Ingress', 'metadata:', `  name: ${ing.name}`, 'spec:              # legacy: the Ingress API is frozen; new setups use the Gateway API'];
     if (!ing.rules.length) L.push('  rules: []');
     else {
       L.push('  rules:');
@@ -387,17 +637,26 @@ export function toYaml(m) {
 // ---------------------------------------------------------------- challenges
 
 const goal = (label, ok, why) => ({ label, ok: !!ok, why: ok ? '' : why });
-const refCost = m => m.blocks.length + refs(m).filter(r => r.to).length;
+/** A board's cost: objects plus references that resolve. A challenge's par is its solution's cost. */
+export const refCost = m => m.blocks.length + refs(m).filter(r => r.to).length;
 const starsFor = (c, par, slack = 2) => (c <= par ? 3 : c <= par + slack ? 2 : 1);
-const net = (s = {}) => block('client', 'net', 'Internet', 20, 200, { fixed: true, ...s });
-const web = (s = {}) => block('deployment', 'd-web', 'web', 760, 120, { replicas: 3, labels: 'app=web', image: 'shop-web:1.0', ...s });
-const apiDep = (s = {}) => block('deployment', 'd-api', 'api', 760, 400, { replicas: 2, labels: 'app=api', image: 'shop-api:1.0', readyPort: 3000, livePort: 3000, envFrom: ['configmap:api-config', 'secret:db-creds'], ...s });
-const svc = (id, name, s = {}) => block('service', id, name, 420, 120, s);
-const ingress = (rules, s = {}) => block('ingress', 'ing', 'shop', 220, 120, { rules, ...s });
-const apiConfig = () => block('configmap', 'cm-api', 'api-config', 1100, 330, { data: ['API_MODE=production'] });
-const dbCreds = (name = 'db-creds') => block('secret', 'sec-db', name, 1100, 480, { data: ['DB_PASSWORD=s3cret'] });
+const net = (s = {}) => block('client', 'net', 'Internet', 20, 220, { fixed: true, via: 'public', ...s });
+const listener = (s = {}) => ({ name: 'http', protocol: 'HTTP', port: 80, hostname: '', cert: '', ...s });
+const gw = (s = {}) => block('gateway', 'gw', 'public', 250, 220, s);
+const route = (rules, s = {}) => block('httproute', 'rt-shop', 'shop', 520, 120, { parents: [{ name: 'public', section: '' }], hostnames: [], rules, ...s });
+const rule = (path, service, port = 80, s = {}) => ({ type: 'PathPrefix', path, header: '', backends: [{ service, port, weight: 1 }], ...s });
+const front = (rules, s = {}) => [gw(), route(rules, s)];
+const web = (s = {}) => block('deployment', 'd-web', 'web', 1100, 120, { replicas: 3, labels: 'app=web', image: 'shop-web:1.0', ...s });
+const apiDep = (s = {}) => block('deployment', 'd-api', 'api', 1100, 400, { replicas: 2, labels: 'app=api', image: 'shop-api:1.0', readyPort: 3000, livePort: 3000, envFrom: ['configmap:api-config', 'secret:db-creds'], ...s });
+const svc = (id, name, s = {}) => block('service', id, name, 800, 120, s);
+const webSvc = (s = {}) => svc('s-web', 'web', { selector: 'app=web', targetPort: 8080, ...s });
+const apiSvc = (s = {}) => block('service', 's-api', 'api', 800, 400, { selector: 'app=api', targetPort: 3000, ...s });
+const ingress = (rules, s = {}) => block('ingress', 'ing', 'shop', 250, 440, { rules, ...s });
+const apiConfig = () => block('configmap', 'cm-api', 'api-config', 1440, 330, { data: ['API_MODE=production'] });
+const dbCreds = (name = 'db-creds') => block('secret', 'sec-db', name, 1440, 480, { data: ['DB_PASSWORD=s3cret'] });
 const D = (m, name) => named(m, 'deployment', name);
 const S = (m, name) => named(m, 'service', name);
+const G = (m, name) => named(m, 'gateway', name);
 
 function allPaths(R, want, label) {
   const bad = R.results.filter(r => r.path === want.path && r.code !== 200);
@@ -410,72 +669,134 @@ const podsReady = (R, m, name) => {
   const bad = p?.find(x => !x.ready);
   return goal(`all ${name} pods are Running and Ready`, p?.length && !bad, !d ? `there is no Deployment called ${name}` : !p.length ? `${name} has 0 replicas` : bad ? `${bad.phase}: ${bad.why}` : '');
 };
+const throughGateway = m => {
+  const c = ofKind(m, 'client')[0];
+  const e = c && entryOf(m, c.via);
+  return goal('requests from outside enter through a Gateway', e?.kind === 'gateway', `the Internet sends to ${e ? `${KINDS[e.kind].label} ${e.name}` : c?.via ? `"${c.via}", which does not exist` : 'nothing'}: point it at the Gateway`);
+};
+/** Some HTTPRoute is Accepted by Gateway gwName. */
+const accepted = (R, m, gwName) => {
+  const rs = ofKind(m, 'httproute').map(r => ({ r, p: R.routes[r.id].parents.find(p => p.ref.name === gwName) }));
+  const ok = rs.some(x => x.p?.accepted);
+  const bad = rs.find(x => x.p && !x.p.accepted) || rs[0];
+  return goal(`an HTTPRoute is Accepted by Gateway ${gwName}`, ok, !rs.length ? 'there is no HTTPRoute' : bad?.p ? `HTTPRoute ${bad.r.name}: ${bad.p.why}` : `no HTTPRoute names ${gwName} in its parentRefs`);
+};
+const resolved = (R, m) => {
+  const bad = ofKind(m, 'httproute').map(r => ({ r, s: R.routes[r.id] })).find(x => !x.s.resolved);
+  return goal('every backendRef resolves (ResolvedRefs: True)', !bad, bad && `HTTPRoute ${bad.r.name}: ResolvedRefs: False (${bad.s.refsBad[0].reason}): ${bad.s.refsBad[0].why}`);
+};
 
 export const CHALLENGES = [
   { id: 'sandbox', title: 'Sandbox', xp: 0, par: 0,
-    brief: 'A free cluster. Add Deployments, Services, an Ingress, ConfigMaps, Secrets and claims, point them at each other by name and label, then apply, roll out and delete pods.',
-    setup: () => ({ blocks: [net({ via: 'shop', paths: ['/', '/api/orders'] }), ingress([{ host: '', path: '/', service: 'web', port: 80 }, { host: '', path: '/api', service: 'api', port: 80 }]),
-      svc('s-web', 'web', { selector: 'app=web', targetPort: 8080 }), block('service', 's-api', 'api', 420, 400, { selector: 'app=api', targetPort: 3000 }),
-      web({ readiness: true }), apiDep({ readiness: true, readyPort: 3000 }), apiConfig(), dbCreds()] }),
+    brief: 'A free cluster. A Gateway with an HTTP and an HTTPS listener, an HTTPRoute, Services, Deployments, ConfigMaps, Secrets and claims. Point them at each other by name and label, then apply, roll out and delete pods. The legacy Ingress is in the palette too.',
+    setup: () => ({ blocks: [net({ paths: ['/', '/api/orders'] }),
+      gw({ listeners: [listener({ hostname: '*.example.com' }), listener({ name: 'https', protocol: 'HTTPS', port: 443, hostname: '*.example.com', cert: 'shop-tls' })] }),
+      route([rule('/', 'web'), rule('/api', 'api')], { hostnames: ['shop.example.com'] }),
+      webSvc(), apiSvc(), web({ readiness: true }), apiDep({ readiness: true, readyPort: 3000 }), apiConfig(), dbCreds(),
+      block('secret', 'sec-tls', 'shop-tls', 250, 460, { data: ['tls.crt=(PEM certificate)', 'tls.key=(PEM private key)'] })] }),
     solve: m => m, check: () => [] },
 
   { id: 'expose', title: 'Hello, cluster', xp: 20,
-    brief: 'Three **web** pods are running, but nobody outside can reach them. Pods come and go, and their IPs change, so you never send traffic to a pod directly. Add a **Service** in front of them (drag it onto the Deployment to select its pods), then add an **Ingress** rule for `/` that points at the Service. The app inside listens on **8080**.',
-    setup: () => ({ blocks: [net({ via: 'shop' }), ingress([]), web()] }),
-    solve: m => { m.blocks.push(svc('s-web', 'web', { selector: 'app=web', targetPort: 8080 })); byId(m, 'ing').rules.push({ host: '', path: '/', service: 'web', port: 80 }); return m; },
-    check: (m, R) => [allPaths(R, { path: '/' }, 'GET / answers 200')] },
+    brief: 'Three **web** pods are running, but nobody outside can reach them. The platform team already runs a **Gateway** called `public` (the front door: a listener on port 80). Pods come and go and their IPs change, so you never send traffic to a pod directly. Add a **Service** in front of the pods (drag it onto the Deployment to select them; the app listens on **8080**), then add an **HTTPRoute**: drag it onto the Gateway (that writes its `parentRefs`) and onto the Service (a rule `PathPrefix /` with a `backendRef`).',
+    setup: () => ({ blocks: [net(), gw(), web()] }),
+    solve: m => { m.blocks.push(webSvc(), route([rule('/', 'web')])); return m; },
+    check: (m, R) => [throughGateway(m), allPaths(R, { path: '/' }, 'GET / answers 200')] },
+
+  { id: 'gateway-class', title: 'Reaching in from outside', xp: 25,
+    brief: 'Everything looks right, yet every request **times out**. `kubectl get gateway public` shows an empty **ADDRESS** and **PROGRAMMED Unknown**. A Gateway does nothing by itself: the controller named by its **GatewayClass** runs the proxy. This manifest was copied from a quickstart. Compare its `gatewayClassName` with what `kubectl get gatewayclass` lists in this cluster.',
+    setup: () => ({ blocks: [net(), gw({ className: 'eg' }), route([rule('/', 'web')]), webSvc(), web()] }),
+    solve: m => { G(m, 'public').className = 'envoy'; return m; },
+    check: (m, R) => [goal('Gateway public is Programmed and has an address', G(m, 'public') && R.gateways[G(m, 'public').id].programmed, G(m, 'public') ? R.gateways[G(m, 'public').id].why || 'no listener is programmed' : 'keep the Gateway called public'),
+      allPaths(R, { path: '/' }, 'GET / answers 200')] },
 
   { id: 'no-endpoints', title: 'Service has no endpoints', xp: 20,
-    brief: 'Every request gets **503**. The pods are healthy and the Service exists. A Service does not point at a Deployment: it **selects pods by label**. Compare the Service\'s selector with the labels on the pods, letter by letter. Fix it by typing, not by dragging.',
-    setup: () => ({ blocks: [net({ via: 'shop' }), ingress([{ host: '', path: '/', service: 'web', port: 80 }]), svc('s-web', 'web', { selector: 'app=frontend', targetPort: 8080 }), web()] }),
+    brief: 'Every request gets **503**. The pods are healthy, the HTTPRoute is Accepted and the Service exists. A Service does not point at a Deployment: it **selects pods by label**. Compare the Service\'s selector with the labels on the pods, letter by letter. Fix it by typing, not by dragging.',
+    setup: () => ({ blocks: [net(), ...front([rule('/', 'web')]), webSvc({ selector: 'app=frontend' }), web()] }),
     solve: m => { S(m, 'web').selector = 'app=web'; return m; },
     check: (m, R) => [allPaths(R, { path: '/' }, 'GET / answers 200')] },
 
   { id: 'target-port', title: 'port, targetPort', xp: 25,
-    brief: 'Now the Service has endpoints, but every request ends in **502**. A Service has two ports: **port** is where clients call it, **targetPort** is where it sends traffic on the pod. Read what the app listens on.',
-    setup: () => ({ blocks: [net({ via: 'shop' }), ingress([{ host: '', path: '/', service: 'web', port: 80 }]), svc('s-web', 'web', { selector: 'app=web', targetPort: 80 }), web()] }),
+    brief: 'Now the Service has endpoints, but every request ends in **502**. A Service has two ports: **port** is where clients (here, the Gateway, through the HTTPRoute\'s backendRef) call it, **targetPort** is where it sends traffic on the pod. Read what the app listens on.',
+    setup: () => ({ blocks: [net(), ...front([rule('/', 'web')]), webSvc({ targetPort: 80 }), web()] }),
     solve: m => { S(m, 'web').targetPort = 8080; return m; },
-    check: (m, R) => [allPaths(R, { path: '/' }, 'GET / answers 200'), goal('clients still call the Service on port 80', S(m, 'web')?.port === 80, 'keep port 80: the Ingress rule calls web:80')] },
+    check: (m, R) => [allPaths(R, { path: '/' }, 'GET / answers 200'), goal('clients still call the Service on port 80', S(m, 'web')?.port === 80, 'keep port 80: the HTTPRoute\'s backendRef calls web:80')] },
 
-  { id: 'nodeport', title: 'Reaching in from outside', xp: 25,
-    brief: 'There is no Ingress controller in this test cluster, so the Internet calls the **web** Service directly. Nothing arrives. The default Service type, **ClusterIP**, gets an address that exists only inside the cluster. Choose the type that also opens a port on every node.',
-    setup: () => ({ blocks: [net({ via: 'web' }), svc('s-web', 'web', { selector: 'app=web', targetPort: 8080 }), web()] }),
-    solve: m => { S(m, 'web').type = 'NodePort'; return m; },
-    check: (m, R) => [allPaths(R, { path: '/' }, 'a request from outside answers 200')] },
+  { id: 'two-apps', title: 'Two apps, one door', xp: 30,
+    brief: 'One Gateway, one HTTPRoute, two apps: `/` goes to the website, `/api` to the API. The website works, but `/api/orders` gets **500**. `kubectl describe httproute shop` shows `ResolvedRefs: False, BackendNotFound`. A backendRef names a Service; read the rule and the Services carefully. (The longest matching PathPrefix wins, whatever the order of the rules.)',
+    setup: () => ({ blocks: [net({ paths: ['/', '/api/orders'] }), ...front([rule('/', 'web'), rule('/api', 'shop-api')], { hostnames: ['shop.example.com'] }),
+      webSvc(), apiSvc(), web(), apiDep({ readiness: true, readyPort: 3000 }), apiConfig(), dbCreds()] }),
+    solve: m => { named(m, 'httproute', 'shop').rules[1].backends[0].service = 'api'; return m; },
+    check: (m, R) => [allPaths(R, { path: '/' }, 'GET / reaches the website'), allPaths(R, { path: '/api/orders' }, 'GET /api/orders reaches the API'), resolved(R, m)] },
 
-  { id: 'ingress', title: 'Two apps, one door', xp: 30,
-    brief: 'One Ingress, two apps: `/` goes to the website, `/api` to the API. The website works, but `/api/orders` gets **503**. The Ingress rule names a Service; read the rule and the Services carefully. (The longest matching path wins, whatever the order of the rules.)',
-    setup: () => ({ blocks: [net({ via: 'shop', paths: ['/', '/api/orders'] }),
-      ingress([{ host: 'shop.example.com', path: '/', service: 'web', port: 80 }, { host: 'shop.example.com', path: '/api', service: 'shop-api', port: 80 }]),
-      svc('s-web', 'web', { selector: 'app=web', targetPort: 8080 }), block('service', 's-api', 'api', 420, 400, { selector: 'app=api', targetPort: 3000 }),
-      web(), apiDep({ readiness: true, readyPort: 3000 }), apiConfig(), dbCreds()] }),
-    solve: m => { byId(m, 'ing').rules[1].service = 'api'; return m; },
+  { id: 'exact-path', title: 'Half the requests 404', xp: 30,
+    brief: 'The home page works, but every **/api/orders** request gets **404**, and the 404 comes from the *website* pods. The HTTPRoute has a rule for `/api`. Read its **match type**: `Exact` matches one path only, `PathPrefix` matches a path and everything under it, element by element. When no `/api` rule matches, `PathPrefix /` catches the request.',
+    setup: () => ({ blocks: [net({ paths: ['/', '/api/orders'] }), ...front([rule('/', 'web'), rule('/api', 'api', 80, { type: 'Exact' })], { hostnames: ['shop.example.com'] }),
+      webSvc(), apiSvc(), web(), apiDep({ readiness: true, readyPort: 3000 }), apiConfig(), dbCreds()] }),
+    solve: m => { named(m, 'httproute', 'shop').rules[1].type = 'PathPrefix'; return m; },
     check: (m, R) => [allPaths(R, { path: '/' }, 'GET / reaches the website'), allPaths(R, { path: '/api/orders' }, 'GET /api/orders reaches the API')] },
 
-  { id: 'broad-selector', title: 'Half the requests 404', xp: 30,
+  { id: 'broad-selector', title: 'Some page loads fail', xp: 30,
     brief: 'Both apps carry the label `app=shop`, and the **web** Service selects `app=shop`. So it selects the API pods too, and some page loads land on an API pod, which does not listen on 8080: **502**. Make the selector specific enough to pick only the website pods. (Labels can have several pairs: `app=shop, component=web`.)',
-    setup: () => ({ blocks: [net({ via: 'shop', count: 6 }), ingress([{ host: '', path: '/', service: 'web', port: 80 }]),
-      svc('s-web', 'web', { selector: 'app=shop', targetPort: 8080 }),
+    setup: () => ({ blocks: [net({ count: 6 }), ...front([rule('/', 'web')]),
+      webSvc({ selector: 'app=shop' }),
       web({ labels: 'app=shop, component=web' }), apiDep({ labels: 'app=shop, component=api', readiness: true, readyPort: 3000 }), apiConfig(), dbCreds()] }),
     solve: m => { S(m, 'web').selector = 'app=shop, component=web'; return m; },
     check: (m, R) => [allPaths(R, { path: '/' }, 'every GET / reaches a website pod'), goal('the web Service selects only website pods', S(m, 'web') && R.endpoints[S(m, 'web').id]?.selected.every(p => p.dep === 'd-web'), 'it still selects API pods')] },
 
+  { id: 'hostname', title: 'Accepted: False', xp: 35,
+    brief: 'The app team applied their HTTPRoute and every request to `shop.example.com` gets **404**. `kubectl get httproute shop -o yaml` shows `Accepted: False, reason NoMatchingListenerHostname`. The platform team\'s Gateway listener only accepts `*.example.com`, and a route attaches only where one of its **hostnames** fits the listener\'s. Fix the route; the Gateway belongs to the platform team, so leave it as it is.',
+    setup: () => ({ blocks: [net(), gw({ listeners: [listener({ hostname: '*.example.com' })] }), route([rule('/', 'web')], { hostnames: ['shop.example.net'] }), webSvc(), web()] }),
+    solve: m => { named(m, 'httproute', 'shop').hostnames = ['shop.example.com']; return m; },
+    check: (m, R) => [accepted(R, m, 'public'), allPaths(R, { path: '/' }, 'GET shop.example.com/ answers 200'),
+      goal('the Gateway still listens on *.example.com, port 80', G(m, 'public')?.listeners.some(l => l.hostname === '*.example.com' && Number(l.port) === 80) && G(m, 'public').listeners.length === 1, 'the Gateway is the platform team\'s: change the HTTPRoute, not the listener'),
+      goal('the Internet still asks for shop.example.com', ofKind(m, 'client')[0]?.host === 'shop.example.com', 'keep the Host header at shop.example.com: that is what users type')] },
+
+  { id: 'canary', title: 'A 10% canary', xp: 40,
+    brief: 'Version **2.0** of the website runs next to 1.0 as **web-canary**. The plan: send **10%** of the traffic to it and watch. One HTTPRoute rule can list several `backendRefs` with **weights**: each gets weight ÷ total of the requests. Right now half the requests fail with **500** (`ResolvedRefs: False`) and the split is 50/50. Fix the canary backendRef, then set the weights so 1 request in 10 reaches 2.0.',
+    setup: () => ({ blocks: [net({ count: 10 }), gw(),
+      route([{ type: 'PathPrefix', path: '/', header: '', backends: [{ service: 'web', port: 80, weight: 1 }, { service: 'web-canary', port: 8080, weight: 1 }] }]),
+      webSvc({ selector: 'app=web, track=stable' }), block('service', 's-canary', 'web-canary', 800, 380, { selector: 'app=web, track=canary', targetPort: 8080 }),
+      web({ labels: 'app=web, track=stable' }), block('deployment', 'd-canary', 'web-canary', 1100, 380, { replicas: 1, labels: 'app=web, track=canary', image: 'shop-web:2.0' })] }),
+    solve: m => { const bs = named(m, 'httproute', 'shop').rules[0].backends; bs[0].weight = 90; bs[1].weight = 10; bs[1].port = 80; return m; },
+    check: (m, R) => {
+      const sent = R.results.length, canary = R.results.filter(r => r.pod?.image === 'shop-web:2.0').length;
+      return [allPaths(R, { path: '/' }, 'every GET / answers 200'),
+        goal('1 request in 10 reaches version 2.0', sent >= 10 && canary * 10 === sent, `${canary} of ${sent} requests reached shop-web:2.0${sent < 10 ? ' (send at least 10 requests)' : ''}: the weights decide the share, weight ÷ sum of weights`),
+        goal('the other 9 in 10 reach version 1.0', R.results.filter(r => r.pod?.image === 'shop-web:1.0' && r.code === 200).length === sent - canary, `${R.results.filter(r => r.pod?.image === 'shop-web:1.0' && r.code === 200).length} of ${sent} requests were served by shop-web:1.0`)];
+    } },
+
+  { id: 'from-ingress', title: 'Retire the Ingress', xp: 40,
+    brief: 'This cluster still routes through a legacy **Ingress** (the ingress-nginx controller was retired in March 2026, and the Ingress API is frozen). The Gateway `public` is ready. Translate the Ingress into an **HTTPRoute**: same host, same paths (`pathType: Prefix` becomes `PathPrefix`), same Services and ports. Then point the Internet at the Gateway and delete the Ingress.',
+    setup: () => ({ blocks: [net({ via: 'shop', paths: ['/', '/api/orders'] }), gw(),
+      ingress([{ host: 'shop.example.com', path: '/', service: 'web', port: 80 }, { host: 'shop.example.com', path: '/api', service: 'api', port: 80 }]),
+      webSvc(), apiSvc(), web(), apiDep({ readiness: true, readyPort: 3000 }), apiConfig(), dbCreds()] }),
+    solve: m => { m.blocks = m.blocks.filter(b => b.kind !== 'ingress'); m.blocks.push(route([rule('/', 'web'), rule('/api', 'api')], { hostnames: ['shop.example.com'] })); ofKind(m, 'client')[0].via = 'public'; return m; },
+    check: (m, R) => [throughGateway(m), allPaths(R, { path: '/' }, 'GET / reaches the website'), allPaths(R, { path: '/api/orders' }, 'GET /api/orders reaches the API'),
+      goal('the HTTPRoute keeps the Ingress\'s host', ofKind(m, 'httproute').some(r => r.hostnames.includes('shop.example.com')), 'the Ingress only answered for shop.example.com: put it in the route\'s hostnames'),
+      goal('the Ingress is gone', !ofKind(m, 'ingress').length, 'delete the Ingress once the Gateway serves the same routes')] },
+
+  { id: 'nodeport', title: 'Straight to a node', xp: 25,
+    brief: 'A throwaway test cluster with **no Gateway controller**: for a quick check, the Internet calls the **web** Service directly. Nothing arrives. The default Service type, **ClusterIP**, gets an address that exists only inside the cluster. Choose the type that also opens a port on every node. (Fine for a test; in production a Gateway is the front door.)',
+    setup: () => ({ blocks: [net({ via: 'web' }), webSvc(), web()] }),
+    solve: m => { S(m, 'web').type = 'NodePort'; return m; },
+    check: (m, R) => [allPaths(R, { path: '/' }, 'a request from outside answers 200')] },
+
   { id: 'readiness', title: 'Running, but not Ready', xp: 30,
     brief: 'Someone added a **readiness probe**, good. Since then the pods show `Running` but `0/1 READY` and the Service has no endpoints. Kubernetes only sends traffic to pods whose readiness probe passes. Look at where the probe knocks.',
-    setup: () => ({ blocks: [net({ via: 'shop' }), ingress([{ host: '', path: '/', service: 'web', port: 80 }]), svc('s-web', 'web', { selector: 'app=web', targetPort: 8080 }), web({ readiness: true, readyPort: 80 })] }),
+    setup: () => ({ blocks: [net(), ...front([rule('/', 'web')]), webSvc(), web({ readiness: true, readyPort: 80 })] }),
     solve: m => { D(m, 'web').readyPort = 8080; return m; },
     check: (m, R) => [podsReady(R, m, 'web'), allPaths(R, { path: '/' }, 'GET / answers 200'), goal('keep the readiness probe', D(m, 'web')?.readiness, 'the probe protects you: fix it, do not remove it')] },
 
   { id: 'liveness', title: 'Killed while starting', xp: 35,
     brief: 'The API takes about **25 seconds** to start. Its **liveness probe** starts checking at once, fails three times, and the kubelet kills the container: `CrashLoopBackOff`, forever. A liveness probe should catch a hung app, not a slow start. Give it enough time before the first check.',
-    setup: () => ({ blocks: [net({ via: 'shop', paths: ['/api/orders'] }), ingress([{ host: '', path: '/api', service: 'api', port: 80 }]), block('service', 's-api', 'api', 420, 400, { selector: 'app=api', targetPort: 3000 }),
+    setup: () => ({ blocks: [net({ paths: ['/api/orders'] }), ...front([rule('/api', 'api')]), apiSvc(),
       apiDep({ readiness: true, liveness: true, liveDelay: 0 }), apiConfig(), dbCreds()] }),
     solve: m => { D(m, 'api').liveDelay = 10; return m; },
     check: (m, R) => [podsReady(R, m, 'api'), allPaths(R, { path: '/api/orders' }, 'GET /api/orders answers 200'), goal('keep the liveness probe', D(m, 'api')?.liveness, 'it restarts a hung API: fix its timing, do not remove it')] },
 
   { id: 'config', title: 'Config by name', xp: 30,
     brief: 'The API pods are stuck in **CreateContainerConfigError**. They load their settings with `envFrom` from a ConfigMap and a Secret, by name. Read the pod error, then compare the names.',
-    setup: () => ({ blocks: [net({ via: 'shop', paths: ['/api/orders'] }), ingress([{ host: '', path: '/api', service: 'api', port: 80 }]), block('service', 's-api', 'api', 420, 400, { selector: 'app=api', targetPort: 3000 }),
+    setup: () => ({ blocks: [net({ paths: ['/api/orders'] }), ...front([rule('/api', 'api')]), apiSvc(),
       apiDep({ readiness: true, envFrom: ['configmap:api-config', 'secret:db-credentials'] }), apiConfig(), dbCreds('db-creds')] }),
     solve: m => { D(m, 'api').envFrom = ['configmap:api-config', 'secret:db-creds']; return m; },
     check: (m, R) => [podsReady(R, m, 'api'), allPaths(R, { path: '/api/orders' }, 'GET /api/orders answers 200'),
@@ -483,7 +804,7 @@ export const CHALLENGES = [
 
   { id: 'rollout', title: 'A safe bad release', xp: 45, costLabel: 'objects + references',
     brief: 'Release **shop-web:2.1** is broken (every request gets 500), and nobody knows yet. Press **Roll out** to see it take the site down. Make the Deployment *safe*: a broken release must never get traffic, and the site must keep **3 ready pods** the whole time. You need a correct **readiness probe** and the right **maxUnavailable**. Keep 2.1 as the new image: the point is to survive it.',
-    setup: () => ({ blocks: [net({ via: 'shop' }), ingress([{ host: '', path: '/', service: 'web', port: 80 }]), svc('s-web', 'web', { selector: 'app=web', targetPort: 8080 }), web({ next: 'shop-web:2.1' })] }),
+    setup: () => ({ blocks: [net(), ...front([rule('/', 'web')]), webSvc(), web({ next: 'shop-web:2.1' })] }),
     solve: m => { Object.assign(D(m, 'web'), { readiness: true, readyPort: 8080, readyPath: '/healthz', maxUnavailable: 0 }); return m; },
     check: (m, R) => {
       const d = D(m, 'web');
@@ -497,7 +818,7 @@ export const CHALLENGES = [
 
   { id: 'pvc', title: 'Data that outlives the pod', xp: 40,
     brief: 'The **db** Deployment runs Postgres. Press **Delete the pods**: the Deployment replaces the pod at once, and every row is gone. A pod\'s filesystem dies with it. Add a **PersistentVolumeClaim**, drag db onto it, and mount it where Postgres keeps its data: **/var/lib/postgresql/data**.',
-    setup: () => ({ blocks: [net({ via: '' , paths: [] }), block('deployment', 'd-db', 'db', 420, 160, { image: 'postgres:16', replicas: 1, labels: 'app=db', envFrom: ['secret:db-creds'] }),
+    setup: () => ({ blocks: [net({ via: '', paths: [] }), block('deployment', 'd-db', 'db', 420, 160, { image: 'postgres:16', replicas: 1, labels: 'app=db', envFrom: ['secret:db-creds'] }),
       block('secret', 'sec-db', 'db-creds', 780, 120, { data: ['POSTGRES_PASSWORD=s3cret'] })] }),
     solve: m => { m.blocks.push(block('pvc', 'pvc-db', 'db-data', 780, 320)); Object.assign(D(m, 'db'), { claim: 'db-data', mountPath: '/var/lib/postgresql/data' }); return m; },
     check: (m, R) => { const f = deletePods(m).find(x => x.d.name === 'db'); return [podsReady(R, m, 'db'), goal('the data survives deleting the pod', f?.ok, f?.why || 'keep the db Deployment')]; } },

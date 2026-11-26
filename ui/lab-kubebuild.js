@@ -1,15 +1,18 @@
-// Kubernetes builder: put an Ingress, Services, Deployments, ConfigMaps, Secrets and claims on the board.
-// Objects find each other by name and by labels, so every wire on the board is a reference that resolved
-// (an Ingress rule naming a Service, a Service selector matching pod labels, envFrom naming a ConfigMap).
-// Apply it and send requests from outside, roll out a new image step by step, or delete the pods to see
-// what data survives. The simulation lives in kubesim.js (DOM-free, tested in Node); the shell in buildlab.js.
+// Kubernetes builder: put a Gateway, HTTPRoutes, Services, Deployments, ConfigMaps, Secrets and claims on
+// the board (and the legacy Ingress, which you still meet in older clusters). Objects find each other by name
+// and by labels, so every wire on the board is a reference that resolved (an HTTPRoute's parentRef naming a
+// Gateway, its backendRef naming a Service, a Service selector matching pod labels, envFrom naming a
+// ConfigMap). Apply it and send requests from outside, roll out a new image step by step, or delete the pods
+// to see what data survives. The simulation lives in kubesim.js (DOM-free, tested in Node); the shell in buildlab.js.
 import { h } from './util.js';
 import { builderLab, controls, fill } from './buildlab.js';
 import * as K from './kubesim.js';
 
-const COLORS = { client: '#9a86d6', ingress: '#d08a4a', service: '#4f9bd9', deployment: '#3fb68b', configmap: '#c9a24a', secret: '#d9786a', pvc: '#a8957a' };
-const ART = { client: 'cloud', ingress: 'ingress', service: 'service', deployment: 'pod', configmap: 'document', secret: 'vault', pvc: 'volume' };
-const KINDS = Object.fromEntries(Object.entries(K.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: k === 'deployment' || k === 'ingress' ? 230 : 200, art: ART[k] }]));
+const COLORS = { client: '#9a86d6', gateway: '#d08a4a', httproute: '#4fa89c', ingress: '#9a8f84', service: '#4f9bd9', deployment: '#3fb68b', configmap: '#c9a24a', secret: '#d9786a', pvc: '#a8957a' };
+const ART = { client: 'cloud', gateway: 'edgeproxy', httproute: 'routetable', ingress: 'ingress', service: 'service', deployment: 'pod', configmap: 'document', secret: 'vault', pvc: 'volume' };
+const WIDE = ['deployment', 'ingress', 'gateway', 'httproute'];
+const KINDS = Object.fromEntries(Object.entries(K.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: WIDE.includes(k) ? 230 : 200, art: ART[k] }]));
+const cond = (ok, text) => h(`span.ab-code.${ok ? 'ok' : 'bad'}`, text);
 
 export function kubeBuildLab(container, onXp) {
   return builderLab(container, onXp, {
@@ -43,7 +46,7 @@ function boardOptions(api) {
 
   function add(kind, at) {
     if (kind === 'client' && K.ofKind(m(), 'client').length) return 'One Internet is enough.';
-    const base = { ingress: 'shop', service: 'svc', deployment: 'app', configmap: 'config', secret: 'secret', pvc: 'data' }[kind];
+    const base = { gateway: 'public', httproute: 'route', ingress: 'legacy', service: 'svc', deployment: 'app', configmap: 'config', secret: 'secret', pvc: 'data' }[kind];
     let i = 1, name = base;
     while (m().blocks.some(b => b.kind === kind && b.name === name)) name = `${base}-${++i}`;
     let id = kind + '-' + name;
@@ -57,7 +60,19 @@ function boardOptions(api) {
   function body(b) {
     const line = t => h('div.ab-line', t);
     const tag = (t, tone = '') => h(`span.bk-tag${tone ? '.' + tone : ''}`, t);
-    if (b.kind === 'client') return [h('div.bk-name', b.name), line(b.via ? `→ ${b.via}` : 'not pointed anywhere'), line(`Host: ${b.host}`), (b.paths || []).slice(0, 3).map(p => line(`GET ${p} ×${b.count}`))];
+    if (b.kind === 'client') return [h('div.bk-name', b.name), line(b.via ? `→ ${b.via}` : 'not pointed anywhere'), line(`Host: ${b.host}${Number(b.port) && Number(b.port) !== 80 ? ` · :${b.port}` : ''}`), (b.paths || []).slice(0, 3).map(p => line(`GET ${p} ×${b.count}`))];
+    if (b.kind === 'gateway') {
+      const st = K.gatewayStatus(m(), b);
+      return [h('div.bk-name', b.name), line(`class: ${b.className || '(none)'}`), b.listeners.slice(0, 3).map(l => line(`${l.name} ${l.protocol} :${l.port} ${l.hostname || '*'}`)),
+        h('div.bk-tags', st.accepted ? tag(st.address) : tag('no address', 'bad'), tag(st.programmed ? 'Programmed' : st.accepted ? 'not Programmed' : 'Unknown', st.programmed ? '' : 'bad'))];
+    }
+    if (b.kind === 'httproute') {
+      const st = K.routeStatus(m(), b);
+      const ok = st.parents.length && st.parents.every(p => p.accepted);
+      return [h('div.bk-name', b.name), line(`hosts: ${b.hostnames.join(', ') || '(from the listener)'}`),
+        b.rules.length ? b.rules.slice(0, 3).map(r => line(`${r.type === 'Exact' ? '=' : ''}${r.path}${r.header ? ' +hdr' : ''} → ${r.backends.map(x => `${x.service}:${x.port}${r.backends.length > 1 ? ` w${K.weightOf(x)}` : ''}`).join(', ') || '(none)'}`)) : line('no rules'),
+        h('div.bk-tags', tag(!st.parents.length ? 'no parentRefs' : ok ? 'Accepted' : 'Accepted: False', ok ? '' : 'bad'), !st.resolved && tag('ResolvedRefs: False', 'bad'))];
+    }
     if (b.kind === 'ingress') return [h('div.bk-name', b.name), b.rules.length ? b.rules.map(r => line(`${r.host || '*'}${r.path || '/'} → ${r.service}:${r.port}`)) : line('no rules')];
     if (b.kind === 'service') {
       const pods = K.ofKind(m(), 'deployment').flatMap(d => K.podsOf(m(), d));
@@ -82,12 +97,81 @@ function boardOptions(api) {
     const remove = h('button.btn.ghost.small', { type: 'button', onclick: () => { K.unref(m(), r); api.changed(); } }, 'Remove');
     const say = {
       via: `The Internet sends its requests to ${t.name}.`,
-      rule: `Rule ${r.label} on ${f.name} names the Service "${r.ref}". Ingress rules point at Services by name, never at pods.`,
+      rule: `Rule ${r.label} on the legacy Ingress ${f.name} names the Service "${r.ref}". Ingress rules point at Services by name, never at pods.`,
+      parent: `${f.name} lists Gateway ${t.name} in its parentRefs${f.parents[r.parent]?.section ? `, listener ${f.parents[r.parent].section}` : ''}. The route asks; the Gateway's controller decides whether it is Accepted (hostnames must fit a listener).`,
+      backend: `A rule of ${f.name} (${r.label}) has a backendRef to the Service ${t.name}. backendRefs name a Service and its port, never pods.`,
+      cert: `Gateway ${f.name} terminates TLS on listener ${r.label.replace(/ tls$/, '')} with the certificate in Secret ${t.name}.`,
       select: `${f.name} selects every pod labelled ${r.label}. That includes the pods of ${t.name}. There is no link to the Deployment itself: only labels.`,
       env: `${f.name} loads every key of ${t.kind === 'secret' ? 'the Secret' : 'the ConfigMap'} ${t.name} as environment variables (envFrom).`,
       claim: `${f.name} mounts the claim ${t.name} at ${f.mountPath || '(no path)'}.`,
     }[r.kind];
     return h('div.pk-inspect', h('div.pk-inspect-head', h('b', 'Reference'), remove), h('p', say), h('p.muted.small', 'Remove deletes the reference from the YAML. Edit names, selectors and rules on the objects themselves.'));
+  }
+
+  const input = (o, key, cls, attrs = {}, cast = v => v.trim()) => h(`input.${cls}`, { value: o[key] ?? '', spellcheck: false, ...attrs, onchange: e => { o[key] = cast(e.target.value); api.changed(); } });
+  const pick = (o, key, options, cls = '') => h(`select${cls ? '.' + cls : ''}`, { onchange: e => { o[key] = e.target.value; api.changed(); } }, options.map(v => h('option', { value: v, selected: String(o[key]) === v }, v)));
+  const x = (onclick, title = 'Remove') => h('button.btn.ghost.small', { type: 'button', title, onclick: () => { onclick(); api.changed(); } }, '✕');
+  const plus = (label, onclick) => h('button.btn.ghost.small', { type: 'button', onclick: () => { onclick(); api.changed(); } }, label);
+  const numOf = v => Math.max(0, Math.round(Number(v) || 0));
+
+  function gatewayInspector(b) {
+    const st = K.gatewayStatus(m(), b);
+    const classes = Object.keys(K.GATEWAY_CLASSES);
+    return [
+      field('gatewayClassName', text(b, 'className', 'envoy'), `Which controller runs this Gateway. Installed here (kubectl get gatewayclass): ${classes.join(', ')}.`),
+      h('div.eyebrow', 'Listeners'),
+      b.listeners.map((l, i) => h('div.kb-row',
+        input(l, 'name', 'kb-w-name', { title: 'Listener name (a route\'s sectionName can pick it)' }),
+        pick(l, 'protocol', ['HTTP', 'HTTPS'], 'kb-w-proto'),
+        input(l, 'port', 'kb-w-port', { type: 'number', min: 1, max: 65535, title: 'Port' }, v => numOf(v) || 80),
+        input(l, 'hostname', 'kb-w-host', { placeholder: 'any host', title: 'hostname: exact, or *.example.com (suffix match); empty = any' }),
+        l.protocol === 'HTTPS' && input(l, 'cert', 'kb-w-svc', { placeholder: 'tls Secret', title: 'tls.certificateRefs: the Secret with tls.crt and tls.key' }),
+        x(() => b.listeners.splice(i, 1)))),
+      plus('+ Add listener', () => { let n = 'http', k = 1; while (b.listeners.some(l => l.name === n)) n = `http-${++k}`; b.listeners.push({ name: n, protocol: 'HTTP', port: 80, hostname: '', cert: '' }); }),
+      h('p.muted.small', 'name · protocol · port · hostname. A request picks the listener on its port with the most specific hostname that fits its Host header. Routes attach where their hostnames fit.'),
+      h('div.eyebrow', 'Status'),
+      h('ul.yb-plain',
+        h('li', cond(st.accepted, `Accepted: ${st.accepted ? 'True' : 'Unknown'}`), ' ', st.accepted ? h('span.muted.small', `controller ${st.controller}`) : h('span.small.nb-why', st.why)),
+        h('li', cond(st.programmed, `Programmed: ${st.programmed ? 'True' : st.accepted ? 'False' : 'Unknown'}`), ' ', h('span.muted.small', st.address ? `address ${st.address}` : 'no address')),
+        st.listeners.map(x => h('li', h('code', x.l.name), ' ', cond(x.ok, x.ok ? 'Programmed' : x.reason), ' ', h('span.muted.small', `${x.attached} route${x.attached === 1 ? '' : 's'} attached`), x.why && h('div.small.nb-why', x.why)))),
+    ];
+  }
+
+  function routeInspector(b) {
+    const st = K.routeStatus(m(), b);
+    const gws = K.ofKind(m(), 'gateway').map(g => g.name);
+    return [
+      h('div.eyebrow', 'parentRefs'),
+      b.parents.map((p, i) => h('div.kb-row',
+        input(p, 'name', 'kb-w-svc', { placeholder: 'gateway', title: `The Gateway to attach to${gws.length ? ` (here: ${gws.join(', ')})` : ''}` }),
+        input(p, 'section', 'kb-w-name', { placeholder: 'any listener', title: 'sectionName: one listener of that Gateway (empty = every listener that fits)' }),
+        x(() => b.parents.splice(i, 1)))),
+      plus('+ Add parentRef', () => b.parents.push({ name: gws[0] || '', section: '' })),
+      field('hostnames (one per line)', lines(b, 'hostnames', 'shop.example.com', 2), 'Empty: every host the listener accepts. Each must fit a listener\'s hostname, or the route is not Accepted there.'),
+      h('div.eyebrow', 'Rules'),
+      b.rules.map((r, i) => h('div.kb-rule',
+        h('div.kb-row',
+          pick(r, 'type', ['PathPrefix', 'Exact'], 'kb-w-proto'),
+          input(r, 'path', 'kb-w-path', { title: 'Path value, starting with /' }, v => v.trim() || '/'),
+          input(r, 'header', 'kb-w-host', { placeholder: 'header (optional)', title: 'A header match: Name: value' }),
+          x(() => b.rules.splice(i, 1), 'Remove the rule')),
+        r.backends.map((be, j) => h('div.kb-row.kb-sub',
+          h('span.muted', '→'),
+          input(be, 'service', 'kb-w-svc', { placeholder: 'service', title: 'backendRef: a Service name' }),
+          input(be, 'port', 'kb-w-port', { type: 'number', min: 1, max: 65535, title: 'The Service\'s port' }, v => numOf(v)),
+          h('span.muted.small', 'weight'),
+          input(be, 'weight', 'kb-w-port', { type: 'number', min: 0, max: 1000000, title: 'Share of the requests: weight ÷ sum of weights. 0 = none.' }, v => numOf(v)),
+          x(() => r.backends.splice(j, 1), 'Remove the backendRef'))),
+        plus('+ backendRef', () => r.backends.push({ service: '', port: 80, weight: 1 })))),
+      plus('+ Add rule', () => b.rules.push({ type: 'PathPrefix', path: '/', header: '', backends: [] })),
+      h('p.muted.small', 'The most specific match wins, across every route on the listener: the more exact hostname, then Exact before PathPrefix, the longest prefix, the most header matches, then the older route and rule order. No match: 404.'),
+      h('div.eyebrow', 'Status'),
+      h('ul.yb-plain',
+        !b.parents.length && h('li', cond(false, 'no parentRefs'), ' ', h('span.small.nb-why', 'The route attaches to nothing: drag it onto a Gateway.')),
+        st.parents.map(p => h('li', h('code', `parent ${p.ref.name}${p.ref.section ? '/' + p.ref.section : ''}`), ' ', cond(p.accepted, p.accepted ? 'Accepted: True' : p.reason === 'NoSuchGateway' ? 'no status' : `Accepted: False · ${p.reason}`),
+          p.accepted ? h('span.muted.small', ` on ${p.listeners.map(l => l.name).join(', ')}`) : h('div.small.nb-why', p.why))),
+        h('li', cond(st.resolved, `ResolvedRefs: ${st.resolved ? 'True' : 'False'}`), !st.resolved && h('div.small.nb-why', st.refsBad.map(x => x.why).join(' ')))),
+    ];
   }
 
   function inspector(sel) {
@@ -100,14 +184,17 @@ function boardOptions(api) {
       h('button.btn.ghost.small', { type: 'button', disabled: !!b.fixed, onclick: () => { m().blocks = m().blocks.filter(x => x !== b); api.changed(); } }, 'Delete'));
     const parts = [head, field('Name', text(b, 'name', '', nameOk(b)))];
     if (b.kind === 'client') {
-      const entries = m().blocks.filter(x => x.kind === 'ingress' || x.kind === 'service');
+      const entries = m().blocks.filter(x => x.kind === 'gateway' || x.kind === 'ingress' || x.kind === 'service');
       parts.push(
-        field('Sends requests to', select(b, 'via', [['', '(nothing)'], ...entries.map(x => [x.name, `${KINDS[x.kind].label}: ${x.name}`])]), 'Through an Ingress, or straight to a NodePort Service.'),
-        field('Host header', text(b, 'host', 'shop.example.com')),
-        h('div.pk-two', field('Paths (one per line)', lines(b, 'paths', '/', 2)), field('Requests per path', num(b, 'count', { min: 1, max: 12 }))));
+        field('Sends requests to', select(b, 'via', [['', '(nothing)'], ...entries.map(x => [x.name, `${KINDS[x.kind].label}: ${x.name}`])]), 'Through a Gateway (or a legacy Ingress), or straight to a NodePort Service.'),
+        h('div.pk-two', field('Host header', text(b, 'host', 'shop.example.com')), field('Port', select(b, 'port', [['80', '80 (http)'], ['443', '443 (https)']]))),
+        h('div.pk-two', field('Paths (one per line)', lines(b, 'paths', '/', 2)), field('Requests per path', num(b, 'count', { min: 1, max: 12 }))),
+        field('Headers (Name: value, one per line)', lines(b, 'headers', 'x-canary: always', 1), 'Sent with every request. An HTTPRoute rule can match on one.'));
     }
+    if (b.kind === 'gateway') parts.push(...gatewayInspector(b));
+    if (b.kind === 'httproute') parts.push(...routeInspector(b));
     if (b.kind === 'ingress') {
-      parts.push(h('div.eyebrow', 'Rules'),
+      parts.push(h('p.muted.small', 'Legacy: the Ingress API is frozen and the ingress-nginx controller was retired in March 2026. You still meet it in older clusters; new setups use a Gateway and HTTPRoutes.'), h('div.eyebrow', 'Rules'),
         b.rules.map((r, i) => h('div.yb-rule',
           h('input.yb-rule-host', { value: r.host || '', placeholder: 'any host', spellcheck: false, title: 'Host (empty = any)', onchange: e => { r.host = e.target.value.trim(); api.changed(); } }),
           h('input.yb-rule-path', { value: r.path || '/', spellcheck: false, title: 'Path prefix', onchange: e => { r.path = e.target.value.trim() || '/'; api.changed(); } }),
@@ -156,7 +243,7 @@ function boardOptions(api) {
 
   return {
     kinds: KINDS,
-    wireKinds: { via: { label: '' }, rule: { label: '' }, select: { label: '', color: '#6f9a5a' }, env: { label: '', color: '#a08a6a' }, claim: { label: '', color: '#8a7a6a' } },
+    wireKinds: { via: { label: '' }, rule: { label: '' }, parent: { label: '', color: '#b8834e' }, backend: { label: '' }, cert: { label: '', color: '#a08a6a' }, select: { label: '', color: '#6f9a5a' }, env: { label: '', color: '#a08a6a' }, claim: { label: '', color: '#8a7a6a' } },
     wires: () => resolved().map(r => ({ id: r.id, kind: r.kind, from: { block: r.from, port: 'out' }, to: { block: r.to }, r })),
     ports: b => (K.TARGETS[b.kind].length ? [{ id: 'out', label: '', on: resolved().some(r => r.from === b.id), title: `Drag onto ${K.TARGETS[b.kind].map(x => KINDS[x].label).join(', ')}` }] : []),
     body,
@@ -169,8 +256,8 @@ function boardOptions(api) {
       return false;
     },
     onDropEmpty: () => { api.say('To remove a reference, click its wire and press Delete.'); return false; },
-    palette: ['ingress', 'service', 'deployment', 'configmap', 'secret', 'pvc'].map(kind => ({ kind, add: at => add(kind, at) })),
-    howto: 'There are no cables in Kubernetes: a wire appears when a name or a label matches. Drag ▶ onto an object to write the reference. Click to configure; Delete removes.',
+    palette: ['gateway', 'httproute', 'service', 'deployment', 'configmap', 'secret', 'pvc', 'ingress'].map(kind => ({ kind, add: at => add(kind, at) })),
+    howto: 'There are no cables in Kubernetes: a wire appears when a name or a label matches. Drag an HTTPRoute\'s ▶ onto a Gateway (parentRef) and onto a Service (backendRef); drag a Service onto a Deployment to select its pods. Click to configure; Delete removes.',
     inspector,
     onDelete: sel => {
       if (sel.type === 'wire') { const r = K.refs(m()).find(x => x.id === sel.id); if (r) K.unref(m(), r); }
@@ -203,7 +290,9 @@ function formView(api) {
 }
 
 function formSettings(m, b) {
-  if (b.kind === 'client') return `→ ${b.via || '(nothing)'} · Host ${b.host} · ${b.paths.join(', ')}`;
+  if (b.kind === 'client') return `→ ${b.via || '(nothing)'} · Host ${b.host}:${b.port || 80} · ${b.paths.join(', ')}${b.headers?.length ? ` · ${b.headers.join(', ')}` : ''}`;
+  if (b.kind === 'gateway') return `class ${b.className} · ${b.listeners.map(l => `${l.name} ${l.protocol}:${l.port} ${l.hostname || '*'}`).join('; ')}`;
+  if (b.kind === 'httproute') return `hosts ${b.hostnames.join(', ') || '(listener)'} · ${b.rules.map(r => `${r.type} ${r.path}${r.header ? ` [${r.header}]` : ''} → ${r.backends.map(x => `${x.service}:${x.port}${r.backends.length > 1 ? ` w${K.weightOf(x)}` : ''}`).join(', ') || '(none)'}`).join('; ') || 'no rules'}`;
   if (b.kind === 'ingress') return b.rules.map(r => `${r.host || '*'}${r.path} → ${r.service}:${r.port}`).join('; ') || 'no rules';
   if (b.kind === 'service') return `${b.type} · selector ${b.selector || '(none)'} · ${b.port} → ${b.targetPort}`;
   if (b.kind === 'deployment') return `${b.image} × ${b.replicas} · labels ${b.labels}${b.readiness ? ` · readiness ${b.readyPath}:${b.readyPort}` : ''}${b.liveness ? ` · liveness ${b.livePath}:${b.livePort} after ${b.liveDelay}s` : ''}`;
@@ -227,7 +316,26 @@ function runIt(m, id) {
     marks[s.id] = e.ready.length ? 'ok' : 'bad';
     steps.push({ who: s.name, tone: e.ready.length ? 'ok' : 'bad', text: e.ready.length ? `endpoints: ${e.ready.map(p => p.name).join(', ')}.` : `no endpoints. ${e.why}` });
   }
-  for (const r of K.refs(m)) if (r.to && r.kind === 'select') wires[r.id] = R.endpoints[r.from]?.ready.some(p => p.dep === r.to) ? 'ok' : 'bad';
+  for (const g of K.ofKind(m, 'gateway')) {
+    const st = R.gateways[g.id];
+    marks[g.id] = st.programmed ? 'ok' : 'bad';
+    steps.push({ who: g.name, tone: st.programmed ? 'ok' : 'bad', text: st.accepted
+      ? `Gateway accepted by ${st.controller}; address ${st.address}. ${st.listeners.map(x => `Listener ${x.l.name} (${x.l.protocol} :${x.l.port}, ${x.l.hostname || 'any host'}): ${x.ok ? 'Programmed' : `${x.reason}: ${x.why}`}, ${x.attached} route${x.attached === 1 ? '' : 's'}.`).join(' ')}`
+      : st.why });
+  }
+  for (const rt of K.ofKind(m, 'httproute')) {
+    const st = R.routes[rt.id];
+    const ok = st.parents.length > 0 && st.parents.every(p => p.accepted) && st.resolved;
+    marks[rt.id] = ok ? 'ok' : 'bad';
+    const ps = st.parents.length ? st.parents.map(p => (p.accepted ? `parent ${p.ref.name}: Accepted on listener ${p.listeners.map(l => l.name).join(', ')}.` : `parent ${p.ref.name}: ${p.why}`)).join(' ') : 'no parentRefs: it attaches to nothing.';
+    steps.push({ who: rt.name, tone: ok ? 'ok' : 'bad', text: `HTTPRoute ${ps} ${st.resolved ? 'ResolvedRefs: True.' : `ResolvedRefs: False (${st.refsBad[0].reason}): ${st.refsBad.map(x => x.why).join(' ')}`}` });
+  }
+  for (const r of K.refs(m)) if (r.to) {
+    if (r.kind === 'select') wires[r.id] = R.endpoints[r.from]?.ready.some(p => p.dep === r.to) ? 'ok' : 'bad';
+    if (r.kind === 'parent') wires[r.id] = R.routes[r.from]?.parents[r.parent]?.accepted ? 'ok' : 'bad';
+    if (r.kind === 'backend') wires[r.id] = R.routes[r.from]?.refsBad.some(x => x.ri === r.ri && x.bi === r.bi) ? 'bad' : 'ok';
+    if (r.kind === 'cert') wires[r.id] = R.gateways[r.from]?.listeners.find(x => x.l.cert === r.ref)?.ok ? 'ok' : 'bad';
+  }
 
   if (id === 'rollout') {
     const target = deps.find(d => d.next);
@@ -257,7 +365,7 @@ function runIt(m, id) {
   for (const g of groups.values()) steps.push({ who: 'request', tone: g.code === 200 ? 'ok' : 'bad', text: [h('code', `GET ${g.host}${g.path}`), ` ×${g.n} → ${g.code || 'no answer'}: ${g.why}`] });
   const tokens = R.results.map(r => ({ hops: r.chain.slice(1).map((to, i) => ({ from: r.chain[i], to })), label: r.path, endCls: r.code === 200 ? 'ok' : 'bad' }));
   const client = K.ofKind(m, 'client')[0];
-  for (const r of K.refs(m)) if (r.to && (r.kind === 'via' || r.kind === 'rule')) {
+  for (const r of K.refs(m)) if (r.to && ['via', 'rule', 'parent', 'backend'].includes(r.kind)) {
     const through = R.results.filter(x => x.chain.includes(r.from) && x.chain.includes(r.to));
     if (through.length) wires[r.id] = through.every(x => x.code === 200) ? 'ok' : 'bad';
   }
@@ -269,7 +377,18 @@ function runIt(m, id) {
 
 function podsPanel(m, R) {
   const el = h('div.yb-card');
-  fill(el, h('div.eyebrow', 'kubectl get pods'),
+  const gws = K.ofKind(m, 'gateway'), rts = K.ofKind(m, 'httproute');
+  fill(el,
+    gws.length > 0 && h('div.eyebrow', 'kubectl get gateway'),
+    gws.length > 0 && h('table.nb-rt', h('tr', h('th', 'NAME'), h('th', 'CLASS'), h('th', 'ADDRESS'), h('th', 'PROGRAMMED')),
+      gws.map(g => { const st = R.gateways[g.id]; return h('tr', h('td', g.name), h('td', g.className), h('td', st.address || h('span.yb-no', '')), h('td', h(`span.ab-code.${st.programmed ? 'ok' : 'bad'}`, st.programmed ? 'True' : st.accepted ? 'False' : 'Unknown'))); })),
+    rts.length > 0 && h('div.eyebrow', 'HTTPRoutes: status.parents[].conditions'),
+    rts.length > 0 && h('table.nb-rt', h('tr', h('th', 'NAME'), h('th', 'HOSTNAMES'), h('th', 'ACCEPTED'), h('th', 'RESOLVEDREFS')),
+      rts.map(r => { const st = R.routes[r.id]; const acc = st.parents.length > 0 && st.parents.every(p => p.accepted);
+        return h('tr', h('td', r.name), h('td', h('code', r.hostnames.length ? JSON.stringify(r.hostnames) : '')),
+          h('td', h(`span.ab-code.${acc ? 'ok' : 'bad'}`, acc ? 'True' : st.parents.find(p => !p.accepted)?.reason || 'no parents')),
+          h('td', h(`span.ab-code.${st.resolved ? 'ok' : 'bad'}`, st.resolved ? 'True' : st.refsBad[0].reason))); })),
+    h('div.eyebrow', 'kubectl get pods'),
     R.pods.length ? h('table.nb-rt', h('tr', h('th', 'NAME'), h('th', 'READY'), h('th', 'STATUS')),
       R.pods.map(p => h('tr', h('td', h('code', p.name)), h('td', p.ready ? '1/1' : '0/1'), h('td', h(`span.ab-code.${p.ready ? 'ok' : 'bad'}`, p.phase))))) : h('p.muted.small', 'No pods.'),
     K.ofKind(m, 'service').length > 0 && h('div.eyebrow', 'kubectl get endpoints'),

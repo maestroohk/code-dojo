@@ -47,6 +47,20 @@ const ART = {
   folder: `<path d="M14 18 H46 L52 24 H106 V62 H14 Z" ${B}/><path d="M14 30 H106" ${L}/><path d="M22 40 H60 M22 48 H50" ${L}/>`,
   ingress: `<path d="M22 66 V30 C22 10 98 10 98 30 V66 Z" ${B}/><path d="M34 66 V34 C34 20 86 20 86 34 V66" ${F}/>
     <path d="M44 48 H70 M62 40 L70 48 L62 56" ${L} stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><rect x="18" y="64" width="84" height="5" rx="2" ${A}/>`,
+  // Gateway API (lab-kubebuild.js): the Gateway as a rack-mounted edge proxy (status screen, two listener
+  // jacks with link lights, vents); an HTTPRoute as a route table card (match chip -> backend per row)
+  edgeproxy: `<rect x="4" y="22" width="8" height="32" rx="1.5" ${B}/><rect x="108" y="22" width="8" height="32" rx="1.5" ${B}/>
+    <circle cx="8" cy="28" r="1.4" ${D}/><circle cx="8" cy="48" r="1.4" ${D}/><circle cx="112" cy="28" r="1.4" ${D}/><circle cx="112" cy="48" r="1.4" ${D}/>
+    <rect x="10" y="18" width="100" height="40" rx="4" ${B}/><rect x="15" y="23" width="90" height="30" rx="2" ${F}/>
+    <rect x="19" y="27" width="28" height="22" rx="1.5" ${S}/><path d="M23 33 H42 M23 38 H36 M23 43 H39" ${L}/>
+    <rect x="53" y="33" width="11" height="12" rx="1.5" ${D}/><rect x="69" y="33" width="11" height="12" rx="1.5" ${D}/>
+    <path d="M55.5 33 V30 H61.5 V33 M71.5 33 V30 H77.5 V33" ${L}/><circle cx="58.5" cy="27.5" r="1.6" ${A}/><circle cx="74.5" cy="27.5" r="1.6" ${A}/>
+    <path d="M87 28 V48 M92 28 V48 M97 28 V48 M102 28 V48" ${L}/>`,
+  routetable: `<rect x="8" y="6" width="104" height="64" rx="5" ${B}/><rect x="8" y="6" width="104" height="13" rx="5" ${F}/><path d="M8 15 H112" ${L}/>
+    <path d="M16 12.5 H44" ${L} stroke-width="2.2" stroke-linecap="round"/><circle cx="102" cy="12.5" r="2.4" ${A}/>
+    ${[0, 1, 2].map(i => `<rect x="15" y="${25 + i * 15}" width="34" height="10" rx="2" ${F}/><path d="M20 ${30 + i * 15} H${38 - i * 6}" ${L}/>
+    <path d="M54 ${30 + i * 15} H80 M76 ${26.5 + i * 15} L80 ${30 + i * 15} L76 ${33.5 + i * 15}" ${L} stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="85" y="${25 + i * 15}" width="20" height="10" rx="2" ${i === 2 ? D : A}/>`).join('')}`,
   service: `<path d="M38 14 H82 L98 38 L82 62 H38 L22 38 Z" ${B}/><path d="M46 38 H60 M60 38 L74 26 M60 38 H76 M60 38 L74 50" ${L} stroke-width="2.2"/>
     <circle cx="76" cy="26" r="3.5" ${A}/><circle cx="78" cy="38" r="3.5" ${A}/><circle cx="76" cy="50" r="3.5" ${A}/><circle cx="44" cy="38" r="3.5" ${D}/>`,
   pod: `<rect x="8" y="8" width="104" height="60" rx="14" ${F}/><rect x="8" y="8" width="104" height="60" rx="14" fill="none" class="dv-dash"/>
