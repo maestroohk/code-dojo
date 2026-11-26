@@ -1,0 +1,224 @@
+{
+  "title": "Pester: tests that catch real bugs",
+  "summary": "Describe, It, Should, BeforeAll and TestDrive in Pester 6; mocks with -ModuleName and Should -Invoke; and tests good enough to fail when the code is wrong.",
+  "minutes": 18,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A Pester test file",
+      "body": [
+        "**Pester** is PowerShell's test framework; it ships inside Windows (an ancient 3.4) and is installed in every serious",
+        "repo from the Gallery. The current release is **Pester 6.2** (September 2026). Version 6 kept v5's structure, so",
+        "almost every v5 test file you meet at work runs unchanged:",
+        "",
+        "```powershell",
+        "# tests/Get-OldLog.Tests.ps1    (the .Tests.ps1 suffix is how Invoke-Pester finds test files)",
+        "BeforeAll {",
+        "    Import-Module \"$PSScriptRoot/../LogTools.psd1\" -Force     # load the code under test",
+        "}",
+        "Describe 'Get-OldLog' {",
+        "    BeforeEach {",
+        "        $old = New-Item 'TestDrive:/old.log' -ItemType File -Force",
+        "        $old.LastWriteTime = (Get-Date).AddDays(-40)",
+        "        New-Item 'TestDrive:/new.log' -ItemType File -Force | Out-Null",
+        "    }",
+        "    It 'returns only files older than 30 days' {",
+        "        (Get-OldLog -Path TestDrive:/).Name | Should -Be 'old.log'",
+        "    }",
+        "}",
+        "```",
+        "",
+        "- **`TestDrive:`** is a temporary folder per test file, deleted afterwards: perfect for file tests.",
+        "- Put setup code in **`BeforeAll`/`BeforeEach`**, never loose in the file: Pester first *discovers* the tests and",
+        "  runs loose code then, not when the tests run.",
+        "- Common assertions: `Should -Be`, `-BeExactly` (case-sensitive), `-HaveCount 3`, `-Contain`, `-BeNullOrEmpty`,",
+        "  `-Throw '*not found*'`, `-BeOfType [datetime]`. Pester 6 adds a typed style too (`Should-Be`, `Should-BeString`,",
+        "  `Should-BeCollection`, `Should-Throw`); both work and you will see both.",
+        "- Run: `Invoke-Pester ./tests -Output Detailed`; in CI, `Invoke-Pester -CI` (exit code and a test-results file)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "This test file fails with `The term 'Get-OldLog' is not recognized`, although the module path is right. Why?",
+      "code": ["Import-Module \"$PSScriptRoot/../LogTools.psd1\" -Force", "", "Describe 'Get-OldLog' {", "    It 'works' { Get-OldLog -Path TestDrive:/ | Should -BeNullOrEmpty }", "}"],
+      "lang": "powershell",
+      "options": [
+        "Loose code runs during discovery only; the `Import-Module` belongs in a `BeforeAll { }` block",
+        "`$PSScriptRoot` is empty in test files",
+        "Tests cannot use modules",
+        "`Should -BeNullOrEmpty` needs a value"
+      ],
+      "answer": 0,
+      "explain": "Since Pester 5, a file is run twice: once to discover the `Describe`/`It` blocks, and again to run them. Only `BeforeAll`, `BeforeEach`, `It` and friends run in the second pass, so setup outside them is lost."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Tests for Get-OldLog that catch bugs",
+      "prompt": [
+        "Write the tests in `~/src/LogTools/tests/Get-OldLog.Tests.ps1` (the `BeforeAll` that imports the module is already",
+        "there). Use `TestDrive:` files with ages you set yourself.",
+        "",
+        "The checks do what a reviewer does: your tests must **pass** on the real module (**at least 3 tests**), and **fail**",
+        "on two broken copies of it: one where `Get-OldLog` returns the *new* files instead of the old ones, and one where it",
+        "*ignores `-Days`*. Run them with `Invoke-Pester ~/src/LogTools/tests -Output Detailed`."
+      ],
+      "setup": ["tests.sh"],
+      "checks": [
+        { "name": "at least 3 tests, all passing",
+          "cmd": "python3 \"$DOJO_FILES/mutants.py\" pass 3 Get-OldLog.Tests.ps1",
+          "fail": "Not yet (see what the check found)." },
+        { "name": "catches inverted ages",
+          "cmd": "python3 \"$DOJO_FILES/mutants.py\" mutant inverted Get-OldLog.Tests.ps1",
+          "fail": "Your tests should fail when the module returns the wrong files." },
+        { "name": "catches an ignored -Days",
+          "cmd": "python3 \"$DOJO_FILES/mutants.py\" mutant ignores-days Get-OldLog.Tests.ps1",
+          "fail": "Add a test that calls `Get-OldLog` with a `-Days` other than 30 and checks the result changes." }
+      ],
+      "hints": [
+        "In `BeforeEach`, create three files in `TestDrive:/` and set their `LastWriteTime` to 2, 40 and 100 days ago.",
+        "Test the default (`(Get-OldLog -Path TestDrive:/).Name | Sort-Object | Should -Be @('mid.log', 'old.log')`), a non-default `-Days 60`, and a case where nothing is old.",
+        "Write the file with a here-string and `Set-Content`, or `nano ~/src/LogTools/tests/Get-OldLog.Tests.ps1`."
+      ],
+      "solution": [
+        "@'",
+        "BeforeAll {",
+        "    Import-Module \"$PSScriptRoot/../LogTools.psd1\" -Force",
+        "}",
+        "",
+        "Describe 'Get-OldLog' {",
+        "    BeforeEach {",
+        "        foreach ($f in @{ Name = 'new.log'; Days = 2 }, @{ Name = 'mid.log'; Days = 40 }, @{ Name = 'old.log'; Days = 100 }) {",
+        "            $item = New-Item -Path \"TestDrive:/$($f.Name)\" -ItemType File -Force",
+        "            $item.LastWriteTime = (Get-Date).AddDays(-$f.Days)",
+        "        }",
+        "    }",
+        "    It 'returns files older than 30 days by default' {",
+        "        (Get-OldLog -Path TestDrive:/).Name | Sort-Object | Should -Be @('mid.log', 'old.log')",
+        "    }",
+        "    It 'honours -Days' {",
+        "        (Get-OldLog -Path TestDrive:/ -Days 60).Name | Should -Be 'old.log'",
+        "    }",
+        "    It 'returns nothing when every file is recent enough' {",
+        "        Get-OldLog -Path TestDrive:/ -Days 365 | Should -BeNullOrEmpty",
+        "    }",
+        "}",
+        "'@ | Set-Content ~/src/LogTools/tests/Get-OldLog.Tests.ps1",
+        "Invoke-Pester ~/src/LogTools/tests/Get-OldLog.Tests.ps1 -Output Detailed"
+      ],
+      "explain": [
+        "A test suite is only as good as the bugs it would catch. The checks used *mutation testing*: break the code on",
+        "purpose and see whether a test notices. A test that only runs `Get-OldLog` without checking *which* files came back",
+        "passes on every mutant: it is coverage without protection."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Mocks: replace what you do not want to run",
+      "body": [
+        "A **mock** replaces a command for the duration of a test, so you can test *your* logic without deleting files,",
+        "calling an API or rebooting a server, and then assert how it was called:",
+        "",
+        "```powershell",
+        "It 'removes only the old file' {",
+        "    Mock Remove-Item -ModuleName LogTools",
+        "    Get-ChildItem TestDrive:/ | Remove-OldLog",
+        "    Should -Invoke Remove-Item -ModuleName LogTools -Times 1 -Exactly -ParameterFilter { $LiteralPath -like '*old.log' }",
+        "}",
+        "```",
+        "",
+        "**`-ModuleName` is the part everyone forgets.** Your function runs *inside* the module, and a mock defined in the",
+        "test's scope is invisible there: the **real** `Remove-Item` runs and `Should -Invoke` reports 0 calls. With",
+        "`-ModuleName LogTools` the mock is injected into the module's scope.",
+        "",
+        "- `Mock Invoke-RestMethod { @{ status = 'ok' } }` returns fake data.",
+        "- `-ParameterFilter { $Uri -like '*/health' }` mocks (or counts) only matching calls.",
+        "- `Should -Invoke X -Times 0 -Exactly` proves something did **not** happen, such as nothing deleted under `-WhatIf`.",
+        "- To mock a command that does not exist on the test machine (a Windows-only cmdlet on a Linux build agent), define an",
+        "  empty function with that name first, then mock it."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A test does `Mock Remove-Item` (no `-ModuleName`), calls `Remove-OldLog` from the LogTools module, and `Should -Invoke Remove-Item -Times 1` fails with *was called 0 times*. What else happened?",
+      "options": [
+        "The real `Remove-Item` ran inside the module and deleted the file",
+        "Nothing: Remove-OldLog was skipped",
+        "Pester refused to run the test",
+        "The mock ran but was not counted"
+      ],
+      "answer": 0,
+      "explain": "The mock existed only in the test script's scope. The module's code resolved `Remove-Item` to the real cmdlet. On `TestDrive:` that is harmless; with a mocked REST call it might not be. Pester 6 prints the recorded calls (here `<none>`) to make this obvious."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Prove -WhatIf never deletes",
+      "prompt": [
+        "Write `~/src/LogTools/tests/Remove-OldLog.Tests.ps1`. Mock `Remove-Item` so nothing is really deleted, and assert",
+        "with `Should -Invoke`. At least **2 tests**; they must pass on the real module and fail on a copy that **deletes",
+        "even under `-WhatIf`**, and on a copy that **deletes every file, old or not**."
+      ],
+      "setup": ["tests.sh"],
+      "checks": [
+        { "name": "at least 2 tests, all passing",
+          "cmd": "python3 \"$DOJO_FILES/mutants.py\" pass 2 Remove-OldLog.Tests.ps1",
+          "fail": "Not yet (see what the check found)." },
+        { "name": "catches a broken -WhatIf",
+          "cmd": "python3 \"$DOJO_FILES/mutants.py\" mutant no-whatif Remove-OldLog.Tests.ps1",
+          "fail": "Add a test that pipes files into `Remove-OldLog -WhatIf` and asserts `Remove-Item` was called 0 times." },
+        { "name": "catches deleting new files",
+          "cmd": "python3 \"$DOJO_FILES/mutants.py\" mutant deletes-all Remove-OldLog.Tests.ps1",
+          "fail": "Add a test with one old and one new file that asserts `Remove-Item` was called exactly once." }
+      ],
+      "hints": [
+        "`BeforeEach { Mock Remove-Item -ModuleName LogTools; ... create an old and a new file in TestDrive:/ ... }`",
+        "Test 1: `Get-ChildItem TestDrive:/ | Remove-OldLog`, then `Should -Invoke Remove-Item -ModuleName LogTools -Times 1 -Exactly`.",
+        "Test 2: the same with `-WhatIf`, then `Should -Invoke Remove-Item -ModuleName LogTools -Times 0 -Exactly`."
+      ],
+      "solution": [
+        "@'",
+        "BeforeAll {",
+        "    Import-Module \"$PSScriptRoot/../LogTools.psd1\" -Force",
+        "}",
+        "",
+        "Describe 'Remove-OldLog' {",
+        "    BeforeEach {",
+        "        Mock Remove-Item -ModuleName LogTools",
+        "        $old = New-Item -Path 'TestDrive:/old.log' -ItemType File -Force",
+        "        $old.LastWriteTime = (Get-Date).AddDays(-40)",
+        "        New-Item -Path 'TestDrive:/new.log' -ItemType File -Force | Out-Null",
+        "    }",
+        "    It 'removes only the old file' {",
+        "        Get-ChildItem TestDrive:/ | Remove-OldLog",
+        "        Should -Invoke Remove-Item -ModuleName LogTools -Times 1 -Exactly",
+        "        Should -Invoke Remove-Item -ModuleName LogTools -Times 1 -Exactly -ParameterFilter { $LiteralPath -like '*old.log' }",
+        "    }",
+        "    It 'removes nothing with -WhatIf' {",
+        "        Get-ChildItem TestDrive:/ | Remove-OldLog -WhatIf",
+        "        Should -Invoke Remove-Item -ModuleName LogTools -Times 0 -Exactly",
+        "    }",
+        "}",
+        "'@ | Set-Content ~/src/LogTools/tests/Remove-OldLog.Tests.ps1",
+        "Invoke-Pester ~/src/LogTools/tests -Output Detailed"
+      ],
+      "explain": [
+        "\"-WhatIf never deletes\" is exactly the kind of promise that breaks silently in a refactor, and exactly the one",
+        "that matters most. A one-line `Should -Invoke ... -Times 0` keeps it true forever. In CI, `Invoke-Pester -CI` exits",
+        "non-zero on any failure and writes `testResults.xml` for the pipeline's test tab."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the Pester feature to its job.",
+      "pairs": [
+        ["`TestDrive:`", "a throwaway folder per test file"],
+        ["`BeforeAll`", "set-up that runs before the tests, not at discovery"],
+        ["`Mock X -ModuleName M`", "replace X inside module M"],
+        ["`Should -Invoke X -Times 0 -Exactly`", "prove X was never called"],
+        ["`Invoke-Pester -CI`", "exit code plus a results file for the pipeline"]
+      ]
+    }
+  ]
+}

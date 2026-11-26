@@ -1,0 +1,140 @@
+{
+  "title": "Boss: LogTools 1.2.0 is red",
+  "summary": "A failing CI run to read and fix in the code, a test that quietly calls the real API, and an installed module that will not load. Fix each at the cause.",
+  "minutes": 20,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket TOOLS-58",
+      "body": [
+        "*\"LogTools 1.2.0 is blocked: the pipeline is red, one test needs the internet (the build agents have none), and on",
+        "Priya's machine `Import-Module LogTools` says no valid module file was found. Release is Friday.\"*",
+        "",
+        "Read the evidence first (`~/ci/pester-run.log`, the test output, the import error), then fix the real cause. A test",
+        "is wrong only when it asserts the wrong behaviour; otherwise fix the code."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Red pipeline: keeps 90 days of audit logs",
+      "prompt": [
+        "Read the pipeline's output, `Get-Content ~/ci/pester-run.log`, and reproduce it:",
+        "`Invoke-Pester ~/src/LogTools/tests/Get-OldLog.Tests.ps1 -Output Detailed`.",
+        "",
+        "The test is right: audit logs are kept for 90 days, and `-Days` must accept that (up to 3650, as before 1.2.0).",
+        "Fix **the module**, not the test, so the file passes."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "Get-OldLog tests pass",
+          "cmd": "pwsh -NoProfile -c '$r = Invoke-Pester ~/src/LogTools/tests/Get-OldLog.Tests.ps1 -PassThru -Output None; \"$($r.Result) $($r.FailedCount)\"'",
+          "expectOutput": "Passed 0",
+          "fail": "`Invoke-Pester ~/src/LogTools/tests/Get-OldLog.Tests.ps1` should pass." },
+        { "name": "the test itself is unchanged",
+          "cmd": "cd ~/src/LogTools && git diff --quiet HEAD -- tests/Get-OldLog.Tests.ps1",
+          "fail": "Change the module, not `tests/Get-OldLog.Tests.ps1` (`git diff tests/` shows what you changed; `git checkout -- tests/Get-OldLog.Tests.ps1` puts it back)." },
+        { "name": "-Days is still validated",
+          "cmd": "pwsh -NoProfile -c 'Import-Module ~/src/LogTools/LogTools.psd1; try { Get-OldLog -Path /tmp -Days 0; \"accepted 0\" } catch { \"refused 0\" }; try { $null = Get-OldLog -Path /tmp -Days 3650; \"accepted 3650\" } catch { \"refused 3650\" }'",
+          "expectOutput": ["refused 0", "accepted 3650"],
+          "fail": "`-Days` should accept 1 to 3650 and still refuse 0." }
+      ],
+      "hints": [
+        "The log says *Cannot validate argument on parameter 'Days'. The 90 argument is greater than the maximum allowed range of 30*.",
+        "Look at `Get-OldLog`'s `param()` in `~/src/LogTools/LogTools.psm1`: `git diff HEAD~1 -- LogTools.psm1` shows what 1.2.0 changed.",
+        "`(Get-Content ~/src/LogTools/LogTools.psm1 -Raw).Replace('[ValidateRange(1, 30)]', '[ValidateRange(1, 3650)]') | Set-Content ~/src/LogTools/LogTools.psm1 -NoNewline`"
+      ],
+      "solution": [
+        "Get-Content ~/ci/pester-run.log",
+        "git -C ~/src/LogTools diff HEAD~1 -- LogTools.psm1",
+        "(Get-Content ~/src/LogTools/LogTools.psm1 -Raw).Replace('[ValidateRange(1, 30)]', '[ValidateRange(1, 3650)]') | Set-Content ~/src/LogTools/LogTools.psm1 -NoNewline",
+        "Invoke-Pester ~/src/LogTools/tests/Get-OldLog.Tests.ps1 -Output Detailed"
+      ],
+      "explain": "The test protected a real requirement (audit retention) from a well-meant \"tightening\". When a test goes red, the first question is *which one is wrong, the code or the test?*, and `git diff` of the last change usually answers it in a minute."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "The test that needs the internet",
+      "prompt": [
+        "Run `Invoke-Pester ~/src/LogTools/tests/Send-LogSummary.Tests.ps1 -Output Detailed`. The test mocks",
+        "`Invoke-RestMethod`, yet the failure is a network error from the **real** `Invoke-RestMethod` (this machine, like the",
+        "build agents, has no network).",
+        "",
+        "Fix the **test** this time so the mock is used and the test passes, with no network."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "Send-LogSummary tests pass offline",
+          "cmd": "pwsh -NoProfile -c '$r = Invoke-Pester ~/src/LogTools/tests/Send-LogSummary.Tests.ps1 -PassThru -Output None; \"$($r.Result) $($r.PassedCount) $($r.FailedCount)\"'",
+          "expectOutput": "Passed 1 0",
+          "fail": "`Invoke-Pester ~/src/LogTools/tests/Send-LogSummary.Tests.ps1` should pass its one test." },
+        { "name": "the mock and the assertion target the module",
+          "cmd": "test \"$(grep -c -- '-ModuleName LogTools' ~/src/LogTools/tests/Send-LogSummary.Tests.ps1)\" -ge 2",
+          "fail": "Both `Mock Invoke-RestMethod` and `Should -Invoke Invoke-RestMethod` need `-ModuleName LogTools`." },
+        { "name": "it still checks what was sent",
+          "cmd": "grep -q 'ParameterFilter' ~/src/LogTools/tests/Send-LogSummary.Tests.ps1",
+          "fail": "Keep the `-ParameterFilter` that checks the body says `oldFiles = 1`: that is what the test is for." }
+      ],
+      "hints": [
+        "`Send-LogSummary` runs inside the LogTools module; the test's `Mock` lives in the test's scope.",
+        "Add `-ModuleName LogTools` to the `Mock` line **and** to `Should -Invoke`.",
+        "`(Get-Content $f -Raw).Replace('Mock Invoke-RestMethod {', 'Mock Invoke-RestMethod -ModuleName LogTools {').Replace('Should -Invoke Invoke-RestMethod', 'Should -Invoke Invoke-RestMethod -ModuleName LogTools')`"
+      ],
+      "solution": [
+        "Invoke-Pester ~/src/LogTools/tests/Send-LogSummary.Tests.ps1 -Output Detailed",
+        "$f = '~/src/LogTools/tests/Send-LogSummary.Tests.ps1'",
+        "(Get-Content $f -Raw).Replace('Mock Invoke-RestMethod {', 'Mock Invoke-RestMethod -ModuleName LogTools {').Replace('Should -Invoke Invoke-RestMethod', 'Should -Invoke Invoke-RestMethod -ModuleName LogTools') | Set-Content $f -NoNewline",
+        "Invoke-Pester ~/src/LogTools/tests/Send-LogSummary.Tests.ps1 -Output Detailed"
+      ],
+      "explain": [
+        "On a developer laptop with internet, this test \"passed\" by posting to the real dashboard on every run, which is",
+        "worse than failing. Build agents without network caught it. A unit test that can reach the network is a bug; Pester",
+        "6 shows the recorded invocations of a mock when `Should -Invoke` fails, which makes this one easy to spot."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "No valid module file was found",
+      "prompt": [
+        "A colleague copied LogTools 1.2.0 into `~/.local/share/powershell/Modules/LogTools/1.2.0/`. Try",
+        "`Import-Module LogTools` and read the error, then compare the folder name with what the manifest inside says",
+        "(`Import-PowerShellDataFile` or `Test-ModuleManifest`).",
+        "",
+        "This **is** release 1.2.0. Fix the installed copy so `Import-Module LogTools` loads version **1.2.0**."
+      ],
+      "setup": ["boss.sh"],
+      "checks": [
+        { "name": "Import-Module LogTools loads 1.2.0",
+          "cmd": "cd /tmp && pwsh -NoProfile -c 'Import-Module LogTools -ErrorAction Stop; (Get-Module LogTools).Version.ToString()' 2>&1",
+          "expectOutput": "1.2.0",
+          "fail": "`Import-Module LogTools` should load version 1.2.0 from your module folder." },
+        { "name": "the installed manifest is valid and exports Send-LogSummary",
+          "cmd": "pwsh -NoProfile -c '$m = Test-ModuleManifest ~/.local/share/powershell/Modules/LogTools/1.2.0/LogTools.psd1 -ErrorAction Stop; \"$($m.Version) $($m.ExportedFunctions.Keys -contains \"Send-LogSummary\")\"'",
+          "expectOutput": "1.2.0 True",
+          "fail": "The manifest in the `1.2.0` folder should say `ModuleVersion = '1.2.0'` and export `Send-LogSummary`." }
+      ],
+      "hints": [
+        "PowerShell only accepts a module in a version folder when the manifest's `ModuleVersion` matches the folder name. Otherwise it skips it and reports *no valid module file was found*.",
+        "`(Import-PowerShellDataFile ~/.local/share/powershell/Modules/LogTools/1.2.0/LogTools.psd1).ModuleVersion` says `1.1.0`.",
+        "`Update-ModuleManifest` refuses a manifest that does not match its folder, so edit the text: `$p = '~/.local/share/powershell/Modules/LogTools/1.2.0/LogTools.psd1'; (Get-Content $p -Raw).Replace(\"ModuleVersion = '1.1.0'\", \"ModuleVersion = '1.2.0'\") | Set-Content $p -NoNewline`"
+      ],
+      "solution": [
+        "Import-Module LogTools",
+        "(Import-PowerShellDataFile ~/.local/share/powershell/Modules/LogTools/1.2.0/LogTools.psd1).ModuleVersion",
+        "Update-ModuleManifest -Path ~/.local/share/powershell/Modules/LogTools/1.2.0/LogTools.psd1 -ModuleVersion 1.2.0",
+        "$p = '~/.local/share/powershell/Modules/LogTools/1.2.0/LogTools.psd1'",
+        "(Get-Content $p -Raw).Replace(\"ModuleVersion = '1.1.0'\", \"ModuleVersion = '1.2.0'\") | Set-Content $p -NoNewline",
+        "Test-ModuleManifest $p",
+        "Import-Module LogTools -Force; Get-Module LogTools"
+      ],
+      "explain": [
+        "Hand-copying modules is how this happens. Installing from the feed (`Install-PSResource LogTools -Version 1.2.0`)",
+        "always creates a folder that matches the package's manifest, and `Get-InstalledPSResource` can then tell you exactly",
+        "what each machine has."
+      ]
+    }
+  ]
+}

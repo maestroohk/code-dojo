@@ -1,0 +1,193 @@
+{
+  "title": "Lint, publish, install: PSScriptAnalyzer and PSResourceGet",
+  "summary": "Make PSScriptAnalyzer a CI gate with a settings file, fix the findings that matter (plain-text passwords), and publish and install your module through a feed with PSResourceGet.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "PSScriptAnalyzer as a gate",
+      "body": [
+        "**PSScriptAnalyzer** (1.25 is current) is the linter behind the VS Code PowerShell extension's squiggles. In CI you",
+        "run it with a **settings file** checked into the repo, so everyone (and the pipeline) applies the same rules:",
+        "",
+        "```powershell",
+        "# PSScriptAnalyzerSettings.psd1",
+        "@{",
+        "    Severity     = @('Error', 'Warning')",
+        "    ExcludeRules = @('PSAvoidUsingWriteHost')     # this repo's scripts are interactive tools",
+        "}",
+        "```",
+        "",
+        "```powershell",
+        "Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1 -EnableExit",
+        "```",
+        "",
+        "`-EnableExit` sets the exit code to the number of findings, so the build fails on any. Findings worth knowing by name:",
+        "",
+        "| Rule | Why it matters |",
+        "|---|---|",
+        "| `PSAvoidUsingPlainTextForPassword` | a `[string] $Password` parameter ends up in history, logs and process lists |",
+        "| `PSAvoidUsingConvertToSecureStringWithPlainText` | the secret is in the script or its caller in clear text |",
+        "| `PSUseDeclaredVarsMoreThanAssignments` | a variable set and never used: usually a typo or dead code |",
+        "| `PSUseShouldProcessForStateChangingFunctions` | `Remove-`/`Set-`/`New-` functions without `-WhatIf` |",
+        "| `PSAvoidUsingCmdletAliases` | aliases differ between machines |",
+        "",
+        "The right type for a secret parameter is **`[pscredential]`** (user name plus `SecureString`), filled by",
+        "`Get-Credential` interactively or by a secret store in automation (module 7)."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Make the analyzer gate pass, honestly",
+      "prompt": [
+        "Run `Invoke-ScriptAnalyzer ~/scripts/Mount-ReportShare.ps1`. Then:",
+        "",
+        "1. Create `~/scripts/PSScriptAnalyzerSettings.psd1` that reports **Error and Warning** findings and excludes only",
+        "   **`PSAvoidUsingWriteHost`** (this script talks to an operator).",
+        "2. Fix the script, do not silence it: take a **`[pscredential] $Credential`** parameter instead of `-UserName` and",
+        "   `-Password`, and remove the unused variable.",
+        "",
+        "`Invoke-ScriptAnalyzer ~/scripts/Mount-ReportShare.ps1 -Settings ~/scripts/PSScriptAnalyzerSettings.psd1 -EnableExit`",
+        "must then exit `0`, and the script must still print `would mount \\\\files.example.com\\reports as <user>`."
+      ],
+      "setup": ["gallery.sh"],
+      "checks": [
+        { "name": "the settings file has the right rules",
+          "cmd": "pwsh -NoProfile -c '$s = Import-PowerShellDataFile ~/scripts/PSScriptAnalyzerSettings.psd1; \"$(@($s.Severity) | Sort-Object) | $($s.ExcludeRules)\"'",
+          "expectOutput": "Error Warning | PSAvoidUsingWriteHost",
+          "fail": "The settings file should set `Severity = @('Error', 'Warning')` and `ExcludeRules = @('PSAvoidUsingWriteHost')`, nothing else excluded." },
+        { "name": "the gate passes",
+          "cmd": "pwsh -NoProfile -c 'Invoke-ScriptAnalyzer -Path ~/scripts/Mount-ReportShare.ps1 -Settings ~/scripts/PSScriptAnalyzerSettings.psd1 | ForEach-Object { \"$($_.RuleName) line $($_.Line)\" }'",
+          "expectOutput": "",
+          "fail": "PSScriptAnalyzer still reports findings (below). Fix the code rather than excluding more rules." },
+        { "name": "it takes a PSCredential and still works",
+          "cmd": "pwsh -NoProfile -NonInteractive -c '& ~/scripts/Mount-ReportShare.ps1 -Credential ([pscredential]::new(\"svc-month-end\", (ConvertTo-SecureString \"not-a-real-secret\" -AsPlainText -Force)))' 2>&1",
+          "expectOutput": "would mount \\\\files.example.com\\reports as svc-month-end",
+          "fail": "`Mount-ReportShare.ps1 -Credential <PSCredential>` should print `would mount \\\\files.example.com\\reports as <user>`." }
+      ],
+      "hints": [
+        "The settings file is a plain hashtable: `@{ Severity = @('Error', 'Warning'); ExcludeRules = @('PSAvoidUsingWriteHost') }`.",
+        "The new `param()`: `[Parameter(Mandatory)] [pscredential] $Credential`. Then `ConvertTo-SecureString`, `$secure`, `$credential = ...` and `$unused` all go.",
+        "Keep the last line, but use `$Credential.UserName`."
+      ],
+      "solution": [
+        "Invoke-ScriptAnalyzer ~/scripts/Mount-ReportShare.ps1",
+        "\"@{ Severity = @('Error', 'Warning'); ExcludeRules = @('PSAvoidUsingWriteHost') }\" | Set-Content ~/scripts/PSScriptAnalyzerSettings.psd1",
+        "@'",
+        "# Mount-ReportShare.ps1: connects the reports share for the month-end job.",
+        "[CmdletBinding()]",
+        "param(",
+        "    [Parameter(Mandatory)]",
+        "    [pscredential] $Credential",
+        ")",
+        "Write-Host \"would mount \\\\files.example.com\\reports as $($Credential.UserName)\"",
+        "'@ | Set-Content ~/scripts/Mount-ReportShare.ps1",
+        "Invoke-ScriptAnalyzer ~/scripts/Mount-ReportShare.ps1 -Settings ~/scripts/PSScriptAnalyzerSettings.psd1"
+      ],
+      "explain": [
+        "The test in the check builds a credential from a plain string, which is fine in a test and nowhere else. In the",
+        "real job the credential comes from `Get-Secret` (module 7). A `[pscredential]` parameter also works with",
+        "`New-PSDrive -Credential`, `Invoke-Command -Credential` and most cmdlets that log in somewhere."
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "PSResourceGet: the current way to install modules",
+      "body": [
+        "**PSResourceGet** (`Microsoft.PowerShell.PSResourceGet`, bundled since PowerShell 7.4; 1.2.1 ships with 7.6) replaces",
+        "the old **PowerShellGet 2** (`Install-Module`, `Find-Module`), which is still in Windows PowerShell 5.1 and in many",
+        "scripts. Same ideas, new names:",
+        "",
+        "| Job | PowerShellGet 2 (old) | PSResourceGet (current) |",
+        "|---|---|---|",
+        "| Search | `Find-Module` | `Find-PSResource` |",
+        "| Install | `Install-Module -Scope CurrentUser` | `Install-PSResource -Scope CurrentUser` |",
+        "| Download only | `Save-Module` | `Save-PSResource` |",
+        "| What is installed | `Get-InstalledModule` | `Get-InstalledPSResource` |",
+        "| Publish | `Publish-Module` | `Publish-PSResource` |",
+        "| Add a feed | `Register-PSRepository` | `Register-PSResourceRepository` |",
+        "",
+        "**Trust.** The PowerShell Gallery is public: anyone can publish, and name-squatting and malicious packages happen.",
+        "`PSGallery` is **untrusted** by default, so installs ask first. Teams usually: pin versions (`-Version '[2.1.0, 3.0)'`",
+        "or an exact one), vet a module once and mirror it to an **internal feed** (a NuGet server, Azure Artifacts, or even",
+        "a file share), and install from there with `-TrustRepository` only for that feed. `Save-PSResource` is also how you",
+        "get modules onto a server with no internet."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Old PowerShellGet 2, or current PSResourceGet?",
+      "buckets": ["PowerShellGet 2", "PSResourceGet"],
+      "items": [
+        ["`Install-Module Pester -Scope CurrentUser`", 0],
+        ["`Install-PSResource Pester -Scope CurrentUser`", 1],
+        ["`Register-PSRepository`", 0],
+        ["`Register-PSResourceRepository`", 1],
+        ["`Get-InstalledPSResource`", 1],
+        ["`Find-Module`", 0]
+      ],
+      "explain": "Both are still everywhere. In new scripts, use PSResourceGet; on a Windows PowerShell 5.1 box without it, `Install-Module` is what you have (and `Install-PSResource -Name Microsoft.PowerShell.PSResourceGet` fixes that)."
+    },
+    {
+      "type": "terminal",
+      "image": "pwsh",
+      "title": "Publish LogTools to the team feed and install it",
+      "prompt": [
+        "The team keeps vetted modules in a feed. Here it is a folder, `~/feed` (a file share works the same way).",
+        "",
+        "1. Register it as a repository named **`TeamFeed`**, **trusted** (leave `PSGallery` untrusted).",
+        "2. Bump LogTools to **1.1.0** in its manifest, and **publish** `~/src/LogTools` to `TeamFeed`.",
+        "3. **Install** LogTools 1.1.0 from `TeamFeed` for your user."
+      ],
+      "setup": ["gallery.sh"],
+      "checks": [
+        { "name": "TeamFeed is registered and trusted, PSGallery is not",
+          "cmd": "pwsh -NoProfile -c '$f = Get-PSResourceRepository TeamFeed -ErrorAction Stop; $g = Get-PSResourceRepository PSGallery; \"$($f.Uri.LocalPath.TrimEnd(\"/\")) $($f.Trusted) $($g.Trusted)\"'",
+          "expectOutput": "/home/learner/feed True False",
+          "fail": "`Get-PSResourceRepository` should show `TeamFeed` at `/home/learner/feed`, trusted, and `PSGallery` still untrusted." },
+        { "name": "the feed holds LogTools 1.1.0",
+          "cmd": "ls ~/feed",
+          "expectContains": "LogTools.1.1.0.nupkg",
+          "fail": "`~/feed` should contain `LogTools.1.1.0.nupkg` (Publish-PSResource writes it)." },
+        { "name": "1.1.0 is installed from TeamFeed",
+          "cmd": "pwsh -NoProfile -c 'Get-InstalledPSResource LogTools -ErrorAction Stop | ForEach-Object { \"$($_.Version) $($_.Repository)\" }'",
+          "expectOutput": "1.1.0 TeamFeed",
+          "fail": "`Get-InstalledPSResource LogTools` should show version 1.1.0 from `TeamFeed`." }
+      ],
+      "hints": [
+        "`Register-PSResourceRepository -Name TeamFeed -Uri ~/feed -Trusted`",
+        "`Update-ModuleManifest -Path ~/src/LogTools/LogTools.psd1 -ModuleVersion 1.1.0`, then `Publish-PSResource -Path ~/src/LogTools -Repository TeamFeed`.",
+        "`Install-PSResource -Name LogTools -Repository TeamFeed -Scope CurrentUser`, and check with `Get-InstalledPSResource LogTools`."
+      ],
+      "solution": [
+        "Register-PSResourceRepository -Name TeamFeed -Uri ~/feed -Trusted",
+        "Get-PSResourceRepository",
+        "Update-ModuleManifest -Path ~/src/LogTools/LogTools.psd1 -ModuleVersion 1.1.0",
+        "Publish-PSResource -Path ~/src/LogTools -Repository TeamFeed",
+        "Find-PSResource -Name LogTools -Repository TeamFeed",
+        "Install-PSResource -Name LogTools -Repository TeamFeed -Scope CurrentUser",
+        "Get-InstalledPSResource LogTools"
+      ],
+      "explain": [
+        "In a real pipeline, the publish step runs only after Pester and PSScriptAnalyzer pass, with the feed's API key from",
+        "the pipeline's secret store (`Publish-PSResource -ApiKey`), and every machine installs from the feed with a pinned",
+        "version. A `RequiredModules` entry in a manifest, or `#Requires -Modules`, then fails fast on a machine that does",
+        "not have it."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A blog post says: `Install-Module CoolTools -Force -SkipPublisherCheck -AllowClobber`. Before running it on a build server, what is the most important thing to check?",
+      "options": [
+        "Who publishes CoolTools and what it does (Gallery page, source, downloads), and pin a version or mirror it to your feed",
+        "Whether `-Force` is spelt right",
+        "That the server runs PowerShell 7",
+        "Nothing: the Gallery scans every package"
+      ],
+      "answer": 0,
+      "explain": "`-Force -SkipPublisherCheck -AllowClobber` turns off the very prompts that protect you: replacing commands from other modules and ignoring a changed signing publisher. Module code runs with the server's permissions. Gallery packages are checked for known malware, not for being safe or trustworthy."
+    }
+  ]
+}
