@@ -1,0 +1,212 @@
+{
+  "title": "Boss: the supply-chain week",
+  "summary": "A week of supply-chain work: a release gate that honours expiring risk acceptances, a lock-file diff that catches a package whose content changed under the same version, and log redaction for the keys that keep turning up in build output.",
+  "minutes": 40,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The tickets",
+      "body": [
+        "```text",
+        "SEC-311  The release gate fails on every High advisory, even ones security has formally",
+        "         accepted until a fix ships. Support accepted risks, but only until their expiry date.",
+        "SEC-312  A package's content changed while its version stayed 1.4.2 (a registry incident at a",
+        "         mirror). Our lock file has contentHash for every package: diff lock files in CI.",
+        "SEC-313  Build logs contain API keys (verbose HTTP logging in integration tests). Redact them",
+        "         before logs are uploaded.",
+        "```"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "SEC-311: a gate with expiring acceptances",
+      "prompt": [
+        "Write `List<string> Gate(List<Finding> findings, List<Accepted> accepted, DateOnly today)`. The records are given.",
+        "",
+        "- only `High` and `Critical` findings can fail the gate;",
+        "- a finding is covered by an acceptance with the same `Advisory` **and** `Package` whose `Expires` is today or later;",
+        "- each uncovered High/Critical finding gives `\"<Package> <Version> <Severity> <Advisory>\"`, plus ` (acceptance expired <yyyy-MM-dd>)` when a matching acceptance exists but expired;",
+        "- Critical first, then by package (ordinal). An empty list means the release may ship."
+      ],
+      "starter": [
+        "List<string> Gate(List<Finding> findings, List<Accepted> accepted, DateOnly today)",
+        "{",
+        "    return findings.Where(f => f.Severity is \"High\" or \"Critical\").Select(f => $\"{f.Package} {f.Version} {f.Severity} {f.Advisory}\").ToList();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Gate(List<Finding> findings, List<Accepted> accepted, DateOnly today)",
+        "{",
+        "    var result = new List<(int Rank, string Package, string Line)>();",
+        "    foreach (var f in findings.Where(f => f.Severity is \"High\" or \"Critical\"))",
+        "    {",
+        "        var matches = accepted.Where(a => a.Advisory == f.Advisory && a.Package == f.Package).ToList();",
+        "        if (matches.Any(a => a.Expires >= today)) continue;",
+        "        var line = $\"{f.Package} {f.Version} {f.Severity} {f.Advisory}\";",
+        "        if (matches.Count > 0) line += $\" (acceptance expired {matches.Max(a => a.Expires):yyyy-MM-dd})\";",
+        "        result.Add((f.Severity == \"Critical\" ? 0 : 1, f.Package, line));",
+        "    }",
+        "    return result.OrderBy(r => r.Rank).ThenBy(r => r.Package, StringComparer.Ordinal).Select(r => r.Line).ToList();",
+        "}"
+      ],
+      "template": [
+        "var today = new DateOnly(2026, 11, 27);",
+        "var findings = new List<Finding>",
+        "{",
+        "    new(\"Example.Compression\", \"1.4.2\", \"High\", \"GHSA-xxxx-0002\"),",
+        "    new(\"Example.ImageKit\", \"2.1.0\", \"Critical\", \"GHSA-xxxx-0001\"),",
+        "    new(\"Example.Archive\", \"0.9.0\", \"Critical\", \"GHSA-xxxx-0005\"),",
+        "    new(\"Example.Logging\", \"3.0.0\", \"Moderate\", \"GHSA-xxxx-0003\"),",
+        "    new(\"Example.Pdf\", \"5.0.1\", \"High\", \"GHSA-xxxx-0006\"),",
+        "};",
+        "var accepted = new List<Accepted>",
+        "{",
+        "    new(\"GHSA-xxxx-0002\", \"Example.Compression\", new DateOnly(2026, 12, 15), \"not reachable: only used for test fixtures\"),",
+        "    new(\"GHSA-xxxx-0006\", \"Example.Pdf\", new DateOnly(2026, 10, 31), \"fix promised by vendor in October\"),",
+        "    new(\"GHSA-xxxx-0001\", \"Example.Other\", new DateOnly(2027, 1, 1), \"a different package\"),",
+        "};",
+        "Dojo.Eq(\"the gate on release day\", new List<string>",
+        "{",
+        "    \"Example.Archive 0.9.0 Critical GHSA-xxxx-0005\",",
+        "    \"Example.ImageKit 2.1.0 Critical GHSA-xxxx-0001\",",
+        "    \"Example.Pdf 5.0.1 High GHSA-xxxx-0006 (acceptance expired 2026-10-31)\",",
+        "}, Gate(findings, accepted, today));",
+        "Dojo.Eq(\"an acceptance is valid on its last day\", new List<string>(), Gate(new List<Finding> { findings[0] }, accepted, new DateOnly(2026, 12, 15)));",
+        "Dojo.Eq(\"...and not the day after\", new List<string> { \"Example.Compression 1.4.2 High GHSA-xxxx-0002 (acceptance expired 2026-12-15)\" }, Gate(new List<Finding> { findings[0] }, accepted, new DateOnly(2026, 12, 16)));",
+        "Dojo.Eq(\"no findings, no failures\", new List<string>(), Gate(new List<Finding>(), accepted, today));",
+        "",
+        "{{CODE}}",
+        "",
+        "record Finding(string Package, string Version, string Severity, string Advisory);",
+        "record Accepted(string Advisory, string Package, DateOnly Expires, string Reason);"
+      ],
+      "hints": [
+        "For each High/Critical finding, find the acceptances with the same advisory and package. Any with `Expires >= today` covers it.",
+        "Collect `(rank, package, line)` and sort with `OrderBy(rank).ThenBy(package, StringComparer.Ordinal)`. Format a `DateOnly` with `:yyyy-MM-dd`."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "SEC-312: diff two lock files",
+      "prompt": [
+        "Write `List<string> LockDiff(string before, string after)` (`using System.Text.Json;`). Both are `packages.lock.json` files:",
+        "",
+        "```json",
+        "{ \"version\": 1, \"dependencies\": { \"net10.0\": {",
+        "    \"Example.ImageKit\": { \"type\": \"Direct\", \"requested\": \"[2.1.0, )\", \"resolved\": \"2.1.0\", \"contentHash\": \"q1w2...==\" } } } }",
+        "```",
+        "",
+        "Compare package by package (a package is identified by framework and id). Output, sorted with ordinal order:",
+        "",
+        "- `+ <framework> <id> <resolved>` for a new package, `- <framework> <id> <resolved>` for a removed one;",
+        "- `~ <framework> <id> <old> -> <new>` when the resolved version changed;",
+        "- `! <framework> <id> <resolved> content changed` when the version is the **same** but `contentHash` differs: the one that must stop the build."
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "List<string> LockDiff(string before, string after)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "List<string> LockDiff(string before, string after)",
+        "{",
+        "    Dictionary<(string Fw, string Id), (string Version, string Hash)> Read(string json)",
+        "    {",
+        "        var map = new Dictionary<(string, string), (string, string)>();",
+        "        using var doc = JsonDocument.Parse(json);",
+        "        foreach (var fw in doc.RootElement.GetProperty(\"dependencies\").EnumerateObject())",
+        "            foreach (var p in fw.Value.EnumerateObject())",
+        "                map[(fw.Name, p.Name)] = (p.Value.GetProperty(\"resolved\").GetString() ?? \"\",",
+        "                    p.Value.TryGetProperty(\"contentHash\", out var h) ? h.GetString() ?? \"\" : \"\");",
+        "        return map;",
+        "    }",
+        "    var a = Read(before);",
+        "    var b = Read(after);",
+        "    var lines = new List<string>();",
+        "    foreach (var (key, (v, h)) in b)",
+        "    {",
+        "        if (!a.TryGetValue(key, out var old)) lines.Add($\"+ {key.Fw} {key.Id} {v}\");",
+        "        else if (old.Version != v) lines.Add($\"~ {key.Fw} {key.Id} {old.Version} -> {v}\");",
+        "        else if (old.Hash != h) lines.Add($\"! {key.Fw} {key.Id} {v} content changed\");",
+        "    }",
+        "    foreach (var (key, (v, _)) in a)",
+        "        if (!b.ContainsKey(key)) lines.Add($\"- {key.Fw} {key.Id} {v}\");",
+        "    lines.Sort(StringComparer.Ordinal);",
+        "    return lines;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var before = \"\"\"",
+        "{ \"version\": 1, \"dependencies\": { \"net10.0\": {",
+        "  \"Example.ImageKit\": { \"type\": \"Direct\", \"requested\": \"[2.1.0, )\", \"resolved\": \"2.1.0\", \"contentHash\": \"AAAA1111==\" },",
+        "  \"Example.Compression\": { \"type\": \"Transitive\", \"resolved\": \"1.4.2\", \"contentHash\": \"BBBB2222==\" },",
+        "  \"Example.Logging\": { \"type\": \"Direct\", \"requested\": \"[3.0.0, )\", \"resolved\": \"3.0.0\", \"contentHash\": \"CCCC3333==\" },",
+        "  \"Example.Old\": { \"type\": \"Transitive\", \"resolved\": \"0.1.0\", \"contentHash\": \"DDDD4444==\" } } } }",
+        "\"\"\";",
+        "var after = \"\"\"",
+        "{ \"version\": 1, \"dependencies\": { \"net10.0\": {",
+        "  \"Example.ImageKit\": { \"type\": \"Direct\", \"requested\": \"[2.1.1, )\", \"resolved\": \"2.1.1\", \"contentHash\": \"EEEE5555==\" },",
+        "  \"Example.Compression\": { \"type\": \"Transitive\", \"resolved\": \"1.4.2\", \"contentHash\": \"ZZZZ9999==\" },",
+        "  \"Example.Logging\": { \"type\": \"Direct\", \"requested\": \"[3.0.0, )\", \"resolved\": \"3.0.0\", \"contentHash\": \"CCCC3333==\" },",
+        "  \"Example.New\": { \"type\": \"Transitive\", \"resolved\": \"1.0.0\", \"contentHash\": \"FFFF6666==\" } } } }",
+        "\"\"\";",
+        "Dojo.Eq(\"the diff\", new List<string>",
+        "{",
+        "    \"! net10.0 Example.Compression 1.4.2 content changed\",",
+        "    \"+ net10.0 Example.New 1.0.0\",",
+        "    \"- net10.0 Example.Old 0.1.0\",",
+        "    \"~ net10.0 Example.ImageKit 2.1.0 -> 2.1.1\",",
+        "}, LockDiff(before, after));",
+        "Dojo.Eq(\"identical files: no diff\", new List<string>(), LockDiff(before, before));"
+      ],
+      "hints": [
+        "Read each file into a dictionary keyed by `(framework, id)` with `(resolved, contentHash)`: `GetProperty(\"dependencies\").EnumerateObject()`, then `EnumerateObject()` again for the packages.",
+        "Walk the new file for `+`, `~` and `!`, the old one for `-`, then `Sort(StringComparer.Ordinal)` (`!` < `+` < `-` < `~` in ordinal order)."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "SEC-313: redact keys in build logs",
+      "prompt": [
+        "Write `string Redact(string line)` (`using System.Text.RegularExpressions;`). Each value that the scanner rule from the secrets lesson finds (keyword, `:` or `=`, 12+ characters from `A-Za-z0-9_-.+/=`) is replaced by its **first 4 characters** followed by `****`. Everything else in the line stays exactly as it was. Here every such value is redacted, whatever its entropy: a log is not the place to be clever.",
+        "",
+        "```text",
+        "Authorization header token=dt_7Hq2Lw9xPz4Rk8Vb sent   ->  Authorization header token=dt_7**** sent",
+        "```"
+      ],
+      "starter": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "string Redact(string line) => line;"
+      ],
+      "solution": [
+        "using System.Text.RegularExpressions;",
+        "",
+        "string Redact(string line) =>",
+        "    Regex.Replace(line, @\"(?i)((?:api[_-]?key|secret|token|passw(?:or)?d)[\"\"']?\\s*[:=]\\s*[\"\"']?)([A-Za-z0-9_\\-.+/=]{12,})\",",
+        "        m => m.Groups[1].Value + m.Groups[2].Value[..4] + \"****\");"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "Dojo.Eq(\"a token in a log line\", \"Authorization header token=dt_7**** sent\", Redact(\"Authorization header token=dt_7Hq2Lw9xPz4Rk8Vb sent\"));",
+        "Dojo.Eq(\"JSON keeps its quotes\", \"{\\\"ApiKey\\\": \\\"pay_****\\\", \\\"BaseUrl\\\": \\\"https://payments.example\\\"}\", Redact(\"{\\\"ApiKey\\\": \\\"pay_live_a1b2c3d4e5f6c41d07e9\\\", \\\"BaseUrl\\\": \\\"https://payments.example\\\"}\"));",
+        "Dojo.Eq(\"two secrets on one line\", \"password=hunt**** secret: Zq8L****\", Redact(\"password=hunter2hunter2 secret: Zq8Lw2Pn5Rt9Vx3K\"));",
+        "Dojo.Eq(\"short values are left alone\", \"password=hunter2\", Redact(\"password=hunter2\"));",
+        "Dojo.Eq(\"lines without secrets are unchanged\", \"GET /api/products 200 12ms\", Redact(\"GET /api/products 200 12ms\"));"
+      ],
+      "hints": [
+        "`Regex.Replace(line, pattern, m => ...)` with two groups: everything up to the value, and the value.",
+        "Return `m.Groups[1].Value + m.Groups[2].Value[..4] + \"****\"`."
+      ]
+    }
+  ]
+}
