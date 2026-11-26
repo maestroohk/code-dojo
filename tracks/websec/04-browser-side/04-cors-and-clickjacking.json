@@ -1,0 +1,187 @@
+{
+  "title": "CORS misconfigurations and clickjacking",
+  "summary": "CORS relaxes the browser's same-origin policy, so a bad policy hands your users' data to any site. Spot origin reflection with credentials and the null origin, write an exact allow-list, and stop framing with frame-ancestors.",
+  "minutes": 15,
+  "prereqs": ["auth/06-api-security/03-cors"],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The misconfiguration in two headers",
+      "body": [
+        "By default a script on `evil.example` may send a request to `api.shop.example`, but may **not read** the answer. CORS headers are the API saying \"this origin may read me\":",
+        "",
+        "```text",
+        "GET /api/me HTTP/1.1                         HTTP/1.1 200 OK",
+        "Host: api.shop.example                       Access-Control-Allow-Origin: https://evil.example",
+        "Origin: https://evil.example                 Access-Control-Allow-Credentials: true",
+        "Cookie: sid=<the victim's session>           {\"name\":\"Ada\",\"email\":\"ada@customer.example\",...}",
+        "```",
+        "",
+        "The server **reflected** whatever `Origin` it received and allowed credentials. Now any site the victim visits can `fetch('https://api.shop.example/api/me', { credentials: 'include' })` and read their data. In ASP.NET Core that is `SetIsOriginAllowed(_ => true).AllowCredentials()`. (`AllowAnyOrigin().AllowCredentials()` is refused by ASP.NET Core at start-up, and browsers ignore `*` with credentials, which is why people reach for the reflection instead.)",
+        "",
+        "Other classics: `Origin: null` allowed (sandboxed iframes and `file:` pages send `null`, and attackers can produce it on purpose), and prefix or suffix checks: `origin.EndsWith(\"shop.example\")` allows `evilshop.example`; `StartsWith(\"https://app.shop.example\")` allows `https://app.shop.example.evil.example`."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "The API allows credentials. Which `Access-Control-Allow-Origin` policies are safe?",
+      "buckets": ["Safe", "Exploitable"],
+      "items": [
+        ["`WithOrigins(\"https://app.shop.example\")`", 0],
+        ["`WithOrigins(\"https://app.shop.example\", \"https://admin.shop.example\")`", 0],
+        ["`SetIsOriginAllowed(_ => true)`", 1],
+        ["`SetIsOriginAllowed(o => o.EndsWith(\"shop.example\"))`", 1],
+        ["`SetIsOriginAllowed(o => o.StartsWith(\"https://app.shop.example\"))`", 1],
+        ["`WithOrigins(\"null\", \"https://app.shop.example\")`", 1]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Someone says: \"CORS is our API's security: only our SPA's origin is allowed.\" Which is true?",
+      "options": [
+        "CORS only controls what browsers let other sites' scripts read; curl and servers ignore it, so the API still needs authentication and authorization",
+        "Right: requests from other origins are blocked by the server",
+        "Right, as long as preflight caching is off",
+        "CORS also stops CSRF, so no antiforgery tokens are needed"
+      ],
+      "answer": 0,
+      "explain": "CORS is a browser relaxation of the same-origin policy, not an access control. And a simple cross-site POST is sent without any preflight, so CORS does not stop CSRF either."
+    },
+    {
+      "type": "learn",
+      "title": "Clickjacking: your page, invisible, under their button",
+      "body": [
+        "An attacker's page loads your **Delete my account** page in an invisible `<iframe>` and puts a \"Win a lamp!\" button exactly over your real button. The user clicks theirs and presses yours, signed in.",
+        "",
+        "```html",
+        "<iframe src=\"https://shop.example/account\" style=\"opacity:0; position:absolute; top:120px; left:40px\"></iframe>",
+        "<button>Win a lamp!</button>",
+        "```",
+        "",
+        "The defence is a header that says who may frame you:",
+        "",
+        "```text",
+        "Content-Security-Policy: frame-ancestors 'none'          (or 'self', or a list of origins)",
+        "X-Frame-Options: DENY                                    (the older header, for old browsers)",
+        "```",
+        "",
+        "`frame-ancestors` only works as a **header**, not in a `<meta>` tag. Send both headers on every HTML response; SameSite=Lax/Strict cookies also mean a cross-site iframe arrives signed out, which helps."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each header to what it controls.",
+      "pairs": [
+        ["`Access-Control-Allow-Origin`", "which other origins' scripts may read the response"],
+        ["`Access-Control-Allow-Credentials: true`", "whether that read may include cookies"],
+        ["`Content-Security-Policy: frame-ancestors 'none'`", "no site may put this page in a frame"],
+        ["`X-Frame-Options: DENY`", "the same, for older browsers"]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "web",
+      "title": "An exact CORS allow-list, and no framing",
+      "prompt": [
+        "Fix the API:",
+        "",
+        "1. The CORS policy `spa` allows **only** `https://app.shop.example`, with credentials, methods `GET` and `PUT`, and the header `content-type`. Any other origin (including `null` and look-alikes) gets no `Access-Control-Allow-Origin`.",
+        "2. Every response carries `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` (a small middleware).",
+        "",
+        "**Run checks** sends real CORS requests and preflights with different `Origin` headers."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddCors(o => o.AddPolicy(\"spa\", p => p",
+        "    .SetIsOriginAllowed(_ => true)",
+        "    .AllowAnyHeader()",
+        "    .AllowAnyMethod()",
+        "    .AllowCredentials()));",
+        "var app = builder.Build();",
+        "",
+        "app.UseCors(\"spa\");",
+        "",
+        "app.MapGet(\"/api/me\", () => new { name = \"Ada\", email = \"ada@customer.example\" });",
+        "app.MapPut(\"/api/me\", () => Results.NoContent());",
+        "app.MapGet(\"/account\", () => Results.Content(",
+        "    \"<!doctype html><h1>Account</h1><form method=post action=/account/delete><button>Delete my account</button></form>\", \"text/html\"));",
+        "",
+        "app.Run();"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddCors(o => o.AddPolicy(\"spa\", p => p",
+        "    .WithOrigins(\"https://app.shop.example\")   // exact: scheme, host and port",
+        "    .WithMethods(\"GET\", \"PUT\")",
+        "    .WithHeaders(\"content-type\")",
+        "    .AllowCredentials()));",
+        "var app = builder.Build();",
+        "",
+        "app.Use(async (ctx, next) =>",
+        "{",
+        "    ctx.Response.Headers.ContentSecurityPolicy = \"frame-ancestors 'none'\";",
+        "    ctx.Response.Headers.XFrameOptions = \"DENY\";",
+        "    await next();",
+        "});",
+        "app.UseCors(\"spa\");",
+        "",
+        "app.MapGet(\"/api/me\", () => new { name = \"Ada\", email = \"ada@customer.example\" });",
+        "app.MapPut(\"/api/me\", () => Results.NoContent());",
+        "app.MapGet(\"/account\", () => Results.Content(",
+        "    \"<!doctype html><h1>Account</h1><form method=post action=/account/delete><button>Delete my account</button></form>\", \"text/html\"));",
+        "",
+        "app.Run();"
+      ],
+      "hints": [
+        "Replace `SetIsOriginAllowed(_ => true)` with `WithOrigins(\"https://app.shop.example\")`, and the `AllowAny...` calls with `WithMethods(\"GET\", \"PUT\")` and `WithHeaders(\"content-type\")`.",
+        "The framing headers: `ctx.Response.Headers.ContentSecurityPolicy = \"frame-ancestors 'none'\"; ctx.Response.Headers.XFrameOptions = \"DENY\";` in an `app.Use(...)` middleware."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "static class DojoTests",
+        "{",
+        "    static async Task<HttpResponseMessage> Get(HttpClient http, string origin)",
+        "    {",
+        "        var msg = new HttpRequestMessage(HttpMethod.Get, \"/api/me\");",
+        "        msg.Headers.Add(\"Origin\", origin);",
+        "        return await http.SendAsync(msg);",
+        "    }",
+        "",
+        "    static string? Acao(HttpResponseMessage r) => r.Headers.TryGetValues(\"Access-Control-Allow-Origin\", out var v) ? v.First() : null;",
+        "",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"CORS could be checked\", async () =>",
+        "        {",
+        "            var ok = await Get(http, \"https://app.shop.example\");",
+        "            Dojo.Eq(\"the SPA's origin is allowed, exactly\", \"https://app.shop.example\", Acao(ok));",
+        "            Dojo.Eq(\"...with credentials\", \"true\", ok.Headers.TryGetValues(\"Access-Control-Allow-Credentials\", out var c) ? c.First() : null);",
+        "            Dojo.Eq(\"https://evil.example is not allowed\", null, Acao(await Get(http, \"https://evil.example\")));",
+        "            Dojo.Eq(\"the null origin is not allowed\", null, Acao(await Get(http, \"null\")));",
+        "            Dojo.Eq(\"a look-alike suffix is not allowed\", null, Acao(await Get(http, \"https://app.shop.example.evil.example\")));",
+        "            Dojo.Eq(\"http (not https) is not allowed\", null, Acao(await Get(http, \"http://app.shop.example\")));",
+        "            var pre = new HttpRequestMessage(HttpMethod.Options, \"/api/me\");",
+        "            pre.Headers.Add(\"Origin\", \"https://app.shop.example\");",
+        "            pre.Headers.Add(\"Access-Control-Request-Method\", \"PUT\");",
+        "            pre.Headers.Add(\"Access-Control-Request-Headers\", \"content-type\");",
+        "            Dojo.Eq(\"a preflight for PUT from the SPA is allowed\", \"https://app.shop.example\", Acao(await http.SendAsync(pre)));",
+        "            var bad = new HttpRequestMessage(HttpMethod.Options, \"/api/me\");",
+        "            bad.Headers.Add(\"Origin\", \"https://evil.example\");",
+        "            bad.Headers.Add(\"Access-Control-Request-Method\", \"PUT\");",
+        "            Dojo.Eq(\"a preflight from evil.example is not allowed\", null, Acao(await http.SendAsync(bad)));",
+        "        });",
+        "        await Dojo.TryAsync(\"Framing could be checked\", async () =>",
+        "        {",
+        "            var r = await http.GetAsync(\"/account\");",
+        "            var csp = r.Headers.TryGetValues(\"Content-Security-Policy\", out var v) ? string.Join(\";\", v) : \"\";",
+        "            Dojo.Check(\"the account page says frame-ancestors 'none'\", csp.Contains(\"frame-ancestors 'none'\"), csp);",
+        "            Dojo.Eq(\"...and X-Frame-Options: DENY\", \"DENY\", r.Headers.TryGetValues(\"X-Frame-Options\", out var x) ? x.First() : null);",
+        "        });",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}
