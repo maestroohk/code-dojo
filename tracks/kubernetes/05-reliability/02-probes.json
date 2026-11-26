@@ -128,41 +128,52 @@
       "explain": "While a startup probe is defined, liveness and readiness are held back. After a restart, the startup probe runs again."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Simulate a liveness probe",
-      "prompt": "Write `List<int> Restarts(bool[] results, int periodSeconds, int failureThreshold)`. `results[i]` is the outcome of the probe at time `i * periodSeconds`. Return the times (in seconds) at which the container is restarted. After a restart, the failure count resets to 0.",
-      "starter": [
-        "List<int> Restarts(bool[] results, int periodSeconds, int failureThreshold)",
-        "{",
-        "    return new List<int>();",
-        "}"
+      "type": "terminal",
+      "title": "Stop a liveness probe from killing a healthy app",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `api` (traefik/whoami, which answers `GET /health` on port 80) keeps restarting:",
+        "`kubectl get pods` shows a growing RESTARTS count, and `kubectl describe pod -l app=api` tells you why.",
+        "",
+        "Fix the Deployment so that the **liveness** probe checks `/health` on the app's real port, and add a **readiness**",
+        "probe on the same endpoint. The new pod must then stay up without restarts, and be Ready."
       ],
-      "solution": [
-        "List<int> Restarts(bool[] results, int periodSeconds, int failureThreshold)",
-        "{",
-        "    var times = new List<int>();",
-        "    int failures = 0;",
-        "    for (int i = 0; i < results.Length; i++)",
-        "    {",
-        "        if (results[i]) { failures = 0; continue; }",
-        "        failures++;",
-        "        if (failures == failureThreshold) { times.Add(i * periodSeconds); failures = 0; }",
-        "    }",
-        "    return times;",
-        "}"
+      "setup": [
+        "probes.sh"
       ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"card example\", new List<int> { 60 }, Restarts(new[] { true, false, false, true, false, false, false }, 10, 3));",
-        "Dojo.Eq(\"all healthy\", new List<int>(), Restarts(new[] { true, true, true }, 5, 1));",
-        "Dojo.Eq(\"threshold 1\", new List<int> { 5, 10 }, Restarts(new[] { true, false, false }, 5, 1));",
-        "Dojo.Eq(\"six failures, threshold 3\", new List<int> { 20, 50 }, Restarts(new[] { false, false, false, false, false, false }, 10, 3));"
+      "checks": [
+        {
+          "name": "api has stopped restarting and is Ready",
+          "cmd": "kubectl rollout status deploy/api --timeout=40s >/dev/null && sleep 6 && kubectl get pods -l app=api -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .status.containerStatuses[0] | \"\\(.restartCount) \\(.ready)\"'",
+          "expectOutput": "0 true",
+          "fail": "The new `api` pod still restarts, or is not Ready."
+        },
+        {
+          "name": "the liveness probe checks /health on the app's port",
+          "cmd": "kubectl get deploy api -o jsonpath='{.spec.template.spec.containers[0].livenessProbe.httpGet.path} {.spec.template.spec.containers[0].livenessProbe.httpGet.port}'",
+          "expectMatch": "^/health (80|http)$",
+          "fail": "Keep a liveness probe, aimed at whoami's `/health` on the container port (`80`, or its name `http`)."
+        },
+        {
+          "name": "a readiness probe gates traffic",
+          "cmd": "kubectl get deploy api -o jsonpath='{.spec.template.spec.containers[0].readinessProbe.httpGet.path}'",
+          "expectOutput": "/health",
+          "fail": "Add a readiness probe on `/health` too."
+        }
       ],
       "hints": [
-        "Keep a consecutive-failure counter.",
-        "Reset it on success and after each restart."
-      ]
+        "`kubectl describe pod -l app=api` shows `Liveness probe failed: ... connection refused` and `Killing`.",
+        "The probe asks `/healthz` on port 8080; whoami serves `/health` on port 80 (named `http`).",
+        "`kubectl patch deploy api --type=json` with `replace` on `/spec/template/spec/containers/0/livenessProbe/httpGet` and `add` of a `readinessProbe`."
+      ],
+      "solution": [
+        "kubectl get pods",
+        "kubectl describe pod -l app=api | grep -E 'Liveness|Killing' | tail -n 3",
+        "kubectl patch deploy api --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/livenessProbe/httpGet\",\"value\":{\"path\":\"/health\",\"port\":\"http\"}},{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/readinessProbe\",\"value\":{\"httpGet\":{\"path\":\"/health\",\"port\":\"http\"},\"periodSeconds\":2}}]'",
+        "kubectl rollout status deploy/api",
+        "kubectl get pods"
+      ],
+      "explain": "A liveness probe that fails restarts the container, so a wrong path or port turns a healthy app into a restart loop, and a liveness probe that checks dependencies (the database) turns one outage into a cluster-wide restart storm. Readiness only removes the pod from Service endpoints. Keep liveness cheap and local, readiness honest, and use a `startupProbe` for slow starters."
     },
     {
       "type": "lab",

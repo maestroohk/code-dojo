@@ -1,178 +1,162 @@
 {
   "title": "Boss: on call",
-  "summary": "Turn raw cluster output into a triage report and check access.",
+  "summary": "Three on-call tickets on a real Kubernetes cluster: read a namespace's events, unstick a Pending workload, and close an RBAC hole.",
   "minutes": 25,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "The scene",
-      "body": "It is 02:00 and the pager says *checkout errors*. You have `kubectl get pods` output and not much patience. Build the report you wish you had."
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Triage report",
-      "prompt": [
-        "Write `List<string> Report(string output)` for `kubectl get pods` text (columns `NAME READY STATUS RESTARTS AGE`, header first). For every pod that is not healthy (same rule as module 1: READY numbers differ or STATUS is not `Running`/`Completed`), return `\"NAME: STATUS -> COMMAND\"` with:",
-        "",
-        "- `CrashLoopBackOff`, `Error` → `kubectl logs NAME --previous`",
-        "- `Running` (but not ready) → `kubectl describe pod NAME`",
-        "- anything else → `kubectl describe pod NAME`",
-        "",
-        "Order: most `RESTARTS` first (the RESTARTS column may look like `7` or `7 (2m ago)`: take the first number), then by name."
-      ],
-      "starter": [
-        "List<string> Report(string output)",
-        "{",
-        "    return new List<string>();",
-        "}"
-      ],
-      "solution": [
-        "List<string> Report(string output)",
-        "{",
-        "    var rows = new List<(string Name, string Status, int Restarts)>();",
-        "    foreach (var line in output.Split('\\n').Skip(1))",
-        "    {",
-        "        var c = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
-        "        if (c.Length < 4) continue;",
-        "        var ready = c[1].Split('/');",
-        "        string status = c[2];",
-        "        if (status == \"Completed\") continue;",
-        "        if (status == \"Running\" && ready[0] == ready[1]) continue;",
-        "        rows.Add((c[0], status, int.Parse(c[3])));",
-        "    }",
-        "    return rows.OrderByDescending(r => r.Restarts).ThenBy(r => r.Name, StringComparer.Ordinal)",
-        "        .Select(r => r.Status is \"CrashLoopBackOff\" or \"Error\"",
-        "            ? $\"{r.Name}: {r.Status} -> kubectl logs {r.Name} --previous\"",
-        "            : $\"{r.Name}: {r.Status} -> kubectl describe pod {r.Name}\")",
-        "        .ToList();",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoOut = string.Join(\"\\n\", new[] {",
-        "    \"NAME                        READY   STATUS             RESTARTS      AGE\",",
-        "    \"checkout-7d9f-2xkqp         1/1     Running            0             3h\",",
-        "    \"checkout-7d9f-9lmnz         0/1     CrashLoopBackOff   7 (2m ago)    15m\",",
-        "    \"payments-55c-k2l9p          0/1     Running            0             15m\",",
-        "    \"cart-6b7-qq81a              0/1     ImagePullBackOff   0             5m\",",
-        "    \"migrate-x7k2                0/1     Completed          0             1h\",",
-        "    \"worker-0                    0/1     Error              2 (10m ago)   20m\",",
-        "});",
-        "Dojo.Eq(\"report\", new List<string> {",
-        "    \"checkout-7d9f-9lmnz: CrashLoopBackOff -> kubectl logs checkout-7d9f-9lmnz --previous\",",
-        "    \"worker-0: Error -> kubectl logs worker-0 --previous\",",
-        "    \"cart-6b7-qq81a: ImagePullBackOff -> kubectl describe pod cart-6b7-qq81a\",",
-        "    \"payments-55c-k2l9p: Running -> kubectl describe pod payments-55c-k2l9p\",",
-        "}, Report(dojoOut));",
-        "Dojo.Eq(\"all healthy\", new List<string>(), Report(\"NAME READY STATUS RESTARTS AGE\\na 1/1 Running 0 1m\"));"
-      ],
-      "hints": [
-        "After splitting on spaces, `7 (2m ago)` becomes several columns; column 3 is still the number.",
-        "Collect tuples, then sort with `OrderByDescending(...).ThenBy(...)`."
+      "body": [
+        "You are on call. Each ticket opens its own one-node **Kubernetes 1.37** cluster with the problem already there. The",
+        "tools: `kubectl get events --sort-by=.lastTimestamp` (and `kubectl events --for`), `describe`, `get nodes --show-labels`,",
+        "`kubectl get clusterrolebindings -o wide` and `kubectl auth can-i --as`."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Why is it Pending?",
+      "type": "terminal",
+      "title": "Ticket 1: what happened in shop this morning?",
+      "image": "k8s",
       "prompt": [
-        "Write `string WhyPending(int reqCpuM, int reqMemMi, Dictionary<string, string> nodeSelector, List<(string Name, int FreeCpuM, int FreeMemMi, Dictionary<string, string> Labels)> nodes)` that produces a message like the scheduler's:",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). Five pods in the namespace `shop`, and a bad morning. Use the **events** (sorted by time) to",
+        "answer, one pod name per file:",
         "",
-        "`\"0/N nodes are available: A Insufficient cpu, B Insufficient memory, C didn't match node selector.\"`",
-        "",
-        "For each node check, in order: selector mismatch (count it in C and stop), then CPU (A) and memory (B), where a node can count in both. Leave out parts whose count is 0, keep the order cpu, memory, selector, join with `\", \"`, end with `.`. If some node fits, return `\"schedulable on NAME\"` (first such node)."
+        "1. `~/answers/pull.txt`: the pod whose image cannot be pulled;",
+        "2. `~/answers/schedule.txt`: the pod the scheduler cannot place;",
+        "3. `~/answers/probe.txt`: the pod whose readiness probe fails;",
+        "4. `~/answers/crash.txt`: the pod that keeps crashing."
       ],
-      "starter": [
-        "string WhyPending(int reqCpuM, int reqMemMi, Dictionary<string, string> nodeSelector,",
-        "                  List<(string Name, int FreeCpuM, int FreeMemMi, Dictionary<string, string> Labels)> nodes)",
-        "{",
-        "    return \"\";",
-        "}"
+      "setup": [
+        "boss-events.sh"
       ],
-      "solution": [
-        "string WhyPending(int reqCpuM, int reqMemMi, Dictionary<string, string> nodeSelector,",
-        "                  List<(string Name, int FreeCpuM, int FreeMemMi, Dictionary<string, string> Labels)> nodes)",
-        "{",
-        "    int cpu = 0, mem = 0, sel = 0;",
-        "    foreach (var n in nodes)",
-        "    {",
-        "        if (!nodeSelector.All(kv => n.Labels.TryGetValue(kv.Key, out var v) && v == kv.Value)) { sel++; continue; }",
-        "        bool cpuOk = n.FreeCpuM >= reqCpuM, memOk = n.FreeMemMi >= reqMemMi;",
-        "        if (cpuOk && memOk) return $\"schedulable on {n.Name}\";",
-        "        if (!cpuOk) cpu++;",
-        "        if (!memOk) mem++;",
-        "    }",
-        "    var parts = new List<string>();",
-        "    if (cpu > 0) parts.Add($\"{cpu} Insufficient cpu\");",
-        "    if (mem > 0) parts.Add($\"{mem} Insufficient memory\");",
-        "    if (sel > 0) parts.Add($\"{sel} didn't match node selector\");",
-        "    return $\"0/{nodes.Count} nodes are available: {string.Join(\", \", parts)}.\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoNodes = new List<(string Name, int FreeCpuM, int FreeMemMi, Dictionary<string, string> Labels)> {",
-        "    (\"n1\", 500, 1024, new() { [\"pool\"] = \"general\" }),",
-        "    (\"n2\", 2000, 512, new() { [\"pool\"] = \"general\" }),",
-        "    (\"gpu1\", 8000, 32768, new() { [\"pool\"] = \"gpu\" }),",
-        "};",
-        "Dojo.Eq(\"cpu, memory and selector\", \"0/3 nodes are available: 1 Insufficient cpu, 2 Insufficient memory, 1 didn't match node selector.\",",
-        "    WhyPending(1000, 2048, new() { [\"pool\"] = \"general\" }, dojoNodes));",
-        "Dojo.Eq(\"fits on gpu1 with no selector\", \"schedulable on gpu1\", WhyPending(4000, 4096, new(), dojoNodes));",
-        "Dojo.Eq(\"fits on n2\", \"schedulable on n2\", WhyPending(1000, 256, new(), dojoNodes));",
-        "Dojo.Eq(\"only selector\", \"0/3 nodes are available: 3 didn't match node selector.\", WhyPending(1, 1, new() { [\"pool\"] = \"arm\" }, dojoNodes));"
+      "checks": [
+        {
+          "name": "pull.txt",
+          "cmd": "test \"$(xargs < ~/answers/pull.txt)\" = images",
+          "fail": "Not the pod with the pull failure (`Failed`, `ErrImagePull` / `BackOff pulling image`)."
+        },
+        {
+          "name": "schedule.txt",
+          "cmd": "test \"$(xargs < ~/answers/schedule.txt)\" = \"$(kubectl -n shop get events -o json | jq -r '[.items[] | select(.involvedObject.kind==\"Pod\" and .reason==\"FailedScheduling\") | .involvedObject.name] | unique | join(\" \")')\"",
+          "fail": "Not the pod with `FailedScheduling`."
+        },
+        {
+          "name": "probe.txt",
+          "cmd": "test \"$(xargs < ~/answers/probe.txt)\" = \"$(kubectl -n shop get events -o json | jq -r '[.items[] | select(.involvedObject.kind==\"Pod\" and .reason==\"Unhealthy\") | .involvedObject.name] | unique | join(\" \")')\"",
+          "fail": "Not the pod with `Unhealthy` (Readiness probe failed)."
+        },
+        {
+          "name": "crash.txt",
+          "cmd": "test \"$(xargs < ~/answers/crash.txt)\" = mailer",
+          "fail": "Not the pod in a crash loop (`BackOff: Back-off restarting failed container`)."
+        }
       ],
       "hints": [
-        "Three counters; a selector mismatch skips the resource checks for that node.",
-        "Build a list of the non-zero parts and `string.Join` them."
-      ]
+        "`kubectl -n shop get events --sort-by=.lastTimestamp` lists REASON and OBJECT for everything that happened.",
+        "Filter one kind: `kubectl -n shop get events --field-selector reason=FailedScheduling`; or `kubectl events -n shop --types=Warning`.",
+        "Image pulls: `Failed` with `ErrImagePull`; scheduling: `FailedScheduling`; probes: `Unhealthy`; crashes: `BackOff ... restarting failed container`."
+      ],
+      "solution": [
+        "kubectl -n shop get events --sort-by=.lastTimestamp",
+        "kubectl -n shop get events --field-selector reason=FailedScheduling",
+        "echo images > ~/answers/pull.txt",
+        "echo reports > ~/answers/schedule.txt",
+        "echo search > ~/answers/probe.txt",
+        "echo mailer > ~/answers/crash.txt"
+      ],
+      "explain": "Events are Kubernetes' own log of what it did and what went wrong, per object: the scheduler, the kubelet and the controllers all write them. `--sort-by=.lastTimestamp` turns them into a timeline, and the REASON column (`FailedScheduling`, `Failed`, `Unhealthy`, `BackOff`, `OOMKilling`) is usually the whole diagnosis. They are kept for only about an hour, so ship them somewhere if you want them for post-mortems."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Who can break production?",
+      "type": "terminal",
+      "title": "Ticket 2: the indexer never starts",
+      "image": "k8s",
       "prompt": [
-        "Write `List<string> Dangerous(List<(string Subject, string Role, string Ns)> bindings)` that flags risky grants. A binding is dangerous when:",
-        "",
-        "- `Role` is `\"cluster-admin\"` (any namespace), or",
-        "- `Role` is `\"admin\"` or `\"edit\"` and `Ns` is `\"*\"` (cluster-wide)",
-        "",
-        "Return `\"Subject: Role in Ns\"` for each, sorted by subject (ordinal), and keep input order for the same subject."
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `indexer` has been `Pending` since it was deployed. The node `dojo` is in the `general` pool for now",
+        "(`kubectl get nodes --show-labels`), and the platform team says batch work may run there until the batch pool exists.",
+        "Make `indexer` run on `dojo` **without relabelling the node**."
       ],
-      "starter": [
-        "List<string> Dangerous(List<(string Subject, string Role, string Ns)> bindings)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "boss-pending.sh"
       ],
-      "solution": [
-        "List<string> Dangerous(List<(string Subject, string Role, string Ns)> bindings)",
-        "{",
-        "    return bindings",
-        "        .Where(b => b.Role == \"cluster-admin\" || ((b.Role == \"admin\" || b.Role == \"edit\") && b.Ns == \"*\"))",
-        "        .OrderBy(b => b.Subject, StringComparer.Ordinal)",
-        "        .Select(b => $\"{b.Subject}: {b.Role} in {b.Ns}\")",
-        "        .ToList();",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoB = new List<(string Subject, string Role, string Ns)> {",
-        "    (\"system:serviceaccount:ci:runner\", \"cluster-admin\", \"*\"),",
-        "    (\"group:shop-devs\", \"edit\", \"shop\"),",
-        "    (\"group:platform\", \"admin\", \"*\"),",
-        "    (\"user:ana\", \"view\", \"*\"),",
-        "    (\"group:platform\", \"cluster-admin\", \"kube-system\"),",
-        "};",
-        "Dojo.Eq(\"flags\", new List<string> { \"group:platform: admin in *\", \"group:platform: cluster-admin in kube-system\", \"system:serviceaccount:ci:runner: cluster-admin in *\" }, Dangerous(dojoB));",
-        "Dojo.Eq(\"nothing risky\", new List<string>(), Dangerous(new() { (\"user:bo\", \"view\", \"shop\") }));"
+      "checks": [
+        {
+          "name": "indexer runs",
+          "cmd": "kubectl rollout status deploy/indexer --timeout=40s >/dev/null; kubectl get deploy indexer -o jsonpath='{.status.readyReplicas}'",
+          "expectOutput": "1",
+          "fail": "`indexer` should have 1 ready pod."
+        },
+        {
+          "name": "the node keeps its labels",
+          "cmd": "kubectl get node dojo -o jsonpath='{.metadata.labels.pool}'",
+          "expectOutput": "general",
+          "fail": "Do not relabel the node: change where `indexer` asks to run."
+        }
       ],
       "hints": [
-        "`OrderBy` is stable, so equal subjects keep input order.",
-        "Write the condition exactly as the two bullets say."
-      ]
+        "`kubectl describe pod -l app=indexer` (or the events): `didn't match Pod's node affinity/selector`.",
+        "The pod asks for `pool: batch`; the node is `pool: general`.",
+        "`kubectl patch deploy indexer -p '{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"pool\":\"general\"}}}}}'`."
+      ],
+      "solution": [
+        "kubectl get events --field-selector reason=FailedScheduling | tail -n 1",
+        "kubectl get nodes --show-labels",
+        "kubectl patch deploy indexer -p '{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"pool\":\"general\"}}}}}'",
+        "kubectl rollout status deploy/indexer"
+      ],
+      "explain": "`Pending` has only a few causes, and the `FailedScheduling` event names them: not enough resources, a `nodeSelector`/affinity that no node matches, taints the pod does not tolerate, or a volume that cannot be attached in that zone. Selectors are the quiet one: the YAML is valid, the pod simply waits forever for a node that does not exist."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 3: close the RBAC hole",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). Security's audit says a **workload's** service account can do anything in the cluster.",
+        "",
+        "1. Find the ClusterRoleBinding that grants `cluster-admin` to a service account, write its name into",
+        "   `~/answers/binding.txt`, and delete it.",
+        "2. Leave the legitimate bindings alone: `web` keeps read-only access to its own namespace, the deployer keeps `edit`",
+        "   in `shop`, and Prometheus keeps reading metrics."
+      ],
+      "setup": [
+        "boss-rbac.sh"
+      ],
+      "checks": [
+        {
+          "name": "binding.txt names the dangerous binding",
+          "cmd": "test \"$(xargs < ~/answers/binding.txt)\" = web-debug-tmp",
+          "fail": "Not the binding. `kubectl get clusterrolebindings -o wide` shows each one's role and subjects."
+        },
+        {
+          "name": "shop's web account is no longer an admin",
+          "cmd": "kubectl auth can-i '*' '*' --all-namespaces --as=system:serviceaccount:shop:web; kubectl auth can-i list pods -n shop --as=system:serviceaccount:shop:web",
+          "expectOutput": [
+            "no",
+            "yes"
+          ],
+          "fail": "`shop:web` should not be cluster-admin any more, but should still `list pods` in `shop` (its `view` RoleBinding)."
+        },
+        {
+          "name": "the other grants still work",
+          "cmd": "kubectl auth can-i patch deployments -n shop --as=system:serviceaccount:shop:deployer; kubectl auth can-i list nodes --as=system:serviceaccount:monitoring:prometheus",
+          "expectOutput": [
+            "yes",
+            "yes"
+          ],
+          "fail": "Do not remove the deployer's or Prometheus's bindings."
+        }
+      ],
+      "hints": [
+        "`kubectl get clusterrolebindings -o wide | grep cluster-admin` lists who has it (ignore the built-in `system:` subjects).",
+        "`kubectl get clusterrolebindings -o json | jq -r '.items[] | select(.roleRef.name==\"cluster-admin\") | .metadata.name + \" \" + ([.subjects[]? | .kind + \":\" + .name] | join(\",\"))'`.",
+        "`kubectl delete clusterrolebinding web-debug-tmp`, then check with `kubectl auth can-i --as=system:serviceaccount:shop:web`."
+      ],
+      "solution": [
+        "kubectl get clusterrolebindings -o json | jq -r '.items[] | select(.roleRef.name==\"cluster-admin\") | .metadata.name + \" \" + ([.subjects[]? | .kind + \":\" + .name] | join(\",\"))'",
+        "echo web-debug-tmp > ~/answers/binding.txt",
+        "kubectl delete clusterrolebinding web-debug-tmp",
+        "kubectl auth can-i '*' '*' --all-namespaces --as=system:serviceaccount:shop:web"
+      ],
+      "explain": "Every pod runs as a service account, and its token is mounted into the pod by default, so a workload bound to `cluster-admin` means \"anyone who exploits this web app owns the cluster\". Temporary debug grants are the classic source. Audits look for cluster-admin, wildcard verbs, `secrets` access and `bind`/`escalate`; for apps that do not call the API at all, `automountServiceAccountToken: false` removes the token entirely."
     }
   ]
 }

@@ -1,0 +1,169 @@
+{
+  "title": "Logs of the dead, and a shell in a shell-less pod",
+  "summary": "logs --previous for crash loops, kubectl exec, and ephemeral debug containers for distroless images.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What the container said, even after it died",
+      "body": [
+        "```bash",
+        "kubectl logs deploy/api --previous        # -p: the last CRASHED container (the current one just restarted)",
+        "kubectl logs deploy/api -c api --since=10m --timestamps",
+        "kubectl logs -l app=api --prefix --max-log-requests=10    # every pod with the label, lines tagged",
+        "kubectl exec -it deploy/api -- sh         # a shell, if the image has one",
+        "```",
+        "",
+        "In a crash loop, plain `kubectl logs` shows the container that has just started and has probably printed only its",
+        "banner; `--previous` shows the one that died, with the error. The kubelet keeps one previous container per container.",
+        "",
+        "Many production images (distroless, chiseled, static Go binaries) have **no shell**. `kubectl debug` adds an",
+        "**ephemeral container** with your tools to the running pod, without restarting it:",
+        "",
+        "```bash",
+        "kubectl debug -it POD --image=busybox:1.37 --target=CONTAINER -- sh",
+        "```",
+        "",
+        "`--target` shares the target container's process namespace, so `ps` shows its processes and `/proc/1/root` is its",
+        "filesystem. Ephemeral containers cannot be removed; they disappear with the pod."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A pod restarts every 30 seconds. `kubectl logs api-x` shows only `api 2.4 starting`. What next?",
+      "options": [
+        "`kubectl logs api-x --previous`",
+        "`kubectl delete pod api-x`",
+        "`kubectl exec api-x -- sh`",
+        "Raise the replica count"
+      ],
+      "answer": 0,
+      "explain": "The current container has not crashed yet. `--previous` is the one that did, and its last lines say why. Deleting the pod throws away exactly that evidence."
+    },
+    {
+      "type": "terminal",
+      "title": "Read the crash and fix the config",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `api` is in `CrashLoopBackOff` after someone renamed a key in its",
+        "ConfigMap `api-config`.",
+        "",
+        "1. Write the error line the **crashed** container printed into `~/answers/fatal.txt`.",
+        "2. Fix the **ConfigMap** so the app finds the setting it asks for (keep the value it already has), and replace the pod",
+        "   so it picks it up. The new pod must stay up."
+      ],
+      "setup": [
+        "crash.sh"
+      ],
+      "checks": [
+        {
+          "name": "fatal.txt has the crashed container's error",
+          "cmd": "grep -qF 'missing setting DB_HOST' ~/answers/fatal.txt",
+          "fail": "Not the crash's error. `kubectl logs deploy/api --previous` shows what the last crashed container printed."
+        },
+        {
+          "name": "api runs with DB_HOST from the ConfigMap",
+          "cmd": "kubectl rollout status deploy/api --timeout=40s >/dev/null && sleep 3 && kubectl get pods -l app=api -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .status.containerStatuses[0].restartCount' && kubectl logs $(kubectl get pods -l app=api -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name') --tail=1",
+          "expectOutput": [
+            "0",
+            "api: using database db.shop.svc.cluster.local"
+          ],
+          "fail": "The new `api` pod should start without restarts and log `using database db.shop.svc.cluster.local`."
+        },
+        {
+          "name": "the value comes from the ConfigMap",
+          "cmd": "kubectl get configmap api-config -o jsonpath='{.data.DB_HOST}'",
+          "expectOutput": "db.shop.svc.cluster.local",
+          "fail": "Put `DB_HOST` in the ConfigMap `api-config` (the app reads every key with `envFrom`)."
+        }
+      ],
+      "hints": [
+        "`kubectl logs deploy/api --previous` (or `-p`).",
+        "`kubectl get configmap api-config -o yaml`: the value is there under another key name.",
+        "`kubectl patch configmap api-config -p '{\"data\":{\"DB_HOST\":\"db.shop.svc.cluster.local\"}}'`, then `kubectl rollout restart deploy/api` (envFrom is read at start)."
+      ],
+      "solution": [
+        "kubectl get pods",
+        "kubectl logs deploy/api --previous",
+        "kubectl logs deploy/api --previous 2>&1 | grep FATAL > ~/answers/fatal.txt",
+        "kubectl get configmap api-config -o yaml",
+        "kubectl patch configmap api-config -p '{\"data\":{\"DB_HOST\":\"db.shop.svc.cluster.local\"}}'",
+        "kubectl rollout restart deploy/api",
+        "kubectl rollout status deploy/api",
+        "kubectl logs deploy/api"
+      ],
+      "explain": "`--previous` turned \"it keeps restarting\" into one exact error line. The fix went into the ConfigMap, where the setting belongs, and `rollout restart` was needed because `envFrom` values are read when a container starts. Keeping the old key as well would also be fine during a migration; removing it is a separate, later change."
+    },
+    {
+      "type": "terminal",
+      "title": "Look inside a container that has no shell",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The pod `edge` runs `traefik/whoami`, a single static binary: no shell,",
+        "no `ps`, no `cat`. Try `kubectl exec edge -- sh`: it fails. Nobody remembers which port it was started on.",
+        "",
+        "1. Attach an **ephemeral debug container** from `busybox:1.37` to `edge`, targeting its container `edge`, without",
+        "   restarting the pod.",
+        "2. From it, find the TCP port the app listens on, and write it into `~/answers/port.txt`."
+      ],
+      "setup": [
+        "ephemeral.sh"
+      ],
+      "checks": [
+        {
+          "name": "an ephemeral busybox container targets edge",
+          "cmd": "kubectl get pod edge -o json | jq -r '.spec.ephemeralContainers[]? | select(.targetContainerName == \"edge\") | .image' | sort -u",
+          "expectOutput": "busybox:1.37",
+          "fail": "`edge` has no ephemeral container targeting `edge`. `kubectl debug edge --image=busybox:1.37 --target=edge ...`."
+        },
+        {
+          "name": "the pod was not restarted",
+          "cmd": "kubectl get pod edge -o jsonpath='{.status.containerStatuses[0].restartCount}'",
+          "expectOutput": "0",
+          "fail": "`edge` restarted. `kubectl debug` with an ephemeral container leaves the app running."
+        },
+        {
+          "name": "port.txt is the listening port",
+          "cmd": "test \"$(xargs < ~/answers/port.txt)\" = 7311",
+          "fail": "Not the port. In the debug container: `netstat -tln`, or `cat /proc/1/cmdline | tr '\\0' ' '` to see the app's arguments."
+        }
+      ],
+      "hints": [
+        "`kubectl debug -it edge --image=busybox:1.37 --target=edge -- sh` opens a shell next to the app.",
+        "This terminal is line based: `--attach=false -c dbg -- sleep 1h` starts it in the background, then `kubectl exec edge -c dbg -- netstat -tln`.",
+        "With `--target`, the app is PID 1 in the debug container's view: `cat /proc/1/cmdline | tr '\\0' ' '`."
+      ],
+      "solution": [
+        "kubectl exec edge -- sh",
+        "kubectl debug edge --image=busybox:1.37 --target=edge -c dbg --attach=false -- sleep 1h",
+        "kubectl wait --for=jsonpath='{.status.ephemeralContainerStatuses[0].state.running}' pod/edge --timeout=30s",
+        "kubectl exec edge -c dbg -- netstat -tln",
+        "kubectl exec edge -c dbg -- sh -c \"cat /proc/1/cmdline | tr '\\\\0' ' '\"",
+        "echo 7311 > ~/answers/port.txt"
+      ],
+      "explain": "Ephemeral containers are how you debug minimal images in production: you bring the tools, the image stays small, and the pod keeps running. `--target` shares the process namespace, so you see the app's processes, its arguments, and its filesystem under `/proc/1/root`. For a broken node, `kubectl debug node/NAME -it --image=busybox:1.37` does the same on the host."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the situation to the command.",
+      "pairs": [
+        [
+          "the app crashed and restarted",
+          "`kubectl logs POD --previous`"
+        ],
+        [
+          "the image has a shell and the pod runs",
+          "`kubectl exec -it POD -- sh`"
+        ],
+        [
+          "a distroless image, the pod runs",
+          "`kubectl debug -it POD --image=busybox:1.37 --target=CONTAINER`"
+        ],
+        [
+          "you need the logs of every replica at once",
+          "`kubectl logs -l app=api --prefix`"
+        ]
+      ]
+    }
+  ]
+}

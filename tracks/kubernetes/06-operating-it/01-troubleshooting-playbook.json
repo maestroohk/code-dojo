@@ -142,60 +142,58 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Triage a pod",
+      "type": "terminal",
+      "title": "Run the playbook on a CrashLoopBackOff",
+      "image": "k8s",
       "prompt": [
-        "Write `string Triage(string status, string ready, string lastReason)` returning the first command to run (use `POD` as the pod name):",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `orders` is in `CrashLoopBackOff` since this morning's config change. Follow the playbook: what does",
+        "`kubectl get pods` say, what do `kubectl describe` and the events add, and what did the **crashed** container print",
+        "(the current one has just restarted and may not have failed yet)?",
         "",
-        "- `lastReason == \"OOMKilled\"` (checked first): `\"kubectl describe pod POD  # raise memory limit\"`",
-        "- `CrashLoopBackOff` or `Error`: `\"kubectl logs POD --previous\"`",
-        "- `Pending`, `ContainerCreating`, `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`: `\"kubectl describe pod POD\"`",
-        "- `Running` with the two numbers in `ready` different: `\"kubectl describe pod POD  # readiness\"`",
-        "- anything else: `\"ok\"`"
+        "1. Write the error line the crashed container logged into `~/answers/error.txt`.",
+        "2. Fix the Deployment the way the error says (the database Service is called `orders-db`) and make sure the new pod",
+        "   stays up."
       ],
-      "starter": [
-        "string Triage(string status, string ready, string lastReason)",
-        "{",
-        "    return \"ok\";",
-        "}"
+      "setup": [
+        "playbook.sh"
       ],
-      "solution": [
-        "string Triage(string status, string ready, string lastReason)",
-        "{",
-        "    if (lastReason == \"OOMKilled\") return \"kubectl describe pod POD  # raise memory limit\";",
-        "    switch (status)",
-        "    {",
-        "        case \"CrashLoopBackOff\":",
-        "        case \"Error\":",
-        "            return \"kubectl logs POD --previous\";",
-        "        case \"Pending\":",
-        "        case \"ContainerCreating\":",
-        "        case \"ImagePullBackOff\":",
-        "        case \"ErrImagePull\":",
-        "        case \"CreateContainerConfigError\":",
-        "            return \"kubectl describe pod POD\";",
-        "    }",
-        "    var parts = ready.Split('/');",
-        "    if (status == \"Running\" && parts[0] != parts[1]) return \"kubectl describe pod POD  # readiness\";",
-        "    return \"ok\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"OOM wins\", \"kubectl describe pod POD  # raise memory limit\", Triage(\"CrashLoopBackOff\", \"0/1\", \"OOMKilled\"));",
-        "Dojo.Eq(\"crash loop\", \"kubectl logs POD --previous\", Triage(\"CrashLoopBackOff\", \"0/1\", \"Error\"));",
-        "Dojo.Eq(\"pending\", \"kubectl describe pod POD\", Triage(\"Pending\", \"0/1\", \"\"));",
-        "Dojo.Eq(\"image pull\", \"kubectl describe pod POD\", Triage(\"ImagePullBackOff\", \"0/1\", \"\"));",
-        "Dojo.Eq(\"config error\", \"kubectl describe pod POD\", Triage(\"CreateContainerConfigError\", \"0/1\", \"\"));",
-        "Dojo.Eq(\"not ready\", \"kubectl describe pod POD  # readiness\", Triage(\"Running\", \"1/2\", \"\"));",
-        "Dojo.Eq(\"healthy\", \"ok\", Triage(\"Running\", \"2/2\", \"\"));",
-        "Dojo.Eq(\"completed job\", \"ok\", Triage(\"Completed\", \"0/1\", \"\"));"
+      "checks": [
+        {
+          "name": "error.txt has the crash's error line",
+          "cmd": "grep -qF 'ORDERS_DB_HOST is not set' ~/answers/error.txt",
+          "fail": "Not the error line. `kubectl logs deploy/orders --previous` (or `-p`) shows the crashed container's output."
+        },
+        {
+          "name": "orders runs and connected",
+          "cmd": "kubectl rollout status deploy/orders --timeout=40s >/dev/null && sleep 3 && kubectl get pods -l app=orders -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .status.containerStatuses[0].restartCount' && kubectl logs $(kubectl get pods -l app=orders -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name') --tail=1",
+          "expectOutput": [
+            "0",
+            "orders: connected to orders-db"
+          ],
+          "fail": "The new `orders` pod should run without restarts and log `connected to orders-db`."
+        },
+        {
+          "name": "the existing setting is kept",
+          "cmd": "kubectl get deploy orders -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name==\"ORDERS_QUEUE\")].value}'",
+          "expectOutput": "orders-v2",
+          "fail": "Keep `ORDERS_QUEUE`: add the missing variable, do not replace the list."
+        }
       ],
       "hints": [
-        "Check `lastReason` before looking at `status`.",
-        "A `switch` with stacked `case` labels groups the statuses neatly."
-      ]
+        "`kubectl get pods`, then `kubectl describe pod -l app=orders | tail` (Events: `Back-off restarting failed container`).",
+        "`kubectl logs deploy/orders -p` shows what the last crashed run printed.",
+        "`kubectl set env deploy/orders ORDERS_DB_HOST=orders-db`, then `kubectl rollout status deploy/orders`."
+      ],
+      "solution": [
+        "kubectl get pods",
+        "kubectl describe pod -l app=orders | tail -n 6",
+        "kubectl logs deploy/orders -p",
+        "kubectl logs deploy/orders -p 2>&1 | grep FATAL > ~/answers/error.txt",
+        "kubectl set env deploy/orders ORDERS_DB_HOST=orders-db",
+        "kubectl rollout status deploy/orders",
+        "kubectl logs deploy/orders"
+      ],
+      "explain": "The playbook order matters: `get` for the state, `describe`/events for what Kubernetes did (back-off, kills, probe failures), `logs -p` for what the app said before it died. Without `-p` you read the fresh container, which is often just a startup banner. CrashLoopBackOff itself is not an error, only Kubernetes waiting longer and longer (up to 5 minutes) between restarts."
     }
   ]
 }

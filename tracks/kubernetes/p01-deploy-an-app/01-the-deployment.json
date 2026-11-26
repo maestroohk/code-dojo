@@ -89,67 +89,76 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Lint the Deployment",
+      "type": "terminal",
+      "title": "Write the Deployment and get it accepted",
+      "image": "k8s",
       "prompt": [
-        "Model the Deployment as a record (provided by the tests, at the bottom):",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl`; the current namespace is `todo`, and the manifests live in `~/k8s`. A first `~/k8s/deployment.yaml` for the TodoApi was started by hand, and",
+        "`kubectl apply -f ~/k8s/deployment.yaml` rejects it. Read the error, then make the file a proper Deployment and apply it:",
         "",
-        "```csharp",
-        "record Deploy(int Replicas, Dictionary<string, string> Selector, Dictionary<string, string> TemplateLabels, string Image);",
-        "```",
+        "1. `todo-api`, **2** replicas, labelled `app: todo-api` (the Deployment, its selector and its pods);",
+        "2. one container `api` from `traefik/whoami:v1.11`, with the argument `--name=todo-api-v1` and a container port named",
+        "   `http` on 80.",
         "",
-        "Write `List<string> Lint(Deploy d)` returning problems in this order:",
-        "",
-        "1. `\"selector is empty\"` if the selector has no entries; otherwise `\"selector does not match template labels\"` if some selector pair is missing from `TemplateLabels`",
-        "2. `\"replicas should be at least 2\"` if `Replicas < 2`",
-        "3. `\"image has no tag\"` if the part after the last `/` has no `:` and the image has no `@`; `\"image uses latest\"` if the tag is `latest`",
-        "",
-        "**Run checks** builds several Deployments and lints them."
+        "Tip: `kubectl create deployment todo-api --image=traefik/whoami:v1.11 --replicas=2 --port=80 --dry-run=client -o yaml`",
+        "prints a correct skeleton to start from. Check with `kubectl apply --dry-run=server -f ~/k8s/deployment.yaml` before you",
+        "apply."
       ],
-      "starter": [
-        "List<string> Lint(Deploy d)",
-        "{",
-        "    var problems = new List<string>();",
-        "    return problems;",
-        "}"
+      "setup": [
+        "s1.sh"
       ],
-      "solution": [
-        "List<string> Lint(Deploy d)",
-        "{",
-        "    var problems = new List<string>();",
-        "    if (d.Selector.Count == 0) problems.Add(\"selector is empty\");",
-        "    else if (!d.Selector.All(kv => d.TemplateLabels.TryGetValue(kv.Key, out var v) && v == kv.Value))",
-        "        problems.Add(\"selector does not match template labels\");",
-        "    if (d.Replicas < 2) problems.Add(\"replicas should be at least 2\");",
-        "    if (!d.Image.Contains('@'))",
-        "    {",
-        "        string last = d.Image[(d.Image.LastIndexOf('/') + 1)..];",
-        "        int colon = last.IndexOf(':');",
-        "        if (colon < 0) problems.Add(\"image has no tag\");",
-        "        else if (last[(colon + 1)..] == \"latest\") problems.Add(\"image uses latest\");",
-        "    }",
-        "    return problems;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoSel = new Dictionary<string, string> { [\"app\"] = \"shop-api\" };",
-        "var dojoTpl = new Dictionary<string, string> { [\"app\"] = \"shop-api\", [\"version\"] = \"1.4.0\" };",
-        "Dojo.Eq(\"the stage manifest is clean\", new List<string>(), Lint(new Deploy(3, dojoSel, dojoTpl, \"registry.example.com/shop/api:1.4.0\")));",
-        "Dojo.Eq(\"registry port is not a tag\", new List<string> { \"image has no tag\" }, Lint(new Deploy(3, dojoSel, dojoTpl, \"registry.example.com:5000/shop/api\")));",
-        "Dojo.Eq(\"latest\", new List<string> { \"image uses latest\" }, Lint(new Deploy(3, dojoSel, dojoTpl, \"shop/api:latest\")));",
-        "Dojo.Eq(\"digest is fine\", new List<string>(), Lint(new Deploy(2, dojoSel, dojoTpl, \"shop/api@sha256:abc123\")));",
-        "Dojo.Eq(\"mismatch and one replica\", new List<string> { \"selector does not match template labels\", \"replicas should be at least 2\" },",
-        "    Lint(new Deploy(1, new() { [\"app\"] = \"shop\" }, dojoTpl, \"shop/api:1.4.0\")));",
-        "Dojo.Eq(\"empty selector\", new List<string> { \"selector is empty\" }, Lint(new Deploy(3, new(), dojoTpl, \"shop/api:1.4.0\")));",
-        "",
-        "record Deploy(int Replicas, Dictionary<string, string> Selector, Dictionary<string, string> TemplateLabels, string Image);"
+      "checks": [
+        {
+          "name": "the file is accepted by the API server",
+          "cmd": "kubectl apply --dry-run=server -f ~/k8s/deployment.yaml >/dev/null && echo accepted",
+          "expectOutput": "accepted",
+          "fail": "`kubectl apply --dry-run=server -f ~/k8s/deployment.yaml` still fails. A Deployment's selector must match its template's labels."
+        },
+        {
+          "name": "todo-api runs 2 ready pods",
+          "cmd": "kubectl rollout status deploy/todo-api --timeout=40s >/dev/null; kubectl get deploy todo-api -o jsonpath='{.status.readyReplicas} {.spec.selector.matchLabels.app} {.metadata.labels.app}'",
+          "expectOutput": "2 todo-api todo-api",
+          "fail": "`todo-api` should run 2 ready pods, select `app: todo-api` and carry that label itself."
+        },
+        {
+          "name": "the container is as specified",
+          "cmd": "kubectl get deploy todo-api -o jsonpath='{.spec.template.spec.containers[0].name} {.spec.template.spec.containers[0].args} {.spec.template.spec.containers[0].ports[0].name}:{.spec.template.spec.containers[0].ports[0].containerPort}'",
+          "expectOutput": "api [\"--name=todo-api-v1\"] http:80",
+          "fail": "The container should be `api`, with `--name=todo-api-v1` and a port `http` on 80."
+        }
       ],
       "hints": [
-        "For the tag, look only at the text after the last `/`: `registry:5000/shop/api` has a colon, but it belongs to the registry.",
-        "`d.Image[(d.Image.LastIndexOf('/') + 1)..]` gives that last part."
-      ]
+        "`kubectl apply` says `selector does not match template labels`: the two must be equal.",
+        "Generate a skeleton with `--dry-run=client -o yaml`, then edit it (or write the whole file with `cat > ... <<'EOF'`).",
+        "Validate with `kubectl apply --dry-run=server -f ~/k8s/deployment.yaml`, then apply and `kubectl rollout status deploy/todo-api`."
+      ],
+      "solution": [
+        "kubectl apply -f ~/k8s/deployment.yaml",
+        "cat > ~/k8s/deployment.yaml <<'EOF'",
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata:",
+        "  name: todo-api",
+        "  labels: {app: todo-api}",
+        "spec:",
+        "  replicas: 2",
+        "  selector:",
+        "    matchLabels: {app: todo-api}",
+        "  template:",
+        "    metadata:",
+        "      labels: {app: todo-api}",
+        "    spec:",
+        "      containers:",
+        "        - name: api",
+        "          image: traefik/whoami:v1.11",
+        "          args: [\"--name=todo-api-v1\"]",
+        "          ports: [{name: http, containerPort: 80}]",
+        "EOF",
+        "kubectl apply --dry-run=server -f ~/k8s/deployment.yaml",
+        "kubectl apply -f ~/k8s/deployment.yaml",
+        "kubectl rollout status deploy/todo-api"
+      ],
+      "explain": "The API server refused an object whose selector could never match its own pods, before anything ran: that is what `--dry-run=server` checks too (schema, defaults, admission), unlike `--dry-run=client`, which only renders locally. Generators (`kubectl create ... --dry-run=client -o yaml`) are the quick way to a correct skeleton; the file in Git is what you then maintain."
     }
   ]
 }

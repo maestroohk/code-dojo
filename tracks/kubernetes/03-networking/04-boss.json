@@ -1,133 +1,156 @@
 {
   "title": "Boss: follow the packet",
-  "summary": "From a URL to a pod IP, through the Gateway, DNS and Service.",
+  "summary": "Three networking tickets on a real Kubernetes cluster: refused connections, a look inside with port-forward, and a broken chain across namespaces.",
   "minutes": 20,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "The scene",
-      "body": "A request arrives at `https://shop.example.com/api/cart`. It passes the Gateway, a Service, and lands on a pod. Each hop can fail in its own way. Build the pieces of a tool that traces the path."
+      "body": [
+        "Networking tickets, each on its own one-node **Kubernetes 1.37** cluster. Work along the path a request takes: the",
+        "name (DNS), the Service (selector, ports, endpoints), the policy, the pod. Use `kubectl get endpointslices`,",
+        "`kubectl describe svc`, `kubectl exec ... wget`, `kubectl port-forward` and `kubectl get networkpolicy`."
+      ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Trace a request",
+      "type": "terminal",
+      "title": "Ticket 1: \"connection refused\" through the Service",
+      "image": "k8s",
       "prompt": [
-        "Write `string Trace(string host, string path, List<(string Host, string Prefix, string Service)> rules, Dictionary<string, List<string>> endpoints)`:",
-        "",
-        "- pick the rule with an exactly matching host and the longest matching prefix (segment rules as in *Route a request*: equal, or followed by `/`, and `/` matches everything; ignore any-host rules here). None: `\"404 no rule\"`.",
-        "- look up the Service in `endpoints`. Missing or empty: `\"503 <service> has no endpoints\"`.",
-        "- otherwise `\"<service> -> <first endpoint>\"`."
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `orders` runs two healthy pods, and the Service `orders` even lists them as endpoints, yet",
+        "`kubectl exec shell -- wget -qO- -T 2 http://orders/` gets `Connection refused`. Fix it without touching the",
+        "Deployment."
       ],
-      "starter": [
-        "string Trace(string host, string path, List<(string Host, string Prefix, string Service)> rules, Dictionary<string, List<string>> endpoints)",
-        "{",
-        "    return \"\";",
-        "}"
+      "setup": [
+        "boss-ports.sh"
       ],
-      "solution": [
-        "bool PrefixMatch(string prefix, string path) =>",
-        "    prefix == \"/\" || path == prefix || path.StartsWith(prefix.TrimEnd('/') + \"/\");",
-        "",
-        "string Trace(string host, string path, List<(string Host, string Prefix, string Service)> rules, Dictionary<string, List<string>> endpoints)",
-        "{",
-        "    var rule = rules.Where(r => r.Host == host && PrefixMatch(r.Prefix, path))",
-        "        .OrderByDescending(r => r.Prefix.Length).ToList();",
-        "    if (rule.Count == 0) return \"404 no rule\";",
-        "    string svc = rule[0].Service;",
-        "    if (!endpoints.TryGetValue(svc, out var eps) || eps.Count == 0) return $\"503 {svc} has no endpoints\";",
-        "    return $\"{svc} -> {eps[0]}\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoRules = new List<(string Host, string Prefix, string Service)> { (\"shop.example.com\", \"/\", \"web\"), (\"shop.example.com\", \"/api\", \"api\"), (\"shop.example.com\", \"/admin\", \"admin\") };",
-        "var dojoEps = new Dictionary<string, List<string>> { [\"web\"] = new() { \"10.1.0.4:3000\" }, [\"api\"] = new() { \"10.1.0.9:8080\", \"10.1.1.2:8080\" }, [\"admin\"] = new() };",
-        "Dojo.Eq(\"api path\", \"api -> 10.1.0.9:8080\", Trace(\"shop.example.com\", \"/api/cart\", dojoRules, dojoEps));",
-        "Dojo.Eq(\"root\", \"web -> 10.1.0.4:3000\", Trace(\"shop.example.com\", \"/\", dojoRules, dojoEps));",
-        "Dojo.Eq(\"admin has no endpoints\", \"503 admin has no endpoints\", Trace(\"shop.example.com\", \"/admin\", dojoRules, dojoEps));",
-        "Dojo.Eq(\"unknown host\", \"404 no rule\", Trace(\"x.example.com\", \"/\", dojoRules, dojoEps));",
-        "Dojo.Eq(\"missing service entry\", \"503 api has no endpoints\", Trace(\"shop.example.com\", \"/api\", dojoRules, new Dictionary<string, List<string>>()));"
+      "checks": [
+        {
+          "name": "a request through the Service answers",
+          "cmd": "kubectl exec shell -- wget -qO- -T 3 http://orders/ | grep '^Name:'",
+          "expectOutput": "Name: orders",
+          "fail": "`wget http://orders/` still fails."
+        },
+        {
+          "name": "the endpoints are on the app's port",
+          "cmd": "kubectl get endpointslices -l kubernetes.io/service-name=orders -n default -o json | jq -r '[.items[] | .ports[0].port as $p | .endpoints[]? | select(.conditions.ready) | $p] | \"\\(length) ready on \\(.[0])\"'",
+          "expectOutput": "2 ready on 8080",
+          "fail": "The Service's `targetPort` should be the port the container listens on."
+        }
       ],
       "hints": [
-        "Reuse `PrefixMatch` from the previous lesson.",
-        "`TryGetValue` then check `Count == 0`."
-      ]
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Spread requests round-robin",
-      "prompt": "kube-proxy in IPVS mode can spread connections round-robin. Write `Dictionary<string, int> Spread(List<string> endpoints, int requests)` returning how many requests each endpoint receives when they are handed out in turn, starting with the first. Every endpoint appears in the result, even with 0.",
-      "starter": [
-        "Dictionary<string, int> Spread(List<string> endpoints, int requests)",
-        "{",
-        "    return new Dictionary<string, int>();",
-        "}"
+        "Endpoints exist, so the selector is right. Compare the endpoint port with the container's port.",
+        "`kubectl get endpointslices -l kubernetes.io/service-name=orders -o wide` and `kubectl get deploy orders -o jsonpath='{.spec.template.spec.containers[0].ports}'`.",
+        "`kubectl patch svc orders -p '{\"spec\":{\"ports\":[{\"name\":\"http\",\"port\":80,\"targetPort\":\"http\"}]}}'`."
       ],
       "solution": [
-        "Dictionary<string, int> Spread(List<string> endpoints, int requests)",
-        "{",
-        "    var counts = endpoints.ToDictionary(e => e, e => 0);",
-        "    for (int i = 0; i < requests; i++) counts[endpoints[i % endpoints.Count]]++;",
-        "    return counts;",
-        "}"
+        "kubectl get endpointslices -l kubernetes.io/service-name=orders -o wide",
+        "kubectl get deploy orders -o jsonpath='{.spec.template.spec.containers[0].ports}'; echo",
+        "kubectl patch svc orders -p '{\"spec\":{\"ports\":[{\"name\":\"http\",\"port\":80,\"targetPort\":\"http\"}]}}'",
+        "kubectl exec shell -- wget -qO- -T 3 http://orders/"
       ],
-      "template": [
-        "{{CODE}}",
-        "var dojoR = Spread(new List<string> { \"a\", \"b\", \"c\" }, 7);",
-        "Dojo.Eq(\"a gets 3\", 3, dojoR[\"a\"]);",
-        "Dojo.Eq(\"b gets 2\", 2, dojoR[\"b\"]);",
-        "Dojo.Eq(\"c gets 2\", 2, dojoR[\"c\"]);",
-        "var dojoR2 = Spread(new List<string> { \"x\", \"y\" }, 1);",
-        "Dojo.Eq(\"y present with 0\", 0, dojoR2[\"y\"]);"
-      ],
-      "hints": [
-        "Start every count at 0 with `ToDictionary`.",
-        "Request `i` goes to `endpoints[i % endpoints.Count]`."
-      ]
+      "explain": "\"No endpoints\" and \"connection refused\" are different failures: the first is the selector, the second is the port. kube-proxy forwards to `podIP:targetPort` whether or not anything listens there, so the Service looks fine while every connection is refused. Referring to a **named** container port makes the mapping survive a port change in the Deployment."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Diagnose a connection",
+      "type": "terminal",
+      "title": "Ticket 2: look at an internal service from your machine",
+      "image": "k8s",
       "prompt": [
-        "Put the checks in the order an engineer would. Write `string Diagnose(bool dnsResolves, int endpointCount, bool targetPortMatchesApp, bool policyAllows)` returning the **first** problem found:",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The `ledger` Service in the namespace `payments` has no external exposure, and must not get one.",
+        "You need to look at it from **this machine** (as you would from your laptop).",
         "",
-        "1. `\"dns: name does not resolve (check namespace and spelling)\"`",
-        "2. `\"endpoints: selector matches no ready pods\"`",
-        "3. `\"policy: a NetworkPolicy blocks the traffic\"`",
-        "4. `\"port: targetPort does not match the port the app listens on\"`",
-        "5. otherwise `\"ok\"`"
+        "1. Use `kubectl port-forward` to make the Service reachable on `localhost:8081` (run it in the background with `&`).",
+        "2. Request `http://localhost:8081/` and write the value of the `Hostname:` line it returns (the pod that answered)",
+        "   into `~/answers/pod.txt`.",
+        "3. Leave the Service as it is: still `ClusterIP`."
       ],
-      "starter": [
-        "string Diagnose(bool dnsResolves, int endpointCount, bool targetPortMatchesApp, bool policyAllows)",
-        "{",
-        "    return \"ok\";",
-        "}"
+      "setup": [
+        "boss-forward.sh"
       ],
-      "solution": [
-        "string Diagnose(bool dnsResolves, int endpointCount, bool targetPortMatchesApp, bool policyAllows)",
-        "{",
-        "    if (!dnsResolves) return \"dns: name does not resolve (check namespace and spelling)\";",
-        "    if (endpointCount == 0) return \"endpoints: selector matches no ready pods\";",
-        "    if (!policyAllows) return \"policy: a NetworkPolicy blocks the traffic\";",
-        "    if (!targetPortMatchesApp) return \"port: targetPort does not match the port the app listens on\";",
-        "    return \"ok\";",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"all good\", \"ok\", Diagnose(true, 3, true, true));",
-        "Dojo.Eq(\"dns first\", \"dns: name does not resolve (check namespace and spelling)\", Diagnose(false, 0, false, false));",
-        "Dojo.Eq(\"no endpoints\", \"endpoints: selector matches no ready pods\", Diagnose(true, 0, false, false));",
-        "Dojo.Eq(\"policy before port\", \"policy: a NetworkPolicy blocks the traffic\", Diagnose(true, 2, false, false));",
-        "Dojo.Eq(\"wrong port\", \"port: targetPort does not match the port the app listens on\", Diagnose(true, 2, false, true));"
+      "checks": [
+        {
+          "name": "pod.txt names the ledger pod",
+          "cmd": "test \"$(xargs < ~/answers/pod.txt)\" = \"$(cat /opt/dojo/state/ledger-pod)\"",
+          "fail": "Not the pod that answered. `curl -s localhost:8081/ | grep Hostname`."
+        },
+        {
+          "name": "ledger is still a ClusterIP Service",
+          "cmd": "kubectl -n payments get svc ledger -o jsonpath='{.spec.type}'",
+          "expectOutput": "ClusterIP",
+          "fail": "Leave the Service as `ClusterIP`: port-forward needs no exposure."
+        }
       ],
       "hints": [
-        "A chain of `if` statements, one per check, in the listed order."
-      ]
+        "`kubectl port-forward -n payments svc/ledger 8081:80 &` forwards local 8081 to the Service's port 80 (one of its pods).",
+        "`curl -s localhost:8081/` prints whoami's report, with `Hostname:`.",
+        "`curl -s localhost:8081/ | sed -n 's/^Hostname: //p' > ~/answers/pod.txt`, then `kill %1` to stop the forward."
+      ],
+      "solution": [
+        "kubectl port-forward -n payments svc/ledger 8081:80 >/dev/null 2>&1 &",
+        "sleep 3",
+        "curl -s localhost:8081/",
+        "curl -s localhost:8081/ | sed -n 's/^Hostname: //p' > ~/answers/pod.txt",
+        "kill %1"
+      ],
+      "explain": "`kubectl port-forward` tunnels through the API server to one pod (picked from the Service), so you can reach an internal service without a LoadBalancer, NodePort or Gateway, and without changing anything. It is the everyday way to open a database or an admin page from a laptop; it needs `pods/portforward` permission, which is why RBAC grants it carefully."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 3: checkout cannot reach inventory",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `checkout` (namespace `shop`) calls `inventory` (namespace `stock`) and logs an error every few",
+        "seconds: `kubectl -n shop logs deploy/checkout --tail=2`. Three things are wrong along the path. Fix them so its newest",
+        "log line says `inventory OK`, keeping the network policy in place (it should let `checkout` in, alongside the old",
+        "frontend)."
+      ],
+      "setup": [
+        "boss-chain.sh"
+      ],
+      "checks": [
+        {
+          "name": "checkout reaches inventory",
+          "cmd": "kubectl -n shop rollout status deploy/checkout --timeout=30s >/dev/null && sleep 4 && kubectl -n shop logs $(kubectl -n shop get pods -l app=checkout -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name') --tail=1",
+          "expectMatch": "inventory OK",
+          "fail": "`checkout`'s newest log line does not say `inventory OK`. Work along the path: name, Service, policy."
+        },
+        {
+          "name": "the Service has endpoints",
+          "cmd": "kubectl get endpointslices -l kubernetes.io/service-name=inventory -n stock -o json | jq -r '[.items[] | .ports[0].port as $p | .endpoints[]? | select(.conditions.ready) | $p] | \"\\(length) ready on \\(.[0])\"'",
+          "expectOutput": "2 ready on 80",
+          "fail": "`inventory`'s selector matches no pods."
+        },
+        {
+          "name": "a policy still guards inventory",
+          "cmd": "kubectl -n stock get networkpolicy -o name | grep -c .",
+          "expectMatch": "^[1-9]",
+          "fail": "Keep a NetworkPolicy on `inventory`: allow `checkout`, do not delete the guard."
+        },
+        {
+          "name": "other pods in shop are still kept out",
+          "cmd": "kubectl -n shop run probe --image=busybox:1.37 --restart=Never --rm -i --command -- sh -c 'wget -qO- -T 2 http://inventory.stock/ >/dev/null 2>&1 && echo reached || echo blocked' 2>/dev/null | grep -E 'reached|blocked'",
+          "expectOutput": "blocked",
+          "fail": "Any pod in `shop` can reach inventory now: allow `app=checkout` only."
+        }
+      ],
+      "hints": [
+        "The URL names the namespace `shop`, but the Service lives in `stock`.",
+        "`kubectl -n stock get endpointslices` is empty: the Service's selector asks for a label the pods do not have. The policy only lets `app=frontend` in.",
+        "`kubectl -n shop set env deploy/checkout INVENTORY_URL=http://inventory.stock.svc.cluster.local/`, `kubectl -n stock patch svc inventory --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/selector/tier\"}]'`, and add `app=checkout` to the policy's `from`."
+      ],
+      "solution": [
+        "kubectl -n shop logs deploy/checkout --tail=2",
+        "kubectl -n shop set env deploy/checkout INVENTORY_URL=http://inventory.stock.svc.cluster.local/",
+        "kubectl -n stock get endpointslices",
+        "kubectl -n stock patch svc inventory --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/selector/tier\"}]'",
+        "kubectl -n stock get networkpolicy inventory-ingress -o yaml",
+        "kubectl -n stock patch networkpolicy inventory-ingress --type=json -p '[{\"op\":\"add\",\"path\":\"/spec/ingress/0/from/-\",\"value\":{\"namespaceSelector\":{\"matchLabels\":{\"team\":\"shop\"}},\"podSelector\":{\"matchLabels\":{\"app\":\"checkout\"}}}}]'",
+        "kubectl -n shop rollout status deploy/checkout",
+        "sleep 4",
+        "kubectl -n shop logs deploy/checkout --tail=1"
+      ],
+      "explain": "Every hop fails differently: a wrong namespace in the name gives `bad address`, a selector mismatch gives a Service with no endpoints (timeouts), and a policy drops packets silently (timeouts too). Checking in path order (name, endpoints, policy) finds all three instead of guessing. A `namespaceSelector` and `podSelector` in the **same** `from` entry mean AND; as separate entries they would mean OR, a classic policy mistake."
     }
   ]
 }

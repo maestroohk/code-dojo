@@ -1,0 +1,114 @@
+{
+  "title": "Events and describe: what Kubernetes did",
+  "summary": "Read a broken workload from the cluster's own account of it: STATUS, describe, events sorted by time.",
+  "minutes": 12,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Start from what the cluster saw",
+      "body": [
+        "Every debugging session on Kubernetes starts with three read-only commands, in this order:",
+        "",
+        "```bash",
+        "kubectl get pods -o wide                       # the state: STATUS, READY, RESTARTS, NODE",
+        "kubectl describe pod NAME                      # the object plus its Events at the bottom",
+        "kubectl get events --sort-by=.lastTimestamp    # the namespace's timeline (newest last)",
+        "```",
+        "",
+        "**Events** are written by the scheduler, the kubelet and the controllers when they act or fail:",
+        "`FailedScheduling`, `Pulling`/`Failed`/`BackOff` (images), `Unhealthy` (probes), `Killing`, `OOMKilling`,",
+        "`FailedCreate` (a ReplicaSet rejected by a quota). The REASON plus the message is usually the whole diagnosis.",
+        "",
+        "Two details seniors rely on: events are kept for about an hour only, and `kubectl events --for pod/NAME --types=Warning`",
+        "(the newer command) filters to one object's problems."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`kubectl get pods` shows `ImagePullBackOff`. Where do you find the exact image reference and the registry's error message?",
+      "options": [
+        "The Events of `kubectl describe pod NAME` (`Failed to pull image ...`)",
+        "`kubectl logs NAME`",
+        "`kubectl get nodes`",
+        "`kubectl top pod NAME`"
+      ],
+      "answer": 0,
+      "explain": "The container never started, so it has no logs. The kubelet records each pull attempt and its error as events on the pod: `not found` (a typo in the tag), `unauthorized` (a missing `imagePullSecret`), or a timeout (registry or network)."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the event REASON to what it means.",
+      "pairs": [
+        [
+          "`FailedScheduling`",
+          "no node fits the pod's requests, selectors or taints"
+        ],
+        [
+          "`BackOff` (pulling image)",
+          "image pulls keep failing; the kubelet waits longer each time"
+        ],
+        [
+          "`Unhealthy`",
+          "a liveness, readiness or startup probe failed"
+        ],
+        [
+          "`FailedCreate` on a ReplicaSet",
+          "pods were rejected at admission (quota, policy)"
+        ]
+      ]
+    },
+    {
+      "type": "terminal",
+      "title": "Fix an ImagePullBackOff",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). A release of `web` went out and its new pods never start:",
+        "`kubectl get pods` shows `ErrImagePull` / `ImagePullBackOff`.",
+        "",
+        "1. Find the image reference that cannot be pulled (in the pod's events), and write it into `~/answers/image.txt`.",
+        "2. Fix the Deployment's image to the version that exists here (`traefik/whoami:v1.11`) and wait for the rollout."
+      ],
+      "setup": [
+        "pull.sh"
+      ],
+      "checks": [
+        {
+          "name": "image.txt has the broken reference",
+          "cmd": "grep -qx 'traefik/whoami:v1.1l' <(xargs < ~/answers/image.txt)",
+          "fail": "Not the broken image. `kubectl describe pod` on a new pod: `Failed to pull image \"...\"`."
+        },
+        {
+          "name": "web is rolled out on v1.11",
+          "cmd": "kubectl rollout status deploy/web --timeout=40s >/dev/null; kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image} {.status.readyReplicas} {.status.updatedReplicas}'",
+          "expectOutput": "traefik/whoami:v1.11 2 2",
+          "fail": "`web` should run `traefik/whoami:v1.11` with 2 ready, updated pods."
+        }
+      ],
+      "hints": [
+        "`kubectl get pods`, then `kubectl describe pod NAME` on one of the failing pods: read the last Events.",
+        "`kubectl get events --sort-by=.lastTimestamp | grep -i pull` shows the same messages for the whole namespace.",
+        "`kubectl set image deploy/web whoami=traefik/whoami:v1.11`, then `kubectl rollout status deploy/web`."
+      ],
+      "solution": [
+        "kubectl get pods",
+        "kubectl get events --sort-by=.lastTimestamp | grep -i 'failed to pull' | tail -n 1",
+        "kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}' > ~/answers/image.txt",
+        "kubectl set image deploy/web whoami=traefik/whoami:v1.11",
+        "kubectl rollout status deploy/web"
+      ],
+      "explain": "`ImagePullBackOff` is the kubelet backing off after `ErrImagePull`; the event message says why (here `not found`: `1l` instead of `11`). Because the rollout only replaced pods as fast as new ones became ready, the old ones kept serving the whole time. `kubectl set image` started a new revision with the right tag."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Deployment's pods are `Pending` and `describe` says `0/1 nodes are available: 1 node(s) didn't match Pod's node affinity/selector`. What do you change?",
+      "options": [
+        "The pod's `nodeSelector`/affinity, or the node's labels, so they match",
+        "The image tag",
+        "The readiness probe",
+        "The Service selector"
+      ],
+      "answer": 0,
+      "explain": "The scheduler lists every reason it rejected each node. A selector mismatch is quiet: the YAML is valid and the pod just waits. `kubectl get nodes --show-labels` shows what the nodes offer."
+    }
+  ]
+}

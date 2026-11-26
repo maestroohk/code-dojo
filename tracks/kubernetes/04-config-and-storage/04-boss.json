@@ -1,154 +1,188 @@
 {
   "title": "Boss: config and data",
-  "summary": "Generate config, check references, and size storage.",
+  "summary": "Three configuration tickets on a real Kubernetes cluster: missing references, a quota, and a Kustomize overlay for production.",
   "minutes": 20,
   "kind": "boss",
   "steps": [
     {
       "type": "learn",
       "title": "The scene",
-      "body": "Before a release, the platform team wants a pre-flight check: will every pod's config references resolve, what will each container see, and is there storage for every claim? Build it."
-    },
-    {
-      "type": "code",
-      "mode": "write",
-      "title": "Check references",
-      "prompt": [
-        "Write `List<string> Missing(List<(string Kind, string Name, string Key)> refs, Dictionary<string, HashSet<string>> configMaps, Dictionary<string, HashSet<string>> secrets)`.",
-        "",
-        "Each ref has `Kind` `\"configmap\"` or `\"secret\"`, an object `Name`, and a `Key` (or `\"\"` for a whole-object reference like `envFrom`). Return one line per problem, in input order:",
-        "",
-        "- object missing: `\"secret shop-db not found\"`",
-        "- key missing: `\"secret shop-db has no key pasword\"`"
-      ],
-      "starter": [
-        "List<string> Missing(List<(string Kind, string Name, string Key)> refs, Dictionary<string, HashSet<string>> configMaps, Dictionary<string, HashSet<string>> secrets)",
-        "{",
-        "    return new List<string>();",
-        "}"
-      ],
-      "solution": [
-        "List<string> Missing(List<(string Kind, string Name, string Key)> refs, Dictionary<string, HashSet<string>> configMaps, Dictionary<string, HashSet<string>> secrets)",
-        "{",
-        "    var problems = new List<string>();",
-        "    foreach (var r in refs)",
-        "    {",
-        "        var store = r.Kind == \"secret\" ? secrets : configMaps;",
-        "        if (!store.TryGetValue(r.Name, out var keys)) problems.Add($\"{r.Kind} {r.Name} not found\");",
-        "        else if (r.Key != \"\" && !keys.Contains(r.Key)) problems.Add($\"{r.Kind} {r.Name} has no key {r.Key}\");",
-        "    }",
-        "    return problems;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoCms = new Dictionary<string, HashSet<string>> { [\"shop-config\"] = new() { \"LOG_LEVEL\", \"PAYMENTS_URL\" } };",
-        "var dojoSecs = new Dictionary<string, HashSet<string>> { [\"shop-db\"] = new() { \"password\", \"user\" } };",
-        "Dojo.Eq(\"all fine\", new List<string>(), Missing(new() { (\"configmap\", \"shop-config\", \"\"), (\"secret\", \"shop-db\", \"password\") }, dojoCms, dojoSecs));",
-        "Dojo.Eq(\"problems in order\", new List<string> { \"secret shop-db has no key pasword\", \"configmap feature-flags not found\", \"secret stripe not found\" },",
-        "    Missing(new() { (\"secret\", \"shop-db\", \"pasword\"), (\"configmap\", \"feature-flags\", \"\"), (\"configmap\", \"shop-config\", \"LOG_LEVEL\"), (\"secret\", \"stripe\", \"key\") }, dojoCms, dojoSecs));",
-        "Dojo.Eq(\"a configmap name is not a secret\", new List<string> { \"secret shop-config not found\" }, Missing(new() { (\"secret\", \"shop-config\", \"\") }, dojoCms, dojoSecs));"
-      ],
-      "hints": [
-        "Pick the right dictionary by `Kind` first.",
-        "Object missing beats key missing: check `TryGetValue` before `Contains`."
+      "body": [
+        "Configuration tickets, each on its own one-node **Kubernetes 1.37** cluster: a release whose pods never start, a",
+        "team namespace out of quota, and the production overlay nobody wrote. Use `kubectl describe`, `kubectl get events`,",
+        "`kubectl describe quota`, and `kubectl kustomize` / `kubectl apply -k`."
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Parse storage quantities",
+      "type": "terminal",
+      "title": "Ticket 1: CreateContainerConfigError",
+      "image": "k8s",
       "prompt": [
-        "Kubernetes quantities use binary suffixes `Ki Mi Gi Ti` (powers of 1024) and decimal ones `k M G T` (powers of 1000). Write `long Bytes(string q)` (no suffix means bytes) and `bool Fits(string request, string capacity)`.",
-        "",
-        "`Bytes(\"10Gi\")` is `10737418240`; `Bytes(\"10G\")` is `10000000000`; `Fits(\"10G\", \"10Gi\")` is true but `Fits(\"10Gi\", \"10G\")` is false."
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The new `billing` release never starts: `kubectl get pods` shows `CreateContainerConfigError`.",
+        "`kubectl describe pod` says what is missing. Provide what it needs (the invoice prefix is `INV`, and the payment key",
+        "for this test cluster is `sk_test_example_123`) without changing the Deployment, so that the pod runs and logs",
+        "`billing: INV invoices in EUR ...`."
       ],
-      "starter": [
-        "long Bytes(string q)",
-        "{",
-        "    return 0;",
-        "}",
-        "",
-        "bool Fits(string request, string capacity)",
-        "{",
-        "    return false;",
-        "}"
+      "setup": [
+        "boss-ref.sh"
       ],
-      "solution": [
-        "long Bytes(string q)",
-        "{",
-        "    var units = new (string Suffix, long Factor)[] {",
-        "        (\"Ki\", 1L << 10), (\"Mi\", 1L << 20), (\"Gi\", 1L << 30), (\"Ti\", 1L << 40),",
-        "        (\"k\", 1000L), (\"M\", 1000_000L), (\"G\", 1000_000_000L), (\"T\", 1000_000_000_000L) };",
-        "    foreach (var (s, f) in units)",
-        "        if (q.EndsWith(s)) return long.Parse(q[..^s.Length]) * f;",
-        "    return long.Parse(q);",
-        "}",
-        "",
-        "bool Fits(string request, string capacity) => Bytes(request) <= Bytes(capacity);"
-      ],
-      "template": [
-        "{{CODE}}",
-        "Dojo.Eq(\"10Gi\", 10737418240L, Bytes(\"10Gi\"));",
-        "Dojo.Eq(\"10G\", 10000000000L, Bytes(\"10G\"));",
-        "Dojo.Eq(\"512Mi\", 536870912L, Bytes(\"512Mi\"));",
-        "Dojo.Eq(\"1Ti\", 1099511627776L, Bytes(\"1Ti\"));",
-        "Dojo.Eq(\"500k\", 500000L, Bytes(\"500k\"));",
-        "Dojo.Eq(\"plain bytes\", 4096L, Bytes(\"4096\"));",
-        "Dojo.Check(\"10G fits in 10Gi\", Fits(\"10G\", \"10Gi\"), \"\");",
-        "Dojo.Check(\"10Gi does not fit in 10G\", !Fits(\"10Gi\", \"10G\"), \"\");"
+      "checks": [
+        {
+          "name": "billing runs",
+          "cmd": "kubectl rollout status deploy/billing --timeout=40s >/dev/null && kubectl logs $(kubectl get pods -l app=billing -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name')",
+          "expectOutput": "billing: INV invoices in EUR (key of 19 characters)",
+          "fail": "`billing` is not running yet (or logs something else). `kubectl describe pod -l app=billing` shows the missing reference."
+        },
+        {
+          "name": "the key is in a Secret, not a ConfigMap",
+          "cmd": "kubectl get secret billing-secrets -o jsonpath='{.data.stripe-key}' | base64 -d",
+          "expectOutput": "sk_test_example_123",
+          "fail": "Create the Secret `billing-secrets` with the key `stripe-key`."
+        },
+        {
+          "name": "the Deployment is unchanged",
+          "cmd": "kubectl get deploy billing -o jsonpath='{.metadata.generation}'",
+          "expectOutput": "1",
+          "fail": "Fix the references' targets, not the Deployment."
+        }
       ],
       "hints": [
-        "Check the two-letter binary suffixes before the one-letter decimal ones (`Gi` ends with `i`, but `G` alone must not match `Gi`).",
-        "`q[..^2]` drops the last two characters."
-      ]
+        "`kubectl describe pod -l app=billing | tail` names the first missing piece; fix it and look again for the next.",
+        "One key is missing from the ConfigMap `billing-config`, and the Secret `billing-secrets` does not exist.",
+        "`kubectl patch configmap billing-config -p '{\"data\":{\"INVOICE_PREFIX\":\"INV\"}}'` and `kubectl create secret generic billing-secrets --from-literal=stripe-key=sk_test_example_123`."
+      ],
+      "solution": [
+        "kubectl get pods",
+        "kubectl describe pod -l app=billing | tail -n 5",
+        "kubectl patch configmap billing-config -p '{\"data\":{\"INVOICE_PREFIX\":\"INV\"}}'",
+        "kubectl create secret generic billing-secrets --from-literal=stripe-key=sk_test_example_123",
+        "kubectl rollout status deploy/billing",
+        "kubectl logs deploy/billing"
+      ],
+      "explain": "`CreateContainerConfigError` means the kubelet could not build the container's environment or volumes: a missing ConfigMap, Secret, or key. The kubelet keeps retrying, so creating the missing pieces is enough; no restart needed. `optional: true` on a reference turns a hard failure into an empty value, which is only right for truly optional settings."
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Render a config file",
+      "type": "terminal",
+      "title": "Ticket 2: the team is out of quota",
+      "image": "k8s",
       "prompt": [
-        "Teams often mount a templated config file. Write `string Render(string template, Dictionary<string, string> values)` that replaces every `${NAME}` with its value. A name not in `values` throws `KeyNotFoundException` (fail the release, not production). Text without placeholders is returned unchanged.",
-        "",
-        "`Render(\"url=${HOST}:${PORT}\", { HOST = \"db\", PORT = \"5432\" })` is `\"url=db:5432\"`."
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). In the namespace `reports`, the `renderer` Deployment wants 3 replicas but only some pods exist.",
+        "`kubectl get rs -n reports` and `kubectl describe quota -n reports` show why. The quota is the team's budget and stays",
+        "as it is. Change `renderer`'s resources so that all **3** replicas run **within** the quota, with each pod still",
+        "requesting at least `250m` CPU and `256Mi` memory."
       ],
-      "starter": [
-        "string Render(string template, Dictionary<string, string> values)",
-        "{",
-        "    return template;",
-        "}"
+      "setup": [
+        "boss-quota.sh"
       ],
-      "solution": [
-        "string Render(string template, Dictionary<string, string> values)",
-        "{",
-        "    var sb = new StringBuilder();",
-        "    int i = 0;",
-        "    while (i < template.Length)",
-        "    {",
-        "        int start = template.IndexOf(\"${\", i);",
-        "        if (start < 0) { sb.Append(template, i, template.Length - i); break; }",
-        "        sb.Append(template, i, start - i);",
-        "        int end = template.IndexOf('}', start);",
-        "        string name = template.Substring(start + 2, end - start - 2);",
-        "        if (!values.TryGetValue(name, out var v)) throw new KeyNotFoundException(name);",
-        "        sb.Append(v);",
-        "        i = end + 1;",
-        "    }",
-        "    return sb.ToString();",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoV = new Dictionary<string, string> { [\"HOST\"] = \"db\", [\"PORT\"] = \"5432\", [\"DB\"] = \"shop\" };",
-        "Dojo.Eq(\"two placeholders\", \"url=db:5432\", Render(\"url=${HOST}:${PORT}\", dojoV));",
-        "Dojo.Eq(\"no placeholders\", \"plain text\", Render(\"plain text\", dojoV));",
-        "Dojo.Eq(\"repeated\", \"db/db/shop\", Render(\"${HOST}/${HOST}/${DB}\", dojoV));",
-        "Dojo.Throws<KeyNotFoundException>(\"unknown name throws\", () => Render(\"x=${NOPE}\", dojoV));"
+      "checks": [
+        {
+          "name": "3 renderer pods are ready",
+          "cmd": "kubectl -n reports rollout status deploy/renderer --timeout=40s >/dev/null; kubectl -n reports get deploy renderer -o jsonpath='{.status.readyReplicas}'",
+          "expectOutput": "3",
+          "fail": "Not all 3 replicas run. The quota rejects pods whose requests (or limits) would exceed it."
+        },
+        {
+          "name": "each pod requests at least 250m and 256Mi",
+          "cmd": "kubectl -n reports get deploy renderer -o json | jq -r '.spec.template.spec.containers[0].resources.requests | \"\\(.cpu) \\(.memory)\"'",
+          "expectMatch": "^(2[5-9][0-9]m|3[0-3][0-9]m) (2[5-9][0-9]Mi|3[0-3][0-9]Mi)$",
+          "fail": "Keep requests of at least `250m` CPU and `256Mi` memory."
+        },
+        {
+          "name": "the quota is unchanged",
+          "cmd": "kubectl -n reports get resourcequota team-quota -o jsonpath='{.spec.hard.requests\\.cpu} {.spec.hard.requests\\.memory} {.spec.hard.limits\\.memory}'",
+          "expectOutput": "1 1Gi 2Gi",
+          "fail": "Leave the quota alone."
+        }
       ],
       "hints": [
-        "Find `${` with `IndexOf`, then the next `}`.",
-        "Append the text between placeholders; look up the name with `TryGetValue`."
-      ]
+        "`kubectl get events -n reports --field-selector reason=FailedCreate` quotes the quota error: which resource, used and limited.",
+        "Three pods must fit in `requests.cpu: 1`, `requests.memory: 1Gi` and `limits.memory: 2Gi` together. And a rolling update needs room for **new** pods while the old ones still count against the quota: here it never has any, so the rollout deadlocks. Replace the old pods first (`strategy: Recreate`), or scale to 0 and back.",
+        "`kubectl -n reports patch deploy renderer -p '{\"spec\":{\"strategy\":{\"type\":\"Recreate\",\"rollingUpdate\":null}}}'`, then `kubectl -n reports set resources deploy renderer --requests=cpu=300m,memory=300Mi --limits=memory=600Mi`."
+      ],
+      "solution": [
+        "kubectl -n reports get rs",
+        "kubectl -n reports describe quota",
+        "kubectl -n reports get events --field-selector reason=FailedCreate | tail -n 2",
+        "kubectl -n reports patch deploy renderer -p '{\"spec\":{\"strategy\":{\"type\":\"Recreate\",\"rollingUpdate\":null}}}'",
+        "kubectl -n reports set resources deploy renderer --requests=cpu=300m,memory=300Mi --limits=memory=600Mi",
+        "kubectl -n reports rollout status deploy/renderer",
+        "kubectl -n reports describe quota"
+      ],
+      "explain": "A ResourceQuota is enforced at admission: the ReplicaSet's pod creations are rejected (`FailedCreate`, visible on the ReplicaSet and in events), so the pods never even reach `Pending`. Quantities add up across the namespace: `500m × 3` is more than `1` CPU. Teams usually pair a quota with a `LimitRange` so pods without requests get sane defaults instead of being rejected."
+    },
+    {
+      "type": "terminal",
+      "title": "Ticket 3: write the production overlay",
+      "image": "k8s",
+      "prompt": [
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). `~/deploy/base` is a Kustomize base for the API (`kubectl kustomize ~/deploy/base` renders it). Write",
+        "the production overlay in `~/deploy/overlays/prod` and apply it with `kubectl apply -k` so that, in the namespace",
+        "`prod`:",
+        "",
+        "1. the API runs **3** replicas;",
+        "2. its config says `LOG_LEVEL=warn` and `ENVIRONMENT=prod` (the base's generated ConfigMap, overridden);",
+        "3. every object carries the label `env=prod`.",
+        "",
+        "Do not edit the base: dev uses it as it is."
+      ],
+      "setup": [
+        "boss-kustomize.sh"
+      ],
+      "checks": [
+        {
+          "name": "api runs 3 replicas in prod",
+          "cmd": "kubectl -n prod rollout status deploy/api --timeout=40s >/dev/null; kubectl -n prod get deploy api -o jsonpath='{.status.readyReplicas}'",
+          "expectOutput": "3",
+          "fail": "There should be 3 ready `api` pods in `prod`. `kubectl apply -k ~/deploy/overlays/prod`."
+        },
+        {
+          "name": "the prod config reached the pods",
+          "cmd": "kubectl -n prod logs $(kubectl -n prod get pods -l app=api -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name')",
+          "expectOutput": "api: log level warn in prod",
+          "fail": "The pods do not log `log level warn in prod`: override the base's `configMapGenerator`."
+        },
+        {
+          "name": "everything is labelled env=prod",
+          "cmd": "kubectl -n prod get deploy,configmap -l env=prod -o name | grep -c -E 'deployment|configmap/api-config'",
+          "expectOutput": "2",
+          "fail": "Add `labels: [{pairs: {env: prod}}]` (or `commonLabels`) in the overlay."
+        },
+        {
+          "name": "the base is unchanged",
+          "cmd": "kubectl kustomize ~/deploy/base | grep -E '^[[:space:]]*(replicas|LOG_LEVEL):' | tr -d ' '",
+          "expectOutput": [
+            "LOG_LEVEL:debug",
+            "replicas:1"
+          ],
+          "fail": "Leave the base as it is."
+        }
+      ],
+      "hints": [
+        "The overlay's `kustomization.yaml`: `resources: [../../base]`, `namespace: prod`, and the changes on top.",
+        "`replicas: [{name: api, count: 3}]`; `configMapGenerator: [{name: api-config, behavior: merge, literals: [LOG_LEVEL=warn, ENVIRONMENT=prod]}]`.",
+        "`labels: [{pairs: {env: prod}, includeSelectors: false}]`; check with `kubectl kustomize ~/deploy/overlays/prod` before `kubectl apply -k`."
+      ],
+      "solution": [
+        "cat > ~/deploy/overlays/prod/kustomization.yaml <<'EOF'",
+        "apiVersion: kustomize.config.k8s.io/v1beta1",
+        "kind: Kustomization",
+        "resources: [../../base]",
+        "namespace: prod",
+        "replicas:",
+        "  - {name: api, count: 3}",
+        "configMapGenerator:",
+        "  - name: api-config",
+        "    behavior: merge",
+        "    literals: [LOG_LEVEL=warn, ENVIRONMENT=prod]",
+        "labels:",
+        "  - pairs: {env: prod}",
+        "EOF",
+        "kubectl kustomize ~/deploy/overlays/prod",
+        "kubectl apply -k ~/deploy/overlays/prod",
+        "kubectl -n prod rollout status deploy/api",
+        "kubectl -n prod logs deploy/api"
+      ],
+      "explain": "Kustomize is built into `kubectl` (`-k`), and base plus overlays is the common way to keep one set of manifests for every environment. Note the generated ConfigMap's name, `api-config-<hash>`: the hash changes whenever the content does, and the Deployment's reference is rewritten to match, so a config change rolls the pods automatically. That is the problem the old \"render a template\" approach never solved."
     }
   ]
 }

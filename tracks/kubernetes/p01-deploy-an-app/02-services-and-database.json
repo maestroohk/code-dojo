@@ -118,58 +118,70 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Check the wiring",
+      "type": "terminal",
+      "title": "Give the API and the database stable names",
+      "image": "k8s",
       "prompt": [
-        "Write `List<string> Wiring(List<(string Name, Dictionary<string, string> Selector, string TargetPort)> services, List<(string Name, Dictionary<string, string> Labels, Dictionary<string, int> Ports)> pods)`.",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl`; the current namespace is `todo`, and the manifests live in `~/k8s`. `todo-api` (port named `http`) and the database StatefulSet `todo-db` (PostgreSQL stand-in,",
+        "port named `postgres` on 5432) run, but nothing can reach them by name. Write `~/k8s/services.yaml` with two Services",
+        "and apply it:",
         "",
-        "For each Service, in order, return one line:",
+        "1. `todo-api` on port 80, to the API pods' `http` port;",
+        "2. `todo-db` on port 5432, to the database pod's `postgres` port.",
         "",
-        "- no pod matches its selector: `\"NAME: no pods match selector\"`",
-        "- pods match, but `TargetPort` is neither a port **name** in the pod's `Ports` nor a port **number** (as text) among its values: `\"NAME: targetPort T not found on POD\"` (first matching pod)",
-        "- otherwise `\"NAME: N pods\"` (number of matching pods)"
+        "From the `shell` pod: `kubectl exec shell -- wget -qO- -T 2 http://todo-api/` and",
+        "`kubectl exec shell -- nc -w 2 todo-db 5432` both answer."
       ],
-      "starter": [
-        "List<string> Wiring(List<(string Name, Dictionary<string, string> Selector, string TargetPort)> services,",
-        "                    List<(string Name, Dictionary<string, string> Labels, Dictionary<string, int> Ports)> pods)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "s2.sh"
       ],
-      "solution": [
-        "List<string> Wiring(List<(string Name, Dictionary<string, string> Selector, string TargetPort)> services,",
-        "                    List<(string Name, Dictionary<string, string> Labels, Dictionary<string, int> Ports)> pods)",
-        "{",
-        "    var lines = new List<string>();",
-        "    foreach (var s in services)",
-        "    {",
-        "        var matching = pods.Where(p => s.Selector.Count > 0 && s.Selector.All(kv => p.Labels.TryGetValue(kv.Key, out var v) && v == kv.Value)).ToList();",
-        "        if (matching.Count == 0) { lines.Add($\"{s.Name}: no pods match selector\"); continue; }",
-        "        var bad = matching.FirstOrDefault(p => !p.Ports.ContainsKey(s.TargetPort) && !p.Ports.Values.Any(n => n.ToString() == s.TargetPort));",
-        "        if (bad.Name is not null) { lines.Add($\"{s.Name}: targetPort {s.TargetPort} not found on {bad.Name}\"); continue; }",
-        "        lines.Add($\"{s.Name}: {matching.Count} pods\");",
-        "    }",
-        "    return lines;",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoPods = new List<(string Name, Dictionary<string, string> Labels, Dictionary<string, int> Ports)> {",
-        "    (\"shop-api-a\", new() { [\"app\"] = \"shop-api\" }, new() { [\"http\"] = 8080 }),",
-        "    (\"shop-api-b\", new() { [\"app\"] = \"shop-api\" }, new() { [\"http\"] = 8080 }),",
-        "    (\"db-0\", new() { [\"app\"] = \"db\" }, new() { [\"postgres\"] = 5432 }),",
-        "};",
-        "Dojo.Eq(\"stage manifests\", new List<string> { \"shop-api: 2 pods\", \"db: 1 pods\" },",
-        "    Wiring(new() { (\"shop-api\", new() { [\"app\"] = \"shop-api\" }, \"http\"), (\"db\", new() { [\"app\"] = \"db\" }, \"5432\") }, dojoPods));",
-        "Dojo.Eq(\"typo in selector\", new List<string> { \"api: no pods match selector\" }, Wiring(new() { (\"api\", new() { [\"app\"] = \"shopapi\" }, \"http\") }, dojoPods));",
-        "Dojo.Eq(\"wrong port\", new List<string> { \"shop-api: targetPort 80 not found on shop-api-a\" }, Wiring(new() { (\"shop-api\", new() { [\"app\"] = \"shop-api\" }, \"80\") }, dojoPods));",
-        "Dojo.Eq(\"number works too\", new List<string> { \"shop-api: 2 pods\" }, Wiring(new() { (\"shop-api\", new() { [\"app\"] = \"shop-api\" }, \"8080\") }, dojoPods));"
+      "checks": [
+        {
+          "name": "todo-api answers by name",
+          "cmd": "kubectl exec shell -- wget -qO- -T 3 http://todo-api/ | grep '^Name:'",
+          "expectOutput": "Name: todo-api-v1",
+          "fail": "`http://todo-api/` does not answer from `shell`."
+        },
+        {
+          "name": "todo-db answers by name",
+          "cmd": "kubectl exec shell -- nc -w 2 todo-db 5432 </dev/null",
+          "expectContains": "PostgreSQL 17 ready",
+          "fail": "`todo-db:5432` does not answer from `shell`."
+        },
+        {
+          "name": "both target named ports",
+          "cmd": "kubectl get svc todo-api todo-db -o jsonpath='{range .items[*]}{.metadata.name}={.spec.ports[0].port}->{.spec.ports[0].targetPort} {end}'",
+          "expectOutput": "todo-api=80->http todo-db=5432->postgres",
+          "fail": "Use the named container ports as `targetPort` (`http`, `postgres`)."
+        }
       ],
       "hints": [
-        "Reuse your selector matching; an empty selector matches nothing for a Service.",
-        "A tuple from `FirstOrDefault` has `Name == null` when nothing was found."
-      ]
+        "A Service: `selector` (the pods' labels) and `ports: [{port: ..., targetPort: ...}]`.",
+        "`targetPort` may name a container port: `targetPort: http`.",
+        "Two documents in one file separated by `---`, then `kubectl apply -f ~/k8s/services.yaml`."
+      ],
+      "solution": [
+        "cat > ~/k8s/services.yaml <<'EOF'",
+        "apiVersion: v1",
+        "kind: Service",
+        "metadata: {name: todo-api}",
+        "spec:",
+        "  selector: {app: todo-api}",
+        "  ports: [{name: http, port: 80, targetPort: http}]",
+        "---",
+        "apiVersion: v1",
+        "kind: Service",
+        "metadata: {name: todo-db}",
+        "spec:",
+        "  selector: {app: todo-db}",
+        "  ports: [{name: postgres, port: 5432, targetPort: postgres}]",
+        "EOF",
+        "kubectl apply -f ~/k8s/services.yaml",
+        "kubectl get endpointslices",
+        "kubectl exec shell -- wget -qO- -T 3 http://todo-api/",
+        "kubectl exec shell -- nc -w 2 todo-db 5432"
+      ],
+      "explain": "Services give pods a stable name and virtual IP while the pods behind them come and go. Named `targetPort`s keep the Service right when a container's port number changes. For a real PostgreSQL StatefulSet you would usually add a headless Service (`clusterIP: None`) for stable per-pod names, plus this regular one for clients."
     }
   ]
 }

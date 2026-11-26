@@ -129,70 +129,47 @@
       ]
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Merge Helm values",
+      "type": "terminal",
+      "title": "Server-side apply: take ownership back for Git",
+      "image": "k8s",
       "prompt": [
-        "Write `Dictionary<string, string> Merge(List<Dictionary<string, string>> layers)` that merges flattened values (keys like `image.tag`) in order, later layers winning.",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The `api` Deployment is managed GitOps-style from `~/gitops/api.yaml`, applied with server-side apply",
+        "under the field manager `gitops`. During an incident someone scaled it to 5 by hand, and that change never went back",
+        "to Git. Git says 3.",
         "",
-        "Then `string Render(string template, Dictionary<string, string> values)` replacing every `{{ .Values.KEY }}` (exactly one space inside each brace pair) with its value. Unknown keys render as an empty string, as Helm does."
+        "1. Re-apply the file the way the GitOps tool does: `kubectl apply --server-side --field-manager=gitops -f ~/gitops/api.yaml`.",
+        "   Read the conflict: the API server tells you **who** owns the field now.",
+        "2. Git is the source of truth: apply again so that Git's value wins and `gitops` owns `spec.replicas` again."
       ],
-      "starter": [
-        "Dictionary<string, string> Merge(List<Dictionary<string, string>> layers)",
-        "{",
-        "    return new Dictionary<string, string>();",
-        "}",
-        "",
-        "string Render(string template, Dictionary<string, string> values)",
-        "{",
-        "    return template;",
-        "}"
+      "setup": [
+        "ssa.sh"
       ],
-      "solution": [
-        "Dictionary<string, string> Merge(List<Dictionary<string, string>> layers)",
-        "{",
-        "    var result = new Dictionary<string, string>();",
-        "    foreach (var layer in layers)",
-        "        foreach (var (k, v) in layer) result[k] = v;",
-        "    return result;",
-        "}",
-        "",
-        "string Render(string template, Dictionary<string, string> values)",
-        "{",
-        "    var sb = new StringBuilder();",
-        "    int i = 0;",
-        "    const string open = \"{{ .Values.\";",
-        "    while (true)",
-        "    {",
-        "        int s = template.IndexOf(open, i);",
-        "        if (s < 0) { sb.Append(template[i..]); break; }",
-        "        int e = template.IndexOf(\" }}\", s);",
-        "        sb.Append(template[i..s]);",
-        "        string key = template[(s + open.Length)..e];",
-        "        sb.Append(values.GetValueOrDefault(key, \"\"));",
-        "        i = e + 3;",
-        "    }",
-        "    return sb.ToString();",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoV = Merge(new() {",
-        "    new() { [\"replicaCount\"] = \"2\", [\"image.tag\"] = \"1.4\", [\"image.repo\"] = \"shop/api\" },",
-        "    new() { [\"replicaCount\"] = \"4\" },",
-        "    new() { [\"image.tag\"] = \"1.5\" },",
-        "});",
-        "Dojo.Eq(\"replicaCount from prod file\", \"4\", dojoV[\"replicaCount\"]);",
-        "Dojo.Eq(\"image.tag from --set\", \"1.5\", dojoV[\"image.tag\"]);",
-        "Dojo.Eq(\"Render image\", \"image: \\\"shop/api:1.5\\\"\", Render(\"image: \\\"{{ .Values.image.repo }}:{{ .Values.image.tag }}\\\"\", dojoV));",
-        "Dojo.Eq(\"Render replicas\", \"replicas: 4\", Render(\"replicas: {{ .Values.replicaCount }}\", dojoV));",
-        "Dojo.Eq(\"unknown key renders empty\", \"x=\", Render(\"x={{ .Values.nope }}\", dojoV));",
-        "Dojo.Eq(\"no placeholders\", \"kind: Service\", Render(\"kind: Service\", dojoV));"
+      "checks": [
+        {
+          "name": "api is back to 3 replicas",
+          "cmd": "kubectl rollout status deploy/api --timeout=40s >/dev/null; kubectl get deploy api -o jsonpath='{.spec.replicas} {.status.readyReplicas}'",
+          "expectOutput": "3 3",
+          "fail": "`api` should be back at 3 replicas."
+        },
+        {
+          "name": "only gitops owns spec.replicas",
+          "cmd": "kubectl get deploy api --show-managed-fields -o json | jq -r '[.metadata.managedFields[] | select(.fieldsV1[\"f:spec\"][\"f:replicas\"] != null) | .manager] | join(\",\")'",
+          "expectOutput": "gitops",
+          "fail": "Another manager still owns `spec.replicas`. Server-side apply with `--force-conflicts` takes the field over."
+        }
       ],
       "hints": [
-        "Merge is the same overwrite loop as env precedence.",
-        "Find `{{ .Values.`, then the next ` }}`; the key is between them."
-      ]
+        "Without forcing, the apply fails with `conflict with \"night-shift\"` (and/or `kubectl-scale`) on `.spec.replicas`.",
+        "`kubectl get deploy api --show-managed-fields -o yaml` lists `managedFields`: which manager set which field.",
+        "`kubectl apply --server-side --field-manager=gitops --force-conflicts -f ~/gitops/api.yaml`."
+      ],
+      "solution": [
+        "kubectl apply --server-side --field-manager=gitops -f ~/gitops/api.yaml",
+        "kubectl get deploy api --show-managed-fields -o jsonpath='{range .metadata.managedFields[*]}{.manager}{\" \"}{end}'; echo",
+        "kubectl apply --server-side --field-manager=gitops --force-conflicts -f ~/gitops/api.yaml",
+        "kubectl rollout status deploy/api"
+      ],
+      "explain": "Server-side apply tracks an owner (field manager) for every field, so two tools changing the same field is a visible **conflict** instead of a silent last-write-wins. GitOps controllers such as Argo CD and Flux apply this way; `--force-conflicts` is them saying \"Git wins\". The incident's real fix is the other direction: if 5 replicas were right, the change belongs in Git, where it is reviewed and survives the next sync."
     }
   ]
 }

@@ -147,47 +147,52 @@
       "answer": "10.0.0.4:8080 10.0.0.6:8080"
     },
     {
-      "type": "code",
-      "mode": "write",
-      "title": "Compute a Service's endpoints",
+      "type": "terminal",
+      "title": "Fix a Service with no endpoints",
+      "image": "k8s",
       "prompt": [
-        "Write `List<string> Endpoints(Dictionary<string, string> selector, int targetPort, List<(string Ip, Dictionary<string, string> Labels, bool Ready)> pods)` returning `\"ip:targetPort\"` for every pod that matches the selector **and** is Ready, in input order.",
+        "This terminal runs a **real one-node Kubernetes 1.37 cluster** (k3s) with `kubectl` (alias `k`). The `catalog` pods are healthy (`kubectl get pods -l app=catalog`), but nothing reaches them through the",
+        "Service: `kubectl exec shell -- wget -qO- -T 2 http://catalog/` fails.",
         "",
-        "An empty selector is a special case for Services: it selects **nothing** (endpoints are then managed by hand), so return an empty list."
+        "Find out why with `kubectl describe svc catalog`, `kubectl get endpointslices -l kubernetes.io/service-name=catalog`",
+        "and the pods' labels and ports, then fix the **Service** (not the Deployment) so that the request answers."
       ],
-      "starter": [
-        "List<string> Endpoints(Dictionary<string, string> selector, int targetPort, List<(string Ip, Dictionary<string, string> Labels, bool Ready)> pods)",
-        "{",
-        "    return new List<string>();",
-        "}"
+      "setup": [
+        "endpoints.sh"
       ],
-      "solution": [
-        "List<string> Endpoints(Dictionary<string, string> selector, int targetPort, List<(string Ip, Dictionary<string, string> Labels, bool Ready)> pods)",
-        "{",
-        "    if (selector.Count == 0) return new List<string>();",
-        "    return pods",
-        "        .Where(p => p.Ready && selector.All(kv => p.Labels.TryGetValue(kv.Key, out var v) && v == kv.Value))",
-        "        .Select(p => $\"{p.Ip}:{targetPort}\")",
-        "        .ToList();",
-        "}"
-      ],
-      "template": [
-        "{{CODE}}",
-        "var dojoPods = new List<(string Ip, Dictionary<string, string> Labels, bool Ready)> {",
-        "    (\"10.244.1.7\", new() { [\"app\"] = \"shop-api\", [\"v\"] = \"1\" }, true),",
-        "    (\"10.244.2.3\", new() { [\"app\"] = \"shop-api\", [\"v\"] = \"2\" }, false),",
-        "    (\"10.244.3.9\", new() { [\"app\"] = \"shop-api\", [\"v\"] = \"2\" }, true),",
-        "    (\"10.244.3.10\", new() { [\"app\"] = \"shopapi\" }, true),",
-        "};",
-        "Dojo.Eq(\"app=shop-api, 8080\", new List<string> { \"10.244.1.7:8080\", \"10.244.3.9:8080\" }, Endpoints(new() { [\"app\"] = \"shop-api\" }, 8080, dojoPods));",
-        "Dojo.Eq(\"typo in pod label is not selected\", new List<string> { \"10.244.3.10:80\" }, Endpoints(new() { [\"app\"] = \"shopapi\" }, 80, dojoPods));",
-        "Dojo.Eq(\"v=2 ready only\", new List<string> { \"10.244.3.9:9000\" }, Endpoints(new() { [\"app\"] = \"shop-api\", [\"v\"] = \"2\" }, 9000, dojoPods));",
-        "Dojo.Eq(\"empty selector selects nothing\", new List<string>(), Endpoints(new(), 80, dojoPods));"
+      "checks": [
+        {
+          "name": "catalog has 2 ready endpoints on the app's port",
+          "cmd": "kubectl get endpointslices -l kubernetes.io/service-name=catalog -n default -o json | jq -r '[.items[] | .ports[0].port as $p | .endpoints[]? | select(.conditions.ready) | $p] | \"\\(length) ready on \\(.[0])\"'",
+          "expectOutput": "2 ready on 8080",
+          "fail": "The Service still has no (or the wrong) endpoints. Its selector must match the pods' labels, and `targetPort` the port the container listens on."
+        },
+        {
+          "name": "a request through the Service answers",
+          "cmd": "kubectl exec shell -- wget -qO- -T 3 http://catalog/ | grep '^Name:'",
+          "expectOutput": "Name: catalog",
+          "fail": "`wget http://catalog/` from the `shell` pod still fails."
+        },
+        {
+          "name": "the Deployment is unchanged",
+          "cmd": "kubectl get deploy catalog -o jsonpath='{.spec.template.metadata.labels.app} {.spec.template.spec.containers[0].ports[0].containerPort}'",
+          "expectOutput": "catalog 8080",
+          "fail": "Fix the Service; leave the Deployment as it is."
+        }
       ],
       "hints": [
-        "Filter on `p.Ready` and the selector, then format.",
-        "Handle `selector.Count == 0` first."
-      ]
+        "`kubectl get pods --show-labels` vs `kubectl get svc catalog -o jsonpath='{.spec.selector}'`: one letter differs.",
+        "`kubectl get pods -l app=catalog -o jsonpath='{.items[0].spec.containers[0].ports}'` shows the container port (named `http`).",
+        "`kubectl patch svc catalog -p '{\"spec\":{\"selector\":{\"app\":\"catalog\"},\"ports\":[{\"port\":80,\"targetPort\":\"http\"}]}}'`."
+      ],
+      "solution": [
+        "kubectl describe svc catalog",
+        "kubectl get pods --show-labels",
+        "kubectl patch svc catalog -p '{\"spec\":{\"selector\":{\"app\":\"catalog\"},\"ports\":[{\"port\":80,\"targetPort\":\"http\"}]}}'",
+        "kubectl get endpointslices -l kubernetes.io/service-name=catalog",
+        "kubectl exec shell -- wget -qO- -T 3 http://catalog/"
+      ],
+      "explain": "A Service is a selector plus a port mapping. `Endpoints: <none>` always means the selector matches no ready pod (a typo, a missing label, or pods that are not Ready); endpoints that refuse connections mean the `targetPort` is wrong. Naming the container port (`http`) and using `targetPort: http` keeps the two from drifting apart."
     },
     {
       "type": "lab",
