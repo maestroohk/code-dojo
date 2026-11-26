@@ -156,39 +156,164 @@
     {
       "type": "learn",
       "title": "Senior's toolkit: operating RabbitMQ and Kafka",
-      "body": [
-        "**RabbitMQ**",
-        "",
-        "```bash",
-        "rabbitmq-diagnostics check_running && rabbitmq-diagnostics check_local_alarms   # is it up, are publishers blocked?",
-        "rabbitmq-diagnostics memory_breakdown        # what holds the memory (queues, connections, binaries)",
-        "rabbitmq-diagnostics listeners               # ports: 5672 AMQP, 15672 management, 15692 Prometheus",
-        "rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers",
-        "rabbitmqctl list_consumers queue_name prefetch_count ack_required",
-        "rabbitmq-queues quorum_status orders         # Raft members, leader, who lags",
-        "rabbitmq-queues check_if_node_is_quorum_critical   # run BEFORE stopping a node",
-        "rabbitmq-upgrade drain                       # maintenance mode before a restart (revive to undo)",
-        "curl -s http://rabbit:15692/metrics | grep rabbitmq_alarms",
-        "curl -s -u ops:\"$RABBIT_PASS\" http://rabbit:15672/api/queues/%2F/orders | jq '.messages_ready, .messages_unacknowledged'",
-        "```",
-        "",
-        "**Kafka**",
-        "",
-        "```bash",
-        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders --reset-offsets --to-datetime 2026-11-26T01:00:00.000 --dry-run",
-        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders:3 --reset-offsets --shift-by 1 --execute",
-        "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json --execute --throttle 50000000",
-        "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json --verify   # also removes the throttle",
-        "kafka-leader-election.sh --bootstrap-server kafka:9092 --election-type PREFERRED --all-topic-partitions",
-        "kafka-log-dirs.sh --bootstrap-server kafka:9092 --describe --broker-list 2   # who fills the disk",
-        "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name orders --alter --add-config retention.ms=86400000",
-        "```",
-        "",
-        "- **Offset resets**: always `--dry-run` first, read the NEW-OFFSET column, then `--execute`; the group must be inactive.",
-        "- **Reassignment**: always with `--throttle` (bytes/s) so moving replicas does not starve clients; `--verify` at the end.",
-        "- **Rolling restart**: one broker at a time; wait until `--under-replicated-partitions` is empty before the next;",
-        "  KRaft controllers one at a time, the active one last (`kafka-metadata-quorum.sh describe --replication`)."
+      "body": "Reach for these during maintenance and incidents: health and memory checks, safe offset resets, throttled reassignments and rolling restarts.",
+      "toolkit": [
+        {
+          "cmd": "rabbitmq-diagnostics check_running && rabbitmq-diagnostics check_local_alarms",
+          "what": "Is it up, and are publishers blocked?"
+        },
+        {
+          "cmd": "rabbitmq-diagnostics memory_breakdown",
+          "what": "What holds the memory (queues, connections, binaries)."
+        },
+        {
+          "cmd": "rabbitmq-diagnostics listeners",
+          "what": "Ports: 5672 AMQP, 15672 management, 15692 Prometheus."
+        },
+        {
+          "cmd": "rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers",
+          "what": "Backlog and consumers per queue."
+        },
+        {
+          "cmd": "rabbitmqctl list_consumers queue_name prefetch_count ack_required",
+          "what": "Prefetch and ack mode per consumer."
+        },
+        {
+          "cmd": "rabbitmq-queues quorum_status orders",
+          "what": "Raft members, leader, who lags."
+        },
+        {
+          "cmd": "rabbitmq-queues check_if_node_is_quorum_critical",
+          "what": "Would stopping this node cost a quorum queue its majority?",
+          "when": "Run it BEFORE stopping a node."
+        },
+        {
+          "cmd": "rabbitmq-upgrade drain",
+          "what": "Maintenance mode before a restart.",
+          "when": "rabbitmq-upgrade revive undoes it."
+        },
+        {
+          "cmd": "curl -s http://rabbit:15692/metrics | grep rabbitmq_alarms",
+          "what": "Alarm metrics from Prometheus."
+        },
+        {
+          "cmd": "curl -s -u ops:\"$RABBIT_PASS\" http://rabbit:15672/api/queues/%2F/orders | jq '.messages_ready, .messages_unacknowledged'",
+          "what": "One queue's backlog from the management API."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders --reset-offsets --to-datetime 2026-11-26T01:00:00.000 --dry-run",
+          "what": "Offset reset, step one.",
+          "flags": [
+            [
+              "--dry-run",
+              "read the NEW-OFFSET column first, then run it again with --execute"
+            ]
+          ],
+          "when": "The group must be inactive."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders:3 --reset-offsets --shift-by 1 --execute",
+          "what": "Skip one record on partition 3."
+        },
+        {
+          "cmd": "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json --execute --throttle 50000000",
+          "what": "Move replicas between brokers.",
+          "flags": [
+            [
+              "--throttle 50000000",
+              "bytes/s, so moving replicas does not starve clients"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json --verify",
+          "what": "Check the reassignment finished.",
+          "flags": [
+            [
+              "--verify",
+              "also removes the throttle"
+            ]
+          ],
+          "when": "At the end of every reassignment."
+        },
+        {
+          "cmd": "kafka-leader-election.sh --bootstrap-server kafka:9092 --election-type PREFERRED --all-topic-partitions",
+          "what": "Move leadership back to the preferred replicas."
+        },
+        {
+          "cmd": "kafka-log-dirs.sh --bootstrap-server kafka:9092 --describe --broker-list 2",
+          "what": "Who fills the disk."
+        },
+        {
+          "cmd": "kafka-configs.sh --bootstrap-server kafka:9092 --entity-type topics --entity-name orders --alter --add-config retention.ms=86400000",
+          "what": "Change a topic's retention.",
+          "flags": [
+            [
+              "retention.ms=86400000",
+              "keep one day"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --describe --under-replicated-partitions",
+          "what": "Are all replicas back in sync?",
+          "when": "Rolling restart: one broker at a time; wait until this is empty before the next."
+        },
+        {
+          "cmd": "kafka-metadata-quorum.sh --bootstrap-server kafka:9092 describe --replication",
+          "what": "The KRaft controllers and which one is active.",
+          "when": "Restart KRaft controllers one at a time, the active one last."
+        }
       ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each flag or command to what it does.",
+      "pairs": [
+        [
+          "`--throttle 50000000`",
+          "Caps replica movement at 50 MB/s"
+        ],
+        [
+          "`--verify`",
+          "Checks the move finished and removes the throttle"
+        ],
+        [
+          "`--election-type PREFERRED`",
+          "Moves leadership back to the preferred replicas"
+        ],
+        [
+          "`rabbitmq-upgrade drain`",
+          "Puts a node in maintenance mode before a restart"
+        ],
+        [
+          "`check_if_node_is_quorum_critical`",
+          "Tells you if stopping the node costs a quorum queue its majority"
+        ],
+        [
+          "`retention.ms=86400000`",
+          "Keeps one day of data"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Move replicas without starving clients, then confirm the move and clear the throttle.",
+      "code": [
+        "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json __1__ __2__ 50000000",
+        "# ... when it is done:",
+        "kafka-reassign-partitions.sh --bootstrap-server kafka:9092 --reassignment-json-file move.json __3__"
+      ],
+      "blanks": [
+        "--execute",
+        "--throttle",
+        "--verify"
+      ],
+      "bank": [
+        "--generate",
+        "--cancel"
+      ],
+      "explain": "`--generate` only proposes a plan and `--cancel` stops a running move. Forgetting `--verify` leaves the throttle in place long after the move."
     },
     {
       "type": "order",

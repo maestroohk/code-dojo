@@ -181,31 +181,224 @@
     {
       "type": "learn",
       "title": "Senior's toolkit: finding lost and duplicate messages",
-      "body": [
-        "**Kafka**",
-        "- `kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic payments-charged --from-beginning --property print.key=true --property print.partition=true --property print.offset=true --property print.headers=true`",
-        "  : the same key or message-id header at two offsets is a duplicate; a missing one is a loss.",
-        "- `kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing`",
-        "  : CURRENT-OFFSET is what a restart will resume from; everything after it will be delivered again.",
-        "- `kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic payments-requested --reset-offsets --to-datetime 2026-11-26T14:00:00.000 --dry-run`",
-        "  then `--execute` : replay after a fix; the group must have no active members, and the handler must be idempotent.",
-        "",
-        "**RabbitMQ**",
-        "- `rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers`",
-        "  : a large unacked count is work in flight; if that consumer dies, all of it is redelivered.",
-        "- `rabbitmqctl list_consumers queue_name prefetch_count ack_required`",
-        "  : `ack_required false` means autoAck, which is at-most-once.",
-        "- `curl -u guest:guest -X POST http://rabbit:15672/api/queues/%2F/billing/get -H 'content-type: application/json' -d '{\"count\":5,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}'`",
-        "  : peek at messages while debugging (they go back marked redelivered, so never on a busy production queue).",
-        "",
-        "**The outbox**",
-        "- `SELECT count(*), min(created_at) FROM outbox WHERE published_at IS NULL;`",
-        "  : relay lag; alert when the oldest unpublished row is older than a minute.",
-        "",
-        "**Client settings**",
-        "- Kafka producer: `Acks = Acks.All`, `EnableIdempotence = true` (not the default in Confluent.Kafka), `MaxInFlight` 5 or less keeps ordering with idempotence.",
-        "- Kafka consumer: `EnableAutoOffsetStore = false` plus `StoreOffset` after the work; `IsolationLevel = IsolationLevel.ReadCommitted` when reading transactional output.",
-        "- RabbitMQ: `autoAck: false`, `CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true)`, `BasicProperties.MessageId` set from the outbox id."
+      "body": "Reach for these when someone reports a message that never arrived or arrived twice, and when you replay after a fix.",
+      "toolkit": [
+        {
+          "cmd": "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic payments-charged --from-beginning --property print.key=true --property print.partition=true --property print.offset=true --property print.headers=true",
+          "what": "Kafka: read the topic with keys, partitions, offsets and headers.",
+          "flags": [
+            [
+              "--from-beginning",
+              "start at the oldest retained record"
+            ],
+            [
+              "--property print.headers=true",
+              "show the message-id header"
+            ]
+          ],
+          "when": "The same key or message-id header at two offsets is a duplicate; a missing one is a loss."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing",
+          "what": "Where the group stands on every partition.",
+          "flags": [
+            [
+              "CURRENT-OFFSET",
+              "what a restart resumes from; everything after it will be delivered again"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic payments-requested --reset-offsets --to-datetime 2026-11-26T14:00:00.000 --dry-run",
+          "what": "Replay after a fix.",
+          "flags": [
+            [
+              "--dry-run",
+              "preview the new offsets"
+            ],
+            [
+              "--execute",
+              "then apply them"
+            ]
+          ],
+          "when": "The group must have no active members, and the handler must be idempotent."
+        },
+        {
+          "cmd": "rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers",
+          "what": "RabbitMQ: what is waiting and what is in flight.",
+          "flags": [
+            [
+              "messages_unacknowledged",
+              "work in flight: if that consumer dies, all of it is redelivered"
+            ]
+          ]
+        },
+        {
+          "cmd": "rabbitmqctl list_consumers queue_name prefetch_count ack_required",
+          "what": "How each consumer acknowledges.",
+          "flags": [
+            [
+              "ack_required false",
+              "autoAck, which is at-most-once"
+            ]
+          ]
+        },
+        {
+          "cmd": "curl -u guest:guest -X POST http://rabbit:15672/api/queues/%2F/billing/get -H 'content-type: application/json' -d '{\"count\":5,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}'",
+          "what": "Peek at messages while debugging.",
+          "flags": [
+            [
+              "\"ackmode\":\"ack_requeue_true\"",
+              "they go back marked redelivered, so never on a busy production queue"
+            ]
+          ]
+        },
+        {
+          "cmd": "SELECT count(*), min(created_at) FROM outbox WHERE published_at IS NULL;",
+          "what": "The outbox relay's lag.",
+          "when": "Alert when the oldest unpublished row is older than a minute.",
+          "lang": "sql"
+        },
+        {
+          "cmd": "new ProducerConfig { Acks = Acks.All, EnableIdempotence = true, MaxInFlight = 5 }",
+          "what": "A Kafka producer that does not lose or duplicate.",
+          "flags": [
+            [
+              "Acks = Acks.All",
+              "wait for the in-sync replicas"
+            ],
+            [
+              "EnableIdempotence = true",
+              "no duplicates on retry (not the default in Confluent.Kafka)"
+            ],
+            [
+              "MaxInFlight = 5",
+              "5 or less keeps ordering with idempotence"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ConsumerConfig { EnableAutoOffsetStore = false, IsolationLevel = IsolationLevel.ReadCommitted }",
+          "what": "A Kafka consumer that commits only finished work.",
+          "flags": [
+            [
+              "EnableAutoOffsetStore = false",
+              "plus StoreOffset after the work"
+            ],
+            [
+              "IsolationLevel.ReadCommitted",
+              "when reading transactional output"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "await channel.BasicConsumeAsync(queue: \"billing\", autoAck: false, consumer: consumer);",
+          "what": "RabbitMQ: ack after the work, not on delivery.",
+          "flags": [
+            [
+              "autoAck: false",
+              "the message stays unacked until you BasicAckAsync it"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new BasicProperties { MessageId = outboxRow.Id.ToString() }",
+          "what": "RabbitMQ: publish from the outbox with confirms and a stable id.",
+          "flags": [
+            [
+              "MessageId",
+              "set from the outbox id, so consumers can spot duplicates"
+            ],
+            [
+              "CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true)",
+              "the channel to publish on: the relay marks a row only after the confirm"
+            ]
+          ],
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each reading to what it tells you.",
+      "pairs": [
+        [
+          "The same message-id header at two offsets",
+          "A duplicate"
+        ],
+        [
+          "A message-id that never appears on the topic",
+          "A loss"
+        ],
+        [
+          "`ack_required false` in `list_consumers`",
+          "autoAck: at-most-once delivery"
+        ],
+        [
+          "A large `messages_unacknowledged`",
+          "Work that is redelivered if the consumer dies"
+        ],
+        [
+          "`CURRENT-OFFSET` in `--describe`",
+          "Where a restart resumes; later records arrive again"
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Configure the payments producer so it neither loses nor duplicates and keeps per-partition order.",
+      "code": [
+        "new ProducerConfig",
+        "{",
+        "    Acks = __1__,",
+        "    EnableIdempotence = __2__,",
+        "    MaxInFlight = __3__",
+        "};"
+      ],
+      "blanks": [
+        "Acks.All",
+        "true",
+        "5"
+      ],
+      "bank": [
+        "Acks.Leader",
+        "false",
+        "10"
+      ],
+      "explain": "`Acks.All` waits for the in-sync replicas, idempotence stops duplicates on retry and is not on by default in Confluent.Kafka, and up to 5 requests in flight keep ordering with idempotence."
+    },
+    {
+      "type": "sort",
+      "prompt": "Which job is each command for?",
+      "buckets": [
+        "Hunt for duplicates or losses",
+        "Replay after a fix",
+        "Watch the outbox relay"
+      ],
+      "items": [
+        [
+          "`kafka-console-consumer.sh --from-beginning --property print.headers=true`",
+          0
+        ],
+        [
+          "`curl -X POST .../api/queues/%2F/billing/get` with `ack_requeue_true`",
+          0
+        ],
+        [
+          "`kafka-consumer-groups.sh --reset-offsets --to-datetime ... --dry-run`",
+          1
+        ],
+        [
+          "The same reset with `--execute`",
+          1
+        ],
+        [
+          "`SELECT count(*), min(created_at) FROM outbox WHERE published_at IS NULL;`",
+          2
+        ]
       ]
     },
     {

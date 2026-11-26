@@ -274,33 +274,214 @@
     {
       "type": "learn",
       "title": "Senior's toolkit: ordering and partitions",
-      "body": [
-        "The commands that answer \"where did this key go, and why is it out of order?\":",
-        "",
-        "```bash",
-        "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic order-events --from-beginning \\",
-        "  --property print.key=true --property print.partition=true --property print.offset=true | grep 'A1'",
-        "                                                   # does one key really live on one partition?",
-        "kafka-console-producer.sh --bootstrap-server kafka:9092 --topic order-events \\",
-        "  --property parse.key=true --property key.separator=:   # Java partitioner: compare with what your C# service did",
-        "kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic order-events    # PartitionCount before you plan",
-        "kafka-topics.sh --bootstrap-server kafka:9092 --alter --topic order-events --partitions 24   # remaps keys, cannot shrink",
-        "kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic order-events          # records per partition: skew",
-        "kafka-log-dirs.sh --bootstrap-server kafka:9092 --describe --topic-list order-events   # bytes per partition: skew",
-        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group projector    # lag on ONE partition = hot key",
-        "rabbitmqctl list_consumers queue_name prefetch_count ack_required   # more than one consumer on a queue = no order",
-        "rabbitmqctl list_queues name consumers messages_ready messages_unacknowledged",
-        "```",
-        "",
-        "Settings and when you reach for them:",
-        "",
-        "- `Partitioner = Partitioner.Murmur2Random`: any .NET producer on a topic that Java code also writes or joins.",
-        "- `EnableIdempotence = true` (caps `MaxInFlight` at 5): order survives retries without giving up throughput.",
-        "- `MaxInFlight = 1`: only when idempotence is impossible and order matters more than speed.",
-        "- `StickyPartitioningLingerMs`: how long null-key records stick to one partition (bigger batches).",
-        "- RabbitMQ `x-single-active-consumer: true` (queue argument): one active consumer with hot standbys.",
-        "- Service Bus `SessionId` + `MaxConcurrentSessions`; SQS FIFO `MessageGroupId` + `MessageDeduplicationId`;",
-        "  Pub/Sub ordering key + message ordering on the subscription."
+      "body": "Reach for these to answer \"where did this key go, and why is it out of order?\" and before you plan or change a partition count.",
+      "toolkit": [
+        {
+          "cmd": "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic order-events --from-beginning --property print.key=true --property print.partition=true --property print.offset=true | grep 'A1'",
+          "what": "Does one key really live on one partition?",
+          "flags": [
+            [
+              "print.partition=true",
+              "show which partition each record came from"
+            ],
+            [
+              "grep 'A1'",
+              "keep only the key you are chasing"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-console-producer.sh --bootstrap-server kafka:9092 --topic order-events --property parse.key=true --property key.separator=:",
+          "what": "Produce keyed records with the Java partitioner, to compare with what your C# service did.",
+          "flags": [
+            [
+              "parse.key=true",
+              "each input line carries a key"
+            ],
+            [
+              "key.separator=:",
+              "A1:payload means key A1"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic order-events",
+          "what": "PartitionCount before you plan."
+        },
+        {
+          "cmd": "kafka-topics.sh --bootstrap-server kafka:9092 --alter --topic order-events --partitions 24",
+          "what": "Grow the topic.",
+          "when": "It remaps keys to new partitions, and it cannot shrink."
+        },
+        {
+          "cmd": "kafka-get-offsets.sh --bootstrap-server kafka:9092 --topic order-events",
+          "what": "Records per partition: skew."
+        },
+        {
+          "cmd": "kafka-log-dirs.sh --bootstrap-server kafka:9092 --describe --topic-list order-events",
+          "what": "Bytes per partition: skew."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group projector",
+          "what": "Lag per partition.",
+          "when": "Lag on ONE partition means a hot key."
+        },
+        {
+          "cmd": "rabbitmqctl list_consumers queue_name prefetch_count ack_required",
+          "what": "Who consumes each queue.",
+          "when": "More than one consumer on a queue means no order."
+        },
+        {
+          "cmd": "rabbitmqctl list_queues name consumers messages_ready messages_unacknowledged",
+          "what": "Consumers and backlog per queue."
+        },
+        {
+          "cmd": "new ProducerConfig { Partitioner = Partitioner.Murmur2Random }",
+          "what": "Java-compatible partitioning.",
+          "flags": [
+            [
+              "Partitioner.Murmur2Random",
+              "the Java client's murmur2 for keyed records"
+            ]
+          ],
+          "when": "Any .NET producer on a topic that Java code also writes or joins.",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ProducerConfig { EnableIdempotence = true, StickyPartitioningLingerMs = 10 }",
+          "what": "Order that survives retries.",
+          "flags": [
+            [
+              "EnableIdempotence = true",
+              "caps MaxInFlight at 5: order survives retries without giving up throughput"
+            ],
+            [
+              "MaxInFlight = 1",
+              "only when idempotence is impossible and order matters more than speed"
+            ],
+            [
+              "StickyPartitioningLingerMs",
+              "how long null-key records stick to one partition (bigger batches)"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "await channel.QueueDeclareAsync(\"orders\", durable: true, exclusive: false, autoDelete: false, arguments: new Dictionary<string, object?> { [\"x-single-active-consumer\"] = true });",
+          "what": "RabbitMQ: one active consumer with hot standbys.",
+          "flags": [
+            [
+              "x-single-active-consumer: true",
+              "a queue argument: only one consumer receives at a time"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new ServiceBusSessionProcessorOptions { MaxConcurrentSessions = 8 }",
+          "what": "Azure Service Bus: order per session.",
+          "flags": [
+            [
+              "SessionId (on ServiceBusMessage)",
+              "messages with the same SessionId are processed in order"
+            ],
+            [
+              "MaxConcurrentSessions",
+              "how many sessions are processed in parallel"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new SendMessageRequest { QueueUrl = queueUrl, MessageBody = body, MessageGroupId = \"A1\", MessageDeduplicationId = \"evt-1\" }",
+          "what": "SQS FIFO: order per group.",
+          "flags": [
+            [
+              "MessageGroupId",
+              "order holds within a group"
+            ],
+            [
+              "MessageDeduplicationId",
+              "a repeat with the same id is dropped"
+            ]
+          ],
+          "lang": "csharp"
+        },
+        {
+          "cmd": "gcloud pubsub subscriptions create order-events-sub --topic=order-events --enable-message-ordering",
+          "what": "Google Pub/Sub: order per ordering key.",
+          "flags": [
+            [
+              "--enable-message-ordering",
+              "message ordering on the subscription; publishers set an ordering key"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each reading or setting to what it means for ordering.",
+      "pairs": [
+        [
+          "Lag grows on one partition only",
+          "A hot key"
+        ],
+        [
+          "Two consumers on one RabbitMQ queue",
+          "No ordering guarantee"
+        ],
+        [
+          "`--alter --partitions 24`",
+          "Keys move to new partitions; you cannot shrink back"
+        ],
+        [
+          "`Partitioner.Murmur2Random`",
+          "Same partition as the Java client for the same key"
+        ],
+        [
+          "`MaxInFlight = 1`",
+          "Order without idempotence, at the cost of throughput"
+        ],
+        [
+          "`x-single-active-consumer: true`",
+          "One active consumer, the rest standing by"
+        ]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which question does each command answer?",
+      "buckets": [
+        "Is the data skewed?",
+        "Where did this key go?",
+        "Plan or change the partition count"
+      ],
+      "items": [
+        [
+          "`kafka-get-offsets.sh --topic order-events`",
+          0
+        ],
+        [
+          "`kafka-log-dirs.sh --describe --topic-list order-events`",
+          0
+        ],
+        [
+          "`kafka-console-consumer.sh ... --property print.partition=true | grep 'A1'`",
+          1
+        ],
+        [
+          "`kafka-console-producer.sh ... --property parse.key=true --property key.separator=:`",
+          1
+        ],
+        [
+          "`kafka-topics.sh --describe --topic order-events`",
+          2
+        ],
+        [
+          "`kafka-topics.sh --alter --topic order-events --partitions 24`",
+          2
+        ]
       ]
     },
     {

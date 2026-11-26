@@ -51,40 +51,141 @@
     {
       "type": "learn",
       "title": "Senior's toolkit: redrive and replay",
-      "body": [
-        "**RabbitMQ**",
-        "",
-        "```bash",
-        "rabbitmqctl list_queues name messages consumers | grep -E 'dead|parking'     # how big, and does anyone read it?",
-        "curl -s -u ops:*** -X POST http://rabbit:15672/api/queues/%2F/orders.dead/get \\",
-        "  -H 'content-type: application/json' -d '{\"count\":10,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}'",
-        "                                                                            # peek: messages go back, nothing lost",
-        "rabbitmq-plugins enable rabbitmq_shovel rabbitmq_shovel_management           # once per cluster",
-        "rabbitmqctl set_parameter shovel drain-orders-dead \\",
-        "  '{\"src-protocol\":\"amqp091\",\"src-uri\":\"amqp://\",\"src-queue\":\"orders.dead\",",
-        "    \"dest-protocol\":\"amqp091\",\"dest-uri\":\"amqp://\",\"dest-queue\":\"orders\",",
-        "    \"src-delete-after\":\"queue-length\"}'                                     # move what is there now, then stop",
-        "rabbitmqctl shovel_status                                                    # is it running, how far?",
-        "rabbitmqctl purge_queue orders.dead                                          # only after sign-off: no undo",
-        "```",
-        "",
-        "**Kafka** (the group must have **no active members** to reset; always `--dry-run` first)",
-        "",
-        "```bash",
-        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing",
-        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders:3 \\",
-        "  --reset-offsets --shift-by 1 --execute                                     # skip one poison record on partition 3",
-        "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders \\",
-        "  --reset-offsets --to-datetime 2026-11-20T09:00:00.000 --dry-run            # replay from a point in time",
-        "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic orders.dlt --from-beginning \\",
-        "  --property print.key=true --property print.headers=true --max-messages 10  # read the DLT",
-        "```",
-        "",
-        "**Cloud:** SQS `aws sqs start-message-move-task --source-arn <dlq-arn>` moves a DLQ back to its source queue;",
-        "Service Bus: a receiver with `SubQueue = SubQueue.DeadLetter`, or Service Bus Explorer in the portal.",
-        "",
-        "Practise in **Labs → Live network labs → 24 Live RabbitMQ lab** (a dead-letter pile-up to drain with a shovel)",
-        "and **25 Live Kafka lab** (replay and shift-by)."
+      "body": "Reach for these when dead letters pile up or a fixed bug means records must be processed again (practise in **Labs → Live network labs → 24 Live RabbitMQ lab**, a dead-letter pile-up to drain with a shovel, and **25 Live Kafka lab**, replay and shift-by).",
+      "toolkit": [
+        {
+          "cmd": "rabbitmqctl list_queues name messages consumers | grep -E 'dead|parking'",
+          "what": "How big is each dead-letter queue, and does anyone read it?"
+        },
+        {
+          "cmd": "curl -s -u ops:*** -X POST http://rabbit:15672/api/queues/%2F/orders.dead/get -H 'content-type: application/json' -d '{\"count\":10,\"ackmode\":\"ack_requeue_true\",\"encoding\":\"auto\"}'",
+          "what": "Peek at dead letters.",
+          "flags": [
+            [
+              "\"ackmode\":\"ack_requeue_true\"",
+              "the messages go back: nothing lost"
+            ]
+          ]
+        },
+        {
+          "cmd": "rabbitmq-plugins enable rabbitmq_shovel rabbitmq_shovel_management",
+          "what": "Enable shovels.",
+          "when": "Once per cluster."
+        },
+        {
+          "cmd": "rabbitmqctl set_parameter shovel drain-orders-dead '{\"src-protocol\":\"amqp091\",\"src-uri\":\"amqp://\",\"src-queue\":\"orders.dead\",\"dest-protocol\":\"amqp091\",\"dest-uri\":\"amqp://\",\"dest-queue\":\"orders\",\"src-delete-after\":\"queue-length\"}'",
+          "what": "Move what is in orders.dead now back to orders, then stop.",
+          "flags": [
+            [
+              "src-queue",
+              "where the messages come from"
+            ],
+            [
+              "dest-queue",
+              "where they go"
+            ],
+            [
+              "\"src-delete-after\":\"queue-length\"",
+              "move as many as the queue held at the start, then delete the shovel"
+            ]
+          ]
+        },
+        {
+          "cmd": "rabbitmqctl shovel_status",
+          "what": "Is the shovel running, and how far is it?"
+        },
+        {
+          "cmd": "rabbitmqctl purge_queue orders.dead",
+          "what": "Empty the queue.",
+          "when": "Only after sign-off: there is no undo."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --group billing",
+          "what": "Where the group is before you move it."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders:3 --reset-offsets --shift-by 1 --execute",
+          "what": "Skip one poison record on partition 3.",
+          "flags": [
+            [
+              "orders:3",
+              "only partition 3 of orders"
+            ],
+            [
+              "--shift-by 1",
+              "move the offset forward by one record"
+            ]
+          ],
+          "when": "The group must have no active members; always --dry-run first."
+        },
+        {
+          "cmd": "kafka-consumer-groups.sh --bootstrap-server kafka:9092 --group billing --topic orders --reset-offsets --to-datetime 2026-11-20T09:00:00.000 --dry-run",
+          "what": "Replay from a point in time.",
+          "flags": [
+            [
+              "--to-datetime",
+              "the first offset at or after that time"
+            ],
+            [
+              "--dry-run",
+              "show the new offsets, change nothing"
+            ]
+          ]
+        },
+        {
+          "cmd": "kafka-console-consumer.sh --bootstrap-server kafka:9092 --topic orders.dlt --from-beginning --property print.key=true --property print.headers=true --max-messages 10",
+          "what": "Read the dead-letter topic.",
+          "flags": [
+            [
+              "print.headers=true",
+              "the failure headers"
+            ],
+            [
+              "--max-messages 10",
+              "stop after ten"
+            ]
+          ]
+        },
+        {
+          "cmd": "aws sqs start-message-move-task --source-arn <dlq-arn>",
+          "what": "SQS: move a DLQ back to its source queue."
+        },
+        {
+          "cmd": "client.CreateReceiver(\"orders\", new ServiceBusReceiverOptions { SubQueue = SubQueue.DeadLetter })",
+          "what": "Azure Service Bus: read a queue's dead-letter subqueue.",
+          "when": "Or use Service Bus Explorer in the portal.",
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each part of a redrive or replay to what it does.",
+      "pairs": [
+        [
+          "`--shift-by 1`",
+          "Skip one record"
+        ],
+        [
+          "`--to-datetime 2026-11-20T09:00:00.000`",
+          "Replay from a point in time"
+        ],
+        [
+          "`--dry-run`",
+          "Show the new offsets, change nothing"
+        ],
+        [
+          "`--topic orders:3`",
+          "Only partition 3 of orders"
+        ],
+        [
+          "`\"src-delete-after\":\"queue-length\"`",
+          "Move what is there now, then stop"
+        ],
+        [
+          "`\"ackmode\":\"ack_requeue_true\"`",
+          "Peeked messages go back to the queue"
+        ]
       ]
     },
     {
