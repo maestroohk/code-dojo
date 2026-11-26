@@ -1,6 +1,6 @@
-// The shared page for the "build it from bricks" labs that simulate a config file: the Compose builder,
+// The shared page for the "build it as a diagram" labs that simulate a config file: the Compose builder,
 // the Kubernetes builder and the Pipeline builder. It owns what they have in common: challenge chips,
-// the brief, goals with stars and XP, saved progress, the lego board (blocks.js), run buttons with an
+// the brief, goals with stars and XP, saved progress, the topology board (blocks.js), run buttons with an
 // animated, explained log, and a live YAML panel (editable when the lab can read YAML back).
 //
 // A lab passes cfg:

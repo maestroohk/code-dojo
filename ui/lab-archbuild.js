@@ -10,8 +10,11 @@ import { createBoard } from './blocks.js';
 import * as A from './archsim.js';
 
 const LAB = 'archbuild';
-const COLORS = { client: '#3d6f8a', gateway: '#b8572a', route: '#8a6a2f', cache: '#2f7a72', queue: '#5f5590', service: '#4f7a3a', db: '#6b5b4b' };
-const KINDS = Object.fromEntries(Object.entries(A.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: 210 }]));
+const COLORS = { client: '#5b8def', gateway: '#d08a4a', route: '#c9a24a', cache: '#3fb6a8', queue: '#9a86d6', service: '#3fb68b', db: '#a8957a' };
+const ART = { client: 'laptop', gateway: 'gateway', route: 'route', cache: 'cache', queue: 'queue', service: 'server', db: 'database' };
+const KINDS = Object.fromEntries(Object.entries(A.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: 210, art: ART[k] }]));
+/** Where things sit, like a deployment diagram: the edge faces the internet, the rest is private. */
+const ZONES = [{ label: 'edge', kinds: ['gateway', 'route'], tone: 2 }, { label: 'private network', kinds: ['service', 'db', 'cache', 'queue'], tone: 1 }];
 const OPS = ['GET /products', 'GET /orders', 'POST /orders', 'GET /search', 'GET /prices'];
 const COST_LABEL = { retries: 'retries used', timeouts: 'route timeout in 100 ms steps' };
 /** replaceChildren that skips false/null (from `cond && node`). */
@@ -83,6 +86,7 @@ export function archBuildLab(container, onXp) {
     blockClass: b => [(b.down) && 'bad'].filter(Boolean).join(' '),
     wireState: w => wireStates.get(w.id) || '',
     wireLabel: w => ({ query: 'query', publish: 'publish', consume: 'consume' }[w.kind] || ''),   // board wire: kind already resolved
+    zones: () => ZONES.map(z => ({ id: z.label, label: z.label, tone: z.tone, members: model.blocks.filter(b => z.kinds.includes(b.kind)).map(b => b.id) })),
     form: formView,
     view: saved.view,
     onView: v => { saved.view = v; persist(); },

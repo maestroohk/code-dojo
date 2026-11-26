@@ -7,8 +7,9 @@ import { h } from './util.js';
 import { builderLab, controls, fill } from './buildlab.js';
 import * as K from './kubesim.js';
 
-const COLORS = { client: '#5f5590', ingress: '#b8572a', service: '#2a6aa8', deployment: '#4f7a3a', configmap: '#8a6a2f', secret: '#8a3f5a', pvc: '#6b5b4b' };
-const KINDS = Object.fromEntries(Object.entries(K.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: k === 'deployment' || k === 'ingress' ? 240 : 210 }]));
+const COLORS = { client: '#9a86d6', ingress: '#d08a4a', service: '#4f9bd9', deployment: '#3fb68b', configmap: '#c9a24a', secret: '#d9786a', pvc: '#a8957a' };
+const ART = { client: 'cloud', ingress: 'ingress', service: 'service', deployment: 'pod', configmap: 'document', secret: 'vault', pvc: 'volume' };
+const KINDS = Object.fromEntries(Object.entries(K.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: k === 'deployment' || k === 'ingress' ? 230 : 200, art: ART[k] }]));
 
 export function kubeBuildLab(container, onXp) {
   return builderLab(container, onXp, {
@@ -183,6 +184,7 @@ function boardOptions(api) {
     },
     wireLabel: w => w.r.label || '',
     blockClass: b => (b.fixed ? 'fixed' : ''),
+    zones: () => [{ id: 'cluster', label: 'cluster · namespace default', tone: 0, members: m().blocks.filter(b => b.kind !== 'client').map(b => b.id) }],
   };
 }
 

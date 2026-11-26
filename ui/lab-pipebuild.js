@@ -1,4 +1,4 @@
-// Pipeline builder: a CI/CD workflow from bricks. Jobs wired with needs, a trigger, artifacts passed
+// Pipeline builder: a CI/CD workflow drawn as a diagram. Jobs wired with needs, a trigger, artifacts passed
 // between jobs, caches, a matrix, if: conditions, deployment environments with reviewers, and secrets.
 // Run it for a push to main, a pull request, or a pull request from a fork, and watch the jobs start,
 // run in parallel, fail, get skipped or wait for approval, each with the reason; a timeline shows where
@@ -8,8 +8,9 @@ import { h } from './util.js';
 import { builderLab, controls, fill } from './buildlab.js';
 import * as P from './pipesim.js';
 
-const COLORS = { trigger: '#5f5590', job: '#2a6aa8', environment: '#b8572a', secrets: '#8a3f5a' };
-const KINDS = Object.fromEntries(Object.entries(P.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: k === 'job' ? 230 : 210 }]));
+const COLORS = { trigger: '#c9a24a', job: '#4f9bd9', environment: '#d08a4a', secrets: '#d9786a' };
+const ART = { trigger: 'trigger', job: 'job', environment: 'environment', secrets: 'vault' };
+const KINDS = Object.fromEntries(Object.entries(P.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: k === 'job' ? 220 : 200, art: ART[k] }]));
 const STATUS_TONE = { success: 'ok', failure: 'bad', skipped: 'skip' };
 
 export function pipeBuildLab(container, onXp) {
@@ -164,6 +165,10 @@ function boardOptions(api) {
     },
     wireLabel: w => (w.kind === 'secret' ? w.r.label : w.kind === 'needs' ? 'needs' : ''),
     blockClass: b => (b.fixed ? 'fixed' : ''),
+    zones: () => [
+      { id: 'wf', label: 'workflow ci.yml · each job on a fresh runner', tone: 0, members: m().blocks.filter(b => b.kind === 'trigger' || b.kind === 'job').map(b => b.id) },
+      { id: 'repo', label: 'repository settings', tone: 4, members: m().blocks.filter(b => b.kind === 'environment' || b.kind === 'secrets').map(b => b.id) },
+    ],
   };
 }
 

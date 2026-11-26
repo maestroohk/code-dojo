@@ -1,15 +1,16 @@
-// A reusable "lego" board: coloured bricks with studs that you drag around, typed ports you drag onto
-// another brick to wire them, a palette to add bricks, selection with an inspector slot, zoom and pan
+// A reusable topology board: devices drawn like a network diagram (a laptop, a switch with its port sockets,
+// a router, a server, a database...) that you drag around, real ports whose cables you drag onto another
+// device to wire them, a palette to add devices, selection with an inspector slot, zoom and pan
 // for big diagrams, Delete to remove, an optional form view of the same model, and an animation helper
 // that sends a token along a path of wires (to show packets or requests flowing).
 //
 // The board does not own the model. The lab passes getters and callbacks:
-//   kinds        { kind: { label, icon, color, width? } }
+//   kinds        { kind: { label, icon, color, width?, art?, panel? } }   art: a devices.js drawing; panel: ports sit on the device face (a switch)
 //   wireKinds    { kind: { label, color } }                 (optional)
 //   blocks()     -> [{ id, kind, x, y, ... }]
 //   wires()      -> [{ id, kind?, from: { block, port }, to: { block, port? } }]
 //   ports(b)     -> [{ id, label, on?, title? }]             ports a wire can be dragged from
-//   body(b)      -> Node | [Node]                           what is printed on the brick
+//   body(b)      -> Node | [Node]                           what is printed under the device
 //   canConnect(fromBlock, portId, toBlock) -> bool          to highlight valid drop targets
 //   connect(fromBlock, portId, toBlock, toPortId|null) -> bool|string   lab mutates its model; a string is an error to show
 //   onDropEmpty(fromBlock, portId)                          a port dropped on empty board (e.g. unplug)
@@ -22,7 +23,9 @@
 //   portSide     'bottom' (ports along the bottom, wires port to port) | 'right' (one output on the right, wires into the left side)
 //   arrows       draw arrowheads at the target end
 //   howto        a short hint under the palette
+//   zones()      -> [{ id, label, members: [blockId], tone? }]   tinted, labelled areas (subnets, networks, clusters) drawn behind devices
 import { h } from './util.js';
+import { deviceSvg } from './devices.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const svgEl = (tag, attrs = {}) => {
@@ -43,6 +46,7 @@ export function createBoard(opt) {
   const blockEls = new Map();
   const wirePaths = new Map();
 
+  const zonesSvg = svgEl('svg', { class: 'bk-zones', width: o.width, height: o.height });
   const wiresSvg = svgEl('svg', { class: 'bk-wires', width: o.width, height: o.height });
   const tokensSvg = svgEl('svg', { class: 'bk-tokens', width: o.width, height: o.height });
   const world = h('div.bk-world', { style: { width: o.width + 'px', height: o.height + 'px' } });
@@ -148,9 +152,10 @@ export function createBoard(opt) {
         if (br.width) return { x: b.x + (pr.left + pr.width / 2 - br.left) / s, y: b.y + (pr.top + pr.height / 2 - br.top) / s, port: true };
       }
     }
-    const w = el.offsetWidth, hh = el.offsetHeight;
-    if (role === 'center') return { x: b.x + w / 2, y: b.y + hh / 2 };
-    return o.portSide === 'right' ? { x: b.x, y: b.y + hh / 2 } : { x: b.x + w / 2, y: b.y };
+    const dev = el.querySelector('.bk-dev');
+    const dx = dev ? dev.offsetLeft + dev.offsetWidth / 2 : el.offsetWidth / 2, dy = dev ? dev.offsetTop + dev.offsetHeight / 2 : el.offsetHeight / 2;
+    if (role === 'center') return { x: b.x + dx, y: b.y + dy };
+    return o.portSide === 'right' ? { x: b.x + (dev ? dev.offsetLeft : 0), y: b.y + dy } : { x: b.x + dx, y: b.y + (dev ? dev.offsetTop : 0) };
   }
 
   function curve(a, b, toPort) {
@@ -164,13 +169,49 @@ export function createBoard(opt) {
 
   // ------------------------------------------------------------ drawing
 
+  /** Tinted, labelled areas behind the devices: subnets, Docker networks, a cluster, a workflow. */
+  function drawZones() {
+    zonesSvg.replaceChildren();
+    (o.zones?.() || []).forEach((z, i) => {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const id of z.members) {
+        const b = blockById(id), el = blockEls.get(id);
+        if (!b || !el || !el.offsetWidth) continue;
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + el.offsetWidth); y1 = Math.max(y1, b.y + el.offsetHeight);
+      }
+      if (x0 === Infinity) return;
+      const pad = 22, top = 30;
+      const tone = z.tone ?? i % 5;
+      const g = svgEl('g', { class: `bk-zone tone-${tone}` });
+      g.append(svgEl('rect', { x: x0 - pad, y: y0 - pad - top, width: x1 - x0 + pad * 2, height: y1 - y0 + pad * 2 + top, rx: 14 }));
+      const t = svgEl('text', { x: x0 - pad + 14, y: y0 - pad - top + 20, class: 'bk-zone-label' });
+      t.textContent = z.label;
+      g.append(t);
+      zonesSvg.append(g);
+    });
+  }
+
+  /** A small cable tag: text on a rounded label, placed at the middle of the cable. */
+  function cableTag(text, at, state) {
+    const g = svgEl('g', { class: `bk-tag-g ${state}` });
+    const t = svgEl('text', { x: at.x, y: at.y + 4, 'text-anchor': 'middle', class: 'bk-wire-label' });
+    t.textContent = text;
+    const r = svgEl('rect', { rx: 4, class: 'bk-tag-bg' });
+    g.append(r, t);
+    wiresSvg.append(g);
+    const bb = t.getBBox?.();
+    if (bb && bb.width) { r.setAttribute('x', bb.x - 6); r.setAttribute('y', bb.y - 2); r.setAttribute('width', bb.width + 12); r.setAttribute('height', bb.height + 4); }
+  }
+
   function drawWires() {
+    drawZones();
     wiresSvg.replaceChildren();
     wirePaths.clear();
     const defs = svgEl('defs');
     // One arrowhead per wire state: a marker cannot inherit the colour of the path that uses it everywhere.
-    defs.innerHTML = ['', 'ok', 'bad', 'active'].map(st => `<marker id="${uid}-arrow-${st || 'plain'}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="bk-arrow ${st}" d="M0,0 L10,5 L0,10 z"/></marker>`).join('');
+    defs.innerHTML = ['', 'ok', 'bad', 'active'].map(st => `<marker id="${uid}-arrow-${st || 'plain'}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path class="bk-arrow ${st}" d="M0,0 L10,5 L0,10 z"/></marker>`).join('');
     wiresSvg.append(defs);
+    const tags = [];
     for (const w of wires()) {
       const a = anchor(w.from.block, w.from.port, 'out'), b = anchor(w.to.block, w.to.port, 'in');
       if (!a || !b) continue;
@@ -178,39 +219,47 @@ export function createBoard(opt) {
       const state = o.wireState?.(w) || '';
       const kind = o.wireKinds[w.kind] || {};
       const selected = sel?.type === 'wire' && sel.id === w.id;
+      // A cable: a dark jacket, a coloured core, a plug at each end and a link light near the far end.
+      const jacket = svgEl('path', { d, class: `bk-cable${selected ? ' sel' : ''}` });
       const path = svgEl('path', { d, class: `bk-wire ${state}${selected ? ' sel' : ''}` });
       if (kind.color) path.style.setProperty('--wire', kind.color);
       if (o.arrows) path.setAttribute('marker-end', `url(#${uid}-arrow-${['ok', 'bad', 'active'].includes(state) ? state : 'plain'})`);
       const hit = svgEl('path', { d, class: 'bk-hit' });
       hit.addEventListener('pointerdown', e => { e.stopPropagation(); surface.focus({ preventScroll: true }); select({ type: 'wire', id: w.id }); });
-      wiresSvg.append(path, hit);
-      wirePaths.set(w.id, { path, wire: w });
+      wiresSvg.append(jacket, path);
+      const len = path.getTotalLength?.() || 0;
+      const at = f => (len ? path.getPointAtLength(len * f) : { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
+      wiresSvg.append(svgEl('circle', { cx: a.x, cy: a.y, r: 4.5, class: 'bk-plug' }));
+      if (!o.arrows) wiresSvg.append(svgEl('circle', { cx: b.x, cy: b.y, r: 4.5, class: 'bk-plug' }));
+      const lp = len > 40 ? path.getPointAtLength(len - (o.arrows ? 22 : 16)) : at(0.8);
+      const light = svgEl('circle', { cx: lp.x, cy: lp.y, r: 3.6, class: `bk-link ${state}` });
+      wiresSvg.append(light, hit);
+      wirePaths.set(w.id, { path, wire: w, light });
       const label = o.wireLabel ? o.wireLabel(w) : kind.label;
-      if (label) {
-        const len = path.getTotalLength?.() || 0;
-        const mid = len ? path.getPointAtLength(len / 2) : { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        const t = svgEl('text', { x: mid.x + 6, y: mid.y - 6, class: `bk-wire-label ${state}` });
-        t.textContent = label;
-        wiresSvg.append(t);
-      }
+      if (label) tags.push([label, at(0.5), state]);
     }
+    for (const [label, mid, state] of tags) cableTag(label, mid, state);
   }
 
   function brick(b) {
-    const k = o.kinds[b.kind] || { label: b.kind, color: '#555' };
+    const k = o.kinds[b.kind] || { label: b.kind, color: '#6b7388' };
     const ports = o.ports ? o.ports(b) : [];
     const extra = (o.blockClass?.(b) || '').split(/\s+/).filter(Boolean).map(c => '.' + c).join('');
     const selected = sel?.type === 'block' && sel.id === b.id;
-    const el = h(`div.bk-block.k-${b.kind}${extra}${selected ? '.sel' : ''}${o.portSide === 'right' ? '.side-right' : ''}`, {
-      style: { left: b.x + 'px', top: b.y + 'px', '--brick': k.color || '#555', width: (k.width || 200) + 'px' },
+    const right = o.portSide === 'right';
+    const jacks = ports.map(p => portEl(b, p, k.panel));
+    // The device itself: a drawing, or (for a switch) a front panel with the port sockets on it.
+    const face = k.panel
+      ? h('div.bk-dev.bk-panel', h('div.bk-panel-head', h('span.bk-panel-brand', k.label), h('span.bk-panel-leds', h('span.bk-led'), h('span.bk-led.pwr'))),
+        h('div.bk-panel-ports', jacks))
+      : h('div.bk-dev', h('span.bk-art', { html: deviceSvg(k.art || 'box') }), h('span.bk-led'), right && jacks);
+    const el = h(`div.bk-block.bk-device.k-${b.kind}${extra}${selected ? '.sel' : ''}${right ? '.side-right' : ''}${k.panel ? '.has-panel' : ''}`, {
+      style: { left: b.x + 'px', top: b.y + 'px', '--dev': k.color || '#6b7388', width: (k.width || 200) + 'px' },
       dataset: { id: b.id },
     },
-    h('div.bk-studs', h('span'), h('span'), h('span'), h('span')),
-    h('div.bk-head', h('span.bk-icon', k.icon || ''), h('span.bk-kind', k.label)),
-    h('div.bk-body', o.body ? o.body(b) : b.name),
-    ports.length > 0 && (o.portSide === 'right'
-      ? ports.map(p => portEl(b, p))
-      : h('div.bk-ports', ports.map(p => portEl(b, p)))));
+    face,
+    !k.panel && !right && ports.length > 0 && h('div.bk-ports.bk-sockets', jacks),
+    h('div.bk-label', h('div.bk-head', h('span.bk-kind', k.label)), h('div.bk-body', o.body ? o.body(b) : b.name)));
 
     el.addEventListener('pointerdown', e => {
       if (e.button !== 0 || e.target.closest('.bk-port, input, select, textarea, button, a')) return;
@@ -243,11 +292,12 @@ export function createBoard(opt) {
     return el;
   }
 
-  function portEl(b, p) {
-    return h(`button.bk-port${p.on ? '.on' : ''}`, {
-      type: 'button', title: p.title || `Drag ${p.label} onto another block to connect it`, dataset: { port: p.id },
+  function portEl(b, p, onPanel) {
+    // A socket with a link LED (lit when something is plugged in) and its name printed next to it.
+    return h(`button.bk-port${p.on ? '.on' : ''}${onPanel ? '.on-panel' : ''}`, {
+      type: 'button', title: p.title || `Drag ${p.label} onto another device to connect it`, dataset: { port: p.id },
       onpointerdown: e => startLink(e, b, p),
-    }, h('span.bk-jack'), p.label && h('span.bk-port-label', p.label));
+    }, h('span.bk-port-led'), h('span.bk-jack'), p.label && h('span.bk-port-label', p.label));
   }
 
   function startLink(e, b, p) {
@@ -296,11 +346,11 @@ export function createBoard(opt) {
   // ------------------------------------------------------------ palette and toolbar
 
   const palette = h('div.bk-palette',
-    h('div.eyebrow', 'Bricks'),
+    h('div.eyebrow', 'Add'),
     (o.palette || []).map(item => {
       const k = o.kinds[item.kind] || {};
-      const btn = h(`button.bk-brick.k-${item.kind}`, { type: 'button', title: item.title || `Add a ${k.label}`, style: { '--brick': k.color || '#555' } },
-        h('span.bk-icon', k.icon || ''), ' ', item.label || k.label);
+      const btn = h(`button.bk-brick.k-${item.kind}`, { type: 'button', title: item.title || `Add a ${k.label}`, style: { '--dev': k.color || '#6b7388' } },
+        h('span.bk-pal-art', { html: deviceSvg(k.art || 'box') }), h('span.bk-pal-label', item.label || k.label));
       btn.addEventListener('pointerdown', e => {
         if (e.button !== 0) return;
         const sx = e.clientX, sy = e.clientY;
@@ -343,7 +393,7 @@ export function createBoard(opt) {
   }
 
   const el = h('div.bk', toolbar, h('div.bk-wrap', palette, surface, formSlot));
-  world.append(wiresSvg);
+  world.append(zonesSvg, wiresSvg);
 
   // ------------------------------------------------------------ public
 
@@ -387,8 +437,8 @@ export function createBoard(opt) {
   function animate(hops, opts = {}) {
     const my = epoch;
     const g = svgEl('g', { class: `bk-token ${opts.cls || ''}` });
-    const dot = svgEl('circle', { r: opts.r || 8 });
-    g.append(dot);
+    // A packet: a small envelope travelling along the cable.
+    g.append(svgEl('rect', { x: -10, y: -7, width: 20, height: 14, rx: 2.5, class: 'bk-packet' }), svgEl('path', { d: 'M-9,-6 L0,1 L9,-6', class: 'bk-packet-flap' }));
     if (opts.label) { const t = svgEl('text', { y: -13 }); t.textContent = opts.label; g.append(t); }
     let placed = false;
     return (async () => {
@@ -442,7 +492,8 @@ export function createBoard(opt) {
     const w = wirePaths.get(id);
     if (!w) return;
     w.path.classList.remove('ok', 'bad', 'active');
-    if (state) w.path.classList.add(state);
+    w.light?.classList.remove('ok', 'bad', 'active');
+    if (state) { w.path.classList.add(state); w.light?.classList.add(state); }
     if (o.arrows) w.path.setAttribute('marker-end', `url(#${uid}-arrow-${['ok', 'bad', 'active'].includes(state) ? state : 'plain'})`);
   }
 

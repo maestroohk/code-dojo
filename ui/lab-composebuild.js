@@ -7,8 +7,9 @@ import { h } from './util.js';
 import { builderLab, controls, fill } from './buildlab.js';
 import * as C from './composesim.js';
 
-const COLORS = { host: '#5f5590', service: '#2a6aa8', network: '#4f7a3a', volume: '#6b5b4b', bind: '#8a6a2f' };
-const KINDS = Object.fromEntries(Object.entries(C.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: k === 'service' ? 230 : 190 }]));
+const COLORS = { host: '#5b8def', service: '#4f9bd9', network: '#3fb68b', volume: '#a8957a', bind: '#c9a24a' };
+const ART = { host: 'laptop', service: 'container', network: 'network', volume: 'volume', bind: 'folder' };
+const KINDS = Object.fromEntries(Object.entries(C.KINDS).map(([k, v]) => [k, { ...v, color: COLORS[k], width: k === 'service' ? 220 : 180, art: ART[k] }]));
 const COND_SHORT = { service_started: 'started', service_healthy: 'healthy', service_completed_successfully: 'completed' };
 const COND_HELP = {
   service_started: 'Waits only until the container has started. The program inside may not accept connections yet.',
@@ -177,6 +178,12 @@ function boardOptions(api) {
     wireLabel: w => (w.kind === 'port' ? w.svc.ports.map(p => { const pp = C.parsePort(p); return pp.error ? p : `:${pp.host ?? '?'}→${pp.container}`; }).join(' ')
       : w.kind === 'dep' ? COND_SHORT[w.w.condition || 'service_started'] : w.kind === 'mount' ? w.w.target : ''),
     blockClass: b => (b.fixed ? 'fixed' : ''),
+    // Each Docker network is an area around the containers on it (and its own block, the handle you wire to).
+    zones: () => {
+      const names = [...new Set(C.services(m()).flatMap(s => C.netsOf(m(), s)))];
+      return names.map((n, i) => ({ id: n, label: `network ${n}`, tone: i % 5,
+        members: [...C.services(m()).filter(s => C.netsOf(m(), s).includes(n)).map(s => s.id), ...m().blocks.filter(b => b.kind === 'network' && b.name === n).map(b => b.id)] }));
+    },
   };
 }
 
