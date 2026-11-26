@@ -1,0 +1,178 @@
+{
+  "title": "Async deadlocks and livelock",
+  "summary": "SemaphoreSlim is not reentrant, async deadlocks hold no thread, and livelock looks busy while doing nothing.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The deadlock that holds no thread",
+      "body": [
+        "`lock` cannot contain `await`, so async code protects state with `SemaphoreSlim(1, 1)`:",
+        "",
+        "```csharp fragment",
+        "public async Task AddManyAsync(IEnumerable<string> items)",
+        "{",
+        "    await _gate.WaitAsync();",
+        "    try { foreach (var i in items) await AddAsync(i); }   // AddAsync also does: await _gate.WaitAsync()",
+        "    finally { _gate.Release(); }",
+        "}",
+        "```",
+        "",
+        "Unlike `Monitor`, a semaphore is **not reentrant** and has no owner: `AddAsync` waits for the slot that `AddManyAsync` holds, and",
+        "`AddManyAsync` waits for `AddAsync`. Forever.",
+        "",
+        "In a dump this looks like *nothing*: no thread is blocked, `syncblk` is empty, the pool threads are idle. The request's state",
+        "machines sit on the heap, each awaiting the next. `dumpasync` (or Visual Studio's Parallel Stacks in **Tasks** view) shows the chain:",
+        "`AddManyAsync` awaiting `AddAsync` awaiting `SemaphoreSlim.WaitAsync`.",
+        "",
+        "Fix: take the semaphore only at the **public entry points**, and have them call private `...Core` methods that assume it is held."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Requests to `/cart/bulk` never finish. CPU is idle, `dotnet-counters` shows a normal thread count and an empty queue, and `syncblk` lists nothing. Where do you look next?",
+      "options": [
+        "`dumpasync` in the dump, to see which async methods are stuck awaiting what",
+        "`ThreadPool.SetMinThreads`",
+        "`syncblk -all`",
+        "Restart and hope"
+      ],
+      "answer": 0,
+      "explain": "Nothing is blocked and the pool is healthy, so this is not starvation or a Monitor deadlock. Code that awaits forever holds no thread; only the async view shows it."
+    },
+    {
+      "type": "sort",
+      "prompt": "Can this hang forever?",
+      "buckets": ["Can hang", "Fine"],
+      "items": [
+        ["A method holding `SemaphoreSlim(1,1)` calls another public method that waits on the same semaphore", 0],
+        ["A method holding a `lock` calls another method that locks the same object", 1],
+        ["`await _gate.WaitAsync();` with `Release()` only on the success path", 0],
+        ["Public methods take the semaphore and call private `Core` methods that do not", 1],
+        ["Two async methods take two semaphores in opposite orders", 0]
+      ],
+      "explain": "Monitor (`lock`) is reentrant for the owning thread; SemaphoreSlim is not reentrant at all. Lock ordering applies to semaphores exactly as to locks."
+    },
+    {
+      "type": "learn",
+      "title": "Livelock: busy, polite and stuck",
+      "body": [
+        "In a **livelock** threads are not blocked; they keep reacting to each other and never make progress. Two threads that each take one",
+        "lock, try the other with `Monitor.TryEnter`, fail, release and retry *at the same moment* can repeat that forever. CPU is high,",
+        "nothing completes.",
+        "",
+        "The same thing happens between services: two clients retrying a conflict immediately (optimistic concurrency, a lease) keep",
+        "colliding. The cure is the same: **randomised backoff** (jitter) so that the retries drift apart, or a fixed order so there is no",
+        "conflict to retry.",
+        "",
+        "| | Deadlock | Livelock | Starvation |",
+        "|---|---|---|---|",
+        "| CPU | idle | busy | low (pool) or one thread never scheduled |",
+        "| Threads | blocked | running | blocked or waiting for a turn |",
+        "| Evidence | `syncblk`, `clrstack` | same stacks in every sample, rising retry counters | `dotnet-counters`, thread count climbing |"
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the symptom to the problem.",
+      "pairs": [
+        ["CPU at 100%, the same retry log line thousands of times, nothing completes", "livelock"],
+        ["CPU idle, two threads each holding a lock the other wants", "deadlock"],
+        ["CPU low, thread count rising 1-2 per second, queue growing", "thread-pool starvation"],
+        ["No thread blocked, async requests never complete", "async deadlock"]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A cart that does not wait for itself",
+      "prompt": [
+        "`Cart.AddManyAsync` hangs forever: it holds the semaphore and calls `AddAsync`, which waits for the same semaphore.",
+        "",
+        "Fix **`Cart`** so that every public method (`AddAsync`, `AddManyAsync`, `CountAsync`) is still safe to call concurrently and none",
+        "of them can wait for itself. Keep the names and signatures."
+      ],
+      "starter": [
+        "class Cart",
+        "{",
+        "    private readonly SemaphoreSlim _gate = new(1, 1);",
+        "    private readonly List<string> _items = new();",
+        "",
+        "    public async Task AddAsync(string item)",
+        "    {",
+        "        await _gate.WaitAsync();",
+        "        try { await Task.Yield(); _items.Add(item); }",
+        "        finally { _gate.Release(); }",
+        "    }",
+        "",
+        "    public async Task AddManyAsync(IEnumerable<string> items)",
+        "    {",
+        "        await _gate.WaitAsync();",
+        "        try { foreach (var item in items) await AddAsync(item); }",
+        "        finally { _gate.Release(); }",
+        "    }",
+        "",
+        "    public async Task<int> CountAsync()",
+        "    {",
+        "        await _gate.WaitAsync();",
+        "        try { return _items.Count; }",
+        "        finally { _gate.Release(); }",
+        "    }",
+        "}"
+      ],
+      "solution": [
+        "class Cart",
+        "{",
+        "    private readonly SemaphoreSlim _gate = new(1, 1);",
+        "    private readonly List<string> _items = new();",
+        "",
+        "    public async Task AddAsync(string item)",
+        "    {",
+        "        await _gate.WaitAsync();",
+        "        try { await AddCoreAsync(item); }",
+        "        finally { _gate.Release(); }",
+        "    }",
+        "",
+        "    public async Task AddManyAsync(IEnumerable<string> items)",
+        "    {",
+        "        await _gate.WaitAsync();",
+        "        try { foreach (var item in items) await AddCoreAsync(item); }",
+        "        finally { _gate.Release(); }",
+        "    }",
+        "",
+        "    public async Task<int> CountAsync()",
+        "    {",
+        "        await _gate.WaitAsync();",
+        "        try { return _items.Count; }",
+        "        finally { _gate.Release(); }",
+        "    }",
+        "",
+        "    // Call only while holding _gate.",
+        "    private async Task AddCoreAsync(string item)",
+        "    {",
+        "        await Task.Yield();",
+        "        _items.Add(item);",
+        "    }",
+        "}"
+      ],
+      "template": [
+        "var dojoCart = new Cart();",
+        "var dojoMany = dojoCart.AddManyAsync(new[] { \"apple\", \"bread\", \"cheese\" });",
+        "var dojoFinished = await Task.WhenAny(dojoMany, Task.Delay(2000)) == dojoMany;",
+        "Dojo.Check(\"AddManyAsync finishes\", dojoFinished, \"It was still waiting after 2 seconds: it waits for a semaphore it already holds.\");",
+        "if (dojoFinished)",
+        "{",
+        "    Dojo.Eq(\"Three items were added\", 3, await dojoCart.CountAsync());",
+        "    var dojoAll = Task.WhenAll(Enumerable.Range(0, 20).Select(i => i % 2 == 0 ? dojoCart.AddAsync($\"x{i}\") : dojoCart.AddManyAsync(new[] { $\"y{i}\", $\"z{i}\" })));",
+        "    var dojoAllDone = await Task.WhenAny(dojoAll, Task.Delay(3000)) == dojoAll;",
+        "    Dojo.Check(\"Concurrent adds all finish\", dojoAllDone, \"Some calls never finished.\");",
+        "    Dojo.Eq(\"No item is lost under concurrent calls\", 3 + 10 + 20, await dojoCart.CountAsync());",
+        "}",
+        "{{CODE}}"
+      ],
+      "hints": [
+        "Move the actual add into a private method that does **not** touch the semaphore, and call it from both public methods.",
+        "`private async Task AddCoreAsync(string item) { await Task.Yield(); _items.Add(item); }`; `AddManyAsync` loops over `AddCoreAsync`."
+      ]
+    }
+  ]
+}
