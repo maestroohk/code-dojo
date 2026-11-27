@@ -1,0 +1,102 @@
+{
+  "title": "Boss: review PR 512 from the CI plan",
+  "summary": "Turn the checklist into a tool that lists every destroy in any plan JSON, then write the review that blocks PR 512, with the reason and the safe alternative for each blocker.",
+  "minutes": 20,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "PLAT-512",
+      "body": [
+        "*\"CI attaches the plan JSON to every pull request. Nobody reads 30 resources of tag changes, so destroys get",
+        "approved. Give us a script that lists what a plan destroys, and do the review of PR 512 with it.\"*",
+        "",
+        "`~/review/PR.txt` describes the pull request, `~/review/plan.json` is the real plan CI made (the `hashicorp/aws`",
+        "provider, the same plan as in the lesson), and `~/review/aws-pr/` has the code before and after. Two steps."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "List what a plan destroys",
+      "prompt": [
+        "Write `~/review/destroys.sh`: given a plan JSON file (`bash destroys.sh plan.json`), it prints the address of every",
+        "resource the plan **deletes**, one per line, sorted. A replacement deletes too, in either order (`-/+` is",
+        "`[\"delete\",\"create\"]`, `+/-` is `[\"create\",\"delete\"]`). A plan that deletes nothing prints nothing.",
+        "",
+        "It is checked against `plan.json` and against other plans."
+      ],
+      "setup": ["bash \"$DOJO_FILES/review.sh\" awsjson"],
+      "checks": [
+        { "name": "PR 512's destroys, sorted",
+          "cmd": "cd ~/review && test \"$(bash destroys.sh plan.json | tr '\\n' ' ')\" = \"aws_db_instance.main aws_s3_bucket.assets aws_s3_bucket_versioning.assets \"",
+          "fail": "`bash destroys.sh plan.json` should print `aws_db_instance.main`, `aws_s3_bucket.assets` and `aws_s3_bucket_versioning.assets`, one per line, sorted. Look at `jq '.resource_changes[] | {address, actions: .change.actions}' plan.json`." },
+        { "name": "a plan without destroys prints nothing",
+          "cmd": "cd ~/review && jq '.resource_changes |= map(.change.actions = [\"update\"])' plan.json > /tmp/none.json && test -z \"$(bash destroys.sh /tmp/none.json)\"",
+          "fail": "On a plan where every action is `update`, the script printed something. Read the actions from the file you are given (`$1`), do not hard-code addresses." },
+        { "name": "create-before-destroy counts as a destroy",
+          "cmd": "cd ~/review && jq '(.resource_changes[] | select(.address == \"aws_instance.web\") | .change.actions) = [\"create\",\"delete\"]' plan.json > /tmp/cbd.json && bash destroys.sh /tmp/cbd.json | grep -qx aws_instance.web",
+          "fail": "A `+/-` replacement (`[\"create\",\"delete\"]`) also destroys the old object: test whether the actions *contain* `delete`, not whether they start with it." }
+      ],
+      "hints": [
+        "Each entry of `.resource_changes` has an `.address` and `.change.actions`, an array such as `[\"update\"]` or `[\"delete\",\"create\"]`.",
+        "`select(.change.actions | index(\"delete\"))` keeps the entries whose actions contain `delete`, wherever it is.",
+        "`jq -r '.resource_changes[] | select(.change.actions | index(\"delete\")) | .address' \"$1\" | sort`"
+      ],
+      "solution": [
+        "cd ~/review",
+        "cat PR.txt",
+        "jq -c '.resource_changes[] | [.address, .change.actions]' plan.json",
+        "echo \"jq -r '.resource_changes[] | select(.change.actions | index(\\\"delete\\\")) | .address' \\\"\\$1\\\" | sort\" > destroys.sh",
+        "bash destroys.sh plan.json"
+      ],
+      "explain": "Three of the nine changes destroy something, and none of them is what the PR title says. A script like this runs in CI on every plan and posts its output on the PR, so a reviewer starts from the destroys instead of finding them on page three."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Write the review",
+      "prompt": [
+        "Write the review of PR 512 in `~/review/REVIEW.md`. Its first line is the verdict: `Request changes`.",
+        "",
+        "Then one comment per blocker, each naming the **address**, the **reason** the plan gives, and the **safe",
+        "alternative**: the database (which attribute forces the replacement, and what happens to the data given",
+        "`skip_final_snapshot`), and the assets bucket and its versioning (why they are destroyed, and the fix). Then the",
+        "update that needs a maintenance window because of downtime: name its attribute.",
+        "",
+        "Use the plan, not the PR description: `jq` on `plan.json` gives you every name you need."
+      ],
+      "setup": ["bash \"$DOJO_FILES/review.sh\" awsjson"],
+      "checks": [
+        { "name": "the verdict",
+          "cmd": "head -n1 ~/review/REVIEW.md | grep -qi 'request changes'",
+          "fail": "The first line of `~/review/REVIEW.md` should be `Request changes`." },
+        { "name": "the database blocker",
+          "cmd": "grep -q 'aws_db_instance.main' ~/review/REVIEW.md && grep -q 'storage_encrypted' ~/review/REVIEW.md && grep -qi 'snapshot' ~/review/REVIEW.md",
+          "fail": "Name `aws_db_instance.main`, the attribute that forces its replacement (`jq '.resource_changes[] | select(.address == \"aws_db_instance.main\") | .change.replace_paths' plan.json`), and what the missing final snapshot means for the data." },
+        { "name": "the bucket blocker",
+          "cmd": "grep -q 'aws_s3_bucket.assets' ~/review/REVIEW.md && grep -q 'aws_s3_bucket_versioning.assets' ~/review/REVIEW.md && grep -q 'module.assets' ~/review/REVIEW.md && grep -q 'moved' ~/review/REVIEW.md",
+          "fail": "Name `aws_s3_bucket.assets` and `aws_s3_bucket_versioning.assets`, where they went (`module.assets...`), and the fix (`moved` blocks)." },
+        { "name": "the maintenance window",
+          "cmd": "grep -q 'engine_version' ~/review/REVIEW.md",
+          "fail": "Which update has downtime? Compare `.change.before.engine_version` and `.change.after.engine_version` of the database." }
+      ],
+      "hints": [
+        "`jq -r '.resource_changes[] | select(.change.actions | index(\"delete\")) | \"\\(.address) \\(.action_reason // \"\") \\(.change.replace_paths // [] | tostring)\"' plan.json` gives each blocker with its reason.",
+        "`delete_because_no_resource_config` is the bucket: it is not in configuration any more, because it is `module.assets.aws_s3_bucket.this` now. `replace_paths` `[[\"storage_encrypted\"]]` is the database.",
+        "The safe alternatives: encryption as its own migration (snapshot, encrypted copy, restore, cut-over) with `deletion_protection` on; two `moved` blocks for the bucket. The window: `engine_version` 16.4 to 17.2."
+      ],
+      "solution": [
+        "cd ~/review",
+        "jq -r '.resource_changes[] | select(.change.actions | index(\"delete\")) | \"\\(.address) \\(.action_reason // \"\") \\(.change.replace_paths // [] | tostring)\"' plan.json",
+        "jq '.resource_changes[] | select(.address == \"aws_db_instance.main\") | .change | {before: .before.engine_version, after: .after.engine_version, skip: .after.skip_final_snapshot}' plan.json",
+        "echo 'Request changes' > REVIEW.md",
+        "echo '1. Blocking: aws_db_instance.main is replaced (-/+): storage_encrypted false -> true forces replacement, and with skip_final_snapshot = true and deletion_protection = false the production data is deleted without a snapshot. Do the encryption as its own migration (snapshot, encrypted copy, restore, cut-over).' >> REVIEW.md",
+        "echo '2. Blocking: aws_s3_bucket.assets and aws_s3_bucket_versioning.assets are destroyed (not in configuration) and created again as module.assets.aws_s3_bucket.this and module.assets.aws_s3_bucket_versioning.this. Add two moved blocks so the plan says has moved.' >> REVIEW.md",
+        "echo '3. Schedule: engine_version 16.4 -> 17.2 is a major upgrade with downtime; apply it in the maintenance window.' >> REVIEW.md",
+        "cat REVIEW.md"
+      ],
+      "explain": "Every comment names an address, quotes the plan and gives the safe path: that is what lets the author fix it without a meeting. Compare with the fixed plan in the lesson: `0 to destroy`, the bucket *has moved*, the database updated in place with `deletion_protection` on."
+    }
+  ]
+}

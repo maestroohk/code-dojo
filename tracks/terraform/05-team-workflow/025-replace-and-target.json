@@ -1,0 +1,108 @@
+{
+  "title": "-replace and -target: emergency tools",
+  "summary": "Rebuild one object on purpose with -replace (the modern taint), and why -target is for emergencies only: what it skips, the warning it prints, and the clean-up plan that must follow.",
+  "minutes": 12,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Rebuild one thing: -replace",
+      "body": [
+        "Sometimes an object must be rebuilt although the code did not change: a leaked key, a server that is broken inside,",
+        "a certificate to re-issue now.",
+        "",
+        "```bash",
+        "terraform plan -replace=tls_private_key.deploy -out=tfplan   # shows -/+ ... will be replaced, as requested",
+        "terraform apply tfplan",
+        "```",
+        "",
+        "Everything that depends on the replaced object follows through the graph (a file holding its public key, an instance",
+        "using the new AMI). `-replace` replaced `terraform taint`, which marked the object in the state at once with no",
+        "plan to review; `taint` still exists but is deprecated. A resource is also *tainted* automatically when",
+        "its creation fails half way: the next plan replaces it (`untaint` if you have fixed it by hand)."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Rotate the leaked deploy key",
+      "prompt": [
+        "SEC-301 (`~/infra/deploy/TICKET.txt`): the deploy private key leaked. Rotate it **now**, and make sure the servers'",
+        "`authorized_keys` gets the new public key. Nothing else may change (the server keeps its name and its motd)."
+      ],
+      "setup": ["bash \"$DOJO_FILES/team.sh\" replace"],
+      "checks": [
+        { "name": "the key is new",
+          "cmd": "cd ~/infra/deploy && ! terraform state show -no-color tls_private_key.deploy | grep -q \"$(cat /opt/dojo/state/key)\"",
+          "fail": "`tls_private_key.deploy` still has the leaked key. `terraform plan -replace=tls_private_key.deploy -out=tfplan`, then apply it." },
+        { "name": "authorized_keys has the new public key",
+          "cmd": "cd ~/infra/deploy && diff <(terraform show -json | jq -j '.values.root_module.resources[] | select(.address == \"tls_private_key.deploy\") | .values.public_key_openssh') out/authorized_keys",
+          "fail": "`out/authorized_keys` should hold the new key's `public_key_openssh`." },
+        { "name": "nothing else changed",
+          "cmd": "cd ~/infra/deploy && terraform state show -no-color random_pet.server | grep -q \"$(cat /opt/dojo/state/pet)\" && test \"$(stat -c %Y out/motd.txt)\" = \"$(cat /opt/dojo/state/motd)\" && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "The server name or the motd changed, or the plan is not clean. Only the key (and what uses it) should be replaced." }
+      ],
+      "hints": [
+        "Changing the code is not needed: `-replace=ADDRESS` asks for a rebuild of one object.",
+        "`terraform plan -replace=tls_private_key.deploy -out=tfplan`: the key is replaced *as requested*, and `authorized_keys` because its content changes.",
+        "`terraform apply tfplan`, then `terraform plan` once more to see it clean."
+      ],
+      "solution": [
+        "cd ~/infra/deploy",
+        "cat TICKET.txt",
+        "terraform plan -replace=tls_private_key.deploy -out=tfplan",
+        "terraform apply tfplan",
+        "terraform plan -detailed-exitcode; echo \"exit $?\""
+      ],
+      "explain": "One flag, a reviewable plan, and the graph did the rest. Rotation is not finished until the old key is useless everywhere: here `authorized_keys` was rewritten; in real life you would also check that nothing else (a CI secret, a vault entry) still holds the old one."
+    },
+    {
+      "type": "learn",
+      "title": "-target: for emergencies only",
+      "body": [
+        "`-target=ADDRESS` plans and applies **only** that object and what it depends on:",
+        "",
+        "```text",
+        "$ terraform apply -target=aws_security_group.web",
+        "",
+        "Warning: Resource targeting is in effect",
+        "",
+        "You are creating a plan with the -target option, which means that the result of this plan may not",
+        "represent all of the changes requested by the current configuration.",
+        "",
+        "The -target option is not for routine use, and is provided only for exceptional situations such as",
+        "recovering from errors or mistakes, or when Terraform specifically suggests to use it as part of an",
+        "error message.",
+        "```",
+        "",
+        "Legitimate uses: an outage where one fix must go out while another part of the plan is broken; a provider error",
+        "that tells you to; bootstrapping something another resource's `for_each` needs. Every targeted apply leaves the rest",
+        "of the configuration **unapplied**, so it must be followed by a full plan and apply (or a clear note why not).",
+        "Teams that \"always target\" end up with states nobody can plan in one go. OpenTofu also has `-exclude=ADDRESS`, the",
+        "opposite: everything except that object."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "During an incident you ran `terraform apply -target=aws_security_group.web` to open a port fast. What must happen next?",
+      "options": [
+        "A full `terraform plan` (and apply, once safe) so the rest of the configuration is applied too, and the fix is in the code if it was not",
+        "Nothing: the targeted apply updated the whole state",
+        "Run `-target` for every other resource, one by one",
+        "Delete the state, the targeted apply made it inconsistent"
+      ],
+      "answer": 0,
+      "explain": "The state is consistent, but other pending changes in the code were skipped and are still pending. A full plan right after the incident shows what is left, while everyone still remembers why."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the situation to the tool.",
+      "pairs": [
+        ["a leaked key must be rebuilt now", "`plan -replace=ADDR`"],
+        ["an outage fix must go out while another part of the plan errors", "`apply -target=ADDR` (then a full plan)"],
+        ["a half-created resource was fixed by hand", "`terraform untaint ADDR`"],
+        ["OpenTofu: apply everything except one broken module", "`tofu apply -exclude=ADDR`"]
+      ]
+    }
+  ]
+}

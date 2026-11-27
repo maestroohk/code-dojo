@@ -1,0 +1,139 @@
+{
+  "title": "Policy as code on the plan",
+  "summary": "Rules that read the plan JSON and block a pull request: Open Policy Agent with conftest, Sentinel and OPA policy sets in HCP Terraform, enforcement levels, and writing the team's first rules.",
+  "minutes": 17,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Rules a reviewer should not have to remember",
+      "body": [
+        "Some rules hold for every change: no public buckets, no `0.0.0.0/0` on port 22, no destroying databases from CI,",
+        "every resource tagged with an owner. Reviewers miss them at 6 p.m. **Policy as code** checks them on the plan JSON",
+        "(`terraform show -json tfplan`), which has the *final* values after variables, modules and functions.",
+        "",
+        "```rego",
+        "# policy/plan.rego, checked with: conftest test plan.json --policy policy/",
+        "package main",
+        "",
+        "import rego.v1",
+        "",
+        "protected := {\"aws_db_instance\", \"aws_s3_bucket\"}",
+        "",
+        "deny contains msg if {",
+        "  some rc in input.resource_changes",
+        "  rc.type in protected",
+        "  \"delete\" in rc.change.actions          # a destroy, or the destroy half of a replacement",
+        "  msg := sprintf(\"%s would be destroyed: needs a manual, approved change\", [rc.address])",
+        "}",
+        "```",
+        "",
+        "Where policies run:",
+        "",
+        "- **OPA** (Open Policy Agent, a CNCF project) with **conftest** in any CI, for Terraform and OpenTofu alike.",
+        "- **HCP Terraform / Terraform Enterprise** run **Sentinel** or **OPA** policy sets between plan and apply, with",
+        "  enforcement levels: *advisory* (warn), *soft-mandatory* (an authorised person may override), *hard-mandatory*.",
+        "- Terraform 1.17 also made **Terraform Policy** generally available: `terraform plan -policies=...` evaluates policies",
+        "  in the CLI itself.",
+        "- Static scanners (Checkov, Trivy's misconfiguration scanning) read the `.tf` files instead of the plan: faster, but",
+        "  blind to values computed from variables and modules."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why check the **plan JSON** rather than grep the `.tf` files for `0.0.0.0/0`?",
+      "options": [
+        "The plan has the final values after variables, locals, modules and functions; the CIDR may come from a tfvars file or a module default the grep never sees",
+        "The plan JSON is smaller",
+        "`.tf` files cannot be read by OPA",
+        "Grep cannot search for slashes"
+      ],
+      "answer": 0,
+      "explain": "`cidr_blocks = var.allowed_cidrs` looks harmless in the code; the plan shows `[\"0.0.0.0/0\"]`. Plan-based policy also sees the *actions*: whether something is created, changed or destroyed."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The team's first two rules",
+      "prompt": [
+        "`~/infra/policy-demo/plans/` has the JSON of two real plans: `safe.json` (changes a message) and `bad.json` (a pull",
+        "request that rotates the DB password, drops the API key and makes a file world-writable). Write",
+        "`~/infra/policy-demo/policy/plan.rego` (package `main`, `import rego.v1`) with two `deny` rules:",
+        "",
+        "1. no `random_password` or `tls_private_key` may be destroyed or replaced (`\"delete\"` in its actions). The message",
+        "   must contain the resource's address.",
+        "2. no `local_file` may end up world-writable: deny when `rc.change.after.file_permission` is `\"0666\"` or `\"0777\"`",
+        "   (the address in the message too).",
+        "",
+        "`conftest test plans/bad.json -p policy` must fail with three messages; `plans/safe.json` must pass. Explore the",
+        "JSON first: `jq '.resource_changes[] | {address, type, actions: .change.actions}' plans/bad.json`."
+      ],
+      "setup": ["bash \"$DOJO_FILES/team.sh\" policy"],
+      "checks": [
+        { "name": "the bad plan is refused, for the right reasons",
+          "cmd": "cd ~/infra/policy-demo && ! conftest test plans/bad.json -p policy --no-color > /tmp/o 2>&1; grep -q 'random_password.db' /tmp/o && grep -q 'tls_private_key.api' /tmp/o && grep -q 'local_file.motd' /tmp/o && grep -q '3 failures' /tmp/o",
+          "fail": "`conftest test plans/bad.json -p policy` should fail with exactly three messages, naming `random_password.db`, `tls_private_key.api` and `local_file.motd`." },
+        { "name": "the safe plan passes",
+          "cmd": "cd ~/infra/policy-demo && conftest test plans/safe.json -p policy --no-color",
+          "fail": "`conftest test plans/safe.json -p policy` should pass: changing a file's content (with 0644) is allowed." },
+        { "name": "the rules are in plan.rego",
+          "cmd": "cd ~/infra/policy-demo && grep -q '^package main' policy/plan.rego && test \"$(grep -c 'deny contains' policy/plan.rego)\" -ge 2",
+          "fail": "`policy/plan.rego` should be `package main` with (at least) two `deny contains msg if { ... }` rules." }
+      ],
+      "hints": [
+        "Rule 1 is the card's rule with `protected := {\"random_password\", \"tls_private_key\"}`.",
+        "Rule 2: `some rc in input.resource_changes`, `rc.type == \"local_file\"`, `rc.change.after.file_permission in {\"0666\", \"0777\"}`, then `msg := sprintf(...)`.",
+        "Run `conftest test plans/bad.json -p policy` after each rule. A destroyed resource has `after = null`, so rule 2 only fires on files that will exist."
+      ],
+      "solution": [
+        "cd ~/infra/policy-demo",
+        "jq -c '.resource_changes[] | {address, type, actions: .change.actions}' plans/bad.json",
+        "cat > policy/plan.rego <<'EOF'",
+        "package main",
+        "",
+        "import rego.v1",
+        "",
+        "secrets := {\"random_password\", \"tls_private_key\"}",
+        "",
+        "deny contains msg if {",
+        "  some rc in input.resource_changes",
+        "  rc.type in secrets",
+        "  \"delete\" in rc.change.actions",
+        "  msg := sprintf(\"%s would be destroyed or replaced: rotate secrets with an approved change\", [rc.address])",
+        "}",
+        "",
+        "deny contains msg if {",
+        "  some rc in input.resource_changes",
+        "  rc.type == \"local_file\"",
+        "  rc.change.after.file_permission in {\"0666\", \"0777\"}",
+        "  msg := sprintf(\"%s would be world-writable (%s)\", [rc.address, rc.change.after.file_permission])",
+        "}",
+        "EOF",
+        "conftest test plans/bad.json -p policy",
+        "conftest test plans/safe.json -p policy"
+      ],
+      "explain": "Three failures: the password (replaced), the key (destroyed) and the file. In CI this step runs right after `terraform show -json tfplan > plan.json`, and its messages are posted on the pull request. Policies are code too: `conftest verify` runs unit tests for them (`test_` rules with sample inputs), and they live in a repo with their own reviews."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the enforcement level (HCP Terraform policy sets) to what happens when a policy fails.",
+      "pairs": [
+        ["advisory", "the run continues, with a warning"],
+        ["soft-mandatory", "the run stops unless an authorised user overrides it"],
+        ["hard-mandatory", "the run stops; nobody can override"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A policy denies destroying `aws_db_instance`. The team really must replace a database once (a planned migration). What is the healthy way?",
+      "options": [
+        "An explicit, reviewed exception: a soft-mandatory override by an authorised person, or an allow-list entry for that one address in the policy repo",
+        "Run `terraform apply` from a laptop to skip CI",
+        "Delete the policy and add it back later",
+        "Use `-target` so the policy does not see it"
+      ],
+      "answer": 0,
+      "explain": "Guard rails should make the dangerous path deliberate and recorded, not impossible. Every bypass that is easier than the approved exception will become the normal way."
+    }
+  ]
+}
