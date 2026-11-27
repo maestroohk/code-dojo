@@ -1,0 +1,206 @@
+{
+  "title": "Live OpenTelemetry on-call lab",
+  "module": "Observability · OpenTelemetry",
+  "minutes": 75,
+  "summary": "A real shop (two .NET 10 services and PostgreSQL) instrumented with the OpenTelemetry SDK, an OpenTelemetry Collector, Prometheus, Grafana, Jaeger and Loki. A slow product page, failing checkouts, a service that sends no traces, broken traces, personal data in spans, an alert nobody trusts and a metric whose cardinality is exploding. Find the causes from traces, metrics and logs, fix them, and prove each fix with the same tools.",
+  "download": "The first start downloads about 700 MB (the Collector, Prometheus 3.16, Grafana 13.3, Jaeger 2.23 and Loki 3.7 images; the .NET 10 SDK and PostgreSQL 18 images if you do not have them) and builds two small images (it restores the OpenTelemetry and Npgsql packages, so it needs the internet once). After that the lab runs offline. It uses about 800 MB of memory while running (every container is capped: 2.5 GB in total at most) and a few percent of one CPU.",
+  "ready_seconds": 240,
+  "nodes": {
+    "ops": "your workstation: curl and jq against Prometheus, Jaeger and Loki, the helper commands promq and spans, the services' settings in /work/config, the Collector's config in /work/collector, alert rules in /work/prometheus/rules",
+    "shop": "the storefront API (.NET 10, OpenTelemetry SDK). Its code is /app/src/Program.cs: saving it rebuilds and redeploys",
+    "inventory": "the stock service (.NET 10, OpenTelemetry SDK), called by the shop",
+    "postgres": "PostgreSQL 18 with the shop's data (psql -U shop -d shop)",
+    "collector": "the OpenTelemetry Collector (contrib 0.166): OTLP in, Jaeger, Prometheus and Loki out (otelcol-contrib validate)",
+    "prometheus": "Prometheus 3.16 (promtool), scraping the Collector; UI on http://127.0.0.1:39090",
+    "jaeger": "Jaeger 2.23, the trace store; UI on http://127.0.0.1:36686",
+    "loki": "Loki 3.7, the log store (logs arrive over OTLP)",
+    "grafana": "Grafana 13.3 with the shop's dashboard; UI on http://127.0.0.1:33000"
+  },
+  "default_node": "ops",
+  "ready": [
+    { "node": "ops", "cmd": "test -f /work/.seeded" },
+    { "node": "ops", "cmd": "curl -sf -m 3 http://shop:8080/healthz >/dev/null && curl -sf -m 3 http://inventory:8080/healthz >/dev/null" },
+    { "node": "ops", "cmd": "curl -sf -m 3 http://prometheus:9090/-/ready >/dev/null && curl -sf -m 3 http://jaeger:16686/api/v3/services >/dev/null" },
+    { "node": "ops", "cmd": "curl -sf -m 3 http://loki:3100/ready >/dev/null && curl -sf -m 3 http://grafana:3000/api/health >/dev/null" }
+  ],
+  "vars": {
+    "ERRCODE": { "type": "int", "min": 1200, "max": 9800 }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "type": "answer",
+      "title": "Which page is slow?",
+      "text": "Customers say \"the shop is slow\". Start where on-call starts: the dashboard. Open Grafana on **http://127.0.0.1:33000** (the home page is the *Shop: RED overview* dashboard: Rate, Errors, Duration per route). Wait a minute for data.\n\nThe same numbers from **ops**, with PromQL:\n\n```\npromq 'histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job=\"shop\"}[5m])))'\n```\n\n`rate(...[5m])` turns the cumulative bucket counters into per-second rates, `sum by (le, http_route)` adds up every instance but keeps the bucket boundary and the route, and `histogram_quantile(0.95, ...)` estimates the latency 95% of requests stay under. Which **route** has the worst p95? Type it as the `http_route` label shows it.",
+      "answer": ["/api/products/{id:int}", "/api/products/{id}", "GET /api/products/{id:int}", "GET /api/products/{id}"],
+      "hints": [
+        "Look at the Duration panel, or the promq output: one line per http_route, the value is in seconds.",
+        "The product detail page, `/api/products/{id:int}`: about 100 ms at p95 while the others take a few."
+      ],
+      "solution": {
+        "note": "`/api/products/{id:int}` (the route template with its constraint, exactly as ASP.NET Core reports it in `http.route`). Low-cardinality labels like the route template are what make this query possible: had the metric been labelled with the raw path (`/api/products/17`), there would be one series per product and the dashboard would be unreadable. p95 of a histogram is an estimate: Prometheus interpolates inside the bucket, so with the default .NET buckets (5, 10, 25, 50, 75, 100, 250 ms...) the answer is only as precise as the bucket it lands in.",
+        "steps": [ { "node": "ops", "cmd": "promq 'histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job=\"shop\"}[5m])))'" } ]
+      }
+    },
+    {
+      "id": "t2",
+      "type": "answer",
+      "title": "Find the slow span",
+      "text": "A metric tells you *what* is slow; a trace tells you *where the time goes*. Open Jaeger on **http://127.0.0.1:36686**, pick service **shop**, operation **GET /api/products/{id:int}**, and open one of the slow traces. The waterfall shows every span: the server span, the HTTP call to inventory, inventory's own spans and the database calls.\n\nFrom **ops** you can read the same traces through Jaeger's query API (v3, which answers in OTLP JSON); `spans` flattens them to one line per span:\n\n```\nspans shop 60 'GET /api/products/{id:int}' | head -20\n```\n\nOne span takes nearly all the time. It is a database call: its `db.query.text` attribute holds the SQL. Which **table** does that slow query read?",
+      "answer": ["reviews", "public.reviews"],
+      "hints": [
+        "The slow span's name is `postgresql` (no `db.query.summary` is set, so the database spans are named after `db.system.name`). Look at its `db.query.text`.",
+        "`SELECT rating, body FROM reviews WHERE product_id = $1 ORDER BY created DESC LIMIT 5`: the table is `reviews`."
+      ],
+      "solution": {
+        "note": "`reviews`. The waterfall makes it obvious: the server span is about as long as one child, the Npgsql span with `db.query.text = SELECT ... FROM reviews WHERE product_id = $1 ...`, while the call to inventory takes about a millisecond. That one span's self time is the incident. Npgsql emits these spans itself (`AddNpgsql()` subscribes to its `Npgsql` ActivitySource) with the stable database conventions: `db.system.name`, `db.namespace`, `db.query.text` with parameters, never values. Task 10 fixes it.",
+        "steps": [ { "node": "ops", "cmd": "spans shop 60 'GET /api/products/{id:int}' | sort -k3 -t' ' | head -20" } ]
+      }
+    },
+    {
+      "id": "t3",
+      "type": "answer",
+      "title": "From a failing trace to its log line",
+      "text": "Some checkouts fail with `502`. In Jaeger, search service **shop** with the tag `error=true` and open a failing `POST /api/checkout` trace. Copy its **trace id** (in the trace header, or the first column of `spans shop 120 'POST /api/checkout'` on ops).\n\nThe reason is in a log line, and every log line the SDK exports carries the trace id of the span it was written in. Find it in Loki: in Grafana use **Explore → Loki** with the query below, or from **ops**:\n\n```\ncurl -sG http://loki:3100/loki/api/v1/query_range \\\n  --data-urlencode 'query={service_name=\"shop\"} | trace_id=\"PASTE-THE-TRACE-ID\"' | jq '.data.result[] | .stream, .values'\n```\n\nThe log record's body is the message **template**; its values are attributes. What is the error **code** the inventory service returned?",
+      "answer": ["INV-{{ERRCODE}}", "{{ERRCODE}}"],
+      "hints": [
+        "`spans shop 300 'POST /api/checkout' | grep ERROR | head -3` gives failing trace ids. Each line starts with the trace id.",
+        "In the Loki answer, the stream holds the log attributes as labels and structured metadata: `Code`, `Reason`, `Sku`, plus `trace_id` and `span_id`. The code is the `Code` attribute, like `INV-1234`."
+      ],
+      "solution": {
+        "note": "The code is `INV-{{ERRCODE}}` (different on every run). The shop logs `Reservation failed for sku {Sku}: {Reason} (code {Code})` inside the checkout span, so the OpenTelemetry logging provider stamps the record with that span's trace id and span id, and Loki keeps them as structured metadata. That link (trace id in every log line) is what turns \"grep the logs around 14:03\" into \"show me exactly this request's logs\". Note what you did not need: the timestamp, the host, or the message text.",
+        "steps": [ { "node": "ops", "cmd": "t=$(spans shop 300 'POST /api/checkout' | grep -m1 ERROR | cut -d' ' -f1); echo trace $t; curl -sG http://loki:3100/loki/api/v1/query_range --data-urlencode \"query={service_name=\\\"shop\\\"} | trace_id=\\\"$t\\\"\" | jq -r '.data.result[].stream | \"\\(.severity_text) \\(.Code) \\(.Reason)\"'" } ]
+      }
+    },
+    {
+      "id": "t4",
+      "type": "state",
+      "title": "The service that went dark",
+      "text": "Look at the trace from task 2 again: the shop's span `GET` calls inventory, but inventory's own spans are never there. Jaeger's service list has no **inventory** at all, and Prometheus has no metrics for it (`promq 'count by (job) (http_server_request_duration_seconds_count)'`). The service works; its telemetry does not arrive.\n\nIts OpenTelemetry settings are in `/work/config/inventory.env` (on **ops**; saving restarts the service). Compare them with the shop's (`/work/config/shop.env`), which works. The SDK logs export failures to its own event source, not the app log, so reason it out from the settings: which protocol does the OTLP exporter use by default, and which port is the Collector's endpoint for it? Fix the setting so inventory's traces and metrics reach the Collector.",
+      "checks": [
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh inventory-traces", "fail_msg": "No inventory spans reached Jaeger in the last 20 seconds. The Collector receives OTLP/gRPC on 4317 and OTLP/HTTP on 4318; the .NET exporter speaks gRPC unless OTEL_EXPORTER_OTLP_PROTOCOL says otherwise." },
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh inventory-metrics", "fail_msg": "Traces arrive, but inventory's metrics are still missing in Prometheus. Wait 10 seconds (metrics are exported every 5 s, scraped every 5 s) and check again." }
+      ],
+      "hints": [
+        "inventory.env points `OTEL_EXPORTER_OTLP_ENDPOINT` at port **4318** (the Collector's OTLP/HTTP port) but sets no protocol, so the exporter speaks **gRPC** to an HTTP server.",
+        "Either use the gRPC port, `sed -i 's#collector:4318#collector:4317#' /work/config/inventory.env`, or keep 4318 and add `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`."
+      ],
+      "solution": {
+        "note": "The default OTLP protocol of the .NET exporter is `grpc` (other SDKs default to `http/protobuf`: Java, Python and JavaScript do), and 4317 is the gRPC port, 4318 the HTTP one. Mixing them fails quietly: the exporter retries and drops, the app keeps working, and the only sign is a gap in your telemetry. That is why a senior alerts on *missing* telemetry too (`absent(up{job=\"inventory\"})`, or the Collector's `otelcol_receiver_accepted_spans` per service), and why the Collector's own metrics are worth a dashboard. With http/protobuf and the generic OTEL_EXPORTER_OTLP_ENDPOINT, the SDK adds `/v1/traces`, `/v1/metrics` and `/v1/logs` itself; with the per-signal variables (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) you give the full URL.",
+        "steps": [ { "node": "ops", "cmd": "sed -i 's#collector:4318#collector:4317#' /work/config/inventory.env && sleep 20 && curl -s http://jaeger:16686/api/v3/services" } ]
+      }
+    },
+    {
+      "id": "t5",
+      "type": "state",
+      "title": "Traces with holes",
+      "text": "Inventory's spans arrive now, but look at a few product-page traces (`spans shop 60 'GET /api/products/{id:int}'`, or Jaeger): most of them still have **no inventory spans**, even though the shop sampled them. Count it:\n\n```\nspans shop 30 --json | jq '[group_by(.trace)[] | select(any(.[]; .kind == 3 and .attrs[\"server.address\"] == \"inventory\"))] | {traces: length, with_inventory: map(select(any(.[]; .service == \"inventory\"))) | length}'\n```\n\nA trace is only useful when it is complete. Look at inventory's sampler settings in `/work/config/inventory.env` and make inventory respect the decision of whoever called it, so every trace the shop keeps is complete.",
+      "checks": [
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh sampler-config", "fail_msg": "inventory's OTEL_TRACES_SAMPLER should follow the parent's decision: a parentbased_ sampler (or no sampler setting at all, which means parentbased_always_on)." },
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh complete-traces", "fail_msg": "In the last 15 seconds, shop traces that call inventory still lack inventory's spans (or there were fewer than 3 such traces). Give the restart a few seconds and check again." }
+      ],
+      "hints": [
+        "`traceidratio` with 0.2 decides from the trace id alone and ignores the `sampled` flag in the incoming `traceparent` header. The shop keeps everything; inventory keeps a fifth.",
+        "`sed -i 's/^OTEL_TRACES_SAMPLER=.*/OTEL_TRACES_SAMPLER=parentbased_always_on/; /^OTEL_TRACES_SAMPLER_ARG/d' /work/config/inventory.env`"
+      ],
+      "solution": {
+        "note": "The rule: decide once, at the root, and let everyone downstream follow (`parentbased_*`). The root's decision travels in the `traceparent` header's flags (`...-01` sampled, `...-00` not). `parentbased_traceidratio` with an arg keeps that ratio for traces that *start* in this service and follows the parent otherwise, which is the usual production setting; the default sampler of every SDK is `parentbased_always_on`. To cut volume without holes, sample at the root only (or tail-sample in the Collector, where whole traces are kept or dropped together).",
+        "steps": [ { "node": "ops", "cmd": "sed -i 's/^OTEL_TRACES_SAMPLER=.*/OTEL_TRACES_SAMPLER=parentbased_always_on/; /^OTEL_TRACES_SAMPLER_ARG/d' /work/config/inventory.env && sleep 20" } ]
+      }
+    },
+    {
+      "id": "t6",
+      "type": "state",
+      "title": "Add the attribute the team needs",
+      "text": "The checkout team wants to know whether failures depend on the size of the cart, but the `checkout` span has no such attribute. Add one to the code: on the **shop** node, edit `/app/src/Program.cs` (open it with the file editor or `nano /app/src/Program.cs`). In the checkout endpoint, set an attribute **`app.cart.size`** on the `checkout` activity: the number of lines in the cart, as an **integer**.\n\nSaving the file rebuilds and redeploys the shop (watch `tail -f /work/logs/shop-build.log`). Check a new checkout span with `spans shop 20 checkout | head -3`.",
+      "checks": [
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh cart-size", "fail_msg": "Recent checkout spans do not all carry app.cart.size as an integer (an int, not a string like \"2\"). Did the build succeed (/work/logs/shop-build.log)? Wait a few seconds after it deployed, then check again." }
+      ],
+      "hints": [
+        "Next to `activity?.SetTag(\"app.payment.method\", cart.Payment);` add one line. `SetTag` keeps the .NET type: an `int` becomes an OTLP `intValue`.",
+        "`activity?.SetTag(\"app.cart.size\", cart.Items.Count);`"
+      ],
+      "solution": {
+        "note": "One line, and the `?.` matters: `StartActivity` returns null when nobody listens or the trace is not sampled, so instrumentation code must never assume an activity. Keep numbers as numbers: as an integer the backend can filter `app.cart.size > 2` and build histograms of it; as a string it can only match exactly. Use your own namespace (`app.`, or your company's) for attributes that have no semantic convention, and check the conventions first (there is no cart convention; there is `user.id`, `http.route`, `error.type`).",
+        "steps": [ { "node": "shop", "cmd": "sed -i 's#^\\( *\\)activity?.SetTag(\"app.payment.method\", cart.Payment);#&\\n\\1activity?.SetTag(\"app.cart.size\", cart.Items.Count);#' /app/src/Program.cs && sleep 25 && tail -n 3 /work/logs/shop-build.log" } ]
+      }
+    },
+    {
+      "id": "t7",
+      "type": "state",
+      "title": "Personal data in the traces",
+      "text": "Security review: the `checkout` span carries **`user.email`** in plain text (`spans shop 20 checkout | head -2`). Traces are kept for days, copied to vendors and read by many people; email addresses must not be in them. The service team will remove it next sprint; you protect the data **today**, in the Collector, for every service at once.\n\nEdit `/work/collector/config.yaml` (on **ops**): add an `attributes` processor that removes the email (delete it, or `hash` it so equal emails still group together), and put it in the **traces** pipeline. Saving the file validates it first (`otelcol-contrib validate`) and restarts the Collector only when it is valid: read `/work/logs/collector.log` to see which happened.",
+      "checks": [
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh no-email", "fail_msg": "A checkout span from the last 15 seconds still holds an email address (or no checkout span arrived). Is the processor listed in the traces pipeline? Did the Collector restart (tail /work/logs/collector.log)?" }
+      ],
+      "hints": [
+        "A processor does nothing until a pipeline lists it. Define it under `processors:` and add its name to `service.pipelines.traces.processors` after `memory_limiter`.",
+        "```yaml\nprocessors:\n  attributes/redact:\n    actions:\n      - key: user.email\n        action: hash   # or: delete\n...\n    traces:\n      processors: [memory_limiter, attributes/redact]\n```\nOn the **collector** node, `otelcol-contrib validate --config=/work/collector/config.yaml` checks your edit."
+      ],
+      "solution": {
+        "note": "The Collector is the one place every span passes, so it is where a platform team enforces rules (redaction, `transform` with OTTL to truncate long `db.query.text`, `filter` to drop health checks) without waiting for every service to redeploy. `hash` (SHA-256 of the value) keeps it useful for grouping and counting without revealing it; `delete` is simpler when nobody needs it. Order matters: `memory_limiter` first, then processors that change data. Fix the source too: the cheapest personal data to protect is the one you never record.",
+        "steps": [ { "node": "ops", "cmd": "python3 - <<'EOF'\np='/work/collector/config.yaml'; t=open(p).read()\nt=t.replace('    spike_limit_mib: 25\\n', '    spike_limit_mib: 25\\n  attributes/redact:\\n    actions:\\n      - key: user.email\\n        action: hash\\n', 1)\nt=t.replace('      processors: [memory_limiter]\\n      exporters: [otlp_grpc/jaeger]', '      processors: [memory_limiter, attributes/redact]\\n      exporters: [otlp_grpc/jaeger]')\nopen(p, 'w').write(t)\nEOF\nsleep 20; tail -n 2 /work/logs/collector.log" } ]
+      }
+    },
+    {
+      "id": "t8",
+      "type": "state",
+      "title": "An alert that pages for the right reason",
+      "text": "The shop has one alert, `ShopSlowRequest` in `/work/prometheus/rules/shop.yml`: p99 of *all* requests over one minute above 20 ms. It fires all the time, so nobody reads it. Replace noise with a symptom the business cares about, measured against an SLO.\n\nThe SLO: **99.9% of checkouts succeed** (no 5xx), over 30 days. That leaves an error budget of 0.1%. Write an alert **`CheckoutErrorBudgetBurn`** in a new file `/work/prometheus/rules/slo.yml` that fires when the error ratio of `/api/checkout` is above **14.4 × 0.001** over **both** the last **1h** and the last **5m** (the fast-burn rule: at that rate, 2% of the month's budget is gone in an hour). Give it `severity: page` and a `runbook_url` annotation. Stop `ShopSlowRequest` from paging (delete it, or lower its severity).\n\nCheck the files on the **prometheus** node with `promtool check rules /work/prometheus/rules/*.yml`, then load them: `curl -X POST http://prometheus:9090/-/reload` (from ops). The shop's checkouts fail far more often than 0.1%, so the new alert goes to pending at once.",
+      "checks": [
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh burn-alert", "fail_msg": "No healthy alert CheckoutErrorBudgetBurn with severity page and a runbook_url that is pending or firing. Did promtool pass, and did you reload? (curl -s http://prometheus:9090/api/v1/rules | jq)" },
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh burn-windows", "fail_msg": "The rules should look at a long window ([1h]) and a short one ([5m]): the long one proves the burn is real, the short one that it is still happening." },
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh noisy-alert", "fail_msg": "ShopSlowRequest still pages. Delete it from shop.yml (or change its severity) and reload." }
+      ],
+      "hints": [
+        "Error ratio over a window: `sum(rate(http_server_request_duration_seconds_count{job=\"shop\", http_route=\"/api/checkout\", http_response_status_code=~\"5..\"}[1h])) / sum(rate(http_server_request_duration_seconds_count{job=\"shop\", http_route=\"/api/checkout\"}[1h]))`. Write it twice (1h and 5m), compare each with `14.4 * 0.001`, join them with `and`.",
+        "```yaml\ngroups:\n  - name: checkout-slo\n    rules:\n      - alert: CheckoutErrorBudgetBurn\n        expr: |\n          (sum(rate(http_server_request_duration_seconds_count{job=\"shop\",http_route=\"/api/checkout\",http_response_status_code=~\"5..\"}[1h]))\n            / sum(rate(http_server_request_duration_seconds_count{job=\"shop\",http_route=\"/api/checkout\"}[1h]))) > (14.4 * 0.001)\n          and\n          (sum(rate(http_server_request_duration_seconds_count{job=\"shop\",http_route=\"/api/checkout\",http_response_status_code=~\"5..\"}[5m]))\n            / sum(rate(http_server_request_duration_seconds_count{job=\"shop\",http_route=\"/api/checkout\"}[5m]))) > (14.4 * 0.001)\n        for: 2m\n        labels: { severity: page }\n        annotations:\n          summary: Checkout is burning its error budget 14x too fast\n          runbook_url: https://runbooks.example.com/shop/checkout-errors\n```"
+      ],
+      "solution": {
+        "note": "Burn rate = error ratio / error budget; 1 means the budget lasts exactly 30 days. The classic multiwindow, multi-burn-rate set (Google SRE workbook): page at 14.4× over 1h and 5m, page at 6× over 6h and 30m, ticket at 1× over 3d and 6h. The long window keeps one bad minute from paging; the short window lets the alert resolve soon after the fix instead of an hour later. In a real setup you would write the ratios as recording rules (`shop:checkout_errors:ratio_rate1h`) and reuse them in every alert and dashboard. And an alert should point at a runbook: what it means, what to check first, who to call.",
+        "steps": [
+          { "node": "ops", "cmd": "cat > /work/prometheus/rules/slo.yml <<'EOF'\ngroups:\n  - name: checkout-slo\n    rules:\n      - record: shop:checkout_errors:ratio_rate5m\n        expr: sum(rate(http_server_request_duration_seconds_count{job=\"shop\",http_route=\"/api/checkout\",http_response_status_code=~\"5..\"}[5m])) / sum(rate(http_server_request_duration_seconds_count{job=\"shop\",http_route=\"/api/checkout\"}[5m]))\n      - record: shop:checkout_errors:ratio_rate1h\n        expr: sum(rate(http_server_request_duration_seconds_count{job=\"shop\",http_route=\"/api/checkout\",http_response_status_code=~\"5..\"}[1h])) / sum(rate(http_server_request_duration_seconds_count{job=\"shop\",http_route=\"/api/checkout\"}[1h]))\n      - alert: CheckoutErrorBudgetBurn\n        expr: shop:checkout_errors:ratio_rate1h > (14.4 * 0.001) and shop:checkout_errors:ratio_rate5m > (14.4 * 0.001)\n        for: 2m\n        labels:\n          severity: page\n        annotations:\n          summary: Checkout is burning its error budget 14x too fast\n          runbook_url: https://runbooks.example.com/shop/checkout-errors\nEOF\nrm /work/prometheus/rules/shop.yml && curl -s -X POST http://prometheus:9090/-/reload && sleep 20" }
+        ]
+      }
+    },
+    {
+      "id": "t9",
+      "type": "state",
+      "title": "The metric that ate Prometheus",
+      "text": "The dashboard's *Series behind app_orders_total* panel keeps climbing. One counter, thousands of time series: see it from **ops** with `promq 'count(app_orders_total)'` and `promq 'topk(5, count by (__name__) ({__name__=~\"app_.*\"}))'`. Every distinct combination of label values is its own series, stored and indexed separately; a label with thousands of values multiplies everything.\n\nFind the attribute in `/app/src/Program.cs` (on **shop**) that makes `app.orders` unbounded, and fix the code so the counter keeps only bounded attributes (payment method and outcome). The metric must keep working. Old series disappear about a minute after the new version stops sending them.",
+      "checks": [
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh orders-exported", "fail_msg": "app_orders_total is gone. Keep the counter; only drop the unbounded attribute." },
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh orders-cardinality", "fail_msg": "app_orders_total still has a series per customer (or more than 15 series). Did the build deploy? Old series expire in the Collector about a minute after the last update: wait and check again." }
+      ],
+      "hints": [
+        "`promq 'count by (app_customer_id) (app_orders_total)' | wc -l` shows the culprit: a customer id on a metric.",
+        "Remove `new(\"app.customer.id\", cart.Customer)` from both `Telemetry.Orders.Add(...)` calls (mind the commas and the closing parenthesis). The customer id belongs on the span, where each request is its own record, if anywhere."
+      ],
+      "solution": {
+        "note": "Metrics are for aggregates with **bounded** labels (route template, status code, method, payment type, region); anything per user, per order, per request (ids, emails, raw URLs, error messages) belongs on spans and logs. Cost grows with the number of series, not the number of requests, so one careless label can multiply a bill or knock over Prometheus. When you cannot change the code at once, an SDK **view** drops it at the source: `.AddView(\"app.orders\", new MetricStreamConfiguration { TagKeys = [\"app.payment.method\", \"app.order.status\"] })`, and Prometheus can drop a label at scrape time with `metric_relabel_configs` (`action: labeldrop`). Deleting it in a Collector processor is a trap for cumulative metrics: several series collapse into one with conflicting values.",
+        "steps": [ { "node": "shop", "cmd": "sed -i '/new(\"app.customer.id\", cart.Customer)/d; s/new(\"app.order.status\", \"failed\"),$/new(\"app.order.status\", \"failed\"));/; s/new(\"app.order.status\", \"placed\"),$/new(\"app.order.status\", \"placed\"));/' /app/src/Program.cs && sleep 25 && tail -n 3 /work/logs/shop-build.log" } ]
+      }
+    },
+    {
+      "id": "t10",
+      "type": "state",
+      "title": "Fix the slow page, and prove it",
+      "text": "Back to task 2: the product page reads all 300,000 reviews to find the five newest of one product. On the **postgres** node, look at the plan:\n\n```\npsql -U shop -d shop -c \"EXPLAIN ANALYZE SELECT rating, body FROM reviews WHERE product_id = 7 ORDER BY created DESC LIMIT 5\"\n```\n\n`Seq Scan on reviews` is the cause. Add an index that serves this query (create it without locking out writes, as you would in production). Then **prove** the fix with the same signal that showed the problem: p95 of `/api/products/{id:int}` over the last minute must drop under 25 ms (watch the Duration panel, or `promq` on ops).",
+      "checks": [
+        { "node": "postgres", "cmd": "bash /lab/checks/checks.sh reviews-index", "fail_msg": "There is no index on reviews that starts with product_id yet." },
+        { "node": "ops", "cmd": "bash /lab/checks/checks.sh product-fast", "fail_msg": "p95 of /api/products/{id:int} over the last minute is not under 25 ms yet. The window is one minute: give it a minute after the index exists, then check again." }
+      ],
+      "hints": [
+        "An index on `(product_id, created DESC)` finds one product's rows and already has them in the order the query wants, so `LIMIT 5` reads five entries.",
+        "`psql -U shop -d shop -c 'CREATE INDEX CONCURRENTLY reviews_product_created ON reviews (product_id, created DESC)'`, then on ops: `promq 'histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"shop\", http_route=\"/api/products/{id:int}\"}[1m])))'`"
+      ],
+      "solution": {
+        "note": "`CREATE INDEX CONCURRENTLY` builds the index without blocking writes (slower, and it cannot run inside a transaction). Then the loop closes: the dashboard that showed the symptom shows the recovery, the trace shows the database span shrink from ~90 ms to well under a millisecond, and the alert (if you had one on latency) resolves. \"Fixed\" means measured, not deployed: say in the incident channel which graph proves it.",
+        "steps": [
+          { "node": "postgres", "cmd": "psql -U shop -d shop -c 'CREATE INDEX CONCURRENTLY reviews_product_created ON reviews (product_id, created DESC)'" },
+          { "node": "ops", "cmd": "sleep 70; promq 'histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"shop\", http_route=\"/api/products/{id:int}\"}[1m])))'" }
+        ]
+      }
+    }
+  ]
+}

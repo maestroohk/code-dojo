@@ -1,0 +1,103 @@
+x-app-env: &appenv
+  DB: "Host=postgres;Username=shop;Password=shop;Database=shop;Maximum Pool Size=20"
+
+services:
+  shop:
+    image: dojo-otel-shop:1
+    build: { context: ., dockerfile: image/Dockerfile }
+    hostname: shop
+    init: true
+    mem_limit: 640m
+    cpus: 1.0
+    environment: { <<: *appenv, APP_ROLE: shop }
+    volumes: ["./files:/lab:ro", "work:/work"]
+    networks: { obs: { ipv4_address: 10.64.1.10 } }
+  inventory:
+    image: dojo-otel-shop:1
+    hostname: inventory
+    init: true
+    mem_limit: 256m
+    cpus: 0.5
+    environment: { <<: *appenv, APP_ROLE: inventory, ERRCODE: "${DOJO_ERRCODE}" }
+    volumes: ["./files:/lab:ro", "work:/work"]
+    networks: { obs: { ipv4_address: 10.64.1.11 } }
+  postgres:
+    image: postgres:18
+    hostname: postgres
+    mem_limit: 256m
+    cpus: 0.5
+    environment: { POSTGRES_USER: shop, POSTGRES_PASSWORD: shop, POSTGRES_DB: shop }
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=60", "-c", "jit=off"]
+    volumes: ["./files:/lab:ro", "./files/postgres/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    networks: { obs: { ipv4_address: 10.64.1.12 } }
+  collector:
+    image: dojo-otel-collector:0.166.0
+    build: { context: ., dockerfile: image/collector.Dockerfile }
+    hostname: collector
+    init: true
+    mem_limit: 192m
+    cpus: 0.5
+    volumes: ["./files:/lab:ro", "work:/work"]
+    networks: { obs: { ipv4_address: 10.64.1.20 } }
+  jaeger:
+    image: jaegertracing/jaeger:2.23.0
+    hostname: jaeger
+    mem_limit: 256m
+    cpus: 0.5
+    ports: ["127.0.0.1:36686:16686"]
+    networks: { obs: { ipv4_address: 10.64.1.21 }, ui: {} }
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    hostname: prometheus
+    mem_limit: 256m
+    cpus: 0.5
+    command: ["--config.file=/lab/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=6h",
+              "--web.enable-lifecycle", "--enable-feature=exemplar-storage"]
+    volumes: ["./files:/lab:ro", "work:/work"]
+    ports: ["127.0.0.1:39090:9090"]
+    networks: { obs: { ipv4_address: 10.64.1.22 }, ui: {} }
+  loki:
+    image: grafana/loki:3.7.10
+    hostname: loki
+    mem_limit: 256m
+    cpus: 0.5
+    command: ["-config.file=/lab/loki/config.yaml"]
+    volumes: ["./files:/lab:ro"]
+    networks: { obs: { ipv4_address: 10.64.1.23 } }
+  grafana:
+    image: grafana/grafana:13.3.2
+    hostname: grafana
+    mem_limit: 384m
+    cpus: 0.5
+    environment:
+      GF_PATHS_PROVISIONING: /lab/grafana/provisioning
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /lab/grafana/dashboards/shop-red.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes: ["./files:/lab:ro"]
+    ports: ["127.0.0.1:33000:3000"]
+    networks: { obs: { ipv4_address: 10.64.1.24 }, ui: {} }
+  ops:
+    image: dojo-toolbox:latest
+    hostname: ops
+    init: true
+    mem_limit: 128m
+    volumes: ["./files:/lab:ro", "work:/work"]
+    networks: { obs: { ipv4_address: 10.64.1.30 } }
+
+volumes:
+  work:
+
+networks:
+  # internal: no way out to the internet, so nothing in the lab can quietly depend on it.
+  obs:
+    internal: true
+    ipam: { config: [ { subnet: 10.64.1.0/24, gateway: 10.64.1.1 } ] }
+  # ui: only so your browser can open Grafana, Jaeger and Prometheus on 127.0.0.1 (ports 33000, 36686, 39090).
+  ui: {}

@@ -1,0 +1,27 @@
+#!/bin/bash
+# spans SERVICE [SECONDS] [OPERATION] [--json]
+# The spans of SERVICE's traces from the last SECONDS (default 60), from Jaeger's query API v3
+# (GET /api/v3/traces, which answers in OTLP JSON: resourceSpans -> scopeSpans -> spans). One line per span:
+#   trace_id  service  duration_ms  status  name  key=value attributes
+# --json prints the same spans as a JSON array instead, for jq.
+svc=$1; secs=${2:-60}; op=$3; json=0
+for a in "$@"; do [ "$a" = --json ] && json=1; done
+[ "$op" = --json ] && op=
+if [ -z "$svc" ]; then echo "usage: spans SERVICE [SECONDS] [OPERATION] [--json]" >&2; exit 2; fi
+args=(--data-urlencode "query.service_name=$svc"
+      --data-urlencode "query.start_time_min=$(date -u -d "-$secs sec" +%Y-%m-%dT%H:%M:%SZ)"
+      --data-urlencode "query.start_time_max=$(date -u -d '+5 sec' +%Y-%m-%dT%H:%M:%SZ)"
+      --data-urlencode "query.num_traces=${NUM_TRACES:-50}")
+[ -n "$op" ] && args+=(--data-urlencode "query.operation_name=$op")
+raw=$(curl -sG -m 15 http://jaeger:16686/api/v3/traces "${args[@]}")
+flat=$(printf '%s' "$raw" | jq -c '[(.result.resourceSpans // [])[]
+  | (.resource.attributes // [] | map({(.key): (.value | to_entries[0].value)}) | add // {}) as $res
+  | .scopeSpans[] | .scope.name as $scope | .spans[]
+  | { trace: .traceId, span: .spanId, parent: (.parentSpanId // ""), service: $res["service.name"], resource: $res, scope: $scope,
+      name, kind, status: (if (.status.code // 0) == 2 then "ERROR" elif (.status.code // 0) == 1 then "OK" else "UNSET" end),
+      ms: ((((.endTimeUnixNano | tonumber) - (.startTimeUnixNano | tonumber)) / 1000000) * 10 | round / 10),
+      attrs: (.attributes // [] | map({(.key): (.value | to_entries[0].value)}) | add // {}),
+      types: (.attributes // [] | map({(.key): (.value | to_entries[0].key)}) | add // {}) } ]' 2>/dev/null)
+[ -z "$flat" ] && flat='[]'
+if [ $json = 1 ]; then printf '%s\n' "$flat"; exit 0; fi
+printf '%s' "$flat" | jq -r '.[] | "\(.trace)  \(.service)  \(.ms)ms  \(.status)  \(.name)  \(.attrs | to_entries | map("\(.key)=\(.value | tostring | .[0:80])") | join(" "))"'

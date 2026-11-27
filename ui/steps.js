@@ -9,6 +9,7 @@ import { codeTrace } from './codetrace.js';
 import { interleaveCard, interleaveDetail } from './interleave.js';
 import { memoryTrace, eventLoop } from './polyviz.js';
 import { testViz } from './testviz.js';
+import { otelViz, otelResult } from './otelviz.js';
 /** The language free runs use: the lesson's (a module may run another language than its track, app.js sets it). */
 const runLang = () => document.documentElement.dataset.codeLang || undefined;
 import { sqlGrid } from './sqlgrid.js';
@@ -208,7 +209,9 @@ function learn(step, ctx) {
     pre.after(bar, slot);
   }
   return {
-    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.interleave && interleaveCard(step.interleave), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), step.testviz && testViz(step.testviz), sqlVisuals(step)),
+    el: h('div.learn', step.title && h('h2', step.title), prose, step.toolkit && toolkitCard(step.toolkit), step.linq && linqViz(step.linq), step.trace && codeTrace(step.trace), step.interleave && interleaveCard(step.interleave), step.pytrace && memoryTrace(step.pytrace, { lang: 'python' }), step.tstrace && memoryTrace(step.tstrace, { lang: 'typescript' }), step.eventloop && eventLoop(step.eventloop), step.regex && regexCard(step.regex), step.testviz && testViz(step.testviz),
+      step.otelviz && otelViz(step.otelviz),
+      sqlVisuals(step)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };
 }
@@ -626,6 +629,7 @@ function drawRunOutput(panel, r, { stdin } = {}) {
         h('span.test-mark', t.pass ? '✓' : '✗'),
         h('div', h('div.test-name', t.name), !t.pass && t.detail && interleaveDetail(t.detail))))));
   }
+  if (r.telemetry) { const ov = otelResult(r.telemetry); if (ov) panel.append(ov); }   // OpenTelemetry steps: the spans and logs the code exported
   if (r.timedOut) panel.append(h('div.diag.error', 'Stopped: it ran for too long. Is there a loop that never ends, or is it waiting for something that never happens?'));
   if (stdin) panel.append(h('div.out-section', h('div.out-title', 'Input given'), h('pre.out', stdin)));
   if (r.stdout || !r.tests?.length) {
