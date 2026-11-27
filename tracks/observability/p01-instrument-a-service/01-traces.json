@@ -1,0 +1,90 @@
+{
+  "title": "Stage 1: traces",
+  "summary": "The bookshop's lookup endpoint with the SDK, the ASP.NET Core instrumentation and a span of your own.",
+  "minutes": 15,
+  "prereqs": ["observability/03-dotnet-instrumentation/01-tracing-aspnet"],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The bookshop",
+      "body": [
+        "A small bookshop API is going to production. Over three stages you give it the telemetry the on-call team will rely on. Stage 1:",
+        "traces. The service has one endpoint, `GET /books/{id:int}`, backed by an in-memory catalogue (ids 1 to 3). Unknown ids answer `404`.",
+        "",
+        "Keep the code you pass: the next stage opens with it."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A 404 for an unknown book id: what status should the server span get?",
+      "options": ["Unset: a 4xx is the caller's problem; record what happened as an attribute instead", "Error", "Ok", "None: drop the span"],
+      "answer": 0,
+      "explain": "Server spans only mark 5xx as Error. The useful signal is an attribute (`app.book.found = false`) you can count and filter."
+    },
+    {
+      "type": "code",
+      "framework": "web+otel",
+      "title": "Trace the lookups",
+      "prompt": [
+        "Write the bookshop (`Program.cs`, ending in `app.Run();`):",
+        "",
+        "- `GET /books/{id:int}` returns `{ \"id\": 1, \"title\": \"Dune\" }` for ids 1 (`Dune`), 2 (`Emma`), 3 (`Ulysses`), else `404`;",
+        "- the SDK with service name **`bookshop`** and the ASP.NET Core instrumentation;",
+        "- an `ActivitySource` **`Bookshop`** (registered) and, in the handler, a span **`load book`** with `app.book.id` (int) and",
+        "  `app.book.found` (bool)."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "app.Run();"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddOpenTelemetry()",
+        "    .ConfigureResource(r => r.AddService(\"bookshop\"))",
+        "    .WithTracing(t => t.AddSource(Telemetry.Source.Name).AddAspNetCoreInstrumentation());",
+        "",
+        "var app = builder.Build();",
+        "var books = new Dictionary<int, string> { [1] = \"Dune\", [2] = \"Emma\", [3] = \"Ulysses\" };",
+        "app.MapGet(\"/books/{id:int}\", (int id) =>",
+        "{",
+        "    using var activity = Telemetry.Source.StartActivity(\"load book\");",
+        "    var found = books.TryGetValue(id, out var title);",
+        "    activity?.SetTag(\"app.book.id\", id);",
+        "    activity?.SetTag(\"app.book.found\", found);",
+        "    return found ? Results.Ok(new { id, title }) : Results.NotFound();",
+        "});",
+        "app.Run();",
+        "",
+        "static class Telemetry",
+        "{",
+        "    public static readonly ActivitySource Source = new(\"Bookshop\");",
+        "}"
+      ],
+      "hints": [
+        "The tracing setup from module 3, with `AddService(\"bookshop\")` and `AddSource(\"Bookshop\")`.",
+        "`activity?.SetTag(\"app.book.found\", found);` keeps the bool."
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        var r = await http.GetAsync(\"/books/1\");",
+        "        DojoWeb.Status(\"GET /books/1 answers 200\", 200, r);",
+        "        Dojo.Eq(\"title\", \"Dune\", DojoWeb.Prop(await DojoWeb.Json(r), \"title\"));",
+        "        DojoWeb.Status(\"GET /books/99 answers 404\", 404, await http.GetAsync(\"/books/99\"));",
+        "        var ok = await DojoOtel.Span(a => a.DisplayName == \"load book\" && Equals(a.GetTagItem(\"app.book.id\"), 1));",
+        "        var miss = await DojoOtel.Span(a => a.DisplayName == \"load book\" && Equals(a.GetTagItem(\"app.book.id\"), 99));",
+        "        Dojo.Check(\"load book spans with app.book.id as an int\", ok is not null && miss is not null, \"Spans: \" + string.Join(\", \", DojoOtel.Spans.Select(a => a.DisplayName)));",
+        "        Dojo.Check(\"app.book.found is a bool\", ok?.GetTagItem(\"app.book.found\") is true && miss?.GetTagItem(\"app.book.found\") is false, \"\");",
+        "        var server = await DojoOtel.Span(a => a.Kind == ActivityKind.Server && miss != null && a.TraceId == miss.TraceId);",
+        "        Dojo.Eq(\"the 404's server span stays Unset\", \"Unset\", server?.Status.ToString());",
+        "        Dojo.Eq(\"service.name is bookshop\", \"bookshop\", DojoOtel.Service(server));",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}
