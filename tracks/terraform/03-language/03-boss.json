@@ -1,0 +1,177 @@
+{
+  "title": "Boss: onboard a team, rotate nothing",
+  "summary": "A per-team config built with count: add a team without rotating anyone's database password, give gold teams 24x7 paging with a filtered for_each, and add the guard rails a reviewer would ask for.",
+  "minutes": 22,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "TEAM-41",
+      "body": [
+        "*\"Payments is joining the platform. They need their database password and env file like every other team, and gold",
+        "teams get 24x7 paging. Last time someone added a team, two other teams' passwords rotated in the middle of the day.\"*",
+        "",
+        "`~/infra/teams` is applied. Three steps; each check runs Terraform and compares passwords against what they were."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Add payments, rotate nothing",
+      "prompt": [
+        "Do `~/infra/teams/TICKET.txt`: add `payments` (gold, `payments-lead@example.com`), keeping the list sorted.",
+        "",
+        "First see what happens if you just insert it into the list: `terraform plan` (do not apply that!). Then change the",
+        "design so each team is keyed by its name, migrate the existing instances without touching them, add payments, and",
+        "apply. Only payments' password and env file may be created."
+      ],
+      "setup": ["bash \"$DOJO_FILES/teams.sh\" 1"],
+      "checks": [
+        { "name": "no existing password changed",
+          "cmd": "cd ~/infra/teams && for t in checkout search web; do test \"$(sed -n 's/^DB_PASSWORD=//p' out/$t/db.env)\" = \"$(cat /opt/dojo/state/pw-$t)\" || { echo \"$t changed\"; exit 1; }; done",
+          "fail": "A team's password rotated. Press Reset scenario: use `for_each` keyed by team name and `moved` blocks." },
+        { "name": "payments has its password and env file",
+          "cmd": "cd ~/infra/teams && grep -Eq '^DB_PASSWORD=[A-Za-z0-9]{32}$' out/payments/db.env",
+          "fail": "`out/payments/db.env` should exist with a 32-character password." },
+        { "name": "instances are keyed by team name",
+          "cmd": "cd ~/infra/teams && terraform state list | grep -q 'random_password.team_db\\[\"payments\"\\]' && ! terraform state list | grep -q 'team_db\\[[0-9]'",
+          "fail": "`terraform state list` should show `random_password.team_db[\"checkout\"]` and so on, not numeric indexes." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/teams && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "`terraform plan` should show no changes." }
+      ],
+      "hints": [
+        "Inserting payments at position 1 shifts search and web: their passwords would be replaced. Turn `var.teams` into a `map(object({ tier = string, owner = string }))` keyed by name.",
+        "`for_each = var.teams` on both resources; `each.key` is the team name; reference the password as `random_password.team_db[each.key].result`.",
+        "Six `moved` blocks: `[0]` to `[\"checkout\"]`, `[1]` to `[\"search\"]`, `[2]` to `[\"web\"]`, for `random_password.team_db` and for `local_sensitive_file.team_env`. The plan must then say `2 to add, 0 to change, 0 to destroy`."
+      ],
+      "solution": [
+        "cd ~/infra/teams",
+        "cat TICKET.txt",
+        "cat > main.tf <<'EOF'",
+        "variable \"teams\" {",
+        "  type = map(object({ tier = string, owner = string }))",
+        "  default = {",
+        "    checkout = { tier = \"gold\", owner = \"checkout-lead@example.com\" }",
+        "    payments = { tier = \"gold\", owner = \"payments-lead@example.com\" }",
+        "    search   = { tier = \"silver\", owner = \"search-lead@example.com\" }",
+        "    web      = { tier = \"gold\", owner = \"web-lead@example.com\" }",
+        "  }",
+        "}",
+        "",
+        "resource \"random_password\" \"team_db\" {",
+        "  for_each = var.teams",
+        "  length   = 32",
+        "  special  = false",
+        "}",
+        "",
+        "resource \"local_sensitive_file\" \"team_env\" {",
+        "  for_each = var.teams",
+        "  filename = \"${path.module}/out/${each.key}/db.env\"",
+        "  content  = \"DB_PASSWORD=${random_password.team_db[each.key].result}\\n\"",
+        "}",
+        "EOF",
+        "for r in random_password.team_db local_sensitive_file.team_env; do i=0; for t in checkout search web; do printf 'moved {\\n  from = %s[%d]\\n  to   = %s[\"%s\"]\\n}\\n' $r $i $r $t; i=$((i+1)); done; done > moved.tf",
+        "cat moved.tf",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan"
+      ],
+      "explain": "The plan: six *has moved to* notes and `2 to add` (payments' password and file). This is the most common Terraform refactor in real repos, and the most common cause of \"why did it rotate?\" incidents. Anything with an identity gets `for_each`."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Paging for gold teams only",
+      "prompt": [
+        "Gold teams get 24x7 paging. In `~/infra/teams`, add a `local_file` named `pager` that writes `out/<team>/pager.yaml`",
+        "for **gold teams only**, with the content `escalation: 24x7` and `owner: <the team's owner>` on two lines. Add an",
+        "output `pager_files`: a map from team name to the file's path. Apply."
+      ],
+      "setup": ["bash \"$DOJO_FILES/teams.sh\" 2"],
+      "checks": [
+        { "name": "gold teams have a pager file",
+          "cmd": "cd ~/infra/teams && for t in checkout payments web; do diff <(printf 'escalation: 24x7\\nowner: %s-lead@example.com\\n' $t) out/$t/pager.yaml || exit 1; done",
+          "fail": "`out/<team>/pager.yaml` for checkout, payments and web should hold `escalation: 24x7` and `owner: <owner>`." },
+        { "name": "silver teams do not",
+          "cmd": "test ! -e ~/infra/teams/out/search/pager.yaml",
+          "fail": "`search` is silver: it should have no pager file." },
+        { "name": "pager_files output",
+          "cmd": "cd ~/infra/teams && terraform output -json pager_files | jq -r 'keys | join(\",\")'",
+          "expectOutput": "checkout,payments,web",
+          "fail": "`terraform output -json pager_files` should be a map whose keys are the gold teams." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/teams && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "`terraform plan` should show no changes." }
+      ],
+      "hints": [
+        "Filter the map in `for_each`: `{ for name, t in var.teams : name => t if t.tier == \"gold\" }`.",
+        "Inside: `filename = \"${path.module}/out/${each.key}/pager.yaml\"` and `content = \"escalation: 24x7\\nowner: ${each.value.owner}\\n\"`.",
+        "The output: `{ for name, f in local_file.pager : name => f.filename }`. A resource with `for_each` is itself a map of instances."
+      ],
+      "solution": [
+        "cd ~/infra/teams",
+        "cat > pager.tf <<'EOF'",
+        "resource \"local_file\" \"pager\" {",
+        "  for_each = { for name, t in var.teams : name => t if t.tier == \"gold\" }",
+        "  filename = \"${path.module}/out/${each.key}/pager.yaml\"",
+        "  content  = \"escalation: 24x7\\nowner: ${each.value.owner}\\n\"",
+        "}",
+        "",
+        "output \"pager_files\" {",
+        "  value = { for name, f in local_file.pager : name => f.filename }",
+        "}",
+        "EOF",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform output pager_files"
+      ],
+      "explain": "A filtered `for_each` is how optional per-item resources are written. When search becomes gold, changing one word adds exactly one file. `local_file.pager` used as a value is a map of the instances, which makes the output a one-line `for`."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The reviewer's guard rails",
+      "prompt": [
+        "The reviewer asks for two guard rails before this merges:",
+        "",
+        "1. `var.teams`: every `tier` must be `gold` or `silver`, and every `owner` an e-mail address. A typo like",
+        "   `tier = \"glod\"` must fail the plan, not silently skip paging.",
+        "2. The teams' database passwords must never be destroyed by a plan: refuse it in the code.",
+        "",
+        "Apply what needs applying and leave a clean plan."
+      ],
+      "setup": ["bash \"$DOJO_FILES/teams.sh\" 3"],
+      "checks": [
+        { "name": "a typo in tier is refused",
+          "cmd": "cd ~/infra/teams && ! terraform plan -input=false -no-color -var 'teams={checkout={tier=\"glod\",owner=\"checkout-lead@example.com\"}}' > /tmp/o 2>&1 && grep -q 'Invalid value for variable' /tmp/o",
+          "fail": "A plan with `tier = \"glod\"` should fail with *Invalid value for variable*." },
+        { "name": "a bad owner is refused",
+          "cmd": "cd ~/infra/teams && ! terraform plan -input=false -no-color -var 'teams={checkout={tier=\"gold\",owner=\"the checkout lead\"}}' > /tmp/o 2>&1 && grep -q 'Invalid value for variable' /tmp/o",
+          "fail": "A plan with `owner = \"the checkout lead\"` should fail validation." },
+        { "name": "passwords cannot be destroyed",
+          "cmd": "cd ~/infra/teams && ! terraform plan -destroy -input=false -no-color > /tmp/o 2>&1 && grep -q 'Instance cannot be destroyed' /tmp/o && grep -q 'random_password.team_db' /tmp/o",
+          "fail": "`terraform plan -destroy` should fail with *Instance cannot be destroyed* for the passwords." },
+        { "name": "still clean",
+          "cmd": "cd ~/infra/teams && terraform plan -detailed-exitcode -input=false -no-color >/dev/null && for t in checkout search web payments; do test \"$(sed -n 's/^DB_PASSWORD=//p' out/$t/db.env)\" = \"$(cat /opt/dojo/state/pw-$t)\" || exit 1; done",
+          "quiet": true,
+          "fail": "`terraform plan` should show no changes and every password must be unchanged." }
+      ],
+      "hints": [
+        "Two `validation` blocks on `var.teams`, each with `alltrue([for name, t in var.teams : ...])`.",
+        "`contains([\"gold\", \"silver\"], t.tier)` and `can(regex(\"^[^@ ]+@[^@ ]+\\\\.[a-z]+$\", t.owner))`.",
+        "`lifecycle { prevent_destroy = true }` in `random_password.team_db`. Run `terraform plan -destroy` to see it refuse."
+      ],
+      "solution": [
+        "cd ~/infra/teams",
+        "sed -i '/^  type = map(object({ tier = string, owner = string }))$/a\\  validation {\\n    condition     = alltrue([for name, t in var.teams : contains([\"gold\", \"silver\"], t.tier)])\\n    error_message = \"Every team tier must be gold or silver.\"\\n  }\\n  validation {\\n    condition     = alltrue([for name, t in var.teams : can(regex(\"^[^@ ]+@[^@ ]+\\\\\\\\.[a-z]+$\", t.owner))])\\n    error_message = \"Every team owner must be an e-mail address.\"\\n  }' main.tf",
+        "sed -i '/^  special  = false$/a\\  lifecycle {\\n    prevent_destroy = true\\n  }' main.tf",
+        "terraform fmt",
+        "terraform validate",
+        "terraform plan -var 'teams={checkout={tier=\"glod\",owner=\"checkout-lead@example.com\"}}'",
+        "terraform plan -destroy",
+        "terraform plan -detailed-exitcode; echo \"exit $?\""
+      ],
+      "explain": "Validation and lifecycle rules are part of the configuration, not of the state, so nothing needed applying: the plan was clean all along. The reviewer's question behind both: *what is the worst a one-character typo can do here?* Now the answer is: fail a plan."
+    }
+  ]
+}

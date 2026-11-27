@@ -1,0 +1,151 @@
+{
+  "title": "Boss: the night the pipeline died",
+  "summary": "A dead CI job, a rename without a moved block, a well-meant state rm and a re-init against an empty state. Bring production's state back to the truth without destroying or rotating anything.",
+  "minutes": 22,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "INC-2207",
+      "body": [
+        "*\"The shop-prod deploy failed at 02:10 and every run since fails too. Then people tried things. Please make the state",
+        "right again. Nothing may be destroyed, and the database password must NOT change: rotating it means an outage.\"*",
+        "",
+        "Three situations from that night, one per step. Before each fix, find out what happened: the error, the logs in",
+        "`~/ci`, `git log -p`, the state (`terraform state list`) and the state server's history",
+        "(`ls /var/lib/dojo-tfstate/shop-prod/` keeps every version, like a versioned S3 bucket)."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The job died holding the lock",
+      "prompt": [
+        "Every plan in `~/infra/shop` fails on a lock. The job that held it was applying the latest commit. Clear the way,",
+        "then look hard at what that commit would have done (`terraform plan`), and make the deploy safe: the password and",
+        "the app's env file must survive. Apply, and leave a clean plan. Commit your fix."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 1"],
+      "checks": [
+        { "name": "the stale lock is gone",
+          "cmd": "test ! -e /var/lib/dojo-tfstate/shop-prod/lock.json",
+          "fail": "The lock from job 5102 is still there (`terraform plan` shows its ID)." },
+        { "name": "the password has its new address",
+          "cmd": "cd ~/infra/shop && terraform state list | grep -qx random_password.postgres && ! terraform state list | grep -qx random_password.db",
+          "fail": "`terraform state list` should have `random_password.postgres` (the commit's new name) and no `random_password.db`." },
+        { "name": "the password did not change",
+          "cmd": "cd ~/infra/shop && test \"$(terraform output -raw db_password)\" = \"$(cat /opt/dojo/state/password)\"",
+          "quiet": true,
+          "fail": "The database password changed: the rename destroyed and re-created it. Press Reset scenario; a `moved` block keeps it." },
+        { "name": "clean plan, committed",
+          "cmd": "cd ~/infra/shop && terraform plan -detailed-exitcode -input=false -no-color -lock-timeout=5s >/dev/null && test -z \"$(git status --porcelain)\"",
+          "fail": "`terraform plan` should show no changes and `git status` should be clean (commit the `moved` block)." }
+      ],
+      "hints": [
+        "`cat ~/ci/job-5102.log`: the runner is gone. `terraform force-unlock` with the ID from the error.",
+        "`git log -p -1` shows the commit renamed `random_password.db` to `random_password.postgres`. The plan destroys the password and replaces `app_env`.",
+        "Add `moved { from = random_password.db  to = random_password.postgres }`, plan (it must say *has moved to*), apply, commit."
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "terraform plan -lock-timeout=5s",
+        "cat ~/ci/job-5102.log",
+        "terraform force-unlock -force 9a41c2e7-55d0-4b8e-a3f6-0e2d7c9b1f85",
+        "git log -p -1 --stat",
+        "terraform plan",
+        "printf 'moved {\\n  from = random_password.db\\n  to   = random_password.postgres\\n}\\n' > moved.tf",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "git add moved.tf && git commit -m \"Keep the DB password through the rename (moved block)\"",
+        "terraform plan -detailed-exitcode; echo \"exit $?\""
+      ],
+      "explain": "Unlocking was the easy part. The real save was reading the plan of the commit the dead job had been applying: it would have rotated the production password. A CI job that destroys anything should need a human's approval of the plan; that is module 5."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The well-meant state rm",
+      "prompt": [
+        "Jo \"fixed\" a failing plan (`~/ci/notes.txt`). Now `terraform plan` wants to **create** a new database password, which",
+        "would rotate it. The real password still exists; only Terraform forgot it.",
+        "",
+        "Bring it back under `random_password.db` with **its original value**, and leave a clean plan. The state server kept",
+        "every version of the state (`ls -l /var/lib/dojo-tfstate/shop-prod/`): one of them still has it. Prove what",
+        "changed between versions before you pick a way back."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 2"],
+      "checks": [
+        { "name": "the password is back, unchanged",
+          "cmd": "cd ~/infra/shop && test \"$(terraform show -json | jq -r '.values.root_module.resources[] | select(.address == \"random_password.db\") | .values.result')\" = \"$(cat /opt/dojo/state/password)\"",
+          "quiet": true,
+          "fail": "`random_password.db` should be in the state again with the original value." },
+        { "name": "the env file still has it",
+          "cmd": "cd ~/infra/shop && grep -q \"shop:$(cat /opt/dojo/state/password)@\" out/app.env",
+          "quiet": true,
+          "fail": "`out/app.env` no longer contains the original password." },
+        { "name": "clean plan",
+          "cmd": "cd ~/infra/shop && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "`terraform plan` should show no changes." }
+      ],
+      "hints": [
+        "`ls -l /var/lib/dojo-tfstate/shop-prod/`: `0001.tfstate` is from before the `state rm`, `0002.tfstate` after. `diff <(jq -S . 0001.tfstate) <(jq -S . 0002.tfstate)` shows that the rm is the only difference.",
+        "Two ways back. Import: `import { to = random_password.db  id = \"<the old value>\" }`; read the plan, because an importer cannot know how a value was generated (look for *forces replacement*). Or restore the old version, which is safe only because nothing else changed since: `terraform state push`.",
+        "`terraform state pull > before-restore.tfstate`, then `terraform state push -force /var/lib/dojo-tfstate/shop-prod/0001.tfstate` (`-force` because its serial is older), then `terraform plan`."
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "cat ~/ci/notes.txt",
+        "terraform plan",
+        "ls -l /var/lib/dojo-tfstate/shop-prod/",
+        "diff <(jq -S 'del(.serial)' /var/lib/dojo-tfstate/shop-prod/0001.tfstate) <(jq -S 'del(.serial)' /var/lib/dojo-tfstate/shop-prod/0002.tfstate) | head -20",
+        "terraform state pull > before-restore.tfstate",
+        "terraform state push -force /var/lib/dojo-tfstate/shop-prod/0001.tfstate",
+        "rm before-restore.tfstate",
+        "terraform plan -detailed-exitcode; echo \"exit $?\""
+      ],
+      "explain": "Versioned state storage turned a scary incident into a five-minute fix. Restoring the version from before the `state rm` was right here because the diff proved it was the only change; had there been applies since, pushing an old version would have made Terraform forget them. Then the import route is the safe one, and it has its own trap: the import plan says `special = true -> false # forces replacement`, because the importer cannot know the value was generated without special characters. You would make the block match what was imported (or ignore that argument) so the plan imports and changes nothing. And the real fix for Jo's original problem? Read the error before reaching for `state rm`."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Six to add",
+      "prompt": [
+        "Monday morning: `terraform plan` in `~/infra/shop` says **6 to add**, for a shop that has been running for months.",
+        "Applying it would try to build a second copy of production (and fail on names that exist, at best).",
+        "",
+        "Find out why Terraform thinks nothing exists (`~/ci/notes.txt`, `git status`, `git diff`, and what `init` saved in",
+        "`.terraform/terraform.tfstate`), point this folder back at production's real state, and prove it: a clean plan.",
+        "Do not write to any state."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 3"],
+      "checks": [
+        { "name": "the folder uses the production state again",
+          "cmd": "cd ~/infra/shop && jq -e '.backend.config.address == \"http://127.0.0.1:8300/state/shop-prod\"' .terraform/terraform.tfstate >/dev/null && grep -q '/state/shop-prod\"' backend.tf",
+          "fail": "`backend.tf` and the backend `init` saved (`jq .backend.config .terraform/terraform.tfstate`) should point at `/state/shop-prod` again." },
+        { "name": "production's state was not touched",
+          "cmd": "curl -fsS http://127.0.0.1:8300/state/shop-prod | jq -e --argjson s \"$(cat /opt/dojo/state/serial)\" '.serial == $s and (.resources | length) == 6' >/dev/null && ! curl -fsS http://127.0.0.1:8300/state/shop-prod-v2 >/dev/null 2>&1",
+          "fail": "Production's state changed, or a state was written at `shop-prod-v2`. Press Reset scenario: this fix needs no writes." },
+        { "name": "clean plan, clean tree",
+          "cmd": "cd ~/infra/shop && terraform plan -detailed-exitcode -input=false -no-color >/dev/null && test -z \"$(git status --porcelain)\"",
+          "fail": "`terraform plan` should show no changes, and `git status` should be clean." }
+      ],
+      "hints": [
+        "`git diff` shows `backend.tf` now points at `/state/shop-prod-v2`, a key with no state in it. An empty state means Terraform manages nothing, so it plans to create everything.",
+        "Undo the local change (`git checkout backend.tf`) and initialise against the old settings. `-migrate-state` would offer to copy the **empty** state over production: say no to that idea.",
+        "`git checkout backend.tf && terraform init -reconfigure && terraform plan`"
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "terraform plan",
+        "cat ~/ci/notes.txt",
+        "git status",
+        "git diff",
+        "jq .backend.config.address .terraform/terraform.tfstate",
+        "git checkout backend.tf",
+        "terraform init -reconfigure",
+        "terraform plan -detailed-exitcode; echo \"exit $?\""
+      ],
+      "explain": "\"Plan wants to create everything\" almost always means Terraform is looking at the wrong (or an empty) state: a wrong backend key, a wrong workspace (`terraform workspace show`), the wrong `-backend-config` file, or the wrong AWS account. Stop, find which state it reads, and never apply that plan. `-reconfigure` switched back without copying anything, which is exactly what was needed."
+    }
+  ]
+}

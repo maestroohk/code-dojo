@@ -1,0 +1,236 @@
+{
+  "title": "Refactoring without destroying",
+  "summary": "Rename with moved blocks, stop managing with removed blocks, adopt existing objects with import blocks, and the terraform state commands they replace.",
+  "minutes": 20,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A rename is a destroy, unless you say otherwise",
+      "body": [
+        "Rename `random_pet.server` to `random_pet.web` in the code and Terraform sees one address disappear and a new one",
+        "appear: **destroy the old, create a new**. For a database that is a disaster. Tell Terraform it is the same object:",
+        "",
+        "```hcl",
+        "moved {",
+        "  from = random_pet.server",
+        "  to   = random_pet.web",
+        "}",
+        "```",
+        "",
+        "The plan then says `# random_pet.server has moved to random_pet.web` and changes nothing. A `moved` block is code: it",
+        "is reviewed in the pull request, works in every environment and workspace when they next apply, and can stay in the",
+        "code (modules that others use should keep them for a while). It also works for moving into a module",
+        "(`to = module.web.random_pet.this`) and from `count` to `for_each` (`from = x[0]`, `to = x[\"a\"]`).",
+        "",
+        "The old way is `terraform state mv random_pet.server random_pet.web`: it edits the state directly, at once, in one",
+        "environment, with no review. It still has its uses (one-off fixes, moving between two states), but prefer `moved`."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Rename to the naming standard",
+      "prompt": [
+        "The team's naming standard says resources are named after their role. In `~/infra/shop`, rename:",
+        "",
+        "- `random_pet.server` to `random_pet.web` (the `server_name` output must keep working)",
+        "- `local_file.nginx` to `local_file.web_nginx`",
+        "",
+        "Nothing may be destroyed or created: the server keeps its name. Plan first, read it, then apply."
+      ],
+      "setup": ["bash \"$DOJO_FILES/shop.sh\" rename"],
+      "checks": [
+        { "name": "the state has the new addresses",
+          "cmd": "cd ~/infra/shop && terraform state list | grep -qx random_pet.web && terraform state list | grep -qx local_file.web_nginx && ! terraform state list | grep -qxE 'random_pet.server|local_file.nginx'",
+          "fail": "`terraform state list` should show `random_pet.web` and `local_file.web_nginx`, and not the old names. Did you apply?" },
+        { "name": "the server kept its name",
+          "cmd": "cd ~/infra/shop && test \"$(terraform output -raw server_name)\" = \"$(cat /opt/dojo/state/pet)\"",
+          "fail": "The server's name changed, so `random_pet` was destroyed and created again. Press Reset scenario and use `moved` blocks." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/shop && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "`terraform plan` should show no changes." }
+      ],
+      "hints": [
+        "Rename both blocks (and the references to `random_pet.server`), then add one `moved` block per rename.",
+        "`grep -n 'random_pet.server\\|local_file.\" *\"nginx' main.tf` finds every place to change. The plan must say *has moved to*, never *will be destroyed*.",
+        "`sed -i 's/random_pet\" \"server\"/random_pet\" \"web\"/; s/random_pet.server/random_pet.web/g; s/local_file\" \"nginx\"/local_file\" \"web_nginx\"/' main.tf`, then a `moved.tf` with two `moved { from = ... to = ... }` blocks."
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "sed -i 's/random_pet\" \"server\"/random_pet\" \"web\"/; s/random_pet.server/random_pet.web/g; s/local_file\" \"nginx\"/local_file\" \"web_nginx\"/' main.tf",
+        "cat > moved.tf <<'EOF'",
+        "moved {",
+        "  from = random_pet.server",
+        "  to   = random_pet.web",
+        "}",
+        "",
+        "moved {",
+        "  from = local_file.nginx",
+        "  to   = local_file.web_nginx",
+        "}",
+        "EOF",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform state list"
+      ],
+      "explain": "Plan: `0 to add, 0 to change, 0 to destroy` with two *has moved to* notes. The apply only rewrote addresses in the state. Leave the `moved` blocks in until every environment has applied them; removing one too early turns the rename back into a destroy for whoever is behind."
+    },
+    {
+      "type": "learn",
+      "title": "Stop managing it, without deleting it",
+      "body": [
+        "Sometimes an object should leave this configuration but keep existing: another team takes it over, or it moves to a",
+        "different state. Deleting the block would **destroy** it. Since Terraform 1.7, say so in code instead:",
+        "",
+        "```hcl",
+        "removed {",
+        "  from = tls_private_key.api",
+        "  lifecycle {",
+        "    destroy = false",
+        "  }",
+        "}",
+        "```",
+        "",
+        "The plan says `will no longer be managed by Terraform, but will not be destroyed`; after the apply, the address is",
+        "gone from the state and the real object is untouched. The other team then adopts it with an `import` block. The old",
+        "way is `terraform state rm ADDRESS`, again direct and unreviewed."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Hand robots.txt to the SEO team",
+      "prompt": [
+        "The SEO team now manages `robots.txt` from their own configuration. Make `~/infra/shop` stop managing",
+        "`local_file.robots`, **without deleting the file**: their import will pick it up from where it is.",
+        "",
+        "Remove its `resource` block, add the right `removed` block, plan (read the warning), and apply."
+      ],
+      "setup": ["bash \"$DOJO_FILES/shop.sh\" handover"],
+      "checks": [
+        { "name": "robots is no longer in this state",
+          "cmd": "cd ~/infra/shop && ! terraform state list | grep -qx 'local_file.robots'",
+          "fail": "`terraform state list` still shows `local_file.robots`. Apply a plan with a `removed` block." },
+        { "name": "the file was not deleted",
+          "cmd": "cd ~/infra/shop && grep -q 'Disallow: /checkout/' out/robots.txt",
+          "fail": "`out/robots.txt` is gone: it was destroyed. Press Reset scenario and use `removed` with `lifecycle { destroy = false }`." },
+        { "name": "the code says so",
+          "cmd": "cd ~/infra/shop && ! grep -q 'resource \"local_file\" \"robots\"' *.tf && grep -q 'destroy *= *false' *.tf && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "The `resource \"local_file\" \"robots\"` block should be gone, a `removed` block with `destroy = false` in its place, and `terraform plan` clean." }
+      ],
+      "hints": [
+        "Delete the `resource \"local_file\" \"robots\"` block from `main.tf`.",
+        "Add `removed { from = local_file.robots` with `lifecycle { destroy = false } }` in a new file, for example `removed.tf`.",
+        "`terraform plan -out=tfplan` must say *will no longer be managed by Terraform, but will not be destroyed*. Then `terraform apply tfplan`."
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "sed -i '/resource \"local_file\" \"robots\"/,/^}/d' main.tf",
+        "cat > removed.tf <<'EOF'",
+        "removed {",
+        "  from = local_file.robots",
+        "  lifecycle {",
+        "    destroy = false",
+        "  }",
+        "}",
+        "EOF",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform state list",
+        "cat out/robots.txt"
+      ],
+      "explain": "Deleting the block alone would have planned `- local_file.robots ... will be destroyed (because local_file.robots is not in configuration)` and removed the file. With a cloud object the stakes are higher: the real thing keeps running and the other team imports it by its ID. `destroy = false` is the safe form to remember; a `removed` block without it is how you delete something on purpose, with a reviewable diff."
+    },
+    {
+      "type": "learn",
+      "title": "Adopt what already exists: import blocks",
+      "body": [
+        "Things built by hand (or by another tool) can be brought under Terraform without rebuilding them. Write where it",
+        "should go and the provider's **import ID** for it:",
+        "",
+        "```hcl",
+        "import {",
+        "  to = aws_s3_bucket.logs",
+        "  id = \"shop-prod-logs-example\"        # the ID format is on each resource's registry page",
+        "}",
+        "```",
+        "",
+        "`terraform plan -generate-config-out=generated.tf` writes a `resource` block from what the provider reads. Review it,",
+        "tidy it into your files, and plan until it says `1 to import, 0 to add, 0 to change, 0 to destroy`: if the block",
+        "does not match the real object, the plan shows the changes (or a replacement) the import would cause. Import blocks",
+        "work in modules (Terraform 1.16+), with `for_each`, and in every environment; `terraform import ADDR ID` is the old",
+        "one-shot command."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Adopt the reporting admin password",
+      "prompt": [
+        "The reporting database's admin password was set by hand in 2024 (`~/legacy/wiki-page.txt`). Bring it under",
+        "Terraform as `random_password.reporting_admin` **without changing it** (the import ID of a `random_password` is the",
+        "password itself). Let Terraform generate the block, check that the plan imports and changes nothing else, and apply.",
+        "",
+        "Afterwards delete the wiki copy of the password: the state is now the single place it lives."
+      ],
+      "setup": ["bash \"$DOJO_FILES/shop.sh\" import"],
+      "checks": [
+        { "name": "the password is imported unchanged",
+          "cmd": "cd ~/infra/shop && test \"$(terraform show -json | jq -r '.values.root_module.resources[] | select(.address == \"random_password.reporting_admin\") | .values.result')\" = \"$(cat /opt/dojo/state/admin)\"",
+          "quiet": true,
+          "fail": "`random_password.reporting_admin` should be in the state with the original value. Use an `import` block and apply." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/shop && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "`terraform plan` should show no changes: the resource block must match what was imported (length and character sets)." },
+        { "name": "the wiki copy is gone",
+          "cmd": "! grep -rq 'Rpt-Admin-2024' ~/legacy 2>/dev/null",
+          "fail": "Delete `~/legacy/wiki-page.txt` once the password is in Terraform." }
+      ],
+      "hints": [
+        "`imports.tf`: `import { to = random_password.reporting_admin` and `id = \"<the password>\" }`.",
+        "`terraform plan -generate-config-out=generated.tf` writes the resource block. Read it: `length = 20`. Then plan again: `1 to import, 0 to add, 0 to change, 0 to destroy`.",
+        "`terraform plan -out=tfplan && terraform apply tfplan`, then `rm ~/legacy/wiki-page.txt`."
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "cat ~/legacy/wiki-page.txt",
+        "cat > imports.tf <<'EOF'",
+        "import {",
+        "  to = random_password.reporting_admin",
+        "  id = \"Rpt-Admin-2024-xQ7mZ\"",
+        "}",
+        "EOF",
+        "terraform plan -generate-config-out=generated.tf",
+        "cat generated.tf",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "rm ~/legacy/wiki-page.txt"
+      ],
+      "explain": "The generated block has `length = 20`, the length of the real password; a block with a different length would have planned a **replacement** right after the import, generating a new password. That check (\"does the plan after import change anything?\") is the whole art of importing. Once applied, the `import` block can be deleted or left as a record; it does nothing more. For real secrets, mind lesson 1: the value is now in the state."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the job to the block (or command).",
+      "pairs": [
+        ["rename a resource without destroying it", "`moved { from = ..., to = ... }`"],
+        ["stop managing an object but keep it", "`removed { ... destroy = false }`"],
+        ["adopt an object built by hand", "`import { to = ..., id = ... }`"],
+        ["write a resource block for an import", "`plan -generate-config-out=FILE`"],
+        ["the unreviewed, one-environment rename", "`terraform state mv`"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You move three resources into a new module `module.cdn` and add `moved` blocks. Staging applied it last week; production has not. A teammate deletes the `moved` blocks as \"cleanup\". What happens at the next production apply?",
+      "options": [
+        "Production plans to destroy the three old addresses and create three new ones",
+        "Nothing: staging already recorded the moves",
+        "Terraform remembers the moves in the lock file",
+        "The plan fails with a cycle error"
+      ],
+      "answer": 0,
+      "explain": "Each state records only its own history. Production's state still has the old addresses; without the `moved` blocks it sees one set disappear and another appear. Keep `moved` blocks until every state that uses the code has applied them (for a shared module: a major version or longer)."
+    }
+  ]
+}

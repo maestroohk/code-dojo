@@ -1,0 +1,99 @@
+{
+  "title": "Composition, and when not to make a module",
+  "summary": "Root modules that compose small modules, passing outputs between them, providers and aliases into modules, the module that does not have the output you need, and the modules that should not exist.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Compose small modules in the root",
+      "body": [
+        "Good Terraform repos keep modules **small and flat**, and let the root module wire them together:",
+        "",
+        "```hcl",
+        "module \"network\" {",
+        "  source = \"./modules/network\"",
+        "  cidr   = \"10.20.0.0/16\"",
+        "}",
+        "",
+        "module \"db\" {",
+        "  source     = \"./modules/postgres\"",
+        "  subnet_ids = module.network.private_subnet_ids   # one module's output is another's input",
+        "}",
+        "",
+        "module \"cdn_cert\" {",
+        "  source    = \"./modules/certificate\"",
+        "  providers = { aws = aws.us_east_1 }             # CloudFront certificates must live in us-east-1",
+        "  domain    = \"shop.example.com\"",
+        "}",
+        "```",
+        "",
+        "Modules that call modules that call modules are hard to read and to upgrade. Pass **data in** (IDs, names), not",
+        "whole objects, and give every output a description: an output is a public interface, removing or renaming one is",
+        "a breaking change for every caller."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The output that is not there",
+      "prompt": [
+        "The load balancer team added two things to `~/infra/web/main.tf`: a file with the shop's certificate and an output",
+        "with its fingerprint. `terraform plan` fails. Read the error: which object, which attribute? Fix it where it belongs",
+        "(the module should offer it, with a description), then plan and apply."
+      ],
+      "setup": ["bash \"$DOJO_FILES/modules.sh\" output"],
+      "checks": [
+        { "name": "the module offers cert_fingerprint",
+          "cmd": "cd ~/infra/web && grep -q 'output \"cert_fingerprint\"' modules/site/*.tf && grep -A3 'output \"cert_fingerprint\"' modules/site/*.tf | grep -q description",
+          "fail": "Add an output `cert_fingerprint` (with a `description`) to `modules/site/outputs.tf`." },
+        { "name": "the root output works",
+          "cmd": "cd ~/infra/web && terraform output -raw shop_cert_fingerprint | grep -q '^SHA256:'",
+          "fail": "`terraform output -raw shop_cert_fingerprint` should print `SHA256:...` (the key's `public_key_fingerprint_sha256`)." },
+        { "name": "the LB has the certificate",
+          "cmd": "cd ~/infra/web && grep -q 'BEGIN CERTIFICATE' out/lb/shop.example.com.pem && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "Apply, so `out/lb/shop.example.com.pem` exists and `terraform plan` shows no changes." }
+      ],
+      "hints": [
+        "*Unsupported attribute: This object does not have an attribute named \"cert_fingerprint\"* on `module.shop`: a module only exposes its outputs.",
+        "In `modules/site/outputs.tf`: `output \"cert_fingerprint\" { description = \"...\"  value = tls_private_key.site.public_key_fingerprint_sha256 }`.",
+        "Then `terraform plan -out=tfplan` and `terraform apply tfplan`. No `init` is needed: the module's source did not change."
+      ],
+      "solution": [
+        "cd ~/infra/web",
+        "terraform plan",
+        "printf '\\noutput \"cert_fingerprint\" {\\n  description = \"SHA-256 fingerprint of the site key.\"\\n  value       = tls_private_key.site.public_key_fingerprint_sha256\\n}\\n' >> modules/site/outputs.tf",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform output shop_cert_fingerprint"
+      ],
+      "explain": "Callers can only see what a module outputs; there is no reaching inside (`module.shop.tls_private_key.site` is not a valid expression). For a shared module in its own repo, the same fix is a new minor version: adding an output is backwards compatible, removing one is not."
+    },
+    {
+      "type": "sort",
+      "prompt": "Make it a module, or not?",
+      "buckets": ["A good module", "Do not make a module"],
+      "items": [
+        ["a service's standard stack (bucket, queue, alarms) that six teams deploy", 0],
+        ["a wrapper around `aws_s3_bucket` that passes every argument straight through", 1],
+        ["a network layout with the company's subnet and routing rules", 0],
+        ["one resource used once, \"in case we need it again\"", 1],
+        ["a module that takes `var.config` (an `any` map) and decides everything inside", 1],
+        ["a certificate plus its DNS validation records, always used together", 0]
+      ],
+      "explain": "A module earns its place by encoding a decision (a standard, a pattern used together, a policy) behind a small, typed interface. Thin pass-through wrappers add a version to upgrade and hide nothing; `any`-typed mega-modules hide everything, including bugs."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A module needs resources in two AWS regions (a certificate in `us-east-1` for CloudFront, everything else in `eu-west-1`). How does it get both providers?",
+      "options": [
+        "It declares `configuration_aliases = [aws.us_east_1]` in `required_providers`, and the caller passes `providers = { aws = aws, aws.us_east_1 = aws.virginia }`",
+        "It writes two `provider \"aws\"` blocks inside the module",
+        "The caller runs it twice with `-target`, once per region",
+        "It cannot: a module only gets one provider"
+      ],
+      "answer": 0,
+      "explain": "Providers are configured in the root and passed in. A module that needs an extra, aliased provider says so with `configuration_aliases`; its resources pick it with `provider = aws.us_east_1`. (The AWS provider 6.x also lets most resources take a `region` argument directly, which removes many aliases, but the alias pattern is everywhere in existing code and in other providers.)"
+    }
+  ]
+}

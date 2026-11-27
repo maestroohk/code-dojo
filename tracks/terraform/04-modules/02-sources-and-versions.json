@@ -1,0 +1,130 @@
+{
+  "title": "Module sources and versions",
+  "summary": "Local paths, the public and private registry, Git URLs with tags; version constraints for modules; reading a changelog and upgrading a module across a breaking release without replacing anything.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Where modules come from",
+      "body": [
+        "```hcl",
+        "module \"vpc\" {",
+        "  source  = \"terraform-aws-modules/vpc/aws\"     # public registry: NAMESPACE/NAME/PROVIDER",
+        "  version = \"~> 6.0\"                            # registry modules take a version constraint",
+        "  # ...",
+        "}",
+        "",
+        "module \"site\" {",
+        "  source = \"app.terraform.io/example-org/site/aws\"   # a private registry (HCP Terraform)",
+        "  version = \"2.1.0\"",
+        "}",
+        "",
+        "module \"site_git\" {",
+        "  source = \"git::https://git.example.com/platform/tf-modules.git//site?ref=v2.1.0\"   # Git: //subfolder, ?ref=tag",
+        "}",
+        "",
+        "module \"local\" {",
+        "  source = \"./modules/site\"     # a path in the same repo: no version, it is whatever is checked out",
+        "}",
+        "```",
+        "",
+        "Rules that save outages:",
+        "",
+        "- **Pin** every remote module: a registry `version`, or a Git **tag** in `ref` (never a branch like `main`, which",
+        "  changes under you). Modules are not in `.terraform.lock.hcl`; only providers are.",
+        "- Modules follow **semantic versioning**: a major version may rename inputs or resources. Read the changelog before",
+        "  upgrading, then `terraform init -upgrade` (or after changing `ref`, plain `terraform init`) and **read the plan**.",
+        "- A good module author ships `moved` blocks with any internal rename, so callers' plans stay clean.",
+        "- For public modules, read the source before you adopt one: you are running someone else's code with your",
+        "  credentials. Many companies mirror the few they allow into a private registry."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the source to what it is.",
+      "pairs": [
+        ["`terraform-aws-modules/vpc/aws`", "a public registry module (needs `version`)"],
+        ["`./modules/site`", "a folder in the same repository"],
+        ["`git::https://git.example.com/m.git//site?ref=v2.1.0`", "a subfolder of a Git repo, at a tag"],
+        ["`app.terraform.io/example-org/site/aws`", "a private registry module"]
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Upgrade the site module to v2",
+      "prompt": [
+        "`~/infra/web` uses the team's `site` module from Git at `v1.0.0`. `v2.0.0` is released, with an output you need.",
+        "",
+        "1. Read the changelog without leaving the terminal: `git -C .terraform/modules/shop log --oneline --all` and",
+        "   `git -C .terraform/modules/shop show v2.0.0:CHANGELOG.md`.",
+        "2. Upgrade the call to `v2.0.0` and adapt it to the breaking change.",
+        "3. `terraform init`, then plan: the certificate and key must be kept (the module's own `moved` block takes care of",
+        "   its rename). Apply.",
+        "4. Add a root output `shop_fingerprint` from the module's new `cert_fingerprint` output, and apply that too."
+      ],
+      "setup": ["bash \"$DOJO_FILES/modules.sh\" git"],
+      "checks": [
+        { "name": "the call uses v2.0.0",
+          "cmd": "cd ~/infra/web && jq -r '.Modules[] | select(.Key == \"shop\") | .Source' .terraform/modules/modules.json",
+          "expectOutput": "git::file:///srv/git/tf-modules.git//site?ref=v2.0.0",
+          "fail": "`.terraform/modules/modules.json` should show the shop module from `?ref=v2.0.0`. Change `ref` in `main.tf` and run `terraform init`." },
+        { "name": "nothing was replaced",
+          "cmd": "cd ~/infra/web && terraform state list | grep -qx module.shop.tls_private_key.this && terraform state show -no-color module.shop.tls_self_signed_cert.site | grep -q \"$(cat /opt/dojo/state/cert)\"",
+          "fail": "The state should have `module.shop.tls_private_key.this` (moved by the module) and the original certificate." },
+        { "name": "the fingerprint output",
+          "cmd": "cd ~/infra/web && terraform output -raw shop_fingerprint | grep -q '^SHA256:'",
+          "fail": "`terraform output -raw shop_fingerprint` should print the key's `SHA256:...` fingerprint, from `module.shop.cert_fingerprint`." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/web && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "`terraform plan` should show no changes." }
+      ],
+      "hints": [
+        "The changelog says `domain` is now `hostname`. Change both `?ref=v1.0.0` to `?ref=v2.0.0` and `domain =` to `hostname =`.",
+        "After changing `source`, run `terraform init` (it fetches the new tag). The plan should only show *has moved to* for the key.",
+        "`printf 'output \"shop_fingerprint\" {\\n  value = module.shop.cert_fingerprint\\n}\\n' > outputs.tf`, then plan and apply."
+      ],
+      "solution": [
+        "cd ~/infra/web",
+        "git -C .terraform/modules/shop log --oneline --all",
+        "git -C .terraform/modules/shop show v2.0.0:CHANGELOG.md",
+        "sed -i 's/?ref=v1.0.0/?ref=v2.0.0/; s/  domain = /  hostname = /' main.tf",
+        "terraform init",
+        "printf 'output \"shop_fingerprint\" {\\n  value = module.shop.cert_fingerprint\\n}\\n' > outputs.tf",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform output shop_fingerprint"
+      ],
+      "explain": "A major upgrade done right: changelog first, the caller adapted, `init` to fetch, and a plan that shows only the move the module's author shipped. Had the author forgotten that `moved` block, your plan would have shown the key (and the certificate signed with it) being replaced: the moment to stop and open an issue on the module, not to apply."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A module is called with `source = \"git::https://git.example.com/platform/tf-modules.git//site?ref=main\"`. What is the risk?",
+      "options": [
+        "Every `terraform init` may fetch a different version: a merge to the module repo can change prod's plan with no change in this repo",
+        "Git sources cannot use subfolders",
+        "`main` is slower to clone than a tag",
+        "None, as long as the lock file is committed"
+      ],
+      "answer": 0,
+      "explain": "Modules are not recorded in `.terraform.lock.hcl`, so a branch ref is a moving target. Pin a tag (or a commit SHA) and upgrade on purpose, in a pull request whose plan someone reads."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Pin the registry module to any 6.x release from 6.2 on. Fill the gaps.",
+      "code": [
+        "module \"vpc\" {",
+        "  source  = \"terraform-aws-modules/vpc/__1__\"",
+        "  __2__ = \"~> __3__\"",
+        "",
+        "  name = \"shop-prod\"",
+        "  cidr = \"10.20.0.0/16\"",
+        "}"
+      ],
+      "blanks": ["aws", "version", "6.2"],
+      "bank": ["azurerm", "ref", "6.2.0", "6"],
+      "explain": "`~> 6.2` allows 6.2 and later 6.x, not 7.0. `~> 6.2.0` would allow only 6.2.x patches. Registry addresses end with the provider they are for (`/aws`, `/azurerm`, `/google`)."
+    }
+  ]
+}
