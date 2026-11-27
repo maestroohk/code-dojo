@@ -1,0 +1,147 @@
+{
+  "title": "Traces and logs backends: Jaeger, Tempo, Loki",
+  "summary": "Searching traces by service, operation, attributes and duration; Loki's labels versus structured metadata; LogQL filters; and jumping between signals with trace ids and exemplars.",
+  "minutes": 18,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Finding the trace",
+      "body": [
+        "**Jaeger** (2.x is built on the Collector and takes OTLP directly) and **Grafana Tempo** store traces. You search by service,",
+        "operation (span name), attributes and duration, then open one trace as a waterfall.",
+        "",
+        "- Jaeger UI: service `shop`, operation `POST /api/checkout`, tags `error=true http.response.status_code=502`, min duration `500ms`.",
+        "  Its query API v3 answers in OTLP JSON: `GET /api/v3/traces?query.service_name=shop&query.start_time_min=...`.",
+        "- Tempo speaks **TraceQL**, which filters on spans inside traces:",
+        "",
+        "```text",
+        "{ resource.service.name = \"shop\" && span.db.system.name = \"postgresql\" && duration > 50ms }",
+        "{ span.http.route = \"/api/checkout\" && status = error } >> { resource.service.name = \"inventory\" }",
+        "```",
+        "",
+        "The second finds checkout errors that have an inventory span *below* them (`>>` = descendant).",
+        "",
+        "Trace stores keep days, not months, and usually only sampled traces. So for \"how often\" questions, use metrics; for \"show me one\",",
+        "traces. Grafana links them: an **exemplar** dot on a latency panel opens its trace; a span's \"Logs for this span\" button runs a Loki",
+        "query by trace id."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You need checkout traces where an inventory call returned 409. Which TraceQL finds them?",
+      "options": [
+        "`{ span.http.route = \"/api/checkout\" } >> { resource.service.name = \"inventory\" && span.http.response.status_code = 409 }`",
+        "`{ http_route=\"/api/checkout\" } |= \"409\"`",
+        "`rate(traces{status=\"409\"}[5m])`",
+        "`{ resource.service.name = \"inventory\" } && duration > 409ms`"
+      ],
+      "answer": 0,
+      "explain": "TraceQL selects spans with `{ ... }` and relates them structurally (`>>` descendant, `>` child, `~` sibling). The second is LogQL syntax, the third PromQL."
+    },
+    {
+      "type": "learn",
+      "title": "Loki: labels, structured metadata, LogQL",
+      "body": [
+        "Loki indexes only **labels** (a few, low-cardinality: `service_name`, `deployment_environment_name`, `namespace`) and stores the",
+        "lines compressed. With OTLP ingestion, resource attributes become labels, and per-record fields (`trace_id`, `span_id`, the",
+        "template's attributes) are kept as **structured metadata**: filterable, but not indexed, so they cost nothing in cardinality.",
+        "",
+        "```text",
+        "{service_name=\"shop\"}                                     every line of the shop (the stream selector: required)",
+        "{service_name=\"shop\"} |= \"Reservation failed\"            lines containing the text",
+        "{service_name=\"shop\"} != \"healthz\"                       lines not containing it",
+        "{service_name=\"shop\"} | trace_id=\"46ae7e54...\"           one request's lines (structured metadata)",
+        "{service_name=~\"shop|inventory\"} | detected_level=\"error\"",
+        "sum by (service_name) (count_over_time({service_name=~\".+\"} | detected_level=\"error\" [5m]))   a metric from logs",
+        "```",
+        "",
+        "Never make a trace id, user id or request path a **label**: each value creates a stream, and Loki slows down and refuses writes",
+        "past its stream limits. Same rule as metrics, same reason."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "In Loki, label or structured metadata?",
+      "buckets": ["Label (indexed, few values)", "Structured metadata (per line)"],
+      "items": [
+        ["`service_name`", 0],
+        ["`deployment_environment_name`", 0],
+        ["`k8s_namespace_name`", 0],
+        ["`trace_id`", 1],
+        ["`span_id`", 1],
+        ["`OrderId` from the log template", 1],
+        ["`user.id`", 1]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "A tiny LogQL engine",
+      "prompt": [
+        "Lines are `record LogLine(Dictionary<string, string> Labels, Dictionary<string, string> Meta, string Text);`.",
+        "Write `List<string> Run(string query, List<LogLine> lines)` for this subset of LogQL, returning the matching `Text`s in order:",
+        "",
+        "- a stream selector first: `{key=\"value\", key2=\"value2\"}` (every pair must equal a **label**);",
+        "- then any number of stages, each separated by spaces:",
+        "  - `|= \"text\"`: the line contains the text (case-sensitive); `!= \"text\"`: it does not;",
+        "  - `| key=\"value\"`: the line's **label or structured metadata** `key` equals the value.",
+        "",
+        "Parse with `System.Text.RegularExpressions.Regex`. You may assume the query is well formed: values never contain quotes."
+      ],
+      "starter": [
+        "List<string> Run(string query, List<LogLine> lines)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Run(string query, List<LogLine> lines)",
+        "{",
+        "    var sel = System.Text.RegularExpressions.Regex.Match(query, @\"^\\s*\\{(?<pairs>[^}]*)\\}\");",
+        "    var selector = System.Text.RegularExpressions.Regex.Matches(sel.Groups[\"pairs\"].Value, @\"(?<k>[\\w.]+)\\s*=\\s*\"\"(?<v>[^\"\"]*)\"\"\")",
+        "        .Select(m => (K: m.Groups[\"k\"].Value, V: m.Groups[\"v\"].Value)).ToList();",
+        "    var stages = System.Text.RegularExpressions.Regex.Matches(query[sel.Length..], @\"(?<op>\\|=|!=|\\|)\\s*(?:(?<k>[\\w.]+)\\s*=\\s*)?\"\"(?<v>[^\"\"]*)\"\"\")",
+        "        .Select(m => (Op: m.Groups[\"op\"].Value, K: m.Groups[\"k\"].Value, V: m.Groups[\"v\"].Value)).ToList();",
+        "    bool Field(LogLine l, string k, string v) => (l.Labels.TryGetValue(k, out var a) && a == v) || (l.Meta.TryGetValue(k, out var b) && b == v);",
+        "    return lines.Where(l => selector.All(p => l.Labels.TryGetValue(p.K, out var x) && x == p.V))",
+        "        .Where(l => stages.All(s => s.Op switch",
+        "        {",
+        "            \"|=\" => l.Text.Contains(s.V, StringComparison.Ordinal),",
+        "            \"!=\" => !l.Text.Contains(s.V, StringComparison.Ordinal),",
+        "            _ => Field(l, s.K, s.V),",
+        "        }))",
+        "        .Select(l => l.Text).ToList();",
+        "}"
+      ],
+      "hints": [
+        "First match the selector at the start (`^\\s*\\{...\\}`), then find the stages in the rest with one regex whose operator group is `\\|=|!=|\\|` (longest first).",
+        "A stage with a key is a field filter; one without is a line filter."
+      ],
+      "template": [
+        "{{CODE}}",
+        "LogLine L(string svc, string text, string trace, string level = \"info\") => new(new() { [\"service_name\"] = svc }, new() { [\"trace_id\"] = trace, [\"detected_level\"] = level }, text);",
+        "var dojoLogs = new List<LogLine> {",
+        "    L(\"shop\", \"Order placed for customer 2129 with 1 lines\", \"aaa\"),",
+        "    L(\"inventory\", \"Stock conflict on sku 12\", \"46ae\", \"warn\"),",
+        "    L(\"shop\", \"Reservation failed for sku 12: stock conflict in warehouse eu-2 (code INV-5821)\", \"46ae\", \"error\"),",
+        "    L(\"shop\", \"GET /healthz\", \"bbb\"),",
+        "    L(\"shop\", \"Reservation failed for sku 3: stock conflict in warehouse eu-2 (code INV-5821)\", \"ccc\", \"error\") };",
+        "Dojo.Eq(\"selector only\", 4, Run(\"{service_name=\\\"shop\\\"}\", dojoLogs).Count);",
+        "Dojo.Eq(\"line filter\", new List<string> { dojoLogs[2].Text, dojoLogs[4].Text }, Run(\"{service_name=\\\"shop\\\"} |= \\\"Reservation failed\\\"\", dojoLogs));",
+        "Dojo.Eq(\"one request's lines, across services? no: the selector picks shop only\", new List<string> { dojoLogs[2].Text }, Run(\"{service_name=\\\"shop\\\"} | trace_id=\\\"46ae\\\"\", dojoLogs));",
+        "Dojo.Eq(\"negative filter\", 3, Run(\"{service_name=\\\"shop\\\"} != \\\"healthz\\\"\", dojoLogs).Count);",
+        "Dojo.Eq(\"stages combine\", new List<string> { dojoLogs[4].Text }, Run(\"{service_name=\\\"shop\\\"} | detected_level=\\\"error\\\" |= \\\"sku 3\\\"\", dojoLogs));",
+        "Dojo.Eq(\"no match\", 0, Run(\"{service_name=\\\"payments\\\"}\", dojoLogs).Count);",
+        "record LogLine(Dictionary<string, string> Labels, Dictionary<string, string> Meta, string Text);"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "27-otel-oncall",
+      "task": ["t2", "t3"],
+      "title": "Live lab: the slow span and the failing request's log line",
+      "prompt": "In the live lab **OpenTelemetry on-call**, find the slow span of the product page in Jaeger (task 2), then follow a failing checkout from its trace to its log line in Loki by trace id (task 3).",
+      "explain": "Metric to trace to log, by id: the workflow this whole module is about."
+    }
+  ]
+}

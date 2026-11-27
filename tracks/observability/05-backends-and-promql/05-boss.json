@@ -1,0 +1,139 @@
+{
+  "title": "Boss: the dashboard that disagreed with itself",
+  "summary": "Two panels on the same dashboard tell different stories about checkout latency and errors. Recompute both from the raw data, the right way, and point at the request that proves it.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**DASH-52.** The *Checkout* dashboard has a panel \"p95 latency\" showing **254 ms** (it averages each instance's p95, so the small, slow instance counts as much as the busy one) and",
+        "the SLO report saying **194 ms**. The error panel shows **0.4%** errors while support counts dozens of failed orders. The",
+        "screenshot from 14:05, two instances of the shop:",
+        "",
+        "| | instance a | instance b |",
+        "|---|---|---|",
+        "| checkouts in the last 5 min | 2 700 | 300 |",
+        "| ≤ 50 ms / ≤ 100 ms / ≤ 250 ms / ≤ 500 ms | 2 600 / 2 690 / 2 700 / 2 700 | 30 / 60 / 210 / 300 |",
+        "| 5xx counter at 14:00 → 14:05 | 1 200 → 1 212 | 870 → 60 (restarted at 14:02) |",
+        "",
+        "Rebuild the numbers as Prometheus should compute them."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Merge the buckets, then the percentile",
+      "prompt": [
+        "Each instance's buckets are `List<(double Le, double Count)>` (cumulative, ending with `+Inf`, the same boundaries everywhere).",
+        "",
+        "Write `string P95Report(List<List<(double Le, double Count)>> instances)` returning",
+        "`\"averaged p95s: {a:F0} ms, merged p95: {m:F0} ms\"`:",
+        "",
+        "- *averaged*: the p95 of each instance (Prometheus' interpolation), then their plain mean: what the broken panel does;",
+        "- *merged*: add the buckets of all instances boundary by boundary (`sum by (le)`), then one p95: what is correct.",
+        "",
+        "Write your own quantile helper (the same algorithm as the lesson). Values are seconds; print milliseconds."
+      ],
+      "starter": [
+        "string P95Report(List<List<(double Le, double Count)>> instances)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string P95Report(List<List<(double Le, double Count)>> instances)",
+        "{",
+        "    var averaged = instances.Average(b => Quantile(0.95, b));",
+        "    var merged = instances[0].Select((b, i) => (b.Le, Count: instances.Sum(x => x[i].Count))).ToList();",
+        "    return $\"averaged p95s: {averaged * 1000:F0} ms, merged p95: {Quantile(0.95, merged) * 1000:F0} ms\";",
+        "}",
+        "",
+        "double Quantile(double q, List<(double Le, double Count)> buckets)",
+        "{",
+        "    var total = buckets[^1].Count;",
+        "    if (total == 0) return double.NaN;",
+        "    var rank = q * total;",
+        "    var i = buckets.FindIndex(b => b.Count >= rank);",
+        "    if (double.IsPositiveInfinity(buckets[i].Le)) return buckets[i - 1].Le;",
+        "    var lower = i == 0 ? 0 : buckets[i - 1].Le;",
+        "    var below = i == 0 ? 0 : buckets[i - 1].Count;",
+        "    return lower + (buckets[i].Le - lower) * (rank - below) / (buckets[i].Count - below);",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "const double dojoInf = double.PositiveInfinity;",
+        "var dojoA = new List<(double, double)> { (0.05, 2600), (0.1, 2690), (0.25, 2700), (0.5, 2700), (dojoInf, 2700) };",
+        "var dojoB = new List<(double, double)> { (0.05, 30), (0.1, 60), (0.25, 210), (0.5, 300), (dojoInf, 300) };",
+        "Dojo.Eq(\"DASH-52\", \"averaged p95s: 254 ms, merged p95: 194 ms\", P95Report([dojoA, dojoB]));",
+        "Dojo.Eq(\"one instance: both agree\", \"averaged p95s: 49 ms, merged p95: 49 ms\", P95Report([dojoA]));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Errors across a restart",
+      "prompt": [
+        "Each instance's 5xx counter is a list of samples `(double T, double V)`. Write `double Increase(List<List<(double T, double V)>> instances)`:",
+        "the total number of errors over the window, **per instance first** with counter-reset handling (a drop means the process restarted",
+        "and the new value counts in full), then summed. No extrapolation.",
+        "",
+        "Then `string ErrorReport(List<List<(double T, double V)>> errors, double checkouts)` returning",
+        "`\"{n} failed of {checkouts} ({pct:F1}%)\"` with `n` the increase (no decimals)."
+      ],
+      "starter": [
+        "double Increase(List<List<(double T, double V)>> instances) => 0;",
+        "",
+        "string ErrorReport(List<List<(double T, double V)>> errors, double checkouts) => \"\";"
+      ],
+      "solution": [
+        "double Increase(List<List<(double T, double V)>> instances) =>",
+        "    instances.Sum(s => s.Zip(s.Skip(1), (a, b) => b.V >= a.V ? b.V - a.V : b.V).Sum());",
+        "",
+        "string ErrorReport(List<List<(double T, double V)>> errors, double checkouts)",
+        "{",
+        "    var n = Increase(errors);",
+        "    return $\"{n:F0} failed of {checkouts} ({100 * n / checkouts:F1}%)\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoA = new List<(double, double)> { (0, 1200), (60, 1203), (120, 1206), (180, 1209), (240, 1210), (300, 1212) };",
+        "var dojoB = new List<(double, double)> { (0, 870), (60, 880), (120, 892), (180, 18), (240, 40), (300, 60) };",
+        "Dojo.Eq(\"instance a alone\", 12.0, Increase([dojoA]));",
+        "Dojo.Eq(\"instance b with its restart\", 82.0, Increase([dojoB]));",
+        "Dojo.Eq(\"DASH-52: not 0.4%\", \"94 failed of 3000 (3.1%)\", ErrorReport([dojoA, dojoB], 3000));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Point at one slow request",
+      "prompt": [
+        "The merged histogram carries **exemplars**: `record Exemplar(double Value, string TraceId, double At);` (seconds, trace id, time).",
+        "Write `string Proof(List<Exemplar> exemplars, double sloSeconds)`: the exemplar **slower than the SLO** with the largest value",
+        "(ties: the latest `At`), as `\"trace {TraceId} took {ms:F0} ms\"`, or `\"no exemplar above the SLO\"`. That is the trace you",
+        "paste in the incident channel."
+      ],
+      "starter": [
+        "string Proof(List<Exemplar> exemplars, double sloSeconds)",
+        "{",
+        "    return \"no exemplar above the SLO\";",
+        "}"
+      ],
+      "solution": [
+        "string Proof(List<Exemplar> exemplars, double sloSeconds)",
+        "{",
+        "    var e = exemplars.Where(x => x.Value > sloSeconds).OrderByDescending(x => x.Value).ThenByDescending(x => x.At).FirstOrDefault();",
+        "    return e is null ? \"no exemplar above the SLO\" : $\"trace {e.TraceId} took {e.Value * 1000:F0} ms\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoEx = new List<Exemplar> { new(0.012, \"a1\", 10), new(0.31, \"0eeecaba1ae500cd99b8be150cc66ac1\", 20), new(0.31, \"30dd4e274f95a6cbe4c02bb84fcdb769\", 25), new(0.18, \"b2\", 30) };",
+        "Dojo.Eq(\"the slowest, latest\", \"trace 30dd4e274f95a6cbe4c02bb84fcdb769 took 310 ms\", Proof(dojoEx, 0.2));",
+        "Dojo.Eq(\"nothing above 500 ms\", \"no exemplar above the SLO\", Proof(dojoEx, 0.5));",
+        "record Exemplar(double Value, string TraceId, double At);"
+      ]
+    }
+  ]
+}
