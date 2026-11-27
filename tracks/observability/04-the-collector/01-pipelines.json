@@ -1,0 +1,280 @@
+{
+  "title": "Receivers, processors, exporters, pipelines",
+  "summary": "How a Collector config is read: components are declared, pipelines wire them, and anything not in a pipeline does nothing.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A separate process between your apps and the backends",
+      "body": [
+        "The **OpenTelemetry Collector** (`otelcol-contrib`, 0.166 in November 2026) receives telemetry, processes it and sends it on. Apps",
+        "export OTLP to it and stay simple; the Collector owns retries, batching, redaction, sampling and the choice of vendor.",
+        "",
+        "A config has two halves. First you **declare** components, each `type` or `type/name`:",
+        "",
+        "- **receivers** get data in (`otlp` on 4317/4318, `prometheus` to scrape, `filelog`, `hostmetrics`, `k8s_cluster`...);",
+        "- **processors** change it (`memory_limiter`, `attributes`, `transform`, `filter`, `tail_sampling`, `k8sattributes`...);",
+        "- **exporters** send it (`otlp_grpc`, `otlp_http`, `prometheus`, `prometheusremotewrite`, `debug`...);",
+        "- **extensions** run beside (`health_check`, `pprof`, `zpages`).",
+        "",
+        "Then `service.pipelines` **wires** them, one pipeline per signal (`traces`, `metrics`, `logs`, or `traces/sampled`): receivers →",
+        "processors **in the listed order** → exporters. A component declared but listed in no pipeline is never started. Recent versions",
+        "renamed exporters: `otlp` is now `otlp_grpc` and `otlphttp` is `otlp_http` (the old names still work with a deprecation warning).",
+        "",
+        "Below: the live lab's Collector after someone added a redaction processor. Hover a component to find it in every pipeline. Spot",
+        "the bug."
+      ],
+      "otelviz": {
+        "kind": "pipeline",
+        "title": "lab collector: config.yaml",
+        "receivers": [
+          "otlp"
+        ],
+        "processors": [
+          "memory_limiter",
+          "attributes/redact"
+        ],
+        "exporters": [
+          "otlp_grpc/jaeger",
+          "prometheus",
+          "otlp_http/loki"
+        ],
+        "pipelines": {
+          "traces": {
+            "receivers": [
+              "otlp"
+            ],
+            "processors": [
+              "memory_limiter"
+            ],
+            "exporters": [
+              "otlp_grpc/jaeger"
+            ]
+          },
+          "metrics": {
+            "receivers": [
+              "otlp"
+            ],
+            "processors": [
+              "memory_limiter"
+            ],
+            "exporters": [
+              "prometheus"
+            ]
+          },
+          "logs": {
+            "receivers": [
+              "otlp"
+            ],
+            "processors": [
+              "memory_limiter"
+            ],
+            "exporters": [
+              "otlp_http/loki"
+            ]
+          }
+        },
+        "bug": "attributes/redact",
+        "notes": {
+          "attributes/redact": "Hashes user.email. Declared, but no pipeline lists it, so emails still reach Jaeger. Add it to service.pipelines.traces.processors after memory_limiter.",
+          "otlp_grpc/jaeger": "Jaeger 2 accepts OTLP natively on 4317."
+        },
+        "caption": "The Collector validates that every component a pipeline names is declared, but not that every declared component is used."
+      }
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does the Collector do with `attributes/redact` in the config above?",
+      "options": [
+        "Nothing: it is declared but no pipeline lists it, so it never runs",
+        "It redacts emails in every pipeline",
+        "It fails to start with an \"unused component\" error",
+        "It redacts only logs"
+      ],
+      "answer": 0,
+      "explain": "Pipelines decide what runs. `otelcol-contrib validate` passes, the Collector starts, and personal data keeps flowing: test the output (the lab's task 7 checks Jaeger, not the file)."
+    },
+    {
+      "type": "order",
+      "prompt": "Put the traces pipeline's processors in a sensible order: protect the Collector first, then change data, then sample the cleaned traces.",
+      "lines": [
+        "      processors:",
+        "        - memory_limiter",
+        "        - attributes/redact",
+        "        - transform/truncate",
+        "        - tail_sampling"
+      ],
+      "also": [
+        [
+          "      processors:",
+          "        - memory_limiter",
+          "        - transform/truncate",
+          "        - attributes/redact",
+          "        - tail_sampling"
+        ]
+      ],
+      "explain": "`memory_limiter` goes first so it can refuse data before anything else spends memory on it. Redaction and transforms must run before anything that keeps or exports data. Tail sampling buffers whole traces, so it runs last, on what will actually be stored."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: running a Collector",
+      "body": "The commands and endpoints you use to check a Collector config and see what the Collector itself is doing.",
+      "toolkit": [
+        {
+          "cmd": "otelcol-contrib validate --config=config.yaml",
+          "what": "Parse the config and build every pipeline without starting them: catches typos, unknown components and bad fields.",
+          "flags": [
+            [
+              "--config",
+              "a file, or a URI: env:VAR, yaml:..., http://..."
+            ],
+            [
+              "--feature-gates",
+              "switch experimental behaviour on or off"
+            ]
+          ],
+          "example": "otelcol-contrib validate --config=/etc/otelcol/config.yaml && systemctl reload otelcol",
+          "when": "in CI and before every restart: the lab's collector-run does it on save"
+        },
+        {
+          "cmd": "otelcol-contrib components",
+          "what": "List the receivers, processors, exporters and extensions compiled into this build, with their stability.",
+          "flags": [
+            [
+              "components",
+              "what this binary can run (contrib has hundreds; your own builds with ocb have only what you chose)"
+            ]
+          ],
+          "example": "otelcol-contrib components | grep -A3 tail_sampling",
+          "when": "\"unknown type\" errors: the component is not in your distribution"
+        },
+        {
+          "cmd": "exporters: debug: { verbosity: detailed }",
+          "what": "Print what reaches the end of a pipeline to the Collector's own log.",
+          "lang": "yaml",
+          "flags": [
+            [
+              "verbosity: basic",
+              "counts only"
+            ],
+            [
+              "verbosity: detailed",
+              "every span, data point and log record"
+            ]
+          ],
+          "example": "service: { pipelines: { traces: { receivers: [otlp], processors: [memory_limiter], exporters: [debug, otlp_grpc/jaeger] } } }",
+          "when": "data goes in but not out: find which stage drops it"
+        },
+        {
+          "cmd": "curl -s http://collector:8888/metrics | grep -E 'otelcol_(receiver|exporter)'",
+          "what": "The Collector's own metrics: accepted, refused, sent and failed items per component, queue size.",
+          "flags": [
+            [
+              "otelcol_receiver_refused_*",
+              "memory_limiter or a bad payload refused data"
+            ],
+            [
+              "otelcol_exporter_send_failed_*",
+              "the backend rejects or is down"
+            ],
+            [
+              "otelcol_exporter_queue_size",
+              "a backlog building up"
+            ]
+          ],
+          "example": "curl -s http://collector:8888/metrics | grep otelcol_exporter_send_failed_spans",
+          "when": "alerting on the pipeline itself, so missing telemetry pages someone"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the symptom to the command.",
+      "pairs": [
+        [
+          "\"unknown type: tail_sampling\" at startup",
+          "`otelcol-contrib components`"
+        ],
+        [
+          "Spans reach the Collector but not Jaeger: where are they lost?",
+          "a `debug` exporter in the pipeline"
+        ],
+        [
+          "You edited the config and want to know it is valid before restarting",
+          "`otelcol-contrib validate`"
+        ],
+        [
+          "Is the backend rejecting data right now?",
+          "`otelcol_exporter_send_failed_*` on :8888/metrics"
+        ]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Lint a Collector config",
+      "prompt": [
+        "Write the check `otelcol-contrib validate` does not do. A config arrives parsed into",
+        "`record Config(List<string> Receivers, List<string> Processors, List<string> Exporters, Dictionary<string, Pipeline> Pipelines);`",
+        "and `record Pipeline(List<string> Receivers, List<string> Processors, List<string> Exporters);` (component ids like `attributes/redact`).",
+        "",
+        "Write `List<string> Lint(Config c)` returning, in this order:",
+        "",
+        "1. for each pipeline (in name order) that uses a component not declared in its section: `\"{pipeline}: unknown {kind} {id}\"` (kind",
+        "   `receiver`, `processor` or `exporter`, in that order, then in list order);",
+        "2. for each pipeline (name order) with processors where `memory_limiter` is present but not first: `\"{pipeline}: memory_limiter should be first\"`;",
+        "3. for each declared component used by no pipeline (receivers, then processors, then exporters, in declared order):",
+        "   `\"unused {kind} {id}\"`.",
+        "",
+        "Compare component ids exactly (`batch` and `batch/2` are different components)."
+      ],
+      "starter": [
+        "List<string> Lint(Config c)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Lint(Config c)",
+        "{",
+        "    var issues = new List<string>();",
+        "    var pipes = c.Pipelines.OrderBy(p => p.Key, StringComparer.Ordinal).ToList();",
+        "    foreach (var (name, p) in pipes)",
+        "    {",
+        "        issues.AddRange(p.Receivers.Where(id => !c.Receivers.Contains(id)).Select(id => $\"{name}: unknown receiver {id}\"));",
+        "        issues.AddRange(p.Processors.Where(id => !c.Processors.Contains(id)).Select(id => $\"{name}: unknown processor {id}\"));",
+        "        issues.AddRange(p.Exporters.Where(id => !c.Exporters.Contains(id)).Select(id => $\"{name}: unknown exporter {id}\"));",
+        "    }",
+        "    foreach (var (name, p) in pipes)",
+        "        if (p.Processors.Contains(\"memory_limiter\") && p.Processors[0] != \"memory_limiter\") issues.Add($\"{name}: memory_limiter should be first\");",
+        "    var used = c.Pipelines.Values.SelectMany(p => p.Receivers.Concat(p.Processors).Concat(p.Exporters)).ToHashSet();",
+        "    issues.AddRange(c.Receivers.Where(id => !used.Contains(id)).Select(id => $\"unused receiver {id}\"));",
+        "    issues.AddRange(c.Processors.Where(id => !used.Contains(id)).Select(id => $\"unused processor {id}\"));",
+        "    issues.AddRange(c.Exporters.Where(id => !used.Contains(id)).Select(id => $\"unused exporter {id}\"));",
+        "    return issues;",
+        "}"
+      ],
+      "hints": [
+        "Three passes over the data, one per rule, so the output order follows the rules.",
+        "\"Used\" is the union of every pipeline's three lists: `c.Pipelines.Values.SelectMany(p => p.Receivers.Concat(p.Processors).Concat(p.Exporters)).ToHashSet()`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoLab = new Config([\"otlp\"], [\"memory_limiter\", \"attributes/redact\"], [\"otlp_grpc/jaeger\", \"prometheus\", \"otlp_http/loki\"],",
+        "    new() { [\"traces\"] = new([\"otlp\"], [\"memory_limiter\"], [\"otlp_grpc/jaeger\"]), [\"metrics\"] = new([\"otlp\"], [\"memory_limiter\"], [\"prometheus\"]),",
+        "            [\"logs\"] = new([\"otlp\"], [\"memory_limiter\"], [\"otlp_http/loki\"]) });",
+        "Dojo.Eq(\"the lab's bug\", new List<string> { \"unused processor attributes/redact\" }, Lint(dojoLab));",
+        "var dojoFixed = dojoLab with { Pipelines = new(dojoLab.Pipelines) { [\"traces\"] = new([\"otlp\"], [\"memory_limiter\", \"attributes/redact\"], [\"otlp_grpc/jaeger\"]) } };",
+        "Dojo.Eq(\"fixed\", new List<string>(), Lint(dojoFixed));",
+        "var dojoMessy = new Config([\"otlp\", \"hostmetrics\"], [\"batch\", \"memory_limiter\"], [\"debug\", \"otlp_grpc\"],",
+        "    new() { [\"traces\"] = new([\"otlp\"], [\"batch\", \"memory_limiter\"], [\"otlp_grpc\", \"otlphttp\"]), [\"metrics\"] = new([\"otlp\", \"prometheus\"], [\"batch/2\"], [\"otlp_grpc\"]) });",
+        "Dojo.Eq(\"every rule, in order\", new List<string> {",
+        "    \"metrics: unknown receiver prometheus\", \"metrics: unknown processor batch/2\", \"traces: unknown exporter otlphttp\",",
+        "    \"traces: memory_limiter should be first\",",
+        "    \"unused receiver hostmetrics\", \"unused exporter debug\" }, Lint(dojoMessy));",
+        "record Config(List<string> Receivers, List<string> Processors, List<string> Exporters, Dictionary<string, Pipeline> Pipelines);",
+        "record Pipeline(List<string> Receivers, List<string> Processors, List<string> Exporters);"
+      ]
+    }
+  ]
+}

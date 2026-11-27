@@ -1,0 +1,182 @@
+{
+  "title": "Boss: the Collector that lost the traces",
+  "summary": "Since Tuesday's config change, traces are missing, the gateway restarts every few hours and a security scan found tokens in spans. Diagnose it from the Collector's own metrics, size it, and prove the fixed processing.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**OBS-731.** The gateway's config after Tuesday's change (excerpt):",
+        "",
+        "```yaml",
+        "processors:",
+        "  memory_limiter: { check_interval: 1s, limit_mib: 512, spike_limit_mib: 100 }",
+        "  tail_sampling:",
+        "    decision_wait: 30s",
+        "    policies: [ { name: errors, type: status_code, status_code: { status_codes: [ERROR] } } ]",
+        "  attributes/redact:",
+        "    actions: [ { key: http.request.header.authorization, action: delete } ]",
+        "exporters:",
+        "  otlp_grpc/vendor: { endpoint: otlp.vendor.example.com:4317, sending_queue: { queue_size: 200 } }",
+        "service:",
+        "  pipelines:",
+        "    traces: { receivers: [otlp], processors: [tail_sampling, memory_limiter], exporters: [otlp_grpc/vendor] }",
+        "```",
+        "",
+        "And from the gateway's own metrics endpoint (`:8888/metrics`), counts over the last hour per component. Three things are wrong:",
+        "find each with code."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Where are spans lost?",
+      "prompt": [
+        "The self-metrics arrive as `record Stat(string Component, string Kind, string Metric, long Value);` where `Kind` is `receiver`,",
+        "`processor` or `exporter` and `Metric` is one of `accepted`, `refused`, `dropped` (processors), `sent`, `send_failed`, `enqueue_failed`",
+        "(exporters).",
+        "",
+        "Write `List<string> Losses(List<Stat> stats)`: for every component whose losses are **more than 1%** of what it handled, a line",
+        "`\"{kind} {component}: {lost} lost of {handled} ({pct:F1}%)\"`, biggest percentage first. Losses and \"handled\":",
+        "",
+        "- receiver: lost = `refused`, handled = `accepted + refused`;",
+        "- processor: lost = `refused + dropped`, handled = `accepted + refused`;",
+        "- exporter: lost = `send_failed + enqueue_failed`, handled = `sent + send_failed + enqueue_failed`.",
+        "",
+        "Missing metrics count as 0; skip components that handled nothing."
+      ],
+      "starter": [
+        "List<string> Losses(List<Stat> stats)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Losses(List<Stat> stats)",
+        "{",
+        "    var rows = new List<(string Line, double Pct)>();",
+        "    foreach (var g in stats.GroupBy(s => (s.Kind, s.Component)))",
+        "    {",
+        "        long V(string m) => g.Where(s => s.Metric == m).Sum(s => s.Value);",
+        "        var (lost, handled) = g.Key.Kind switch",
+        "        {",
+        "            \"receiver\" => (V(\"refused\"), V(\"accepted\") + V(\"refused\")),",
+        "            \"processor\" => (V(\"refused\") + V(\"dropped\"), V(\"accepted\") + V(\"refused\")),",
+        "            _ => (V(\"send_failed\") + V(\"enqueue_failed\"), V(\"sent\") + V(\"send_failed\") + V(\"enqueue_failed\")),",
+        "        };",
+        "        if (handled == 0) continue;",
+        "        var pct = 100.0 * lost / handled;",
+        "        if (pct > 1) rows.Add(($\"{g.Key.Kind} {g.Key.Component}: {lost} lost of {handled} ({pct:F1}%)\", pct));",
+        "    }",
+        "    return rows.OrderByDescending(r => r.Pct).Select(r => r.Line).ToList();",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoStats = new List<Stat> {",
+        "    new(\"otlp\", \"receiver\", \"accepted\", 7_200_000), new(\"otlp\", \"receiver\", \"refused\", 1_800_000),",
+        "    new(\"tail_sampling\", \"processor\", \"accepted\", 7_200_000),",
+        "    new(\"memory_limiter\", \"processor\", \"accepted\", 400_000), new(\"memory_limiter\", \"processor\", \"refused\", 2_000),",
+        "    new(\"attributes/redact\", \"processor\", \"accepted\", 0),",
+        "    new(\"otlp_grpc/vendor\", \"exporter\", \"sent\", 300_000), new(\"otlp_grpc/vendor\", \"exporter\", \"enqueue_failed\", 96_000), new(\"otlp_grpc/vendor\", \"exporter\", \"send_failed\", 2_000) };",
+        "Dojo.Eq(\"OBS-731\", new List<string> {",
+        "    \"exporter otlp_grpc/vendor: 98000 lost of 398000 (24.6%)\",",
+        "    \"receiver otlp: 1800000 lost of 9000000 (20.0%)\" }, Losses(dojoStats));",
+        "Dojo.Eq(\"a healthy hour\", new List<string>(), Losses([new(\"otlp\", \"receiver\", \"accepted\", 1000), new(\"otlp\", \"receiver\", \"refused\", 5), new(\"x\", \"exporter\", \"sent\", 1000)]));",
+        "record Stat(string Component, string Kind, string Metric, long Value);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Why does it run out of memory?",
+      "prompt": [
+        "The receiver refuses a fifth of everything because memory is full. `tail_sampling` runs **before** `memory_limiter` and holds",
+        "every trace for `decision_wait`. Estimate it.",
+        "",
+        "Write `string Size(double spansPerSec, double decisionWaitSec, int bytesPerSpan, int limitMib)`:",
+        "",
+        "- held MiB = `spansPerSec * decisionWaitSec * bytesPerSpan / 1048576`;",
+        "- the largest `decision_wait` (whole seconds, rounded down) whose held memory stays within **half** the limit (the other half is",
+        "  for everything else);",
+        "- return `\"holds {held:F0} MiB of {limitMib} MiB; decision_wait <= {max}s fits\"`."
+      ],
+      "starter": [
+        "string Size(double spansPerSec, double decisionWaitSec, int bytesPerSpan, int limitMib)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Size(double spansPerSec, double decisionWaitSec, int bytesPerSpan, int limitMib)",
+        "{",
+        "    var held = spansPerSec * decisionWaitSec * bytesPerSpan / 1048576.0;",
+        "    var max = (int)Math.Floor(limitMib / 2.0 * 1048576.0 / (spansPerSec * bytesPerSpan));",
+        "    return $\"holds {held:F0} MiB of {limitMib} MiB; decision_wait <= {max}s fits\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"OBS-731: 2 500 spans/s, 30 s, 1.2 KB each, 512 MiB\", \"holds 86 MiB of 512 MiB; decision_wait <= 89s fits\", Size(2500, 30, 1200, 512));",
+        "Dojo.Eq(\"at peak: 20 000 spans/s\", \"holds 687 MiB of 512 MiB; decision_wait <= 11s fits\", Size(20000, 30, 1200, 512));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Process a batch the way the fixed config would",
+      "prompt": [
+        "The fixed traces pipeline is `memory_limiter, filter/health, attributes/redact, transform/truncate, tail_sampling`. Prove what it",
+        "does to a batch of spans: `record Span(string Name, string Status, Dictionary<string, string> Attrs);`.",
+        "",
+        "Write `List<string> Process(List<Span> spans)` that, in order:",
+        "",
+        "1. **filter/health**: drops spans whose `url.path` is `/healthz` or `/ready`;",
+        "2. **attributes/redact**: deletes `http.request.header.authorization` and `http.request.header.cookie`, hashes `user.email`",
+        "   (SHA-256, lower-case hex, first **12** characters only for this report);",
+        "3. **transform/truncate**: cuts every attribute value to at most **32** characters;",
+        "4. then formats each span as `\"{Name} {Status} {k=v k=v ...}\"` with attributes sorted by key (ordinal), separated by single spaces.",
+        "",
+        "(Tail sampling is left out: one batch is not a whole trace.)"
+      ],
+      "starter": [
+        "List<string> Process(List<Span> spans)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Process(List<Span> spans)",
+        "{",
+        "    var result = new List<string>();",
+        "    foreach (var s in spans)",
+        "    {",
+        "        if (s.Attrs.TryGetValue(\"url.path\", out var path) && path is \"/healthz\" or \"/ready\") continue;",
+        "        var a = new Dictionary<string, string>(s.Attrs);",
+        "        a.Remove(\"http.request.header.authorization\");",
+        "        a.Remove(\"http.request.header.cookie\");",
+        "        if (a.TryGetValue(\"user.email\", out var email))",
+        "            a[\"user.email\"] = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(email)))[..12];",
+        "        foreach (var k in a.Keys.ToList()) if (a[k].Length > 32) a[k] = a[k][..32];",
+        "        var attrs = string.Join(\" \", a.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $\"{kv.Key}={kv.Value}\"));",
+        "        result.Add($\"{s.Name} {s.Status} {attrs}\".TrimEnd());",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(\"ana@example.com\")))[..12];",
+        "var dojoBatch = new List<Span> {",
+        "    new(\"GET /healthz\", \"UNSET\", new() { [\"url.path\"] = \"/healthz\" }),",
+        "    new(\"POST /api/checkout\", \"ERROR\", new() { [\"url.path\"] = \"/api/checkout\", [\"http.request.header.authorization\"] = \"Bearer eyJhbGciOiJIUzI1NiJ9.secret\", [\"user.email\"] = \"ana@example.com\" }),",
+        "    new(\"postgresql\", \"UNSET\", new() { [\"db.query.text\"] = \"SELECT rating, body FROM reviews WHERE product_id = $1 ORDER BY created DESC LIMIT 5\", [\"db.system.name\"] = \"postgresql\" }),",
+        "    new(\"GET /ready\", \"UNSET\", new() { [\"url.path\"] = \"/ready\", [\"http.request.header.cookie\"] = \"session=abc\" }) };",
+        "Dojo.Eq(\"the batch after the fixed pipeline\", new List<string> {",
+        "    $\"POST /api/checkout ERROR url.path=/api/checkout user.email={dojoHash}\",",
+        "    \"postgresql UNSET db.query.text=SELECT rating, body FROM reviews db.system.name=postgresql\" }, Process(dojoBatch));",
+        "Dojo.Eq(\"no attributes\", new List<string> { \"internal UNSET\" }, Process([new(\"internal\", \"UNSET\", new())]));",
+        "record Span(string Name, string Status, Dictionary<string, string> Attrs);"
+      ]
+    }
+  ]
+}
