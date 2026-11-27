@@ -1,0 +1,205 @@
+{
+  "title": "Boss: read a trace like on-call",
+  "summary": "A trace export from a failed checkout and a list of headers seen at each hop: find the span that caused the failure, the span that cost the time, and the hop that broke the trace.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**OPS-4410: \"checkout returns 502 sometimes, and some traces stop at the shop\".** You have Jaeger's export of one failing trace",
+        "(this one, recorded in the lab), and from the mesh's access logs the `traceparent` each service received for another request.",
+        "",
+        "The spans come to your code as `record SpanRec(string Id, string? Parent, string Service, string Name, string Kind, double Start, double Dur, string Status, int? HttpStatus);`",
+        "(`Kind`: `server`, `client`, `internal`; `Status`: `unset`, `ok`, `error`; `HttpStatus` from `http.response.status_code`)."
+      ],
+      "otelviz": {"kind":"trace","traceId":"46ae7e540484dd36a9df49aab2401a3f","spans":[{"id":"20d89fcba3b16e62","service":"shop","name":"POST /api/checkout","scope":"Microsoft.AspNetCore","kind":"server","start":0.0,"dur":6.24,"status":"error","attrs":{"error.type":"502","http.request.method":"POST","http.response.status_code":"502","http.route":"/api/checkout","server.address":"shop","server.port":"8080","url.path":"/api/checkout"}},{"id":"86d88d2ffaed6bdf","parent":"20d89fcba3b16e62","service":"shop","name":"checkout","scope":"Shop.App","kind":"internal","start":0.08,"dur":6.1,"status":"error","statusMsg":"reservation failed","attrs":{"app.cart.size":"3","app.payment.method":"voucher","user.email":"a5a82efa793395d5867756bd11bc23ce31c5b3ebcfebec0dd4980eb661d827a5"}},{"id":"9e324d19633e0502","parent":"86d88d2ffaed6bdf","service":"shop","name":"POST","scope":"System.Net.Http","kind":"client","start":0.11,"dur":5.42,"status":"unset","attrs":{"http.request.method":"POST","http.response.status_code":"200","server.address":"inventory","server.port":"8080","url.full":"http://inventory:8080/reservations"}},{"id":"8b13f77f47f9552c","parent":"9e324d19633e0502","service":"inventory","name":"POST /reservations","scope":"Microsoft.AspNetCore","kind":"server","start":0.35,"dur":4.96,"status":"unset","attrs":{"http.request.method":"POST","http.response.status_code":"200","http.route":"/reservations","server.address":"inventory","server.port":"8080","url.path":"/reservations"}},{"id":"5dcf35700d223c90","parent":"8b13f77f47f9552c","service":"inventory","name":"postgresql","scope":"Npgsql","kind":"client","start":0.45,"dur":4.8,"status":"unset","attrs":{"db.namespace":"shop","db.query.text":"UPDATE stock SET qty = qty - $1 WHERE product_id = $2 AND qty >= $1","db.system.name":"postgresql","server.address":"postgres"},"events":[{"t":5.24,"name":"received-first-response","attrs":{}}]},{"id":"af0a53e8d8d8c2f5","parent":"86d88d2ffaed6bdf","service":"shop","name":"POST","scope":"System.Net.Http","kind":"client","start":5.58,"dur":0.52,"status":"error","attrs":{"error.type":"409","http.request.method":"POST","http.response.status_code":"409","server.address":"inventory","server.port":"8080","url.full":"http://inventory:8080/reservations"}},{"id":"6ea506ba007761e4","parent":"af0a53e8d8d8c2f5","service":"inventory","name":"POST /reservations","scope":"Microsoft.AspNetCore","kind":"server","start":5.85,"dur":0.14,"status":"unset","attrs":{"http.request.method":"POST","http.response.status_code":"409","http.route":"/reservations","server.address":"inventory","server.port":"8080","url.path":"/reservations"}}],"logs":[{"t":5.94,"level":"Warning","service":"inventory","body":"Stock conflict on sku 12","template":"Stock conflict on sku {Sku}","traceId":"46ae7e540484dd36a9df49aab2401a3f","spanId":"6ea506ba007761e4","attrs":{"Sku":"12"}},{"t":6.17,"level":"Error","service":"shop","body":"Reservation failed for sku 12: stock conflict in warehouse eu-2 (code INV-5821)","template":"Reservation failed for sku {Sku}: {Reason} (code {Code})","traceId":"46ae7e540484dd36a9df49aab2401a3f","spanId":"86d88d2ffaed6bdf","attrs":{"Code":"INV-5821","Reason":"stock conflict in warehouse eu-2","Sku":"12"}}]}
+    },
+    {
+      "type": "code",
+      "title": "The root cause span",
+      "prompt": [
+        "Errors propagate up: the server span is red because the checkout span is red because a client call is red. The interesting one is",
+        "the **deepest** error. Write `string RootCause(List<SpanRec> spans)`:",
+        "",
+        "- the root cause is the error span (`Status == \"error\"`) with **no error span among its descendants**;",
+        "- if there are several, take the one that **started first**;",
+        "- describe it as `\"{Service} {Name} ({Kind})\"`, plus `\" -> {HttpStatus}\"` when it has one, plus, when one of its **children** is a",
+        "  server span (the callee), `\" answered by {child.Service} {child.Name}\"`;",
+        "- with no error span return `\"no error\"`."
+      ],
+      "starter": [
+        "string RootCause(List<SpanRec> spans)",
+        "{",
+        "    return \"no error\";",
+        "}"
+      ],
+      "solution": [
+        "string RootCause(List<SpanRec> spans)",
+        "{",
+        "    bool ErrorBelow(SpanRec s) => spans.Where(c => c.Parent == s.Id).Any(c => c.Status == \"error\" || ErrorBelow(c));",
+        "    var cause = spans.Where(s => s.Status == \"error\" && !ErrorBelow(s)).OrderBy(s => s.Start).FirstOrDefault();",
+        "    if (cause is null) return \"no error\";",
+        "    var text = $\"{cause.Service} {cause.Name} ({cause.Kind})\";",
+        "    if (cause.HttpStatus is int code) text += $\" -> {code}\";",
+        "    var callee = spans.FirstOrDefault(c => c.Parent == cause.Id && c.Kind == \"server\");",
+        "    if (callee is not null) text += $\" answered by {callee.Service} {callee.Name}\";",
+        "    return text;",
+        "}"
+      ],
+      "hints": [
+        "A recursive local function `bool ErrorBelow(SpanRec s)` that looks at the children and their children.",
+        "In the recorded trace the answer is the second `POST` client span (409); inventory's server span for it is Unset, as the HTTP conventions say for a 4xx."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoErr = new List<SpanRec> {",
+        "    new(\"20d8\", null, \"shop\", \"POST /api/checkout\", \"server\", 0, 6.24, \"error\", 502),",
+        "    new(\"86d8\", \"20d8\", \"shop\", \"checkout\", \"internal\", 0.08, 6.1, \"error\", null),",
+        "    new(\"9e32\", \"86d8\", \"shop\", \"POST\", \"client\", 0.11, 5.42, \"unset\", 200),",
+        "    new(\"8b13\", \"9e32\", \"inventory\", \"POST /reservations\", \"server\", 0.35, 4.96, \"unset\", 200),",
+        "    new(\"5dcf\", \"8b13\", \"inventory\", \"postgresql\", \"client\", 0.45, 4.8, \"unset\", null),",
+        "    new(\"af0a\", \"86d8\", \"shop\", \"POST\", \"client\", 5.58, 0.52, \"error\", 409),",
+        "    new(\"6ea5\", \"af0a\", \"inventory\", \"POST /reservations\", \"server\", 5.85, 0.14, \"unset\", 409) };",
+        "Dojo.Eq(\"the recorded failed checkout\", \"shop POST (client) -> 409 answered by inventory POST /reservations\", RootCause(dojoErr));",
+        "Dojo.Eq(\"no errors\", \"no error\", RootCause(dojoErr.Select(s => s with { Status = \"unset\" }).ToList()));",
+        "var dojoDb = new List<SpanRec> {",
+        "    new(\"a\", null, \"api\", \"GET /x\", \"server\", 0, 30, \"error\", 500),",
+        "    new(\"b\", \"a\", \"api\", \"postgresql\", \"client\", 2, 25, \"error\", null),",
+        "    new(\"c\", \"a\", \"api\", \"GET\", \"client\", 1, 5, \"error\", 503) };",
+        "Dojo.Eq(\"two leaf errors: the earlier one\", \"api GET (client) -> 503\", RootCause(dojoDb));",
+        "record SpanRec(string Id, string? Parent, string Service, string Name, string Kind, double Start, double Dur, string Status, int? HttpStatus);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Where did the time go?",
+      "prompt": [
+        "Write `List<string> TopSelfTime(List<SpanRec> spans, int n)`: the `n` spans with the most **self time** (duration minus the time",
+        "covered by its direct children; children may overlap each other, so merge their intervals first, and clip them to the parent),",
+        "largest first, ties by `Start`, each as `\"{Service} {Name} {self:F1}ms\"`.",
+        "",
+        "Overlap matters: a parent of 100 ms with two children running **in parallel** from 0 to 60 ms has 40 ms of self time, not -20."
+      ],
+      "starter": [
+        "List<string> TopSelfTime(List<SpanRec> spans, int n)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> TopSelfTime(List<SpanRec> spans, int n)",
+        "{",
+        "    double Self(SpanRec s)",
+        "    {",
+        "        var end = s.Start + s.Dur;",
+        "        var parts = spans.Where(c => c.Parent == s.Id)",
+        "            .Select(c => (From: Math.Max(c.Start, s.Start), To: Math.Min(c.Start + c.Dur, end)))",
+        "            .Where(p => p.To > p.From).OrderBy(p => p.From).ToList();",
+        "        double covered = 0, reach = double.MinValue;",
+        "        foreach (var (from, to) in parts)",
+        "        {",
+        "            if (from >= reach) { covered += to - from; reach = to; }",
+        "            else if (to > reach) { covered += to - reach; reach = to; }",
+        "        }",
+        "        return Math.Max(0, s.Dur - covered);",
+        "    }",
+        "    return spans.Select(s => (s, Self: Self(s))).OrderByDescending(x => x.Self).ThenBy(x => x.s.Start)",
+        "        .Take(n).Select(x => $\"{x.s.Service} {x.s.Name} {x.Self:F1}ms\").ToList();",
+        "}"
+      ],
+      "hints": [
+        "Turn each child into an interval clipped to the parent, sort by start, and sweep: add only the part beyond what is already covered.",
+        "`Math.Max(0, s.Dur - covered)`, then `OrderByDescending(self).ThenBy(start).Take(n)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSlow = new List<SpanRec> {",
+        "    new(\"5644\", null, \"shop\", \"GET /api/products/{id:int}\", \"server\", 0, 93.56, \"unset\", 200),",
+        "    new(\"5843\", \"5644\", \"shop\", \"GET\", \"client\", 0.07, 0.88, \"unset\", 200),",
+        "    new(\"219f\", \"5843\", \"inventory\", \"GET /stock/{sku:int}\", \"server\", 0.26, 0.53, \"unset\", 200),",
+        "    new(\"60d1\", \"219f\", \"inventory\", \"postgresql\", \"client\", 0.37, 0.37, \"unset\", null),",
+        "    new(\"8ce0\", \"5644\", \"shop\", \"postgresql\", \"client\", 1.0, 92.48, \"unset\", null) };",
+        "Dojo.Eq(\"the slow product page: one query\", new List<string> { \"shop postgresql 92.5ms\", \"inventory postgresql 0.4ms\" }, TopSelfTime(dojoSlow, 2));",
+        "var dojoPar = new List<SpanRec> {",
+        "    new(\"p\", null, \"api\", \"GET /dashboard\", \"server\", 0, 100, \"unset\", 200),",
+        "    new(\"c1\", \"p\", \"api\", \"GET orders\", \"client\", 0, 60, \"unset\", 200),",
+        "    new(\"c2\", \"p\", \"api\", \"GET profile\", \"client\", 10, 50, \"unset\", 200) };",
+        "Dojo.Eq(\"parallel children overlap\", new List<string> { \"api GET orders 60.0ms\", \"api GET profile 50.0ms\", \"api GET /dashboard 40.0ms\" }, TopSelfTime(dojoPar, 3));",
+        "var dojoLate = new List<SpanRec> { new(\"p\", null, \"api\", \"job\", \"internal\", 0, 10, \"unset\", null), new(\"c\", \"p\", \"api\", \"async tail\", \"internal\", 5, 20, \"unset\", null) };",
+        "Dojo.Eq(\"a child that outlives its parent is clipped\", new List<string> { \"api async tail 20.0ms\", \"api job 5.0ms\" }, TopSelfTime(dojoLate, 5));",
+        "record SpanRec(string Id, string? Parent, string Service, string Name, string Kind, double Start, double Dur, string Status, int? HttpStatus);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Which hop broke the trace?",
+      "prompt": [
+        "For a second request, the access logs give, in call order, the `traceparent` each hop **received** (null when there was none):",
+        "`record Hop(string Service, string? Received, string SentSpanId);` where `SentSpanId` is the span id the hop put in the header it sent on.",
+        "",
+        "Write `string BrokenHop(List<Hop> hops)`. The first hop is the edge and starts the trace (its `Received` is ignored). For every later hop,",
+        "the received header must be valid (paste in your `TryParse`), carry the **same trace id** as the previous valid header, and name the",
+        "previous hop's `SentSpanId` as its parent. Return the first hop that fails as",
+        "`\"{Service}: no traceparent\"`, `\"{Service}: invalid traceparent\"`, `\"{Service}: new trace id\"` or `\"{Service}: wrong parent\"`,",
+        "or `\"intact\"`."
+      ],
+      "starter": [
+        "string BrokenHop(List<Hop> hops)",
+        "{",
+        "    return \"intact\";",
+        "}",
+        "",
+        "// paste TryParse here"
+      ],
+      "solution": [
+        "string BrokenHop(List<Hop> hops)",
+        "{",
+        "    string? trace = null;",
+        "    for (var i = 1; i < hops.Count; i++)",
+        "    {",
+        "        var h = hops[i];",
+        "        if (h.Received is null) return $\"{h.Service}: no traceparent\";",
+        "        if (!TryParse(h.Received, out var t, out var parent, out _)) return $\"{h.Service}: invalid traceparent\";",
+        "        if (trace is not null && t != trace) return $\"{h.Service}: new trace id\";",
+        "        if (parent != hops[i - 1].SentSpanId) return $\"{h.Service}: wrong parent\";",
+        "        trace = t;",
+        "    }",
+        "    return \"intact\";",
+        "}",
+        "",
+        "bool TryParse(string? header, out string traceId, out string parentId, out bool sampled)",
+        "{",
+        "    traceId = parentId = \"\";",
+        "    sampled = false;",
+        "    var parts = (header ?? \"\").Trim().Split('-');",
+        "    if (parts.Length != 4 || parts[0] != \"00\") return false;",
+        "    static bool Hex(string s, int len) => s.Length == len && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');",
+        "    if (!Hex(parts[1], 32) || !Hex(parts[2], 16) || !Hex(parts[3], 2)) return false;",
+        "    if (parts[1].All(c => c == '0') || parts[2].All(c => c == '0')) return false;",
+        "    traceId = parts[1];",
+        "    parentId = parts[2];",
+        "    sampled = (Convert.ToByte(parts[3], 16) & 1) == 1;",
+        "    return true;",
+        "}"
+      ],
+      "hints": [
+        "Walk from the second hop; remember the trace id of the first valid header you saw.",
+        "Order of checks: missing, invalid, a different trace id, then the parent id against `hops[i - 1].SentSpanId`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "const string dojoT = \"46ae7e540484dd36a9df49aab2401a3f\";",
+        "var dojoGood = new List<Hop> { new(\"edge\", null, \"1111111111111111\"), new(\"shop\", $\"00-{dojoT}-1111111111111111-01\", \"2222222222222222\"),",
+        "    new(\"inventory\", $\"00-{dojoT}-2222222222222222-01\", \"3333333333333333\") };",
+        "Dojo.Eq(\"intact\", \"intact\", BrokenHop(dojoGood));",
+        "Dojo.Eq(\"a worker that never got a header\", \"inventory: no traceparent\", BrokenHop([dojoGood[0], dojoGood[1], dojoGood[2] with { Received = null }]));",
+        "Dojo.Eq(\"a proxy that upper-cased it\", \"shop: invalid traceparent\", BrokenHop([dojoGood[0], dojoGood[1] with { Received = $\"00-{dojoT.ToUpperInvariant()}-1111111111111111-01\" }, dojoGood[2]]));",
+        "Dojo.Eq(\"a service that started its own trace\", \"inventory: new trace id\", BrokenHop([dojoGood[0], dojoGood[1], dojoGood[2] with { Received = \"00-0af7651916cd43dd8448eb211c80319c-2222222222222222-01\" }]));",
+        "Dojo.Eq(\"a header forwarded unchanged (the old parent)\", \"inventory: wrong parent\", BrokenHop([dojoGood[0], dojoGood[1], dojoGood[2] with { Received = $\"00-{dojoT}-1111111111111111-01\" }]));",
+        "record Hop(string Service, string? Received, string SentSpanId);"
+      ]
+    }
+  ]
+}

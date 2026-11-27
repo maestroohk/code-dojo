@@ -1,0 +1,179 @@
+{
+  "title": "Semantic conventions: names everyone agrees on",
+  "summary": "Why attribute and span names are standardised, what is stable at the end of 2026 (HTTP, database, RPC) and what is not (messaging), and how to name spans and migrate old attributes.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Same names, every language, every vendor",
+      "body": [
+        "The **semantic conventions** (semconv) name the attributes, span names and metrics for common operations, so a dashboard or an alert",
+        "works whatever library or language produced the data. They are versioned (v1.45.0 came out on 2 November 2026) and every part has",
+        "a stability level.",
+        "",
+        "| Area | Status (semconv 1.45, Nov 2026) | Key names |",
+        "|---|---|---|",
+        "| HTTP spans and metrics | **stable** (since 1.23, 2023) | `http.request.method`, `http.route`, `http.response.status_code`, `url.full`, `url.path`, `server.address`, `error.type`; metric `http.server.request.duration` (seconds) |",
+        "| Database client spans and metrics | **stable** (core attributes; per-database pages vary) | `db.system.name`, `db.namespace`, `db.collection.name`, `db.operation.name`, `db.query.text`, `db.query.summary` |",
+        "| RPC (gRPC, Dubbo) | **stable since 1.45** | `rpc.system`, `rpc.method`, call duration metrics |",
+        "| Messaging | **development** (still changing: 1.45 renamed `messaging.system` to `messaging.system.name`) | `messaging.system.name`, `messaging.operation.type`, `messaging.destination.name` |",
+        "| Resource basics | `service.name` stable | `service.version`, `deployment.environment.name` |",
+        "",
+        "Older instrumentation still emits the pre-stable names (`http.method`, `http.status_code`, `db.statement`, `db.system`). Most",
+        "instrumentations let you migrate with `OTEL_SEMCONV_STABILITY_OPT_IN` (`http/dup` or `database/dup` emit both while dashboards move).",
+        "The .NET ASP.NET Core and HttpClient instrumentation and Npgsql 10 already emit the stable names: the lab's spans show",
+        "`db.query.text` and `db.system.name`. For messaging, pin your library version and expect renames."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the old (pre-stable) attribute to its stable name.",
+      "pairs": [
+        ["`http.method`", "`http.request.method`"],
+        ["`http.status_code`", "`http.response.status_code`"],
+        ["`http.url`", "`url.full`"],
+        ["`db.statement`", "`db.query.text`"],
+        ["`db.system`", "`db.system.name`"],
+        ["`db.name`", "`db.namespace`"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "What should the **server** span of `GET /api/products/17` be named?",
+      "options": ["`GET /api/products/{id}` (method and route template)", "`GET /api/products/17`", "`/api/products/17`", "`ProductsController.Get`"],
+      "answer": 0,
+      "explain": "Span names must be low-cardinality: `{method} {route}`. The raw path makes a new name per product, so the backend's operation list, its latency stats and any span-name metric blow up. The concrete path goes in `url.path`. Without a route (a 404 that matched nothing) the name is just the method."
+    },
+    {
+      "type": "sort",
+      "prompt": "Stable, or still in development, as of semconv 1.45 (November 2026)?",
+      "buckets": ["Stable", "Development"],
+      "items": [
+        ["`http.route`", 0],
+        ["`http.server.request.duration`", 0],
+        ["`db.query.text`", 0],
+        ["`db.system.name`", 0],
+        ["`messaging.destination.name`", 1],
+        ["`messaging.operation.type`", 1],
+        ["`messaging.system.name`", 1]
+      ],
+      "explain": "Build alerts and long-lived dashboards on stable names. Development names can still be renamed in a minor release, as `messaging.system` just was."
+    },
+    {
+      "type": "code",
+      "title": "Name spans by the conventions",
+      "prompt": [
+        "Write two methods.",
+        "",
+        "**`string HttpSpanName(string method, string? route)`**: `\"{METHOD} {route}\"`, or just `\"{METHOD}\"` when the route is null or",
+        "empty. The method is upper-cased; if it is not one of `GET HEAD POST PUT DELETE CONNECT OPTIONS TRACE PATCH`, use `HTTP` instead",
+        "(the conventions' rule for unknown methods, so a scanner sending `FOOBAR` cannot create new span names).",
+        "",
+        "**`string DbSpanName(string? summary, string? operation, string? collection, string? ns, string system)`**, in this order:",
+        "",
+        "1. `summary` if given (`db.query.summary`);",
+        "2. else `\"{operation} {target}\"` when there is an operation and a target, where target is `collection`, else `ns`;",
+        "3. else the target alone (or the operation alone when there is no target);",
+        "4. else `system` (`db.system.name`).",
+        "",
+        "Empty strings count as missing."
+      ],
+      "starter": [
+        "string HttpSpanName(string method, string? route) => method;",
+        "",
+        "string DbSpanName(string? summary, string? operation, string? collection, string? ns, string system) => system;"
+      ],
+      "solution": [
+        "string HttpSpanName(string method, string? route)",
+        "{",
+        "    string[] known = [\"GET\", \"HEAD\", \"POST\", \"PUT\", \"DELETE\", \"CONNECT\", \"OPTIONS\", \"TRACE\", \"PATCH\"];",
+        "    var m = method.ToUpperInvariant();",
+        "    if (!known.Contains(m)) m = \"HTTP\";",
+        "    return string.IsNullOrEmpty(route) ? m : $\"{m} {route}\";",
+        "}",
+        "",
+        "string DbSpanName(string? summary, string? operation, string? collection, string? ns, string system)",
+        "{",
+        "    static string? Val(string? s) => string.IsNullOrEmpty(s) ? null : s;",
+        "    if (Val(summary) is { } sum) return sum;",
+        "    var target = Val(collection) ?? Val(ns);",
+        "    var op = Val(operation);",
+        "    if (op is not null && target is not null) return $\"{op} {target}\";",
+        "    return target ?? op ?? system;",
+        "}"
+      ],
+      "hints": [
+        "`known.Contains(method.ToUpperInvariant())` decides between the method and `HTTP`.",
+        "For the database: `var target = Val(collection) ?? Val(ns);` then the three cases in order."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"GET with a route\", \"GET /api/products/{id:int}\", HttpSpanName(\"GET\", \"/api/products/{id:int}\"));",
+        "Dojo.Eq(\"lower case method\", \"POST /api/checkout\", HttpSpanName(\"post\", \"/api/checkout\"));",
+        "Dojo.Eq(\"no route matched\", \"GET\", HttpSpanName(\"GET\", null));",
+        "Dojo.Eq(\"unknown method\", \"HTTP\", HttpSpanName(\"FOOBAR\", \"\"));",
+        "Dojo.Eq(\"unknown method with a route\", \"HTTP /api/checkout\", HttpSpanName(\"PROPFIND\", \"/api/checkout\"));",
+        "Dojo.Eq(\"a summary wins\", \"SELECT reviews\", DbSpanName(\"SELECT reviews\", \"SELECT\", \"reviews\", \"shop\", \"postgresql\"));",
+        "Dojo.Eq(\"operation and collection\", \"UPDATE stock\", DbSpanName(null, \"UPDATE\", \"stock\", \"shop\", \"postgresql\"));",
+        "Dojo.Eq(\"operation and namespace\", \"SELECT shop\", DbSpanName(\"\", \"SELECT\", null, \"shop\", \"postgresql\"));",
+        "Dojo.Eq(\"target only\", \"shop\", DbSpanName(null, null, \"\", \"shop\", \"postgresql\"));",
+        "Dojo.Eq(\"nothing but the system (what Npgsql names its spans)\", \"postgresql\", DbSpanName(null, null, null, null, \"postgresql\"));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Migrate old attributes",
+      "prompt": [
+        "A legacy service still sends pre-stable names and the platform team rewrites them in the Collector. Write the rule as C#:",
+        "`Dictionary<string, object> Upgrade(Dictionary<string, object> attrs)` returns a **new** dictionary where",
+        "",
+        "- `http.method` → `http.request.method`, `http.status_code` → `http.response.status_code`, `http.url` → `url.full`,",
+        "  `http.target` → `url.path`, `db.statement` → `db.query.text`, `db.system` → `db.system.name`, `db.name` → `db.namespace`;",
+        "- every other key is kept as it is;",
+        "- if both the old and the new name are present, the **new** value wins and the old key is dropped.",
+        "",
+        "Values keep their type (an `int` status code stays an `int`)."
+      ],
+      "starter": [
+        "Dictionary<string, object> Upgrade(Dictionary<string, object> attrs)",
+        "{",
+        "    return new Dictionary<string, object>(attrs);",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, object> Upgrade(Dictionary<string, object> attrs)",
+        "{",
+        "    var renames = new Dictionary<string, string>",
+        "    {",
+        "        [\"http.method\"] = \"http.request.method\", [\"http.status_code\"] = \"http.response.status_code\", [\"http.url\"] = \"url.full\",",
+        "        [\"http.target\"] = \"url.path\", [\"db.statement\"] = \"db.query.text\", [\"db.system\"] = \"db.system.name\", [\"db.name\"] = \"db.namespace\",",
+        "    };",
+        "    var result = new Dictionary<string, object>();",
+        "    foreach (var (k, v) in attrs)",
+        "    {",
+        "        if (renames.TryGetValue(k, out var stable)) { if (!attrs.ContainsKey(stable)) result[stable] = v; }",
+        "        else result[k] = v;",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "A rename map, then one loop: an old key is written under its new name unless the new name is already in the input.",
+        "Do not modify the input dictionary: build a new one."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoOld = new Dictionary<string, object> { [\"http.method\"] = \"GET\", [\"http.status_code\"] = 200, [\"http.target\"] = \"/api/products/7\", [\"app.region\"] = \"eu\" };",
+        "var dojoNew = Upgrade(dojoOld);",
+        "Dojo.Eq(\"keys\", \"app.region,http.request.method,http.response.status_code,url.path\", string.Join(\",\", dojoNew.Keys.Order()));",
+        "Dojo.Check(\"the status code stays an int\", dojoNew.GetValueOrDefault(\"http.response.status_code\") is int dojoCode && dojoCode == 200, \"\");",
+        "Dojo.Eq(\"the input is untouched\", 4, dojoOld.Count);",
+        "Dojo.Check(\"the input still has the old key\", dojoOld.ContainsKey(\"http.method\"), \"\");",
+        "var dojoBoth = Upgrade(new Dictionary<string, object> { [\"db.statement\"] = \"old\", [\"db.query.text\"] = \"SELECT 1\", [\"db.system\"] = \"postgresql\" });",
+        "Dojo.Eq(\"the stable value wins\", \"SELECT 1\", dojoBoth.GetValueOrDefault(\"db.query.text\") as string);",
+        "Dojo.Eq(\"no old keys left\", \"db.query.text,db.system.name\", string.Join(\",\", dojoBoth.Keys.Order()));"
+      ]
+    }
+  ]
+}

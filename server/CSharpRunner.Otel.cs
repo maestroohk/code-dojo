@@ -240,6 +240,13 @@ public sealed partial class CSharpRunner
 
             internal static readonly Dictionary<string, string> SpanService = [];
 
+            /// <summary>The service.name of the provider that exported this span (from the learner's resource), or null.</summary>
+            public static string? Service(Activity? a)
+            {
+                if (a is null) return null;
+                lock (Gate) return SpanService.TryGetValue(a.SpanId.ToHexString(), out var s) ? s : null;
+            }
+
             /// <summary>What the run captured, for the waterfall the check result shows (written when the program exits).</summary>
             internal static void Dump()
             {
