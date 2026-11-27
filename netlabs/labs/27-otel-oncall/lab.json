@@ -3,7 +3,7 @@
   "module": "Observability · OpenTelemetry",
   "minutes": 75,
   "summary": "A real shop (two .NET 10 services and PostgreSQL) instrumented with the OpenTelemetry SDK, an OpenTelemetry Collector, Prometheus, Grafana, Jaeger and Loki. A slow product page, failing checkouts, a service that sends no traces, broken traces, personal data in spans, an alert nobody trusts and a metric whose cardinality is exploding. Find the causes from traces, metrics and logs, fix them, and prove each fix with the same tools.",
-  "download": "The first start downloads about 700 MB (the Collector, Prometheus 3.16, Grafana 13.3, Jaeger 2.23 and Loki 3.7 images; the .NET 10 SDK and PostgreSQL 18 images if you do not have them) and builds two small images (it restores the OpenTelemetry and Npgsql packages, so it needs the internet once). After that the lab runs offline. It uses about 800 MB of memory while running (every container is capped: 2.5 GB in total at most) and a few percent of one CPU.",
+  "download": "The first start downloads about 700 MB (the Collector, Prometheus 3.16, Grafana 13.3, Jaeger 2.23 and Loki 3.7 images; the .NET 10 SDK and PostgreSQL 18 images if you do not have them) and builds two small images (it restores the OpenTelemetry and Npgsql packages, so it needs the internet once). After that the lab runs offline. It uses about 1 GB of memory while running (every container is capped: 2.7 GB in total at most) and a few percent of one CPU.",
   "ready_seconds": 240,
   "nodes": {
     "ops": "your workstation: curl and jq against Prometheus, Jaeger and Loki, the helper commands promq and spans, the services' settings in /work/config, the Collector's config in /work/collector, alert rules in /work/prometheus/rules",
@@ -19,6 +19,7 @@
   "default_node": "ops",
   "ready": [
     { "node": "ops", "cmd": "test -f /work/.seeded" },
+    { "node": "postgres", "cmd": "psql -U shop -d shop -h 127.0.0.1 -tAc 'SELECT count(*) FROM reviews' | grep -qx 500000" },
     { "node": "ops", "cmd": "curl -sf -m 3 http://shop:8080/healthz >/dev/null && curl -sf -m 3 http://inventory:8080/healthz >/dev/null" },
     { "node": "ops", "cmd": "curl -sf -m 3 http://prometheus:9090/-/ready >/dev/null && curl -sf -m 3 http://jaeger:16686/api/v3/services >/dev/null" },
     { "node": "ops", "cmd": "curl -sf -m 3 http://loki:3100/ready >/dev/null && curl -sf -m 3 http://grafana:3000/api/health >/dev/null" }
@@ -31,15 +32,15 @@
       "id": "t1",
       "type": "answer",
       "title": "Which page is slow?",
-      "text": "Customers say \"the shop is slow\". Start where on-call starts: the dashboard. Open Grafana on **http://127.0.0.1:33000** (the home page is the *Shop: RED overview* dashboard: Rate, Errors, Duration per route). Wait a minute for data.\n\nThe same numbers from **ops**, with PromQL:\n\n```\npromq 'histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job=\"shop\"}[5m])))'\n```\n\n`rate(...[5m])` turns the cumulative bucket counters into per-second rates, `sum by (le, http_route)` adds up every instance but keeps the bucket boundary and the route, and `histogram_quantile(0.95, ...)` estimates the latency 95% of requests stay under. Which **route** has the worst p95? Type it as the `http_route` label shows it.",
+      "text": "Customers say \"the shop is slow\". Start where on-call starts: the dashboard. Open Grafana on **http://127.0.0.1:33000** (the home page is the *Shop: RED overview* dashboard: Rate, Errors, Duration per route). Give it two or three minutes after the start: the first requests of a fresh service are slow (JIT, connection pools) and would blur a long window.\n\nThe same numbers from **ops**, with PromQL:\n\n```\npromq 'histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job=\"shop\"}[1m])))'\n```\n\n`rate(...[1m])` turns the cumulative bucket counters into per-second rates, `sum by (le, http_route)` adds up every instance but keeps the bucket boundary and the route, and `histogram_quantile(0.95, ...)` estimates the latency 95% of requests stay under. Which **route** has the worst p95? Type it as the `http_route` label shows it.",
       "answer": ["/api/products/{id:int}", "/api/products/{id}", "GET /api/products/{id:int}", "GET /api/products/{id}"],
       "hints": [
         "Look at the Duration panel, or the promq output: one line per http_route, the value is in seconds.",
-        "The product detail page, `/api/products/{id:int}`: about 100 ms at p95 while the others take a few."
+        "The product detail page, `/api/products/{id:int}`: well over 100 ms at p95 while the others take a few milliseconds."
       ],
       "solution": {
         "note": "`/api/products/{id:int}` (the route template with its constraint, exactly as ASP.NET Core reports it in `http.route`). Low-cardinality labels like the route template are what make this query possible: had the metric been labelled with the raw path (`/api/products/17`), there would be one series per product and the dashboard would be unreadable. p95 of a histogram is an estimate: Prometheus interpolates inside the bucket, so with the default .NET buckets (5, 10, 25, 50, 75, 100, 250 ms...) the answer is only as precise as the bucket it lands in.",
-        "steps": [ { "node": "ops", "cmd": "promq 'histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job=\"shop\"}[5m])))'" } ]
+        "steps": [ { "node": "ops", "cmd": "promq 'histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job=\"shop\"}[1m])))'" } ]
       }
     },
     {
@@ -185,7 +186,7 @@
       "id": "t10",
       "type": "state",
       "title": "Fix the slow page, and prove it",
-      "text": "Back to task 2: the product page reads all 300,000 reviews to find the five newest of one product. On the **postgres** node, look at the plan:\n\n```\npsql -U shop -d shop -c \"EXPLAIN ANALYZE SELECT rating, body FROM reviews WHERE product_id = 7 ORDER BY created DESC LIMIT 5\"\n```\n\n`Seq Scan on reviews` is the cause. Add an index that serves this query (create it without locking out writes, as you would in production). Then **prove** the fix with the same signal that showed the problem: p95 of `/api/products/{id:int}` over the last minute must drop under 25 ms (watch the Duration panel, or `promq` on ops).",
+      "text": "Back to task 2: the product page reads all 500,000 reviews to find the five newest of one product. On the **postgres** node, look at the plan:\n\n```\npsql -U shop -d shop -c \"EXPLAIN ANALYZE SELECT rating, body FROM reviews WHERE product_id = 7 ORDER BY created DESC LIMIT 5\"\n```\n\n`Seq Scan on reviews` is the cause. Add an index that serves this query (create it without locking out writes, as you would in production). Then **prove** the fix with the same signal that showed the problem: p95 of `/api/products/{id:int}` over the last minute must drop under 25 ms (watch the Duration panel, or `promq` on ops).",
       "checks": [
         { "node": "postgres", "cmd": "bash /lab/checks/checks.sh reviews-index", "fail_msg": "There is no index on reviews that starts with product_id yet." },
         { "node": "ops", "cmd": "bash /lab/checks/checks.sh product-fast", "fail_msg": "p95 of /api/products/{id:int} over the last minute is not under 25 ms yet. The window is one minute: give it a minute after the index exists, then check again." }
@@ -195,7 +196,7 @@
         "`psql -U shop -d shop -c 'CREATE INDEX CONCURRENTLY reviews_product_created ON reviews (product_id, created DESC)'`, then on ops: `promq 'histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"shop\", http_route=\"/api/products/{id:int}\"}[1m])))'`"
       ],
       "solution": {
-        "note": "`CREATE INDEX CONCURRENTLY` builds the index without blocking writes (slower, and it cannot run inside a transaction). Then the loop closes: the dashboard that showed the symptom shows the recovery, the trace shows the database span shrink from ~90 ms to well under a millisecond, and the alert (if you had one on latency) resolves. \"Fixed\" means measured, not deployed: say in the incident channel which graph proves it.",
+        "note": "`CREATE INDEX CONCURRENTLY` builds the index without blocking writes (slower, and it cannot run inside a transaction). Then the loop closes: the dashboard that showed the symptom shows the recovery, the trace shows the database span shrink from over 100 ms to well under a millisecond, and the alert (if you had one on latency) resolves. \"Fixed\" means measured, not deployed: say in the incident channel which graph proves it.",
         "steps": [
           { "node": "postgres", "cmd": "psql -U shop -d shop -c 'CREATE INDEX CONCURRENTLY reviews_product_created ON reviews (product_id, created DESC)'" },
           { "node": "ops", "cmd": "sleep 70; promq 'histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"shop\", http_route=\"/api/products/{id:int}\"}[1m])))'" }

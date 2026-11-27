@@ -63,4 +63,4 @@ Service logs are in `/work/logs/` (`shop.log`, `inventory.log`, `collector.log`,
 
 OpenTelemetry names use dots; Prometheus names use underscores and add the unit and `_total` / `_bucket` suffixes. The SDK's `http.server.request.duration` histogram (seconds) becomes `http_server_request_duration_seconds_bucket`, `_sum` and `_count`, with labels `http_route`, `http_request_method`, `http_response_status_code`, and `job` set from `service.name`. In Loki, resource attributes become labels (`service_name`), and `trace_id` / `span_id` are structured metadata you filter with `| trace_id="..."`.
 
-The lab checks your work by asking the real backends, so press **Check** as often as you like. Changes take a few seconds to show up (export every 5 s, scrape every 5 s). Stop the lab when you take a break: it frees about 800 MB of memory.
+The lab checks your work by asking the real backends, so press **Check** as often as you like. Changes take a few seconds to show up (export every 5 s, scrape every 5 s). Stop the lab when you take a break: it frees about 1 GB of memory.

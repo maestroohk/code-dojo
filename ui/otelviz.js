@@ -17,7 +17,7 @@ const s = (tag, attrs = {}, ...kids) => {
   for (const k of kids.flat()) if (k != null) el.append(k instanceof Node ? k : document.createTextNode(String(k)));
   return el;
 };
-const put = (el, ...kids) => el.replaceChildren(...kids.flat().filter(k => k != null && k !== false && k !== ''));
+const put = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false && k !== ''));
 
 export function otelViz(spec) {
   switch (spec?.kind) {
@@ -41,7 +41,9 @@ export function otelResult(t) {
   };
   traces.forEach((tr, i) => {
     const root = rootOf(tr.spans);
-    pick.append(h('button.mini', { type: 'button', onclick: () => show(i) }, `${root?.name || 'trace'} · ${tr.spans.length} span${tr.spans.length > 1 ? 's' : ''}`));
+    const failed = tr.spans.some(x => x.status === 'error');
+    pick.append(h('button.mini', { type: 'button', onclick: () => show(i) },
+      `${i + 1}. ${root?.name || 'trace'} · ${tr.spans.length} span${tr.spans.length > 1 ? 's' : ''}${failed ? ' · error' : ''}`));
   });
   const loose = (t.logs || []).filter(l => !l.traceId);
   const wrap = h('div.out-section.ov-result',
@@ -135,7 +137,10 @@ function traceView(spec, { compact = false, caption } = {}) {
         h('div.ov-lane',
           ticks.slice(1, -1).map(t => h('span.ov-grid', { style: `left:${t * 100}%` })),
           h('span.ov-bar', { style: `left:${left}%;width:${width}%;background:${x.status === 'error' ? 'var(--bad)' : color(x.service)}` }),
-          h('span.ov-dur', { style: left + width > 78 ? `right:${100 - left + 0.8}%` : `left:${left + width + 0.8}%` }, fmtMs(x.dur))));
+          // Near the right edge the label goes inside the end of the bar (a long bar) or just before it (a short one).
+          left + width > 78
+            ? h(`span.ov-dur${width > 14 ? '.in' : ''}`, { style: width > 14 ? `right:${100 - left - width + 0.6}%` : `right:${100 - left + 0.8}%` }, fmtMs(x.dur))
+            : h('span.ov-dur', { style: `left:${left + width + 0.8}%` }, fmtMs(x.dur))));
       const toggle = () => { openId = openId === x.id ? null : x.id; draw(); };
       row.addEventListener('click', toggle);
       row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
@@ -237,9 +242,17 @@ function metricsView(spec) {
     for (const a of spec.annotations || []) {
       g.append(s('line', { x1: X(a.t), x2: X(a.t), y1: T, y2: H - B, class: 'ov-annot' }), s('text', { x: X(a.t) + 4, y: T + 11, class: 'ov-annot-label' }, a.label));
     }
-    for (const t of spec.thresholds || []) {
-      g.append(s('line', { x1: L, x2: W - R, y1: Y(t.value), y2: Y(t.value), class: `ov-threshold ${t.kind || 'bad'}` }),
-        s('text', { x: W - R - 4, y: Y(t.value) - 5, class: `ov-threshold-label ${t.kind || 'bad'}`, 'text-anchor': 'end' }, t.label || fmtVal(t.value, spec.unit)));
+    // Threshold labels sit above their line; when two lines are close, the lower one's label goes under its line,
+    // and when they are still too close, labels step left so they never overprint.
+    const used = [];
+    for (const t of [...(spec.thresholds || [])].sort((a, b) => b.value - a.value)) {
+      const ly = Y(t.value);
+      let y = ly - 5, x = W - R - 4;
+      if (used.some(u => Math.abs(u.y - y) < 13)) y = ly + 13;
+      while (used.some(u => Math.abs(u.y - y) < 13 && u.x === x)) x -= 230;
+      used.push({ y, x });
+      g.append(s('line', { x1: L, x2: W - R, y1: ly, y2: ly, class: `ov-threshold ${t.kind || 'bad'}` }),
+        s('text', { x, y, class: `ov-threshold-label ${t.kind || 'bad'}`, 'text-anchor': 'end' }, t.label || fmtVal(t.value, spec.unit)));
     }
     for (const x of live) {
       const pts = (x.points || []).filter(p => p[1] != null);
