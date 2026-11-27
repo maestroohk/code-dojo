@@ -1,0 +1,160 @@
+{
+  "title": "Runbooks, triage and the incident routine",
+  "summary": "What a runbook holds, the first five minutes of a page, mitigate before you diagnose, the roles in an incident, and the timeline a blameless review is built on.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A runbook you can follow at 3 a.m.",
+      "body": [
+        "Every paging alert links a runbook. A good one is short and concrete:",
+        "",
+        "1. **What it means** for users, in one sentence (\"checkouts are failing faster than the SLO allows\").",
+        "2. **First checks**, as links and commands: the dashboard, the Jaeger search for `error=true` on that route, the Loki query, recent",
+        "   deploys (`kubectl rollout history`), the dependency's status page.",
+        "3. **Mitigations**, safest first: roll back the last deploy, scale up, turn off a feature flag, fail over, shed load.",
+        "4. **Escalation**: who owns the dependency, when to call them.",
+        "",
+        "The first five minutes of a page: **acknowledge** (so nobody else starts in parallel), look at the **scope** (one route or all, one",
+        "region or all, since when), check **what changed** (deploys, config, flags, traffic), then **mitigate**. Restoring service comes",
+        "before finding the root cause: a rollback that fixes it in two minutes beats a perfect diagnosis in forty. The trace below is",
+        "where the lab's checkout incident starts: one red path, one log line with the code."
+      ],
+      "otelviz": {"kind":"trace","traceId":"46ae7e540484dd36a9df49aab2401a3f","spans":[{"id":"20d89fcba3b16e62","service":"shop","name":"POST /api/checkout","scope":"Microsoft.AspNetCore","kind":"server","start":0.0,"dur":6.24,"status":"error","attrs":{"error.type":"502","http.request.method":"POST","http.response.status_code":"502","http.route":"/api/checkout","server.address":"shop","server.port":"8080","url.path":"/api/checkout"}},{"id":"86d88d2ffaed6bdf","parent":"20d89fcba3b16e62","service":"shop","name":"checkout","scope":"Shop.App","kind":"internal","start":0.08,"dur":6.1,"status":"error","statusMsg":"reservation failed","attrs":{"app.cart.size":"3","app.payment.method":"voucher","user.email":"a5a82efa793395d5867756bd11bc23ce31c5b3ebcfebec0dd4980eb661d827a5"}},{"id":"9e324d19633e0502","parent":"86d88d2ffaed6bdf","service":"shop","name":"POST","scope":"System.Net.Http","kind":"client","start":0.11,"dur":5.42,"status":"unset","attrs":{"http.request.method":"POST","http.response.status_code":"200","server.address":"inventory","server.port":"8080","url.full":"http://inventory:8080/reservations"}},{"id":"8b13f77f47f9552c","parent":"9e324d19633e0502","service":"inventory","name":"POST /reservations","scope":"Microsoft.AspNetCore","kind":"server","start":0.35,"dur":4.96,"status":"unset","attrs":{"http.request.method":"POST","http.response.status_code":"200","http.route":"/reservations","server.address":"inventory","server.port":"8080","url.path":"/reservations"}},{"id":"5dcf35700d223c90","parent":"8b13f77f47f9552c","service":"inventory","name":"postgresql","scope":"Npgsql","kind":"client","start":0.45,"dur":4.8,"status":"unset","attrs":{"db.namespace":"shop","db.query.text":"UPDATE stock SET qty = qty - $1 WHERE product_id = $2 AND qty >= $1","db.system.name":"postgresql","server.address":"postgres"},"events":[{"t":5.24,"name":"received-first-response","attrs":{}}]},{"id":"af0a53e8d8d8c2f5","parent":"86d88d2ffaed6bdf","service":"shop","name":"POST","scope":"System.Net.Http","kind":"client","start":5.58,"dur":0.52,"status":"error","attrs":{"error.type":"409","http.request.method":"POST","http.response.status_code":"409","server.address":"inventory","server.port":"8080","url.full":"http://inventory:8080/reservations"}},{"id":"6ea506ba007761e4","parent":"af0a53e8d8d8c2f5","service":"inventory","name":"POST /reservations","scope":"Microsoft.AspNetCore","kind":"server","start":5.85,"dur":0.14,"status":"unset","attrs":{"http.request.method":"POST","http.response.status_code":"409","http.route":"/reservations","server.address":"inventory","server.port":"8080","url.path":"/reservations"}}],"logs":[{"t":5.94,"level":"Warning","service":"inventory","body":"Stock conflict on sku 12","template":"Stock conflict on sku {Sku}","traceId":"46ae7e540484dd36a9df49aab2401a3f","spanId":"6ea506ba007761e4","attrs":{"Sku":"12"}},{"t":6.17,"level":"Error","service":"shop","body":"Reservation failed for sku 12: stock conflict in warehouse eu-2 (code INV-5821)","template":"Reservation failed for sku {Sku}: {Reason} (code {Code})","traceId":"46ae7e540484dd36a9df49aab2401a3f","spanId":"86d88d2ffaed6bdf","attrs":{"Code":"INV-5821","Reason":"stock conflict in warehouse eu-2","Sku":"12"}}]}
+    },
+    {
+      "type": "order",
+      "prompt": "You are paged: `CheckoutErrorBudgetBurn`. Put the first steps in order.",
+      "lines": [
+        "Acknowledge the page so the team knows someone is on it",
+        "Open the dashboard: which route, since when, how bad",
+        "Check what changed: deploys, config, feature flags in the last hour",
+        "Mitigate: roll back the 13:05 deploy",
+        "Confirm recovery on the same burn-rate panel",
+        "Post an update in the incident channel with the trace id that shows the failure"
+      ],
+      "also": [[
+        "Acknowledge the page so the team knows someone is on it",
+        "Open the dashboard: which route, since when, how bad",
+        "Check what changed: deploys, config, feature flags in the last hour",
+        "Mitigate: roll back the 13:05 deploy",
+        "Post an update in the incident channel with the trace id that shows the failure",
+        "Confirm recovery on the same burn-rate panel"
+      ]]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Errors started at 13:05, a deploy went out at 13:04, and you have a promising theory about a database lock. What do you do first?",
+      "options": ["Roll back the 13:04 deploy, then investigate with the pressure off", "Investigate the lock theory until you are sure", "Restart the database", "Wait for the alert to resolve on its own"],
+      "answer": 0,
+      "explain": "Correlated change + a cheap, reversible mitigation = do it now. If the rollback does not help, you have learnt something too. Restarting a database is neither cheap nor obviously related."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: on-call",
+      "body": "The commands you use during and right after a page.",
+      "toolkit": [
+        { "cmd": "amtool silence add alertname=X service=checkout --duration=2h --comment='migration OPS-88'", "what": "Silence a known, planned alert with an end and a reason.",
+          "flags": [["--duration", "always set an end"], ["--comment", "who and why: the next on-call reads it"], ["amtool silence query", "what is silenced right now"]],
+          "example": "amtool --alertmanager.url=http://alertmanager:9093 silence add alertname=DiskFillingUp instance=db-1 --duration=4h --comment='resize in progress, OPS-88'", "when": "planned maintenance, never to make an incident quiet" },
+        { "cmd": "amtool alert query severity=page", "what": "What is firing right now, as Alertmanager sees it (after grouping and inhibition).",
+          "flags": [["severity=page", "label matchers"], ["--active / --silenced / --inhibited", "which state"]],
+          "example": "amtool --alertmanager.url=http://alertmanager:9093 alert query --inhibited service=checkout", "when": "\"why didn't I get paged for X?\"" },
+        { "cmd": "kubectl rollout undo deployment/shop", "what": "Roll back to the previous ReplicaSet: the most common mitigation.",
+          "flags": [["rollout history", "what changed and when"], ["--to-revision=N", "a specific revision"], ["rollout status", "wait for it to finish"]],
+          "example": "kubectl rollout history deployment/shop && kubectl rollout undo deployment/shop && kubectl rollout status deployment/shop --timeout=120s", "when": "errors started with a deploy" },
+        { "cmd": "curl -sG http://jaeger:16686/api/v3/traces --data-urlencode query.service_name=shop ...", "what": "Pull failing traces from a script or runbook instead of clicking.",
+          "flags": [["query.operation_name", "one span name"], ["query.start_time_min/max", "RFC 3339 times"], ["query.duration_min", "slow ones only, e.g. 500ms"]],
+          "example": "spans shop 300 'POST /api/checkout' | grep ERROR | head", "when": "a runbook step: \"show me three failing requests\"" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the incident role to its job.",
+      "pairs": [
+        ["Incident commander", "decides, delegates, keeps the timeline; does not debug"],
+        ["Operations lead", "investigates and changes the system"],
+        ["Communications lead", "status page and stakeholder updates on a schedule"],
+        ["Scribe", "writes down who did what, when, with links to graphs"]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Build the incident timeline",
+      "prompt": [
+        "The review starts from a timeline. Events come from several tools: `record Event(string At, string Source, string Text);` with `At`",
+        "as `HH:mm:ss` and `Source` one of `deploy`, `alert`, `log`, `human`.",
+        "",
+        "Write `List<string> Timeline(List<Event> events)`:",
+        "",
+        "- sorted by time (ties keep the input order);",
+        "- each line `\"{At} [{source}] {Text}\"`;",
+        "- consecutive `log` events with the **same text** collapse into one line, ending ` (×{n})` when n > 1;",
+        "- the first `alert` line gets the suffix `\" <- detected {m} min after the first deploy before it\"` when there is a deploy earlier",
+        "  (minutes rounded down; skip the suffix otherwise)."
+      ],
+      "starter": [
+        "List<string> Timeline(List<Event> events)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Timeline(List<Event> events)",
+        "{",
+        "    var sorted = events.Select((e, i) => (e, i)).OrderBy(x => TimeSpan.Parse(x.e.At)).ThenBy(x => x.i).Select(x => x.e).ToList();",
+        "    var lines = new List<string>();",
+        "    var alertSeen = false;",
+        "    for (var i = 0; i < sorted.Count; i++)",
+        "    {",
+        "        var e = sorted[i];",
+        "        var n = 1;",
+        "        while (e.Source == \"log\" && i + 1 < sorted.Count && sorted[i + 1].Source == \"log\" && sorted[i + 1].Text == e.Text) { n++; i++; }",
+        "        var line = $\"{e.At} [{e.Source}] {e.Text}\" + (n > 1 ? $\" (×{n})\" : \"\");",
+        "        if (e.Source == \"alert\" && !alertSeen)",
+        "        {",
+        "            alertSeen = true;",
+        "            var deploy = sorted.Take(i).FirstOrDefault(d => d.Source == \"deploy\");",
+        "            if (deploy is not null)",
+        "                line += $\" <- detected {(int)(TimeSpan.Parse(e.At) - TimeSpan.Parse(deploy.At)).TotalMinutes} min after the first deploy before it\";",
+        "        }",
+        "        lines.Add(line);",
+        "    }",
+        "    return lines;",
+        "}"
+      ],
+      "hints": [
+        "Sort with the index as a tie-breaker: `events.Select((e, i) => (e, i)).OrderBy(x => TimeSpan.Parse(x.e.At)).ThenBy(x => x.i)`.",
+        "Collapse with an inner `while` that looks at the next event."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoEvents = new List<Event> {",
+        "    new(\"13:07:30\", \"alert\", \"CheckoutErrorBudgetBurn firing (burn 67x)\"),",
+        "    new(\"13:05:02\", \"log\", \"Reservation failed for sku 12: stock conflict (code INV-5821)\"),",
+        "    new(\"13:04:10\", \"deploy\", \"inventory 2.8.0 rolled out\"),",
+        "    new(\"13:05:02\", \"log\", \"Reservation failed for sku 12: stock conflict (code INV-5821)\"),",
+        "    new(\"13:05:09\", \"log\", \"Reservation failed for sku 12: stock conflict (code INV-5821)\"),",
+        "    new(\"13:09:00\", \"human\", \"rolled back inventory to 2.7.4\"),",
+        "    new(\"13:19:00\", \"alert\", \"CheckoutErrorBudgetBurn resolved\") };",
+        "Dojo.Eq(\"INC-2291\", new List<string> {",
+        "    \"13:04:10 [deploy] inventory 2.8.0 rolled out\",",
+        "    \"13:05:02 [log] Reservation failed for sku 12: stock conflict (code INV-5821) (×3)\",",
+        "    \"13:07:30 [alert] CheckoutErrorBudgetBurn firing (burn 67x) <- detected 3 min after the first deploy before it\",",
+        "    \"13:09:00 [human] rolled back inventory to 2.7.4\",",
+        "    \"13:19:00 [alert] CheckoutErrorBudgetBurn resolved\" }, Timeline(dojoEvents));",
+        "Dojo.Eq(\"no deploy, no suffix\", new List<string> { \"01:00:00 [alert] DiskFull\" }, Timeline([new(\"01:00:00\", \"alert\", \"DiskFull\")]));",
+        "record Event(string At, string Source, string Text);"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "27-otel-oncall",
+      "task": ["t4", "t5"],
+      "title": "Live lab: the service that went dark",
+      "prompt": "In the live lab **OpenTelemetry on-call**, find out why inventory sends no telemetry and fix its exporter settings (task 4), then make its traces complete again with the right sampler (task 5).",
+      "explain": "Missing telemetry is an incident too: alert on it."
+    }
+  ]
+}

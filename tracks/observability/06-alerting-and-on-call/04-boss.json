@@ -1,0 +1,169 @@
+{
+  "title": "Boss: the 3 a.m. page",
+  "summary": "An Alertmanager webhook wakes you. From its payload, the failing trace, the logs and the deploy history, produce the first incident update and the mitigation, the way a calm on-call engineer would.",
+  "minutes": 30,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The page",
+      "body": [
+        "Your bot receives Alertmanager's webhook (the real JSON format, `version: \"4\"`), and has access to Jaeger, Loki and the deploy",
+        "log. Build the three pieces of the first response: what fired, what the telemetry says, what to roll back."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Read the webhook",
+      "prompt": [
+        "Write `List<string> Summarize(string json)` for an Alertmanager webhook payload: one line per alert in `alerts`, in order:",
+        "",
+        "`\"{STATUS} {alertname} service={service} since {HH:mm} runbook={runbook_url}\"`",
+        "",
+        "- `STATUS` is the alert's `status` upper-cased (`FIRING` / `RESOLVED`);",
+        "- `alertname` and `service` come from its `labels`, `runbook_url` from its `annotations` (`-` when missing);",
+        "- `since` is `startsAt` (an RFC 3339 time) in UTC, as `HH:mm`.",
+        "",
+        "Use `System.Text.Json` (`JsonDocument`)."
+      ],
+      "starter": [
+        "List<string> Summarize(string json)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Summarize(string json)",
+        "{",
+        "    using var doc = System.Text.Json.JsonDocument.Parse(json);",
+        "    var lines = new List<string>();",
+        "    foreach (var a in doc.RootElement.GetProperty(\"alerts\").EnumerateArray())",
+        "    {",
+        "        string Get(string section, string key) =>",
+        "            a.TryGetProperty(section, out var s) && s.TryGetProperty(key, out var v) ? v.GetString() ?? \"-\" : \"-\";",
+        "        var since = DateTimeOffset.Parse(a.GetProperty(\"startsAt\").GetString()!).UtcDateTime;",
+        "        lines.Add($\"{a.GetProperty(\"status\").GetString()!.ToUpperInvariant()} {Get(\"labels\", \"alertname\")} service={Get(\"labels\", \"service\")} since {since:HH:mm} runbook={Get(\"annotations\", \"runbook_url\")}\");",
+        "    }",
+        "    return lines;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoJson = \"\"\"",
+        "{ \"version\": \"4\", \"status\": \"firing\", \"receiver\": \"storefront-pager\", \"groupKey\": \"{}:{alertname=\\\"CheckoutErrorBudgetBurn\\\"}\",",
+        "  \"commonLabels\": { \"severity\": \"page\" },",
+        "  \"alerts\": [",
+        "    { \"status\": \"firing\", \"labels\": { \"alertname\": \"CheckoutErrorBudgetBurn\", \"service\": \"checkout\", \"severity\": \"page\" },",
+        "      \"annotations\": { \"summary\": \"Checkout is burning its error budget 67x\", \"runbook_url\": \"https://runbooks.example.com/shop/checkout-errors\" },",
+        "      \"startsAt\": \"2026-11-27T03:07:30.512+01:00\", \"endsAt\": \"0001-01-01T00:00:00Z\", \"fingerprint\": \"a1b2\" },",
+        "    { \"status\": \"resolved\", \"labels\": { \"alertname\": \"TargetDown\", \"service\": \"inventory\", \"severity\": \"page\" },",
+        "      \"annotations\": {}, \"startsAt\": \"2026-11-27T01:55:00Z\", \"endsAt\": \"2026-11-27T02:01:00Z\", \"fingerprint\": \"c3d4\" } ] }",
+        "\"\"\";",
+        "Dojo.Eq(\"the page\", new List<string> {",
+        "    \"FIRING CheckoutErrorBudgetBurn service=checkout since 02:07 runbook=https://runbooks.example.com/shop/checkout-errors\",",
+        "    \"RESOLVED TargetDown service=inventory since 01:55 runbook=-\" }, Summarize(dojoJson));"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "What the telemetry says",
+      "prompt": [
+        "From Jaeger you have the failing trace's spans, `record Span(string Id, string? Parent, string Service, string Name, string Status, int? HttpStatus);`,",
+        "and from Loki its log lines, `record Log(string SpanId, string Level, string Body, string? Code);`.",
+        "",
+        "Write `string Finding(List<Span> spans, List<Log> logs)`:",
+        "",
+        "- the **root cause span**: the error span with no error descendant (first in list order if several);",
+        "- the **callee**: its child span in another service, if any;",
+        "- the **evidence**: the first `Error` (else `Warning`) log line written in the root cause span, its parent, or the callee;",
+        "",
+        "as `\"{Service} {Name} -> {HttpStatus} from {callee.Service}; log: {Body} [{Code}]\"`. Leave out ` -> ...` without a status,",
+        "`from ...` without a callee, and ` [{Code}]` without a code; with no log write `log: none`."
+      ],
+      "starter": [
+        "string Finding(List<Span> spans, List<Log> logs)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Finding(List<Span> spans, List<Log> logs)",
+        "{",
+        "    bool ErrorBelow(Span s) => spans.Where(c => c.Parent == s.Id).Any(c => c.Status == \"error\" || ErrorBelow(c));",
+        "    var cause = spans.First(s => s.Status == \"error\" && !ErrorBelow(s));",
+        "    var callee = spans.FirstOrDefault(c => c.Parent == cause.Id && c.Service != cause.Service);",
+        "    var ids = new HashSet<string?> { cause.Id, cause.Parent, callee?.Id };",
+        "    var mine = logs.Where(l => ids.Contains(l.SpanId)).ToList();",
+        "    var log = mine.FirstOrDefault(l => l.Level == \"Error\") ?? mine.FirstOrDefault(l => l.Level == \"Warning\");",
+        "    var text = $\"{cause.Service} {cause.Name}\";",
+        "    if (cause.HttpStatus is int code) text += $\" -> {code}\";",
+        "    if (callee is not null) text += $\" from {callee.Service}\";",
+        "    text += log is null ? \"; log: none\" : $\"; log: {log.Body}\" + (log.Code is null ? \"\" : $\" [{log.Code}]\");",
+        "    return text;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSpans = new List<Span> {",
+        "    new(\"20d8\", null, \"shop\", \"POST /api/checkout\", \"error\", 502),",
+        "    new(\"86d8\", \"20d8\", \"shop\", \"checkout\", \"error\", null),",
+        "    new(\"9e32\", \"86d8\", \"shop\", \"POST\", \"unset\", 200),",
+        "    new(\"8b13\", \"9e32\", \"inventory\", \"POST /reservations\", \"unset\", 200),",
+        "    new(\"af0a\", \"86d8\", \"shop\", \"POST\", \"error\", 409),",
+        "    new(\"6ea5\", \"af0a\", \"inventory\", \"POST /reservations\", \"unset\", 409) };",
+        "var dojoLogs = new List<Log> {",
+        "    new(\"6ea5\", \"Warning\", \"Stock conflict on sku 12\", null),",
+        "    new(\"86d8\", \"Error\", \"Reservation failed for sku 12: stock conflict in warehouse eu-2 (code INV-5821)\", \"INV-5821\") };",
+        "Dojo.Eq(\"the recorded failure\", \"shop POST -> 409 from inventory; log: Reservation failed for sku 12: stock conflict in warehouse eu-2 (code INV-5821) [INV-5821]\", Finding(dojoSpans, dojoLogs));",
+        "Dojo.Eq(\"only the callee's warning\", \"shop POST -> 409 from inventory; log: Stock conflict on sku 12\", Finding(dojoSpans, dojoLogs.Take(1).ToList()));",
+        "Dojo.Eq(\"no logs\", \"shop POST -> 409 from inventory; log: none\", Finding(dojoSpans, new List<Log>()));",
+        "record Span(string Id, string? Parent, string Service, string Name, string Status, int? HttpStatus);",
+        "record Log(string SpanId, string Level, string Body, string? Code);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "What to roll back",
+      "prompt": [
+        "Deploys are `record Deploy(string Service, string Version, string Previous, DateTime At);`. Write",
+        "`string Mitigation(List<Deploy> deploys, string[] services, DateTime errorsSince)`:",
+        "",
+        "- consider deploys of any of `services` (the ones in the failing trace) that happened **at most 30 minutes before** `errorsSince`",
+        "  (and not after it);",
+        "- pick the **latest** of them and return `\"roll back {Service} {Version} -> {Previous} (deployed {m} min before the errors)\"`",
+        "  (whole minutes, rounded down);",
+        "- with none, return `\"no recent deploy of {services joined by , }: escalate to the owners\"`."
+      ],
+      "starter": [
+        "string Mitigation(List<Deploy> deploys, string[] services, DateTime errorsSince)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Mitigation(List<Deploy> deploys, string[] services, DateTime errorsSince)",
+        "{",
+        "    var d = deploys.Where(x => services.Contains(x.Service) && x.At <= errorsSince && errorsSince - x.At <= TimeSpan.FromMinutes(30))",
+        "        .OrderByDescending(x => x.At).FirstOrDefault();",
+        "    return d is null",
+        "        ? $\"no recent deploy of {string.Join(\", \", services)}: escalate to the owners\"",
+        "        : $\"roll back {d.Service} {d.Version} -> {d.Previous} (deployed {(int)(errorsSince - d.At).TotalMinutes} min before the errors)\";",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoAt = new DateTime(2026, 11, 27, 2, 5, 0, DateTimeKind.Utc);",
+        "var dojoDeploys = new List<Deploy> {",
+        "    new(\"shop\", \"5.2.0\", \"5.1.9\", dojoAt.AddHours(-20)),",
+        "    new(\"inventory\", \"2.8.0\", \"2.7.4\", dojoAt.AddMinutes(-1).AddSeconds(-10)),",
+        "    new(\"search\", \"9.0.1\", \"9.0.0\", dojoAt.AddMinutes(-3)),",
+        "    new(\"shop\", \"5.2.1\", \"5.2.0\", dojoAt.AddMinutes(-12)),",
+        "    new(\"inventory\", \"2.8.1\", \"2.8.0\", dojoAt.AddMinutes(4)) };",
+        "Dojo.Eq(\"the latest relevant deploy\", \"roll back inventory 2.8.0 -> 2.7.4 (deployed 1 min before the errors)\", Mitigation(dojoDeploys, [\"shop\", \"inventory\"], dojoAt));",
+        "Dojo.Eq(\"only shop in the trace\", \"roll back shop 5.2.1 -> 5.2.0 (deployed 12 min before the errors)\", Mitigation(dojoDeploys, [\"shop\"], dojoAt));",
+        "Dojo.Eq(\"nothing recent\", \"no recent deploy of payments: escalate to the owners\", Mitigation(dojoDeploys, [\"payments\"], dojoAt));",
+        "record Deploy(string Service, string Version, string Previous, DateTime At);"
+      ]
+    }
+  ]
+}

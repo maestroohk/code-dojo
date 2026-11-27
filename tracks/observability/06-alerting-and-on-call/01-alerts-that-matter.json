@@ -1,0 +1,191 @@
+{
+  "title": "Alerts that page for the right reasons",
+  "summary": "Page on symptoms users feel, ticket the rest; for:, labels and annotations; Alertmanager routing, grouping and inhibition.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Symptoms page, causes explain",
+      "body": [
+        "A page wakes a human. It must be **urgent, actionable and real**. So:",
+        "",
+        "- **Page on symptoms** users feel: error budget burn, checkout latency over the SLO, \"no orders in 10 minutes\" in business hours.",
+        "- **Do not page on causes**: CPU at 90%, one pod restarted, a disk at 70%. They go on dashboards, or become *tickets* when they",
+        "  predict a symptom (\"disk full in 4 hours\": `predict_linear(node_filesystem_avail_bytes[6h], 4*3600) < 0`).",
+        "- `for: 5m` keeps a blip from paging; too long and you find out late. Burn-rate rules need only a short `for` because the windows",
+        "  already smooth.",
+        "- Every alert carries `severity` (`page` / `ticket`), the `service` or team that owns it, a `summary` with the numbers, and a",
+        "  `runbook_url`.",
+        "- Alert on **missing** telemetry too: `absent_over_time(up{job=\"inventory\"}[10m])`, or the Collector's `send_failed` counters.",
+        "",
+        "A useful health metric for the alerts themselves: how many pages per week, and what share led to an action. A page nobody acts on",
+        "is a bug in the alert."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Page someone now, or open a ticket for working hours?",
+      "buckets": [
+        "Page",
+        "Ticket or dashboard"
+      ],
+      "items": [
+        [
+          "checkout error budget burning 14× over 1 h and 5 m",
+          0
+        ],
+        [
+          "p99 of the product page over its SLO for 15 minutes",
+          0
+        ],
+        [
+          "no telemetry from inventory for 10 minutes",
+          0
+        ],
+        [
+          "one pod restarted once",
+          1
+        ],
+        [
+          "CPU at 85% on one node",
+          1
+        ],
+        [
+          "disk predicted full in 3 days",
+          1
+        ],
+        [
+          "a certificate expiring in 21 days",
+          1
+        ]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the rule so it pages only after 5 minutes and tells the responder where to start.",
+      "code": [
+        "- alert: ProductPageSlow",
+        "  expr: histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{http_route=\"/api/products/{id:int}\"}[5m]))) > 0.25",
+        "  __1__: 5m",
+        "  __2__:",
+        "    severity: page",
+        "    team: storefront",
+        "  __3__:",
+        "    summary: \"p95 of the product page is {{ $value | humanizeDuration }}\"",
+        "    __4__: https://runbooks.example.com/storefront/product-page-slow"
+      ],
+      "blanks": [
+        "for",
+        "labels",
+        "annotations",
+        "runbook_url"
+      ],
+      "bank": [
+        "wait",
+        "tags",
+        "notes",
+        "link",
+        "keep_firing_for"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Alertmanager: route, group, inhibit, silence",
+      "body": [
+        "Prometheus evaluates rules; **Alertmanager** decides who hears about them:",
+        "",
+        "```yaml",
+        "route:",
+        "  receiver: storefront-tickets",
+        "  group_by: [alertname, service]      # one notification per group, not per series",
+        "  group_wait: 30s                     # wait for siblings before the first message",
+        "  group_interval: 5m                  # then at most one update per group every 5 m",
+        "  repeat_interval: 4h",
+        "  routes:",
+        "    - matchers: [ severity=\"page\" ]",
+        "      receiver: storefront-pager",
+        "inhibit_rules:",
+        "  - source_matchers: [ severity=\"page\" ]",
+        "    target_matchers: [ severity=\"ticket\" ]",
+        "    equal: [service]                   # a page for a service mutes its tickets",
+        "```",
+        "",
+        "- **Grouping** turns \"40 pods are down\" into one message with 40 lines.",
+        "- **Inhibition** mutes symptoms of a known cause (the cluster is down, so do not also page for every service in it).",
+        "- **Silences** (`amtool silence add alertname=X --duration=2h --comment=...`) mute planned work. Always with a comment and an end."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The Kubernetes API of one cluster is down. 60 services in it fire their own alerts. What stops on-call getting 61 pages?",
+      "options": [
+        "An inhibit rule: the cluster-level page mutes service alerts with the same cluster label",
+        "A silence on every alert, added by hand during the incident",
+        "A longer `for:` on every service alert",
+        "Raising every threshold"
+      ],
+      "answer": 0,
+      "explain": "Inhibition encodes \"this cause explains those symptoms\" once, in config. Silences are for planned work; adding 60 by hand in an incident is how real problems get muted too."
+    },
+    {
+      "type": "code",
+      "title": "Group and inhibit like Alertmanager",
+      "prompt": [
+        "Firing alerts are `record Alert(string Name, string Service, string Severity, string Instance);`.",
+        "Write `List<string> Notify(List<Alert> firing)`:",
+        "",
+        "1. **Inhibit**: drop every `ticket` alert whose `Service` also has a firing `page` alert.",
+        "2. **Group** the rest by (`Name`, `Service`).",
+        "3. One line per group: `\"[{SEVERITY}] {Name} {Service}: {n} firing ({instances})\"` with the severity upper-cased (a group's",
+        "   alerts share it; take the first), instances sorted (ordinal) and joined by `, `.",
+        "4. Pages first, then tickets; within each, by name then service (ordinal)."
+      ],
+      "starter": [
+        "List<string> Notify(List<Alert> firing)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Notify(List<Alert> firing)",
+        "{",
+        "    var paged = firing.Where(a => a.Severity == \"page\").Select(a => a.Service).ToHashSet();",
+        "    return firing.Where(a => !(a.Severity == \"ticket\" && paged.Contains(a.Service)))",
+        "        .GroupBy(a => (a.Name, a.Service))",
+        "        .Select(g => (Sev: g.First().Severity, g.Key.Name, g.Key.Service,",
+        "            Line: $\"[{g.First().Severity.ToUpperInvariant()}] {g.Key.Name} {g.Key.Service}: {g.Count()} firing ({string.Join(\", \", g.Select(a => a.Instance).Order(StringComparer.Ordinal))})\"))",
+        "        .OrderBy(x => x.Sev == \"page\" ? 0 : 1).ThenBy(x => x.Name, StringComparer.Ordinal).ThenBy(x => x.Service, StringComparer.Ordinal)",
+        "        .Select(x => x.Line).ToList();",
+        "}"
+      ],
+      "hints": [
+        "Collect the services that have a page first, then filter the tickets out.",
+        "`GroupBy(a => (a.Name, a.Service))` groups by both; order with `x.Sev == \"page\" ? 0 : 1` first."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoFiring = new List<Alert> {",
+        "    new(\"PodRestarting\", \"checkout\", \"ticket\", \"checkout-7d9f\"),",
+        "    new(\"CheckoutErrorBudgetBurn\", \"checkout\", \"page\", \"shop\"),",
+        "    new(\"TargetDown\", \"inventory\", \"page\", \"10.0.0.12:8080\"),",
+        "    new(\"TargetDown\", \"inventory\", \"page\", \"10.0.0.11:8080\"),",
+        "    new(\"DiskFillingUp\", \"postgres\", \"ticket\", \"db-1\") };",
+        "Dojo.Eq(\"Monday 03:12\", new List<string> {",
+        "    \"[PAGE] CheckoutErrorBudgetBurn checkout: 1 firing (shop)\",",
+        "    \"[PAGE] TargetDown inventory: 2 firing (10.0.0.11:8080, 10.0.0.12:8080)\",",
+        "    \"[TICKET] DiskFillingUp postgres: 1 firing (db-1)\" }, Notify(dojoFiring));",
+        "Dojo.Eq(\"nothing firing\", 0, Notify(new List<Alert>()).Count);",
+        "record Alert(string Name, string Service, string Severity, string Instance);"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "27-otel-oncall",
+      "task": "t8",
+      "title": "Live lab: an alert that pages for the right reason",
+      "prompt": "In the live lab **OpenTelemetry on-call**, replace the noisy `ShopSlowRequest` page with a multiwindow burn-rate alert on checkout, check it with `promtool`, reload Prometheus and watch it go pending (task 8).",
+      "explain": "promtool, reload, the rules API: the loop for every alerting change."
+    }
+  ]
+}
