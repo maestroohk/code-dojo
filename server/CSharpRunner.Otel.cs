@@ -306,6 +306,11 @@ public sealed partial class CSharpRunner
                         attrs[kv.Key] = kv.Value;
                     }
                     template ??= r.Body;
+                    // Scopes reach the exporter only with IncludeScopes = true (the OTLP exporter flattens them into attributes too).
+                    r.ForEachScope<object?>((scope, _) =>
+                    {
+                        foreach (var kv in scope) if (kv.Key != "{OriginalFormat}") attrs.TryAdd(kv.Key, kv.Value);
+                    }, null);
                     Add(new DojoLog(r.CategoryName ?? "", r.LogLevel, template, r.FormattedMessage ?? r.Body,
                         r.TraceId == default ? "" : r.TraceId.ToHexString(), r.SpanId == default ? "" : r.SpanId.ToHexString(),
                         attrs, r.Exception?.GetType().Name, ServiceOf(ParentProvider)));

@@ -1,0 +1,277 @@
+{
+  "title": "Tracing an ASP.NET Core service",
+  "summary": "AddOpenTelemetry().WithTracing(): the SDK, the ASP.NET Core instrumentation, your own ActivitySource, and the reasons spans silently go missing.",
+  "minutes": 18,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One call wires the SDK",
+      "body": [
+        "In an ASP.NET Core app the SDK is a service registration (package `OpenTelemetry.Extensions.Hosting`, version 1.20 here):",
+        "",
+        "```csharp",
+        "builder.Services.AddOpenTelemetry()",
+        "    .ConfigureResource(r => r.AddService(\"orders\", serviceVersion: \"2.1.0\"))",
+        "    .WithTracing(t => t",
+        "        .AddSource(\"Orders.Api\")                 // your own ActivitySource(s); wildcards work: \"Orders.*\"",
+        "        .AddAspNetCoreInstrumentation()          // a Server span per request (OpenTelemetry.Instrumentation.AspNetCore)",
+        "        .AddHttpClientInstrumentation()          // a Client span per outgoing call",
+        "        .AddOtlpExporter());                     // to the Collector; reads OTEL_EXPORTER_OTLP_* from the environment",
+        "```",
+        "",
+        "- The **instrumentation** packages subscribe to what ASP.NET Core and HttpClient already emit and turn it into spans with the stable",
+        "  HTTP conventions (`http.route`, `http.response.status_code`, `url.path`, `error.type`).",
+        "- `AddSource` is an allow-list: the SDK listens **only** to sources you name. Database libraries ship their own (`AddNpgsql()`,",
+        "  `AddSource(\"Microsoft.EntityFrameworkCore\")` with `OpenTelemetry.Instrumentation.EntityFrameworkCore`, still a beta package).",
+        "- `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_TRACES_SAMPLER` and the exporter variables override or complement the code,",
+        "  so operations can change them without a rebuild (the live lab does exactly that).",
+        "",
+        "In these exercises you need **no exporter**: the tests add their own processor to the tracer provider you build and read what it",
+        "exports. Everything you see under the results came out of the real SDK."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the setup so the service is called `orders` and both the framework's and your own spans are exported.",
+      "code": [
+        "builder.Services.__1__()",
+        "    .ConfigureResource(r => r.__2__(\"orders\"))",
+        "    .__3__(t => t",
+        "        .__4__(\"Orders.Api\")",
+        "        .AddAspNetCoreInstrumentation()",
+        "        .AddOtlpExporter());"
+      ],
+      "blanks": [
+        "AddOpenTelemetry",
+        "AddService",
+        "WithTracing",
+        "AddSource"
+      ],
+      "bank": [
+        "AddTracing",
+        "AddActivitySource",
+        "WithMetrics",
+        "SetServiceName",
+        "UseOpenTelemetry"
+      ]
+    },
+    {
+      "type": "code",
+      "framework": "web+otel",
+      "title": "Turn on tracing",
+      "prompt": [
+        "The orders API below works but sends no telemetry. Register the OpenTelemetry SDK so that every request produces a **server span**:",
+        "",
+        "- the resource's service name is **`orders`**, version **`2.1.0`**;",
+        "- tracing with the **ASP.NET Core instrumentation**.",
+        "",
+        "**Run checks** starts your server, calls `GET /orders/7`, and reads the spans your tracer provider exported (they are drawn under",
+        "the results)."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "",
+        "var app = builder.Build();",
+        "app.MapGet(\"/orders/{id:int}\", (int id) => Results.Ok(new { id, total = 42.5 }));",
+        "app.Run();"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddOpenTelemetry()",
+        "    .ConfigureResource(r => r.AddService(\"orders\", serviceVersion: \"2.1.0\"))",
+        "    .WithTracing(t => t.AddAspNetCoreInstrumentation());",
+        "",
+        "var app = builder.Build();",
+        "app.MapGet(\"/orders/{id:int}\", (int id) => Results.Ok(new { id, total = 42.5 }));",
+        "app.Run();"
+      ],
+      "hints": [
+        "`builder.Services.AddOpenTelemetry()` returns a builder: chain `.ConfigureResource(...)` and `.WithTracing(...)` on it.",
+        "`.ConfigureResource(r => r.AddService(\"orders\", serviceVersion: \"2.1.0\")).WithTracing(t => t.AddAspNetCoreInstrumentation());`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        var r = await http.GetAsync(\"/orders/7\");",
+        "        DojoWeb.Status(\"GET /orders/7 answers 200\", 200, r);",
+        "        var server = await DojoOtel.Span(a => a.Kind == ActivityKind.Server);",
+        "        Dojo.Check(\"a server span was exported\", server is not null, \"No span reached the tracer provider. Did you call AddOpenTelemetry().WithTracing(t => t.AddAspNetCoreInstrumentation())?\");",
+        "        Dojo.Eq(\"its name is method + route template\", \"GET /orders/{id:int}\", server?.DisplayName);",
+        "        Dojo.Eq(\"http.route\", \"/orders/{id:int}\", DojoOtel.Tag(server, \"http.route\"));",
+        "        Dojo.Eq(\"http.response.status_code\", \"200\", DojoOtel.Tag(server, \"http.response.status_code\"));",
+        "        Dojo.Eq(\"the resource says service.name = orders\", \"orders\", DojoOtel.Service(server));",
+        "    }",
+        "}"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A teammate added `var activity = Source.StartActivity(\"price order\");` and `AddAspNetCoreInstrumentation()`, but no `price order` span ever appears. The server spans do. Most likely cause?",
+      "options": [
+        "The tracer provider has no `AddSource(\"Orders.Api\")`, so nobody listens to that ActivitySource and StartActivity returns null",
+        "Custom spans need their own exporter",
+        "ActivitySource only works inside controllers",
+        "The span name contains a space"
+      ],
+      "answer": 0,
+      "explain": "The SDK only listens to sources it was told about. Forgetting `AddSource` (or a typo in the name) is the most common \"my spans are missing\" bug; it fails silently because `?.` swallows the null. A test that asserts the span exists, like the ones here, catches it."
+    },
+    {
+      "type": "learn",
+      "title": "Your own spans: one ActivitySource per component",
+      "body": [
+        "Create one `ActivitySource` per library or component, as a static, named like a namespace, and register the same name with `AddSource`:",
+        "",
+        "```csharp",
+        "static class Telemetry",
+        "{",
+        "    public static readonly ActivitySource Source = new(\"Orders.Api\");",
+        "}",
+        "",
+        "app.MapPost(\"/orders/{id:int}/price\", (int id, string? coupon) =>",
+        "{",
+        "    using var activity = Telemetry.Source.StartActivity(\"price order\");   // child of the request's server span",
+        "    activity?.SetTag(\"app.order.id\", id);",
+        "    if (coupon == \"EXPIRED\")",
+        "    {",
+        "        activity?.SetStatus(ActivityStatusCode.Error, \"coupon expired\");",
+        "        activity?.SetTag(\"error.type\", \"coupon_expired\");",
+        "        return Results.BadRequest();",
+        "    }",
+        "    return Results.Ok(new { id, total = 37.5 });",
+        "});",
+        "```",
+        "",
+        "- `StartActivity` makes the new span a child of `Activity.Current` (the server span), and `using` ends it.",
+        "- Add attributes that answer the questions you will be asked in an incident (which order, which plan, how many items), typed as what",
+        "  they are. Prefix your own with your namespace (`app.`).",
+        "- For an exception: `activity?.AddException(ex)` (.NET 9+) records it as an `exception` event with type, message and stack trace.",
+        "- The 400 above is a *client* error for the server span (status stays Unset); your own span can still say what went wrong."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Good span attribute, or does it belong somewhere else?",
+      "buckets": [
+        "Good span attribute",
+        "Not on a span"
+      ],
+      "items": [
+        [
+          "`app.order.id = 8812`",
+          0
+        ],
+        [
+          "`app.cart.size = 3` (an int)",
+          0
+        ],
+        [
+          "`app.plan = \"enterprise\"`",
+          0
+        ],
+        [
+          "`card.number = \"4111 1111 1111 1111\"`",
+          1
+        ],
+        [
+          "`auth.header = \"Bearer eyJ...\"`",
+          1
+        ],
+        [
+          "the whole request body as JSON (40 KB)",
+          1
+        ]
+      ],
+      "explain": "Ids and small facts that explain behaviour are what spans are for: each span is one request, so high cardinality is fine there (unlike metrics). Secrets and payment data never go into telemetry; big payloads cost money and leak data. Most backends truncate long values anyway."
+    },
+    {
+      "type": "code",
+      "framework": "web+otel",
+      "title": "A span for the pricing step",
+      "prompt": [
+        "Add `POST /orders/{id:int}/price?coupon=...` to the service (keep the tracing setup from the previous step):",
+        "",
+        "- create a static `ActivitySource` named **`Orders.Api`** and register it with the tracer provider;",
+        "- in the endpoint, a span **`price order`** with the attribute **`app.order.id`** (an **int**);",
+        "- when `coupon` is `EXPIRED`: span status **Error** with the description **`coupon expired`**, attribute **`error.type`** =",
+        "  **`coupon_expired`**, and the response `400`;",
+        "- otherwise answer `200` with `{ \"id\": 7, \"total\": 37.5 }`.",
+        "",
+        "Put your static class after `app.Run();`."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddOpenTelemetry()",
+        "    .ConfigureResource(r => r.AddService(\"orders\", serviceVersion: \"2.1.0\"))",
+        "    .WithTracing(t => t.AddAspNetCoreInstrumentation());",
+        "",
+        "var app = builder.Build();",
+        "app.MapGet(\"/orders/{id:int}\", (int id) => Results.Ok(new { id, total = 42.5 }));",
+        "app.Run();"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddOpenTelemetry()",
+        "    .ConfigureResource(r => r.AddService(\"orders\", serviceVersion: \"2.1.0\"))",
+        "    .WithTracing(t => t.AddSource(Telemetry.Source.Name).AddAspNetCoreInstrumentation());",
+        "",
+        "var app = builder.Build();",
+        "app.MapGet(\"/orders/{id:int}\", (int id) => Results.Ok(new { id, total = 42.5 }));",
+        "app.MapPost(\"/orders/{id:int}/price\", (int id, string? coupon) =>",
+        "{",
+        "    using var activity = Telemetry.Source.StartActivity(\"price order\");",
+        "    activity?.SetTag(\"app.order.id\", id);",
+        "    if (coupon == \"EXPIRED\")",
+        "    {",
+        "        activity?.SetStatus(ActivityStatusCode.Error, \"coupon expired\");",
+        "        activity?.SetTag(\"error.type\", \"coupon_expired\");",
+        "        return Results.BadRequest();",
+        "    }",
+        "    return Results.Ok(new { id, total = 37.5 });",
+        "});",
+        "app.Run();",
+        "",
+        "static class Telemetry",
+        "{",
+        "    public static readonly ActivitySource Source = new(\"Orders.Api\");",
+        "}"
+      ],
+      "hints": [
+        "Two places must agree on the name: `new ActivitySource(\"Orders.Api\")` and `.AddSource(\"Orders.Api\")` (or `.AddSource(Telemetry.Source.Name)`).",
+        "`activity?.SetTag(\"app.order.id\", id);` keeps the int. For the error: `SetStatus(ActivityStatusCode.Error, \"coupon expired\")` and `SetTag(\"error.type\", \"coupon_expired\")`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        var ok = await http.PostAsync(\"/orders/7/price?coupon=WELCOME\", null);",
+        "        DojoWeb.Status(\"a good coupon answers 200\", 200, ok);",
+        "        Dojo.Eq(\"total\", \"37.5\", DojoWeb.Prop(await DojoWeb.Json(ok), \"total\"));",
+        "        var price = await DojoOtel.Span(a => a.DisplayName == \"price order\");",
+        "        Dojo.Check(\"a price order span was exported\", price is not null, \"Spans exported: \" + string.Join(\", \", DojoOtel.Spans.Select(a => a.DisplayName)) + \". Is the ActivitySource registered with AddSource?\");",
+        "        if (price is null) return;",
+        "        Dojo.Eq(\"it comes from the Orders.Api source\", \"Orders.Api\", price.Source.Name);",
+        "        Dojo.Check(\"app.order.id is the int 7\", price.GetTagItem(\"app.order.id\") is int dojoId && dojoId == 7, \"got \" + price.GetTagItem(\"app.order.id\")?.GetType().Name);",
+        "        var server = await DojoOtel.Span(a => a.Kind == ActivityKind.Server && a.TraceId == price.TraceId);",
+        "        Dojo.Check(\"it is a child of the request's server span\", server is not null && price.ParentSpanId == server.SpanId, \"\");",
+        "        Dojo.Eq(\"a good coupon leaves the status Unset\", \"Unset\", price.Status.ToString());",
+        "        var bad = await http.PostAsync(\"/orders/8/price?coupon=EXPIRED\", null);",
+        "        DojoWeb.Status(\"an expired coupon answers 400\", 400, bad);",
+        "        var failed = await DojoOtel.Span(a => a.DisplayName == \"price order\" && Equals(a.GetTagItem(\"app.order.id\"), 8));",
+        "        Dojo.Eq(\"expired: status Error\", \"Error\", failed?.Status.ToString());",
+        "        Dojo.Eq(\"expired: the description\", \"coupon expired\", failed?.StatusDescription);",
+        "        Dojo.Eq(\"expired: error.type\", \"coupon_expired\", DojoOtel.Tag(failed, \"error.type\"));",
+        "        var badServer = await DojoOtel.Span(a => a.Kind == ActivityKind.Server && failed != null && a.TraceId == failed.TraceId);",
+        "        Dojo.Eq(\"the server span of a 400 stays Unset (a client error)\", \"Unset\", badServer?.Status.ToString());",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}
