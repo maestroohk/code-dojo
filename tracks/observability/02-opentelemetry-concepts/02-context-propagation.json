@@ -1,0 +1,268 @@
+{
+  "title": "Context propagation: traceparent and baggage",
+  "summary": "How one trace survives crossing processes: the W3C traceparent and tracestate headers, baggage, and what .NET injects for you.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The traceparent header",
+      "body": [
+        "A trace crosses services because each outgoing call carries the current span's context in a header, defined by the W3C",
+        "**Trace Context** recommendation:",
+        "",
+        "```text",
+        "traceparent: 00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-01",
+        "             |  |                                |                |",
+        "         version  trace-id (16 bytes, 32 hex)    parent-id         flags (01 = sampled)",
+        "                                                 (8 bytes, 16 hex)",
+        "```",
+        "",
+        "- Lowercase hex only. A trace id or parent id of all zeros is invalid. Version `ff` is invalid; version `00` has exactly four parts.",
+        "- The receiver starts its server span as a **child** of `parent-id`, in the same trace, and follows the **sampled** flag",
+        "  (parent-based sampling, lesson 4).",
+        "- **`tracestate`** carries vendor-specific values alongside it (`tracestate: ot=th:8,vendor=abc`), up to 32 entries.",
+        "",
+        "In .NET you rarely write this: `HttpClient` injects `traceparent` from `Activity.Current` on every request, and ASP.NET Core extracts",
+        "it on every incoming one (both through `DistributedContextPropagator.Current`, W3C by default). You do it by hand where no library",
+        "does: message headers, a custom TCP protocol, a job queue in a database table."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print?",
+      "code": [
+        "var header = \"00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-01\";",
+        "var parts = header.Split('-');",
+        "var sampled = (Convert.ToByte(parts[3], 16) & 1) == 1;",
+        "Console.WriteLine($\"{parts[1][..8]} {parts[2].Length} {sampled}\");"
+      ],
+      "answer": "46ae7e54 16 True",
+      "explain": "The second part is the trace id (the first 8 hex digits are printed), the third the parent span id (16 hex digits), and the lowest bit of the flags is `sampled`. Only that bit is defined today (bit 2, `random`, is in Trace Context Level 2); test the bit, never compare the whole byte to `01`."
+    },
+    {
+      "type": "code",
+      "title": "Parse traceparent like a receiver must",
+      "prompt": [
+        "Write `bool TryParse(string? header, out string traceId, out string parentId, out bool sampled)` for version `00` headers.",
+        "",
+        "Return `false` (and empty strings, `false`) unless:",
+        "",
+        "- the header has exactly four `-`-separated parts: version `00`, trace id, parent id, flags;",
+        "- the trace id is 32 and the parent id 16 **lowercase** hex digits, and neither is all zeros;",
+        "- the flags are 2 hex digits.",
+        "",
+        "`sampled` is bit 0 of the flags. Leading or trailing spaces around the whole header are allowed (trim them).",
+        "A receiver that rejects a bad header simply starts a new trace, so be strict."
+      ],
+      "starter": [
+        "bool TryParse(string? header, out string traceId, out string parentId, out bool sampled)",
+        "{",
+        "    traceId = parentId = \"\";",
+        "    sampled = false;",
+        "    return false;",
+        "}"
+      ],
+      "solution": [
+        "bool TryParse(string? header, out string traceId, out string parentId, out bool sampled)",
+        "{",
+        "    traceId = parentId = \"\";",
+        "    sampled = false;",
+        "    var parts = (header ?? \"\").Trim().Split('-');",
+        "    if (parts.Length != 4 || parts[0] != \"00\") return false;",
+        "    static bool Hex(string s, int len) => s.Length == len && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');",
+        "    if (!Hex(parts[1], 32) || !Hex(parts[2], 16) || !Hex(parts[3], 2)) return false;",
+        "    if (parts[1].All(c => c == '0') || parts[2].All(c => c == '0')) return false;",
+        "    traceId = parts[1];",
+        "    parentId = parts[2];",
+        "    sampled = (Convert.ToByte(parts[3], 16) & 1) == 1;",
+        "    return true;",
+        "}"
+      ],
+      "hints": [
+        "A small helper `bool Hex(string s, int len)` that checks the length and that every char is `0-9` or `a-f` covers three checks.",
+        "Set the `out` values only after every check passed, so a rejected header leaves them empty."
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Check(\"a valid sampled header\", TryParse(\"00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-01\", out var t1, out var p1, out var s1) && t1 == \"46ae7e540484dd36a9df49aab2401a3f\" && p1 == \"86d88d2ffaed6bdf\" && s1, \"\");",
+        "Dojo.Check(\"not sampled (00)\", TryParse(\"00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-00\", out _, out _, out var s2) && !s2, \"\");",
+        "Dojo.Check(\"flags 09: bit 0 set, so sampled\", TryParse(\" 00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-09 \", out _, out _, out var s3) && s3, \"\");",
+        "Dojo.Check(\"uppercase hex is rejected\", !TryParse(\"00-46AE7E540484DD36A9DF49AAB2401A3F-86d88d2ffaed6bdf-01\", out _, out _, out _), \"\");",
+        "Dojo.Check(\"all-zero trace id is rejected\", !TryParse(\"00-00000000000000000000000000000000-86d88d2ffaed6bdf-01\", out _, out _, out _), \"\");",
+        "Dojo.Check(\"all-zero parent id is rejected\", !TryParse(\"00-46ae7e540484dd36a9df49aab2401a3f-0000000000000000-01\", out _, out _, out _), \"\");",
+        "Dojo.Check(\"short trace id is rejected\", !TryParse(\"00-46ae7e540484dd36a9df49aab2401a-86d88d2ffaed6bdf-01\", out _, out _, out _), \"\");",
+        "Dojo.Check(\"version ff is rejected\", !TryParse(\"ff-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-01\", out _, out _, out _), \"\");",
+        "Dojo.Check(\"a fifth part is rejected for version 00\", !TryParse(\"00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-01-xyz\", out _, out _, out _), \"\");",
+        "Dojo.Check(\"null and empty are rejected\", !TryParse(null, out var t9, out _, out _) && t9 == \"\" && !TryParse(\"\", out _, out _, out _), \"\");",
+        "Dojo.Check(\"non-hex flags are rejected\", !TryParse(\"00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-0g\", out _, out _, out _), \"\");"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Would a strict receiver accept this `traceparent`?",
+      "buckets": ["Valid", "Invalid: start a new trace"],
+      "items": [
+        ["`00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`", 0],
+        ["`00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00`", 0],
+        ["`00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01`", 1],
+        ["`00-00000000000000000000000000000000-00f067aa0ba902b7-01`", 1],
+        ["`ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`", 1],
+        ["`00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7`", 1]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Propagate to the next hop",
+      "prompt": [
+        "When your service calls the next one, the header carries **your** span as the parent. Write",
+        "`string Outgoing(string incoming, string mySpanId)`: the header to send downstream, with the incoming trace id, `mySpanId` as the",
+        "parent id, and the incoming flags unchanged. If `incoming` is not a valid header (reuse `TryParse`, paste it in), start a new",
+        "trace: return `\"00-\" + NewTraceId() + \"-\" + mySpanId + \"-01\"` (the tests give you `string NewTraceId()`)."
+      ],
+      "starter": [
+        "string Outgoing(string incoming, string mySpanId)",
+        "{",
+        "    return \"\";",
+        "}",
+        "",
+        "// paste TryParse here"
+      ],
+      "solution": [
+        "string Outgoing(string incoming, string mySpanId)",
+        "{",
+        "    if (!TryParse(incoming, out var traceId, out _, out _)) return \"00-\" + NewTraceId() + \"-\" + mySpanId + \"-01\";",
+        "    var flags = incoming.Trim().Split('-')[3];",
+        "    return $\"00-{traceId}-{mySpanId}-{flags}\";",
+        "}",
+        "",
+        "bool TryParse(string? header, out string traceId, out string parentId, out bool sampled)",
+        "{",
+        "    traceId = parentId = \"\";",
+        "    sampled = false;",
+        "    var parts = (header ?? \"\").Trim().Split('-');",
+        "    if (parts.Length != 4 || parts[0] != \"00\") return false;",
+        "    static bool Hex(string s, int len) => s.Length == len && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');",
+        "    if (!Hex(parts[1], 32) || !Hex(parts[2], 16) || !Hex(parts[3], 2)) return false;",
+        "    if (parts[1].All(c => c == '0') || parts[2].All(c => c == '0')) return false;",
+        "    traceId = parts[1];",
+        "    parentId = parts[2];",
+        "    sampled = (Convert.ToByte(parts[3], 16) & 1) == 1;",
+        "    return true;",
+        "}"
+      ],
+      "hints": [
+        "Keep the flags exactly as they came (`00` must stay `00`: the caller decided not to sample, and you follow).",
+        "`$\"00-{traceId}-{mySpanId}-{flags}\"` with `flags = incoming.Trim().Split('-')[3]`."
+      ],
+      "template": [
+        "string NewTraceId() => \"aaaabbbbccccddddeeeeffff00001111\";",
+        "{{CODE}}",
+        "Dojo.Eq(\"same trace, my span as the parent\", \"00-46ae7e540484dd36a9df49aab2401a3f-9e324d19633e0502-01\", Outgoing(\"00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-01\", \"9e324d19633e0502\"));",
+        "Dojo.Eq(\"an unsampled trace stays unsampled\", \"00-46ae7e540484dd36a9df49aab2401a3f-9e324d19633e0502-00\", Outgoing(\"00-46ae7e540484dd36a9df49aab2401a3f-86d88d2ffaed6bdf-00\", \"9e324d19633e0502\"));",
+        "Dojo.Eq(\"garbage in: a new trace\", \"00-aaaabbbbccccddddeeeeffff00001111-9e324d19633e0502-01\", Outgoing(\"not-a-header\", \"9e324d19633e0502\"));",
+        "Dojo.Eq(\"no header: a new trace\", \"00-aaaabbbbccccddddeeeeffff00001111-1111222233334444-01\", Outgoing(\"\", \"1111222233334444\"));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Baggage: context that is not about timing",
+      "body": [
+        "**Baggage** is a second header (`baggage: tenant.id=acme,user.tier=gold;ttl=60`) that carries key/value pairs to every downstream",
+        "service, so a service deep in the call chain can know the tenant or the experiment group without every API passing it along.",
+        "",
+        "- It is **not** added to spans automatically: a service reads it and copies what it needs onto its spans or metrics (in the .NET",
+        "  SDK, `Baggage.GetBaggage(\"tenant.id\")`; a `BaggageSpanProcessor` can copy all of it).",
+        "- It travels in plain text to every service you call, *including third parties*. Never put secrets, tokens or personal data in it.",
+        "- Keep it small: it is sent on every request (the W3C spec limits it to 8 192 bytes and 64 entries).",
+        "- Values are percent-encoded; anything after `;` is a property of that entry.",
+        "",
+        "`OTEL_PROPAGATORS` picks the formats an SDK reads and writes (default `tracecontext,baggage`; `b3` and `jaeger` exist for old",
+        "systems you still talk to)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which of these belongs in baggage?",
+      "options": [
+        "`tenant.id=acme`, so every service can tag its spans and metrics with the tenant",
+        "`auth=Bearer eyJhbGciOi...`, so downstream services can call on the user's behalf",
+        "`user.email=ana@example.com`, so support can search traces by customer",
+        "the whole cart as JSON, so inventory does not need to load it"
+      ],
+      "answer": 0,
+      "explain": "Baggage is propagated to every hop, in plain text, possibly outside your company: small, non-sensitive, useful for correlation. Credentials belong in their own headers with their own rules, personal data nowhere it can leak, and payloads in the request body."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: propagation",
+      "body": "The APIs and settings that decide whether a trace survives the next hop.",
+      "toolkit": [
+        { "cmd": "Activity.Current", "what": "The span running on this async flow right now: what HttpClient and loggers attach to.", "lang": "csharp",
+          "flags": [["Activity.Current?.TraceId", "the trace id to put in an error response or a log"], ["Activity.Current?.Context", "an ActivityContext to pass on or to link"]],
+          "example": "return Results.Problem(detail: \"Payment failed\", extensions: new Dictionary<string, object?> { [\"traceId\"] = Activity.Current?.TraceId.ToString() });", "when": "showing users a trace id they can quote to support" },
+        { "cmd": "Propagators.DefaultTextMapPropagator.Inject(...)", "what": "Write the current context (traceparent, tracestate, baggage) into any carrier: message headers, a dictionary.", "lang": "csharp",
+          "flags": [["Inject(new PropagationContext(ctx, Baggage.Current), carrier, setter)", "producer side"], ["Extract(default, carrier, getter)", "consumer side: returns the parent context"]],
+          "example": "Propagators.DefaultTextMapPropagator.Inject(new PropagationContext(activity!.Context, Baggage.Current), message.Headers, (h, k, v) => h[k] = v);", "when": "queues, jobs, anything that is not HTTP or gRPC" },
+        { "cmd": "OTEL_PROPAGATORS=tracecontext,baggage", "what": "Which propagation formats the SDK reads and writes.", "lang": "bash",
+          "flags": [["tracecontext", "W3C traceparent and tracestate (the default)"], ["baggage", "W3C baggage"], ["b3", "Zipkin's B3 headers, for older systems"]],
+          "example": "OTEL_PROPAGATORS=tracecontext,baggage,b3", "when": "talking to a system that only knows B3" },
+        { "cmd": "curl -H 'traceparent: 00-<trace>-<span>-01' URL", "what": "Join a request to a trace you choose, then find it by that id in the backend.", "lang": "bash",
+          "flags": [["-H 'traceparent: ...'", "the context to continue"], ["-v", "see the response headers too"]],
+          "example": "curl -s -H 'traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01' http://localhost:8080/api/checkout", "when": "reproducing a bug and wanting its trace without searching" }
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Read the baggage header",
+      "prompt": [
+        "Write `Dictionary<string, string> ParseBaggage(string? header)` for the W3C `baggage` header:",
+        "",
+        "- entries are separated by `,`; each is `key=value`, optionally followed by `;properties` (ignore properties);",
+        "- trim spaces around keys and values; skip entries without `=` or with an empty key;",
+        "- values are percent-encoded: decode them with `Uri.UnescapeDataString`;",
+        "- if a key repeats, the **last** one wins.",
+        "",
+        "`ParseBaggage(\"tenant.id=acme, user.tier=gold;ttl=60,note=caf%C3%A9\")` gives `tenant.id → acme`, `user.tier → gold`, `note → café`."
+      ],
+      "starter": [
+        "Dictionary<string, string> ParseBaggage(string? header)",
+        "{",
+        "    return new Dictionary<string, string>();",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string> ParseBaggage(string? header)",
+        "{",
+        "    var result = new Dictionary<string, string>();",
+        "    foreach (var entry in (header ?? \"\").Split(','))",
+        "    {",
+        "        var pair = entry.Split(';')[0];",
+        "        var eq = pair.IndexOf('=');",
+        "        if (eq < 0) continue;",
+        "        var key = pair[..eq].Trim();",
+        "        if (key.Length == 0) continue;",
+        "        result[key] = Uri.UnescapeDataString(pair[(eq + 1)..].Trim());",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "Split on `,`, then keep only what comes before the first `;`, then split at the first `=` (values may contain `=` after encoding... take everything after the first one).",
+        "`result[key] = value` (the indexer) makes the last duplicate win."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoB = ParseBaggage(\"tenant.id=acme, user.tier=gold;ttl=60,note=caf%C3%A9\");",
+        "Dojo.Eq(\"three entries\", 3, dojoB.Count);",
+        "Dojo.Eq(\"tenant.id\", \"acme\", dojoB.GetValueOrDefault(\"tenant.id\"));",
+        "Dojo.Eq(\"properties after ; are not part of the value\", \"gold\", dojoB.GetValueOrDefault(\"user.tier\"));",
+        "Dojo.Eq(\"percent-decoded\", \"café\", dojoB.GetValueOrDefault(\"note\"));",
+        "Dojo.Eq(\"last one wins\", \"b\", ParseBaggage(\"k=a,k=b\").GetValueOrDefault(\"k\"));",
+        "Dojo.Eq(\"junk entries skipped\", 1, ParseBaggage(\"novalue,=x, ok = yes ,\").Count);",
+        "Dojo.Eq(\"spaces trimmed\", \"yes\", ParseBaggage(\"novalue,=x, ok = yes ,\").GetValueOrDefault(\"ok\"));",
+        "Dojo.Eq(\"null header\", 0, ParseBaggage(null).Count);"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,207 @@
+{
+  "title": "PromQL: rate, sum by, histogram_quantile",
+  "summary": "Series and labels, why counters need rate(), aggregating with sum by, and how histogram_quantile turns buckets into a percentile (and where it lies).",
+  "minutes": 20,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Series, counters, rate",
+      "body": [
+        "Prometheus (3.16 in the lab) stores **time series**: a metric name plus a set of labels, with a sample every scrape.",
+        "",
+        "```text",
+        "http_server_request_duration_seconds_count{job=\"shop\", http_route=\"/api/checkout\", http_response_status_code=\"502\"}  1843",
+        "```",
+        "",
+        "Counters only go up (and reset to 0 when the process restarts), so their raw value means nothing; you want the **per-second rate**:",
+        "",
+        "- `rate(x_total[5m])`: average per-second increase over the last 5 minutes, handling resets. Use a window of at least 4 scrape",
+        "  intervals. For alerts and dashboards.",
+        "- `irate(x_total[5m])`: from the last two samples only. Spiky; for zoomed-in graphs, never for alerts.",
+        "- `increase(x_total[1h])`: rate × window, \"how many in the last hour\" (extrapolated, so not always a whole number).",
+        "",
+        "Then aggregate across instances: `sum by (http_route) (rate(...[5m]))` keeps only the labels you name; `sum without (instance)`",
+        "drops the ones you name. Always `rate` first, then `sum`: summing raw counters from instances that restarted at different times",
+        "breaks reset detection.",
+        "",
+        "In Prometheus 3 the name you query is the OTLP name translated: dots to underscores, plus the unit and `_total`",
+        "(`http.server.request.duration` → `http_server_request_duration_seconds`). Prometheus 3 can also keep UTF-8 names",
+        "(`{\"http.server.request.duration\"}`) when you ingest OTLP directly, so check which your setup does."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which query answers \"requests per second per route, all instances together\"?",
+      "options": [
+        "`sum by (http_route) (rate(http_server_request_duration_seconds_count[5m]))`",
+        "`rate(sum by (http_route) (http_server_request_duration_seconds_count)[5m])`",
+        "`sum by (http_route) (http_server_request_duration_seconds_count)`",
+        "`irate(http_server_request_duration_seconds_count[1m]) by (http_route)`"
+      ],
+      "answer": 0,
+      "explain": "rate per series first (each series handles its own resets), then add them up. The second needs a subquery and breaks when one instance restarts; the third sums lifetime totals."
+    },
+    {
+      "type": "code",
+      "title": "rate() by hand",
+      "prompt": [
+        "Implement the core of `rate()` for one counter series: `double Rate(List<(double T, double V)> samples)` (seconds, value):",
+        "",
+        "- the increase is the sum of the differences between consecutive samples, except when a value **drops** (a counter reset: the",
+        "  process restarted), where the increase for that step is the new value itself;",
+        "- rate = increase / (last T - first T); 0 with fewer than two samples.",
+        "",
+        "(Real Prometheus also extrapolates to the edges of the window; leave that out.)"
+      ],
+      "starter": [
+        "double Rate(List<(double T, double V)> samples)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double Rate(List<(double T, double V)> samples)",
+        "{",
+        "    if (samples.Count < 2) return 0;",
+        "    double increase = 0;",
+        "    for (var i = 1; i < samples.Count; i++)",
+        "    {",
+        "        var d = samples[i].V - samples[i - 1].V;",
+        "        increase += d >= 0 ? d : samples[i].V;",
+        "    }",
+        "    return increase / (samples[^1].T - samples[0].T);",
+        "}"
+      ],
+      "hints": [
+        "Loop over consecutive pairs; a negative difference means the counter started again from 0.",
+        "`increase += d >= 0 ? d : samples[i].V;`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"steady: 300 in 60 s\", 5.0, Rate([(0, 1000), (15, 1075), (30, 1150), (45, 1225), (60, 1300)]));",
+        "Dojo.Eq(\"a restart between t=30 and t=45 (1150 -> 20)\", 4.083, Math.Round(Rate([(0, 1000), (15, 1075), (30, 1150), (45, 20), (60, 95)]), 3));",
+        "Dojo.Eq(\"one sample\", 0.0, Rate([(0, 5)]));",
+        "Dojo.Eq(\"no traffic\", 0.0, Rate([(0, 7), (60, 7)]));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Histograms and histogram_quantile",
+      "body": [
+        "A histogram is exported as cumulative buckets: `_bucket{le=\"0.1\"}` counts observations ≤ 0.1 s, `le=\"+Inf\"` counts all of them",
+        "(= `_count`), and `_sum` is their total. A percentile over 5 minutes, per route:",
+        "",
+        "```text",
+        "histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job=\"shop\"}[5m])))",
+        "```",
+        "",
+        "Keep `le` in the `by`: the function needs the buckets. It finds the bucket where the 95th percentile falls and **interpolates",
+        "linearly** inside it, so the answer can only be as good as the boundaries: with buckets at 75 and 100 ms, a real p95 of 92 ms or",
+        "of 76 ms can both come out near 99. That is the flat line at ~0.098 s below, recorded in the lab while the product page was slow; the",
+        "index went in at the marked time and p95 dropped to the next bucket down. Average latency = `rate(_sum[5m]) / rate(_count[5m])`.",
+        "",
+        "You cannot average percentiles across instances (the mean of two p95s is not the p95); you can always add buckets. That is the reason",
+        "to export histograms rather than precomputed percentiles."
+      ],
+      "otelviz": {"kind":"metrics","title":"GET /api/products/{id:int}: latency percentiles","unit":"s","clock":"23:50","query":"histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job=\"shop\", http_route=\"/api/products/{id:int}\"}[1m])))","series":[{"name":"p50","points":[[0,0.00409],[15,0.07614],[30,0.08321],[45,0.08417],[60,0.08182],[75,0.08194],[90,0.08214],[105,0.08107],[120,0.0811],[135,0.07961],[150,0.07804],[165,0.07969],[180,0.08006],[195,0.08191],[210,0.08097],[225,0.07961],[240,0.07905],[255,0.07542],[270,0.07542],[285,0.07773],[300,0.07629],[315,0.07803],[330,0.07823],[345,0.07841],[360,0.08041],[375,0.07583],[390,0.0525],[405,0.00314],[420,0.0025],[435,0.0025],[450,0.0025],[465,0.0025],[480,0.0025],[495,0.0025],[510,0.0025],[525,0.0025],[540,0.0025],[555,0.00254],[570,0.00254],[585,0.00257],[600,0.00257],[615,0.00254]]},{"name":"p95","points":[[0,0.09945],[15,0.09966],[30,0.1175],[45,0.09992],[60,0.0992],[75,0.1375],[90,0.09982],[105,0.09939],[120,0.09866],[135,0.09796],[150,0.0978],[165,0.09797],[180,0.09801],[195,0.09867],[210,0.09861],[225,0.09855],[240,0.09851],[255,0.09754],[270,0.09754],[285,0.09848],[300,0.09841],[315,0.09848],[330,0.09855],[345,0.09784],[360,0.09865],[375,0.09833],[390,0.09804],[405,0.09482],[420,0.00475],[435,0.00475],[450,0.00475],[465,0.00475],[480,0.00475],[495,0.00475],[510,0.00475],[525,0.00475],[540,0.00475],[555,0.00483],[570,0.00482],[585,0.00489],[600,0.00489],[615,0.00482]]},{"name":"p99","points":[[0,0.2165],[15,0.2155],[30,0.2235],[45,0.2185],[60,0.199],[75,0.2275],[90,0.217],[105,0.20725],[120,0.154],[135,0.09959],[150,0.09956],[165,0.09959],[180,0.0996],[195,0.145],[210,0.1465],[225,0.154],[240,0.154],[255,0.09951],[270,0.09951],[285,0.1615],[300,0.1645],[315,0.16],[330,0.166],[345,0.09957],[360,0.16],[375,0.16],[390,0.1705],[405,0.1765],[420,0.00495],[435,0.00495],[450,0.00495],[465,0.00495],[480,0.00495],[495,0.00495],[510,0.00495],[525,0.00495],[540,0.00495],[555,0.007],[570,0.00665],[585,0.00825],[600,0.00825],[615,0.0065]]}],"thresholds":[{"value":0.05,"label":"objective: p95 under 50 ms","kind":"warn"}],"annotations":[{"t":354,"label":"CREATE INDEX reviews(product_id, created)"}]}
+    },
+    {
+      "type": "code",
+      "title": "histogram_quantile by hand",
+      "prompt": [
+        "Implement Prometheus' algorithm: `double Quantile(double q, List<(double Le, double Count)> buckets)`. Buckets are cumulative,",
+        "sorted by `Le`, and the last has `Le = double.PositiveInfinity`.",
+        "",
+        "1. total = the count of the last bucket; if 0, return `double.NaN`.",
+        "2. rank = q × total. Find the first bucket whose count ≥ rank.",
+        "3. If that is the `+Inf` bucket, return the `Le` of the bucket before it (the largest finite bound).",
+        "4. Otherwise interpolate: lower bound = the previous bucket's `Le` (0 for the first bucket), count below = the previous bucket's",
+        "   count (0 for the first); result = lower + (upper - lower) × (rank - countBelow) / (count - countBelow)."
+      ],
+      "starter": [
+        "double Quantile(double q, List<(double Le, double Count)> buckets)",
+        "{",
+        "    return double.NaN;",
+        "}"
+      ],
+      "solution": [
+        "double Quantile(double q, List<(double Le, double Count)> buckets)",
+        "{",
+        "    var total = buckets[^1].Count;",
+        "    if (total == 0) return double.NaN;",
+        "    var rank = q * total;",
+        "    var i = buckets.FindIndex(b => b.Count >= rank);",
+        "    if (double.IsPositiveInfinity(buckets[i].Le)) return buckets[i - 1].Le;",
+        "    var lower = i == 0 ? 0 : buckets[i - 1].Le;",
+        "    var below = i == 0 ? 0 : buckets[i - 1].Count;",
+        "    return lower + (buckets[i].Le - lower) * (rank - below) / (buckets[i].Count - below);",
+        "}"
+      ],
+      "hints": [
+        "`buckets.FindIndex(b => b.Count >= rank)` finds the bucket.",
+        "For 100 requests with 90 under 0.075 and 100 under 0.1: rank 95, so 0.075 + 0.025 × (95 - 90) / (100 - 90) = 0.0875."
+      ],
+      "template": [
+        "{{CODE}}",
+        "const double dojoInf = double.PositiveInfinity;",
+        "var dojoSlow = new List<(double, double)> { (0.005, 0), (0.01, 2), (0.025, 3), (0.05, 5), (0.075, 8), (0.1, 98), (0.25, 100), (dojoInf, 100) };",
+        "Dojo.Eq(\"the slow product page: p95 lands in the 75-100 ms bucket\", 0.0992, Math.Round(Quantile(0.95, dojoSlow), 4));",
+        "Dojo.Eq(\"p50 too\", 0.0867, Math.Round(Quantile(0.5, dojoSlow), 4));",
+        "var dojoFast = new List<(double, double)> { (0.005, 95), (0.01, 99), (0.025, 100), (dojoInf, 100) };",
+        "Dojo.Eq(\"after the index: first bucket, lower bound 0\", 0.005, Math.Round(Quantile(0.95, dojoFast), 4));",
+        "var dojoTail = new List<(double, double)> { (0.1, 50), (0.5, 90), (dojoInf, 100) };",
+        "Dojo.Eq(\"p99 beyond the last finite bucket returns that bound\", 0.5, Quantile(0.99, dojoTail));",
+        "Dojo.Check(\"no data is NaN\", double.IsNaN(Quantile(0.95, [(0.1, 0), (dojoInf, 0)])), \"\");"
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the error-ratio panel: share of 5xx per route over 5 minutes.",
+      "code": [
+        "__1__ by (http_route) (__2__(http_server_request_duration_seconds_count{http_response_status_code=__3__\"5..\"}[5m]))",
+        "/",
+        "__1__ by (http_route) (__2__(http_server_request_duration_seconds_count[5m]))"
+      ],
+      "blanks": ["sum", "rate", "~"],
+      "bank": ["avg", "irate", "!", "max", "increase"],
+      "explain": "`=~` is a regex match on a label. Both sides keep the same `by` labels, so the division matches series one to one."
+    },
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: PromQL you type every week",
+      "body": "The queries and endpoints behind most dashboards and investigations.",
+      "toolkit": [
+        { "cmd": "topk(10, sum by (http_route) (rate(http_server_request_duration_seconds_count[5m])))", "what": "The busiest routes right now.",
+          "flags": [["topk(n, ...)", "the n largest series"], ["bottomk", "the smallest"]], "example": "topk(5, sum by (job) (rate(http_server_request_duration_seconds_count{http_response_status_code=~\"5..\"}[5m])))", "when": "\"what is on fire?\"" },
+        { "cmd": "histogram_quantile(0.99, sum by (le) (rate(x_bucket[5m])))", "what": "A percentile from a histogram; keep le in the by.",
+          "flags": [["sum by (le, route)", "a percentile per route"], ["rate(x_sum) / rate(x_count)", "the mean"]], "example": "histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job=\"shop\"}[5m])))", "when": "latency panels and SLOs" },
+        { "cmd": "absent(up{job=\"inventory\"})", "what": "1 when a series does not exist at all: alerts on telemetry that stopped arriving.",
+          "flags": [["absent_over_time(x[10m])", "missing for a whole window"], ["up == 0", "a target that is scraped but down"]], "example": "absent_over_time(http_server_request_duration_seconds_count{job=\"inventory\"}[10m])", "when": "the lab's task 4: a service that went dark" },
+        { "cmd": "curl -sG http://prometheus:9090/api/v1/query --data-urlencode 'query=up'", "what": "Any query from a shell or script; /api/v1/query_range for a graph's data.",
+          "flags": [["--data-urlencode", "PromQL has quotes and braces: let curl encode it"], ["query_range?start=&end=&step=", "a time series"], ["/api/v1/series?match[]=", "which series exist"]],
+          "example": "curl -sG http://prometheus:9090/api/v1/query --data-urlencode 'query=count by (__name__) ({__name__=~\"app_.*\"})' | jq '.data.result'", "when": "runbooks, checks, CI smoke tests" },
+        { "cmd": "promtool query instant http://localhost:9090 'up'", "what": "The same from promtool, with readable output.",
+          "flags": [["query range --start --end --step", "a range"], ["tsdb analyze", "which metrics and labels use the most series"]], "example": "promtool tsdb analyze /prometheus", "when": "on the Prometheus host, hunting cardinality" }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the question to the query.",
+      "pairs": [
+        ["Is inventory sending anything at all?", "`absent(up{job=\"inventory\"})`"],
+        ["Which five routes fail the most?", "`topk(5, ...)`"],
+        ["Mean latency of checkout", "`rate(x_sum[5m]) / rate(x_count[5m])`"],
+        ["Which metric names have the most series?", "`promtool tsdb analyze`"]
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "27-otel-oncall",
+      "task": "t1",
+      "title": "Live lab: which page is slow?",
+      "prompt": "In the live lab **OpenTelemetry on-call**, open the real Grafana dashboard and Prometheus, and find the route with the worst p95 with `histogram_quantile`.",
+      "explain": "The dashboard and `promq` agree because they run the same PromQL against the same Prometheus."
+    }
+  ]
+}

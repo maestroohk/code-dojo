@@ -1,0 +1,117 @@
+{
+  "title": "Stage 2: metrics",
+  "summary": "A lookups counter with bounded attributes and a duration histogram whose buckets fit the SLO.",
+  "minutes": 15,
+  "prereqs": ["observability/03-dotnet-instrumentation/02-metrics-with-meter"],
+  "steps": [
+    {
+      "type": "learn",
+      "title": "What the dashboard needs",
+      "body": [
+        "The on-call dashboard for the bookshop needs: lookups per second split by found / not found, and the lookup latency against",
+        "its SLO, \"99% of lookups under **50 ms**\". So a counter with one bounded attribute, and a histogram in seconds with a bucket",
+        "boundary at 0.05."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which attribute set is right for `app.book.lookups`?",
+      "options": ["`app.book.found` (true / false)", "`app.book.id` and `app.book.found`", "`app.book.title`", "the requesting user's id"],
+      "answer": 0,
+      "explain": "Two series. The id is already on the span, where per-request detail belongs."
+    },
+    {
+      "type": "code",
+      "framework": "web+otel",
+      "carry": true,
+      "title": "Count and time the lookups",
+      "prompt": [
+        "Keep stage 1 and add, with a `Meter` named **`Bookshop`** registered through `.WithMetrics(...)`:",
+        "",
+        "- counter **`app.book.lookups`** (+1 per request) with only **`app.book.found`** (bool);",
+        "- histogram **`app.book.lookup.duration`** (unit `s`) of the handler's time in seconds, no attributes, with boundaries exactly",
+        "  **`0.01, 0.05, 0.25, 1`** (a view, or instrument advice)."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddOpenTelemetry()",
+        "    .ConfigureResource(r => r.AddService(\"bookshop\"))",
+        "    .WithTracing(t => t.AddSource(Telemetry.Source.Name).AddAspNetCoreInstrumentation());",
+        "",
+        "var app = builder.Build();",
+        "var books = new Dictionary<int, string> { [1] = \"Dune\", [2] = \"Emma\", [3] = \"Ulysses\" };",
+        "app.MapGet(\"/books/{id:int}\", (int id) =>",
+        "{",
+        "    using var activity = Telemetry.Source.StartActivity(\"load book\");",
+        "    var found = books.TryGetValue(id, out var title);",
+        "    activity?.SetTag(\"app.book.id\", id);",
+        "    activity?.SetTag(\"app.book.found\", found);",
+        "    return found ? Results.Ok(new { id, title }) : Results.NotFound();",
+        "});",
+        "app.Run();",
+        "",
+        "static class Telemetry",
+        "{",
+        "    public static readonly ActivitySource Source = new(\"Bookshop\");",
+        "}"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "builder.Services.AddOpenTelemetry()",
+        "    .ConfigureResource(r => r.AddService(\"bookshop\"))",
+        "    .WithTracing(t => t.AddSource(Telemetry.Source.Name).AddAspNetCoreInstrumentation())",
+        "    .WithMetrics(m => m.AddMeter(Telemetry.Meter.Name)",
+        "        .AddView(\"app.book.lookup.duration\", new ExplicitBucketHistogramConfiguration { Boundaries = [0.01, 0.05, 0.25, 1] }));",
+        "",
+        "var app = builder.Build();",
+        "var books = new Dictionary<int, string> { [1] = \"Dune\", [2] = \"Emma\", [3] = \"Ulysses\" };",
+        "app.MapGet(\"/books/{id:int}\", (int id) =>",
+        "{",
+        "    var start = Stopwatch.GetTimestamp();",
+        "    using var activity = Telemetry.Source.StartActivity(\"load book\");",
+        "    var found = books.TryGetValue(id, out var title);",
+        "    activity?.SetTag(\"app.book.id\", id);",
+        "    activity?.SetTag(\"app.book.found\", found);",
+        "    Telemetry.Lookups.Add(1, new KeyValuePair<string, object?>(\"app.book.found\", found));",
+        "    Telemetry.Duration.Record(Stopwatch.GetElapsedTime(start).TotalSeconds);",
+        "    return found ? Results.Ok(new { id, title }) : Results.NotFound();",
+        "});",
+        "app.Run();",
+        "",
+        "static class Telemetry",
+        "{",
+        "    public static readonly ActivitySource Source = new(\"Bookshop\");",
+        "    public static readonly Meter Meter = new(\"Bookshop\");",
+        "    public static readonly Counter<long> Lookups = Meter.CreateCounter<long>(\"app.book.lookups\", unit: \"{lookup}\");",
+        "    public static readonly Histogram<double> Duration = Meter.CreateHistogram<double>(\"app.book.lookup.duration\", unit: \"s\");",
+        "}"
+      ],
+      "hints": [
+        "Add `.WithMetrics(m => m.AddMeter(\"Bookshop\").AddView(...))` to the builder and two instruments to `Telemetry`.",
+        "`new ExplicitBucketHistogramConfiguration { Boundaries = [0.01, 0.05, 0.25, 1] }`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        foreach (var id in new[] { 1, 2, 9, 3, 1 }) await http.GetAsync($\"/books/{id}\");",
+        "        var span = await DojoOtel.Span(a => a.DisplayName == \"load book\");",
+        "        Dojo.Check(\"stage 1 still holds\", span is not null, \"\");",
+        "        DojoOtel.Flush();",
+        "        var lookups = DojoOtel.Points(\"app.book.lookups\");",
+        "        Dojo.Eq(\"two series\", 2, lookups.Count);",
+        "        Dojo.Eq(\"found\", 4.0, lookups.Where(p => Equals(p.Tags.GetValueOrDefault(\"app.book.found\"), true)).Sum(p => p.Value));",
+        "        Dojo.Eq(\"not found\", 1.0, lookups.Where(p => Equals(p.Tags.GetValueOrDefault(\"app.book.found\"), false)).Sum(p => p.Value));",
+        "        var dur = DojoOtel.Points(\"app.book.lookup.duration\");",
+        "        Dojo.Eq(\"one duration series\", 1, dur.Count);",
+        "        Dojo.Eq(\"unit s\", \"s\", dur.FirstOrDefault()?.Unit);",
+        "        Dojo.Eq(\"five lookups timed\", 5L, dur.FirstOrDefault()?.Count ?? 0);",
+        "        Dojo.Eq(\"boundaries\", \"0.01,0.05,0.25,1\", string.Join(\",\", (dur.FirstOrDefault()?.Bounds ?? []).Where(b => !double.IsInfinity(b)).Select(b => b.ToString(System.Globalization.CultureInfo.InvariantCulture))));",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}

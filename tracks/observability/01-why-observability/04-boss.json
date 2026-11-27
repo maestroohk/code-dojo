@@ -1,0 +1,169 @@
+{
+  "title": "Boss: the incident review",
+  "summary": "A bad deploy broke checkouts for ten minutes. From the dashboard's numbers, rebuild when the burn-rate alert fired and how much of the month's error budget the incident cost.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The ticket",
+      "body": [
+        "**INC-2291: checkout errors after the 13:05 deploy.** You are writing the review. The Grafana panel *Checkouts per minute*",
+        "(exported as CSV) shows, for the SLO \"99.9% of checkouts succeed over 30 days\":",
+        "",
+        "| Minute | Checkouts | Failed (5xx) |",
+        "|---|---|---|",
+        "| 13:00 to 13:04 | 1 000 each | 1 each |",
+        "| 13:05 to 13:14 | 1 000 each | 400 each (the deploy) |",
+        "| 13:15 to 13:29 | 1 000 each | 1 each (rolled back at 13:15) |",
+        "",
+        "The alert is the fast-burn rule: burn ≥ 14.4 over 60 minutes **and** over 5 minutes, `for: 2m`. Questions the review must answer:",
+        "how fast did it burn, when did it page, and how much of the month's budget is gone? The month normally sees 43.2 million checkouts.",
+        "",
+        "Each minute is `record Minute(int At, long Total, long Bad);` with `At` in minutes after 13:00. The tests build the table above."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Burn rate over a window",
+      "prompt": [
+        "Write `double WindowBurn(List<Minute> minutes, int end, int length, double slo)`: the burn rate over the `length` minutes that end",
+        "at minute `end` (inclusive: `end - length + 1` to `end`). Only minutes that exist count (the table starts at 13:00, so early",
+        "windows are shorter). Burn rate = (bad / total) / (1 - slo), 0 when there is no traffic in the window.",
+        "",
+        "`WindowBurn(table, 5, 5, 0.999)` covers 13:01 to 13:05: 404 failed of 5 000 = 8.08% → burn **80.8**."
+      ],
+      "starter": [
+        "double WindowBurn(List<Minute> minutes, int end, int length, double slo)",
+        "{",
+        "    return 0;",
+        "}"
+      ],
+      "solution": [
+        "double WindowBurn(List<Minute> minutes, int end, int length, double slo)",
+        "{",
+        "    var w = minutes.Where(m => m.At > end - length && m.At <= end).ToList();",
+        "    long total = w.Sum(m => m.Total), bad = w.Sum(m => m.Bad);",
+        "    return total == 0 ? 0 : (double)bad / total / (1 - slo);",
+        "}"
+      ],
+      "hints": [
+        "Filter with `m.At > end - length && m.At <= end`, then sum `Total` and `Bad`.",
+        "Cast before dividing: `(double)bad / total / (1 - slo)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoT = Enumerable.Range(0, 30).Select(i => new Minute(i, 1000, i >= 5 && i <= 14 ? 400 : 1)).ToList();",
+        "Dojo.Eq(\"13:01 to 13:05\", 80.8, Math.Round(WindowBurn(dojoT, 5, 5, 0.999), 1));",
+        "Dojo.Eq(\"13:00 to 13:04, before the deploy\", 1.0, Math.Round(WindowBurn(dojoT, 4, 5, 0.999), 1));",
+        "Dojo.Eq(\"the 60-minute window at 13:14 only has 15 minutes of data\", 267.0, Math.Round(WindowBurn(dojoT, 14, 60, 0.999), 1));",
+        "Dojo.Eq(\"13:16 to 13:20, after the rollback\", 1.0, Math.Round(WindowBurn(dojoT, 20, 5, 0.999), 1));",
+        "Dojo.Eq(\"no data\", 0.0, WindowBurn(dojoT, 100, 5, 0.999));",
+        "record Minute(int At, long Total, long Bad);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "When did it page, when did it resolve?",
+      "prompt": [
+        "Write `string Timeline(List<Minute> minutes, double slo, int forMinutes)` using `WindowBurn` (paste it in). Walk the minutes in order.",
+        "The **condition** at minute `t` is: `WindowBurn(t, 60) >= 14.4` and `WindowBurn(t, 5) >= 14.4`.",
+        "",
+        "- The alert **fires** at the first minute where the condition has been true for `forMinutes + 1` consecutive minutes",
+        "  (true at `t - forMinutes` ... `t`), like Prometheus' `for:` evaluated once a minute.",
+        "- After firing, it **resolves** at the first minute where the condition is false.",
+        "",
+        "Return `\"fired 13:07, resolved 13:19\"` (times as `13:mm`, two digits), or `\"never fired\"`, or `\"fired 13:mm, still firing\"`."
+      ],
+      "starter": [
+        "string Timeline(List<Minute> minutes, double slo, int forMinutes)",
+        "{",
+        "    return \"never fired\";",
+        "}",
+        "",
+        "// paste WindowBurn here"
+      ],
+      "solution": [
+        "string Timeline(List<Minute> minutes, double slo, int forMinutes)",
+        "{",
+        "    var run = 0;",
+        "    int? fired = null;",
+        "    foreach (var m in minutes.OrderBy(m => m.At))",
+        "    {",
+        "        var on = WindowBurn(minutes, m.At, 60, slo) >= 14.4 && WindowBurn(minutes, m.At, 5, slo) >= 14.4;",
+        "        run = on ? run + 1 : 0;",
+        "        if (fired is null && run >= forMinutes + 1) fired = m.At;",
+        "        else if (fired is not null && !on) return $\"fired {Clock(fired.Value)}, resolved {Clock(m.At)}\";",
+        "    }",
+        "    return fired is null ? \"never fired\" : $\"fired {Clock(fired.Value)}, still firing\";",
+        "}",
+        "",
+        "string Clock(int at) => $\"{13 + at / 60}:{at % 60:D2}\";",
+        "",
+        "double WindowBurn(List<Minute> minutes, int end, int length, double slo)",
+        "{",
+        "    var w = minutes.Where(m => m.At > end - length && m.At <= end).ToList();",
+        "    long total = w.Sum(m => m.Total), bad = w.Sum(m => m.Bad);",
+        "    return total == 0 ? 0 : (double)bad / total / (1 - slo);",
+        "}"
+      ],
+      "hints": [
+        "Keep a counter of consecutive minutes where the condition holds; reset it to 0 when it does not.",
+        "At 13:05 the condition becomes true, so with `for: 2m` it fires at 13:07. The 5-minute window drops below 14.4 once it no longer holds deploy minutes... check the numbers: 13:19 covers 13:15 to 13:19."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoT = Enumerable.Range(0, 30).Select(i => new Minute(i, 1000, i >= 5 && i <= 14 ? 400 : 1)).ToList();",
+        "Dojo.Eq(\"the incident\", \"fired 13:07, resolved 13:19\", Timeline(dojoT, 0.999, 2));",
+        "Dojo.Eq(\"for: 0m fires at once\", \"fired 13:05, resolved 13:19\", Timeline(dojoT, 0.999, 0));",
+        "Dojo.Eq(\"a one-minute blip with for: 5m never pages\", \"never fired\",",
+        "    Timeline(Enumerable.Range(0, 30).Select(i => new Minute(i, 1000, i == 5 ? 400 : 1)).ToList(), 0.999, 5));",
+        "Dojo.Eq(\"no rollback\", \"fired 13:07, still firing\",",
+        "    Timeline(Enumerable.Range(0, 30).Select(i => new Minute(i, 1000, i >= 5 ? 400 : 1)).ToList(), 0.999, 2));",
+        "record Minute(int At, long Total, long Bad);"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "What did it cost?",
+      "prompt": [
+        "Write `string Cost(List<Minute> minutes, double slo, long monthlyTotal)`: how much of the month's error budget these minutes",
+        "spent, and how long a full outage that would equal.",
+        "",
+        "- budget (in failed checkouts) = `monthlyTotal * (1 - slo)`",
+        "- spent = sum of `Bad` / budget, as a percentage with one decimal",
+        "- equivalent full outage = spent fraction × the budget in minutes for 30 days (`30 * 24 * 60 * (1 - slo)`), one decimal",
+        "",
+        "Return `\"spent 9.3% of the budget (4.0 min of full outage)\"`."
+      ],
+      "starter": [
+        "string Cost(List<Minute> minutes, double slo, long monthlyTotal)",
+        "{",
+        "    return \"\";",
+        "}"
+      ],
+      "solution": [
+        "string Cost(List<Minute> minutes, double slo, long monthlyTotal)",
+        "{",
+        "    var budget = monthlyTotal * (1 - slo);",
+        "    var spent = minutes.Sum(m => m.Bad) / budget;",
+        "    var outage = spent * 30 * 24 * 60 * (1 - slo);",
+        "    return $\"spent {spent * 100:F1}% of the budget ({outage:F1} min of full outage)\";",
+        "}"
+      ],
+      "hints": [
+        "The incident failed 4 000 checkouts plus 20 background failures. Budget: 43.2 M × 0.001 = 43 200.",
+        "`spent * 30 * 24 * 60 * (1 - slo)` turns the fraction back into minutes."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoT = Enumerable.Range(0, 30).Select(i => new Minute(i, 1000, i >= 5 && i <= 14 ? 400 : 1)).ToList();",
+        "Dojo.Eq(\"INC-2291\", \"spent 9.3% of the budget (4.0 min of full outage)\", Cost(dojoT, 0.999, 43_200_000));",
+        "Dojo.Eq(\"the same failures against 99.99%\", \"spent 93.1% of the budget (4.0 min of full outage)\", Cost(dojoT, 0.9999, 43_200_000));",
+        "Dojo.Eq(\"a quiet half hour\", \"spent 0.1% of the budget (0.0 min of full outage)\",",
+        "    Cost(Enumerable.Range(0, 30).Select(i => new Minute(i, 1000, 1)).ToList(), 0.999, 43_200_000));",
+        "record Minute(int At, long Total, long Bad);"
+      ]
+    }
+  ]
+}

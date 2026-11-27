@@ -1,0 +1,245 @@
+{
+  "title": "Processors: protect, clean, sample",
+  "summary": "memory_limiter, batching in the exporter (the batch processor is on its way out), redaction with attributes, OTTL with transform and filter, and tail sampling policies.",
+  "minutes": 18,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Protect the Collector, batch at the exporter",
+      "body": [
+        "```yaml",
+        "processors:",
+        "  memory_limiter:            # first in every pipeline",
+        "    check_interval: 1s",
+        "    limit_mib: 400           # hard limit: refuse data (receivers return errors, SDKs retry)",
+        "    spike_limit_mib: 80      # soft limit = limit - spike: start refusing early",
+        "exporters:",
+        "  otlp_grpc/backend:",
+        "    endpoint: backend.example.com:4317",
+        "    sending_queue:           # queue + retries + batching, per exporter",
+        "      enabled: true",
+        "      queue_size: 1000",
+        "      batch:",
+        "        enabled: true",
+        "        flush_timeout: 200ms",
+        "        min_size: 8192",
+        "    retry_on_failure: { enabled: true, max_elapsed_time: 300s }",
+        "```",
+        "",
+        "- **memory_limiter** turns \"OOM-killed and lost everything in flight\" into \"pushing back for a while\". Also set `GOMEMLIMIT` to about",
+        "  80% of the container limit so Go's garbage collector works with it.",
+        "- **Batching** used to be the `batch` processor. It is being deprecated in favour of exporter batching (`sending_queue.batch`), which",
+        "  batches after the queue, per exporter; the replacement processor for the rare cases that need it is `queue_batch`. You will see",
+        "  `batch` in almost every config written before 2027: it still works, and the release notes warn before it goes.",
+        "- `sending_queue` keeps data in memory while a backend is down (or on disk with the `file_storage` extension, to survive restarts)."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The backend is down for 10 minutes. The Collector has `memory_limiter` and an in-memory `sending_queue` of 1 000 batches. What happens?",
+      "options": [
+        "The queue fills, then new data is dropped (counted in otelcol_exporter_enqueue_failed_*); memory_limiter keeps the Collector alive; when the backend returns the queue drains",
+        "The Collector buffers everything until the backend returns, however long it takes",
+        "The Collector crashes and restarts until the backend returns",
+        "SDKs keep the data until the Collector accepts it again"
+      ],
+      "answer": 0,
+      "explain": "Every buffer is bounded. Size the queue for the outage you want to survive (throughput × time), use file_storage if a restart must not lose it, and alert on the enqueue_failed and send_failed metrics."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the processor to the job.",
+      "pairs": [
+        [
+          "Refuse data before the Collector runs out of memory",
+          "memory_limiter"
+        ],
+        [
+          "Hash user.email on every span",
+          "\u0007ttributes"
+        ],
+        [
+          "Cut every attribute to 512 characters",
+          "\transform (OTTL)"
+        ],
+        [
+          "Drop health-check spans",
+          "\filter"
+        ],
+        [
+          "Keep every trace that had an error",
+          "\tail_sampling"
+        ],
+        [
+          "Add pod and namespace names from the Kubernetes API",
+          "k8sattributes"
+        ]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Redact, rewrite, drop",
+      "body": [
+        "```yaml",
+        "processors:",
+        "  attributes/redact:              # per-key actions on span, log and data point attributes",
+        "    actions:",
+        "      - { key: user.email, action: hash }        # SHA-256 hex of the value",
+        "      - { key: http.request.header.authorization, action: delete }",
+        "      - { key: deployment.region, value: eu-west-1, action: insert }   # only if missing",
+        "  transform/truncate:              # OTTL: the OpenTelemetry Transformation Language",
+        "    trace_statements:",
+        "      - truncate_all(span.attributes, 512)",
+        "      - replace_pattern(span.attributes[\"db.query.text\"], \"'[^']*'\", \"'?'\")",
+        "  filter/health:                  # drop what nobody needs",
+        "    traces:",
+        "      span:",
+        "        - 'attributes[\"url.path\"] == \"/healthz\"'",
+        "```",
+        "",
+        "`attributes` actions: `insert` (add if missing), `update` (change if present), `upsert` (both), `delete`, `hash`, `extract`",
+        "(regex into new keys). `transform` can do almost anything with OTTL statements and `where` conditions; `filter` drops whatever",
+        "its conditions match. Redaction in the Collector protects you **today**, for every service; still fix the source."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Apply attribute actions",
+      "prompt": [
+        "Implement the `attributes` processor's actions on one span's attributes.",
+        "`record AttrAction(string Key, string Action, string? Value = null);` with `Action` one of `insert`, `update`, `upsert`, `delete`, `hash`.",
+        "",
+        "Write `Dictionary<string, string> Apply(Dictionary<string, string> attrs, List<AttrAction> actions)`: a **new** dictionary, actions",
+        "applied in order:",
+        "",
+        "- `insert`: set `Value` only if the key is missing; `update`: only if present; `upsert`: always;",
+        "- `delete`: remove the key; `hash`: replace a present value with its SHA-256 as lower-case hex",
+        "  (`Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)))`, in `System.Security.Cryptography`)."
+      ],
+      "starter": [
+        "Dictionary<string, string> Apply(Dictionary<string, string> attrs, List<AttrAction> actions)",
+        "{",
+        "    return new Dictionary<string, string>(attrs);",
+        "}"
+      ],
+      "solution": [
+        "Dictionary<string, string> Apply(Dictionary<string, string> attrs, List<AttrAction> actions)",
+        "{",
+        "    var result = new Dictionary<string, string>(attrs);",
+        "    foreach (var a in actions)",
+        "    {",
+        "        var has = result.TryGetValue(a.Key, out var current);",
+        "        switch (a.Action)",
+        "        {",
+        "            case \"insert\" when !has: result[a.Key] = a.Value!; break;",
+        "            case \"update\" when has: result[a.Key] = a.Value!; break;",
+        "            case \"upsert\": result[a.Key] = a.Value!; break;",
+        "            case \"delete\": result.Remove(a.Key); break;",
+        "            case \"hash\" when has:",
+        "                result[a.Key] = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(current!)));",
+        "                break;",
+        "        }",
+        "    }",
+        "    return result;",
+        "}"
+      ],
+      "hints": [
+        "Check `TryGetValue` before each action: insert, update and hash depend on whether the key is there.",
+        "A `switch` with `case \"insert\" when !has:` guards reads nicely."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoIn = new Dictionary<string, string> { [\"user.email\"] = \"ana@example.com\", [\"http.request.header.authorization\"] = \"Bearer x\", [\"app.plan\"] = \"pro\" };",
+        "var dojoOut = Apply(dojoIn, [new(\"user.email\", \"hash\"), new(\"http.request.header.authorization\", \"delete\"),",
+        "    new(\"deployment.region\", \"insert\", \"eu-west-1\"), new(\"app.plan\", \"insert\", \"free\")]);",
+        "Dojo.Eq(\"email hashed (SHA-256, lower hex)\", \"e8ed2b5eda0fc9cbbea0a5c3a9e4f8bd40b7b6c1c3c8f8a0b1c7e3d7a5a0d6f3\".Length, dojoOut.GetValueOrDefault(\"user.email\")?.Length ?? 0);",
+        "Dojo.Eq(\"the hash is the real SHA-256\", Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(\"ana@example.com\"))), dojoOut.GetValueOrDefault(\"user.email\"));",
+        "Dojo.Check(\"authorization deleted\", !dojoOut.ContainsKey(\"http.request.header.authorization\"), \"\");",
+        "Dojo.Eq(\"insert adds a missing key\", \"eu-west-1\", dojoOut.GetValueOrDefault(\"deployment.region\"));",
+        "Dojo.Eq(\"insert keeps an existing value\", \"pro\", dojoOut.GetValueOrDefault(\"app.plan\"));",
+        "Dojo.Eq(\"the input is untouched\", \"ana@example.com\", dojoIn[\"user.email\"]);",
+        "var dojoUp = Apply(new() { [\"a\"] = \"1\" }, [new(\"a\", \"update\", \"2\"), new(\"b\", \"update\", \"9\"), new(\"c\", \"upsert\", \"3\"), new(\"zz\", \"hash\")]);",
+        "Dojo.Eq(\"update only changes present keys, upsert always sets, hash skips missing\", \"a=2,c=3\", string.Join(\",\", dojoUp.OrderBy(kv => kv.Key).Select(kv => $\"{kv.Key}={kv.Value}\")));",
+        "record AttrAction(string Key, string Action, string? Value = null);"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Tail sampling policies",
+      "body": [
+        "```yaml",
+        "processors:",
+        "  tail_sampling:",
+        "    decision_wait: 10s                 # wait this long after a trace's first span before deciding",
+        "    num_traces: 50000                  # traces held in memory while waiting",
+        "    policies:                          # a trace is kept when ANY policy says sample",
+        "      - { name: errors, type: status_code, status_code: { status_codes: [ERROR] } }",
+        "      - { name: slow, type: latency, latency: { threshold_ms: 1000 } }",
+        "      - { name: vip, type: string_attribute, string_attribute: { key: app.plan, values: [enterprise] } }",
+        "      - { name: rest, type: probabilistic, probabilistic: { sampling_percentage: 5 } }",
+        "```",
+        "",
+        "Latency is the trace's end-to-end time (latest end minus earliest start). Spans that arrive after the decision are judged by the",
+        "decision already made (kept traces keep late spans). Memory is roughly spans per second × `decision_wait` × span size: at 20 000",
+        "spans/s and 10 s that is 200 000 spans held at once. And every span of a trace must reach the **same** Collector instance (next lesson)."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Decide like tail_sampling",
+      "prompt": [
+        "Spans of one complete trace: `record Span(string TraceId, double Start, double End, string Status, Dictionary<string, string> Attrs);`",
+        "(milliseconds; `Status` is `ERROR`, `OK` or `UNSET`). Policies: `record Policy(string Type, double Number = 0, string? Key = null, string[]? Values = null);`",
+        "",
+        "Write `string Decide(List<Span> trace, List<Policy> policies)` returning the **name of the first policy type that samples**, or `\"drop\"`:",
+        "",
+        "- `status_code`: some span has `Status == \"ERROR\"`;",
+        "- `latency`: `max(End) - min(Start) >= Number`;",
+        "- `string_attribute`: some span has attribute `Key` with a value in `Values`;",
+        "- `probabilistic`: the trace id's first 16 hex digits as an unsigned number, divided by 2^64, times 100, is below `Number` (a percentage)."
+      ],
+      "starter": [
+        "string Decide(List<Span> trace, List<Policy> policies)",
+        "{",
+        "    return \"drop\";",
+        "}"
+      ],
+      "solution": [
+        "string Decide(List<Span> trace, List<Policy> policies)",
+        "{",
+        "    foreach (var p in policies)",
+        "    {",
+        "        var keep = p.Type switch",
+        "        {",
+        "            \"status_code\" => trace.Any(s => s.Status == \"ERROR\"),",
+        "            \"latency\" => trace.Max(s => s.End) - trace.Min(s => s.Start) >= p.Number,",
+        "            \"string_attribute\" => trace.Any(s => p.Key is not null && s.Attrs.TryGetValue(p.Key, out var v) && (p.Values ?? []).Contains(v)),",
+        "            \"probabilistic\" => ulong.Parse(trace[0].TraceId[..16], System.Globalization.NumberStyles.HexNumber) / 18446744073709551616.0 * 100 < p.Number,",
+        "            _ => false,",
+        "        };",
+        "        if (keep) return p.Type;",
+        "    }",
+        "    return \"drop\";",
+        "}"
+      ],
+      "hints": [
+        "A `switch` expression on `p.Type`, one line per policy; return the type of the first one that is true.",
+        "End-to-end latency: `trace.Max(s => s.End) - trace.Min(s => s.Start)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoPolicies = new List<Policy> { new(\"status_code\"), new(\"latency\", 1000), new(\"string_attribute\", Key: \"app.plan\", Values: [\"enterprise\"]), new(\"probabilistic\", 5) };",
+        "Span S(string id, double a, double b, string st = \"UNSET\", string plan = \"free\") => new(id, a, b, st, new() { [\"app.plan\"] = plan });",
+        "Dojo.Eq(\"an error is kept\", \"status_code\", Decide([S(\"ffff000000000000ffff000000000000\", 0, 30), S(\"ffff000000000000ffff000000000000\", 5, 20, \"ERROR\")], dojoPolicies));",
+        "Dojo.Eq(\"end to end, not per span: 1.2 s\", \"latency\", Decide([S(\"ffff000000000000ffff000000000000\", 0, 400), S(\"ffff000000000000ffff000000000000\", 800, 1200)], dojoPolicies));",
+        "Dojo.Eq(\"an enterprise customer\", \"string_attribute\", Decide([S(\"ffff000000000000ffff000000000000\", 0, 40, plan: \"enterprise\")], dojoPolicies));",
+        "Dojo.Eq(\"the lucky 5%\", \"probabilistic\", Decide([S(\"0100000000000000ffff000000000000\", 0, 40)], dojoPolicies));",
+        "Dojo.Eq(\"an ordinary trace is dropped\", \"drop\", Decide([S(\"ffff000000000000ffff000000000000\", 0, 40), S(\"ffff000000000000ffff000000000000\", 10, 900)], dojoPolicies));",
+        "Dojo.Eq(\"policy order decides the label\", \"latency\", Decide([S(\"ffff000000000000ffff000000000000\", 0, 1500, \"ERROR\")], [new(\"latency\", 1000), new(\"status_code\")]));",
+        "record Span(string TraceId, double Start, double End, string Status, Dictionary<string, string> Attrs);",
+        "record Policy(string Type, double Number = 0, string? Key = null, string[]? Values = null);"
+      ]
+    }
+  ]
+}

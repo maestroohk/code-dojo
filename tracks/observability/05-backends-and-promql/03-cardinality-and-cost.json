@@ -1,0 +1,119 @@
+{
+  "title": "Cardinality and cost",
+  "summary": "Every label value multiplies series; series cost memory, disk and money. Find the label that explodes, and decide what belongs on metrics, spans or logs.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Series multiply",
+      "body": [
+        "A metric's **cardinality** is its number of distinct series: the product of the distinct values of each label (for the",
+        "combinations that actually occur). The HTTP duration histogram per service is roughly",
+        "",
+        "```text",
+        "routes (25) × methods (3) × status codes (6) × buckets (15) × instances (6)  ≈  40 000 series",
+        "```",
+        "",
+        "Each active series costs Prometheus a few KB of memory, index entries, and at a hosted vendor real money (often billed per active",
+        "series). Add one label with 5 000 values (a customer id) and that metric alone becomes 200 million combinations to track. That is the",
+        "lab's task 9: `app.orders` with `app.customer.id` went from 6 series to hundreds in minutes.",
+        "",
+        "Rules of thumb a reviewer applies:",
+        "",
+        "- metric labels: bounded and known in advance (route template, method, status code, region, payment type, tier);",
+        "- never on metrics: ids (user, order, request, trace), emails, raw URLs or paths with ids, error messages, timestamps, versions of",
+        "  everything with a commit hash;",
+        "- high-cardinality detail is welcome on **spans and logs** (one record per request: the cost is per record, not per value).",
+        "",
+        "Find culprits with `promtool tsdb analyze`, Prometheus' **Status → TSDB Status** page (top labels by series), or",
+        "`topk(10, count by (__name__) ({__name__=~\".+\"}))`. Below: the series behind `app_orders_total`, recorded in the lab while task 9 was being fixed."
+      ],
+      "otelviz": {"kind":"metrics","title":"count(app_orders_total): series behind one counter","unit":"","clock":"00:33","query":"count(app_orders_total)","series":[{"name":"active series","points":[[0,4],[15,7],[30,8],[45,16],[60,34],[75,43],[90,56],[105,65],[120,78],[135,91],[150,105],[165,123],[180,138],[195,147],[210,29],[225,42],[240,56],[255,66],[270,66],[285,67],[300,68],[315,6]]}],"thresholds":[{"value":50,"label":"what this counter should need: 6","kind":"warn"}],"annotations":[{"t":210,"label":"redeploy: old series expire"},{"t":315,"label":"app.customer.id removed"}]}
+    },
+    {
+      "type": "predict",
+      "prompt": "How many series can this counter create at most?",
+      "code": [
+        "int routes = 12, methods = 2, statuses = 5, regions = 3;",
+        "Console.WriteLine(routes * methods * statuses * regions);",
+        "int customers = 20_000;",
+        "Console.WriteLine((long)routes * methods * statuses * regions * customers);"
+      ],
+      "answer": ["360", "7200000"],
+      "explain": "360 series is nothing. One customer label makes it 7.2 million possible series; in practice the active ones are whatever customers showed up, which is still far beyond what one counter should cost."
+    },
+    {
+      "type": "sort",
+      "prompt": "Fine as a metric label, or not?",
+      "buckets": ["Fine on a metric", "Spans or logs only"],
+      "items": [
+        ["`http_route=\"/api/products/{id:int}\"`", 0],
+        ["`http_response_status_code=\"502\"`", 0],
+        ["`app_payment_method=\"paypal\"`", 0],
+        ["`url_path=\"/api/products/17\"`", 1],
+        ["`app_customer_id=\"3306\"`", 1],
+        ["`error_message=\"Timeout after 5000 ms calling ...\"`", 1],
+        ["`trace_id=\"46ae7e54...\"`", 1]
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Find the label that explodes",
+      "prompt": [
+        "You exported the series of one metric: each is a `Dictionary<string, string>` of labels.",
+        "Write `List<string> Culprits(List<Dictionary<string, string>> series, int maxValues)`: for each label key, count its distinct values",
+        "across all series; return the keys with **more than** `maxValues` values, most values first (ties by key, ordinal), formatted",
+        "`\"{key}: {n} values\"`."
+      ],
+      "starter": [
+        "List<string> Culprits(List<Dictionary<string, string>> series, int maxValues)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Culprits(List<Dictionary<string, string>> series, int maxValues) =>",
+        "    series.SelectMany(s => s).GroupBy(kv => kv.Key)",
+        "        .Select(g => (Key: g.Key, N: g.Select(kv => kv.Value).Distinct().Count()))",
+        "        .Where(x => x.N > maxValues)",
+        "        .OrderByDescending(x => x.N).ThenBy(x => x.Key, StringComparer.Ordinal)",
+        "        .Select(x => $\"{x.Key}: {x.N} values\").ToList();"
+      ],
+      "hints": [
+        "Flatten every series' pairs with `SelectMany`, group by key, count distinct values.",
+        "`.OrderByDescending(x => x.N).ThenBy(x => x.Key, StringComparer.Ordinal)`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSeries = new List<Dictionary<string, string>>();",
+        "string[] dojoPay = [\"card\", \"paypal\", \"voucher\"];",
+        "for (var i = 0; i < 600; i++)",
+        "    dojoSeries.Add(new() { [\"job\"] = \"shop\", [\"app_payment_method\"] = dojoPay[i % 3], [\"app_order_status\"] = i % 7 == 0 ? \"failed\" : \"placed\", [\"app_customer_id\"] = (1000 + i).ToString() });",
+        "Dojo.Eq(\"the lab's app_orders_total\", new List<string> { \"app_customer_id: 600 values\" }, Culprits(dojoSeries, 20));",
+        "Dojo.Eq(\"a strict limit shows everything above it\", new List<string> { \"app_customer_id: 600 values\", \"app_payment_method: 3 values\", \"app_order_status: 2 values\" }, Culprits(dojoSeries, 1));",
+        "Dojo.Eq(\"healthy\", 0, Culprits([new() { [\"a\"] = \"1\" }, new() { [\"a\"] = \"2\" }], 5).Count);"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Product wants \"revenue per customer per day\". Where should it come from?",
+      "options": [
+        "The orders database or the event stream into an analytics store; not a metric label",
+        "A Prometheus counter with a `customer_id` label",
+        "A span attribute, summed in the trace backend",
+        "A Loki label per customer"
+      ],
+      "answer": 0,
+      "explain": "Observability backends answer \"is the system healthy and why not\". Per-entity business reporting needs every event, exactly once, kept for months: that is a database or analytics job. Using a metrics system for it is a classic way to get both an expensive Prometheus and wrong numbers."
+    },
+    {
+      "type": "lab",
+      "live": "27-otel-oncall",
+      "task": "t9",
+      "title": "Live lab: the metric that ate Prometheus",
+      "prompt": "In the live lab **OpenTelemetry on-call**, find the unbounded attribute on `app.orders` and fix the code so the counter keeps only bounded attributes (task 9).",
+      "explain": "Cardinality is fixed at the source: the attribute that should never have been there, or an SDK view that drops it."
+    }
+  ]
+}

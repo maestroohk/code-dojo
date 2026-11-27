@@ -1,0 +1,116 @@
+{
+  "title": "Agents, gateways and load balancing",
+  "summary": "Where Collectors run (next to the app, or as a central tier), what each layer is for, and why tail sampling needs traces routed by trace id.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Two layers",
+      "body": [
+        "```text",
+        "  app ──OTLP──▶ agent Collector (same node)  ──OTLP──▶  gateway Collectors (a pool)  ──▶ backends",
+        "               DaemonSet / sidecar / host               Deployment behind a load balancer",
+        "               k8sattributes, hostmetrics,               tail_sampling, redaction, routing,",
+        "               filelog, memory_limiter, batching          credentials for vendors, cost control",
+        "```",
+        "",
+        "- **Agent** (one per node or pod): short hop for apps, adds host and Kubernetes metadata, scrapes local logs and metrics, buffers when",
+        "  the network blips. Cheap, many of them, no global view.",
+        "- **Gateway** (a central, horizontally scaled pool): one place for policy (redaction, sampling, which vendor gets what), holds the",
+        "  backend credentials so apps never do.",
+        "- Small setups run only one of them; the lab runs a single gateway. On Kubernetes the **OpenTelemetry Operator** manages both",
+        "  (`OpenTelemetryCollector` resources with `mode: daemonset | deployment | sidecar | statefulset`) and can inject SDK auto-instrumentation.",
+        "",
+        "**The tail sampling catch:** a gateway can only judge a trace if it has *all* its spans, but a normal load balancer spreads spans",
+        "of one trace across instances. So agents use the **loadbalancing exporter**, which hashes the trace id to pick the gateway:",
+        "",
+        "```yaml",
+        "exporters:",
+        "  loadbalancing:",
+        "    routing_key: traceID",
+        "    protocol: { otlp: { tls: { insecure: true } } }",
+        "    resolver:",
+        "      dns: { hostname: otel-gateway-headless.observability.svc.cluster.local, port: 4317 }",
+        "```"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Agent (next to the app) or gateway (central pool)?",
+      "buckets": ["Agent", "Gateway"],
+      "items": [
+        ["`k8sattributes`: add pod and namespace names", 0],
+        ["`hostmetrics`: CPU and disk of this node", 0],
+        ["`filelog`: tail this node's container logs", 0],
+        ["`tail_sampling` across the whole fleet", 1],
+        ["holding the vendor's API key", 1],
+        ["one redaction policy for every team", 1]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Three gateway replicas run `tail_sampling` behind a round-robin Kubernetes Service. Errors are supposed to be kept 100%, yet many error traces in the backend are missing spans. Why?",
+      "options": [
+        "Spans of one trace land on different replicas; each sees part of the trace and decides alone. Route by trace id (loadbalancing exporter) instead",
+        "tail_sampling cannot keep errors",
+        "Three replicas is too few",
+        "The SDKs must use head sampling at 100% for tail sampling to work"
+      ],
+      "answer": 0,
+      "explain": "The replica that holds the failing span keeps its part; the others drop theirs as \"ordinary\". The loadbalancing exporter with `routing_key: traceID` (and a headless Service so it sees every pod) sends a whole trace to one replica."
+    },
+    {
+      "type": "learn",
+      "title": "Consistent hashing",
+      "body": [
+        "Routing by `hash(trace id) % N` breaks when N changes: scale from 3 to 4 gateways and three quarters of the in-flight traces move,",
+        "split between the old and the new owner mid-trace. **Consistent hashing** moves only about 1/N of them. The loadbalancing exporter uses a",
+        "hash ring; **rendezvous hashing** (highest random weight) has the same property and fits in three lines: score every gateway with",
+        "`hash(traceId + gateway)` and pick the highest. Removing a gateway only moves the traces it owned; the rest keep their winner."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Route a trace to its gateway",
+      "prompt": [
+        "Write `string Pick(string traceId, List<string> gateways)` with rendezvous hashing: for each gateway compute",
+        "`BitConverter.ToUInt64(SHA256.HashData(Encoding.UTF8.GetBytes(traceId + \"|\" + gateway)))` (the first 8 bytes of the hash) and",
+        "return the gateway with the **highest** score (ties: the first in the list). With no gateways, throw `InvalidOperationException`."
+      ],
+      "starter": [
+        "string Pick(string traceId, List<string> gateways)",
+        "{",
+        "    return gateways[0];",
+        "}"
+      ],
+      "solution": [
+        "string Pick(string traceId, List<string> gateways)",
+        "{",
+        "    if (gateways.Count == 0) throw new InvalidOperationException(\"no gateways\");",
+        "    ulong Score(string g) => BitConverter.ToUInt64(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(traceId + \"|\" + g)));",
+        "    var best = gateways[0];",
+        "    foreach (var g in gateways.Skip(1)) if (Score(g) > Score(best)) best = g;",
+        "    return best;",
+        "}"
+      ],
+      "hints": [
+        "A local function `ulong Score(string g)` and a loop that keeps the best so far.",
+        "`MaxBy(g => Score(g))` also works and keeps the first on ties."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoGw = new List<string> { \"gw-0\", \"gw-1\", \"gw-2\" };",
+        "var dojoIds = Enumerable.Range(0, 3000).Select(i => i.ToString(\"x32\")).ToList();",
+        "Dojo.Check(\"the same trace always goes to the same gateway\", dojoIds.All(id => Pick(id, dojoGw) == Pick(id, dojoGw)), \"\");",
+        "var dojoCounts = dojoIds.GroupBy(id => Pick(id, dojoGw)).ToDictionary(g => g.Key, g => g.Count());",
+        "Dojo.Check(\"spread evenly (each gets 800 to 1200 of 3000)\", dojoGw.All(g => dojoCounts.GetValueOrDefault(g) is > 800 and < 1200), string.Join(\", \", dojoCounts));",
+        "var dojoFour = new List<string> { \"gw-0\", \"gw-1\", \"gw-2\", \"gw-3\" };",
+        "var dojoMoved = dojoIds.Count(id => Pick(id, dojoGw) != Pick(id, dojoFour));",
+        "Dojo.Check(\"adding a 4th gateway moves about a quarter, not three quarters\", dojoMoved is > 550 and < 950, \"moved \" + dojoMoved);",
+        "Dojo.Check(\"every moved trace moved to the new gateway\", dojoIds.Where(id => Pick(id, dojoGw) != Pick(id, dojoFour)).All(id => Pick(id, dojoFour) == \"gw-3\"), \"\");",
+        "Dojo.Throws<InvalidOperationException>(\"no gateways\", () => Pick(\"abc\", new List<string>()));"
+      ]
+    }
+  ]
+}

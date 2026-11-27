@@ -1,0 +1,128 @@
+{
+  "title": "Sampling: head, tail and parent-based",
+  "summary": "Keeping every trace is expensive. Head sampling decides at the start, tail sampling after the end, and parent-based sampling keeps traces whole.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Decide early, or decide late",
+      "body": [
+        "A busy service produces far more spans than anyone reads, and backends bill by volume. **Sampling** keeps a subset.",
+        "",
+        "- **Head sampling** decides when the root span starts, in the SDK: `TraceIdRatioBased(0.1)` keeps 10% of traces. Cheap (dropped",
+        "  spans are never even recorded), but blind: it keeps errors and slow requests at the same 10% as everything else.",
+        "- **Parent-based**: a span with a remote parent follows the `sampled` flag in `traceparent`. Only the root decides; everyone",
+        "  downstream follows, so a kept trace is complete. `ParentBased(root: ...)` is the SDK default (`parentbased_always_on`).",
+        "- **Tail sampling** decides after the trace is complete, in a Collector that sees all its spans: keep every error, every trace",
+        "  slower than 1 s, and 5% of the rest. It costs memory (traces are buffered for `decision_wait`) and every span of a trace must",
+        "  reach the same Collector instance (module 4).",
+        "",
+        "Metrics are not sampled: they count every request whatever the traces keep, which is why you alert on metrics. Below, 1 000",
+        "traces with 1% errors and 2% slow ones. Compare 10% head sampling with tail sampling at the same storage cost."
+      ],
+      "otelviz": { "kind": "sampling", "traces": 1000, "errorRate": 0.01, "slowRate": 0.02, "ratio": 0.1, "rest": 0.07, "seed": 11,
+        "caption": "Dots are traces in arrival order; ringed ones failed (red) or were slow (orange). A real tail sampler's policies: status_code, latency, probabilistic." }
+    },
+    {
+      "type": "mcq",
+      "prompt": "The shop samples 100% at the root. Inventory is configured with `traceidratio` 0.2 (not parent-based). What do you see in Jaeger?",
+      "options": [
+        "Most shop traces have no inventory spans: inventory ignores the sampled flag and records only a fifth of the traces",
+        "Every trace is complete, because the trace id is the same",
+        "Inventory's spans appear in separate traces of their own",
+        "Nothing changes: samplers only apply to metrics"
+      ],
+      "answer": 0,
+      "explain": "A non-parent-based sampler makes its own decision. The shop keeps the trace, inventory drops its part: a trace with holes, exactly the lab's task 5. Fix: `parentbased_traceidratio` (or `parentbased_always_on`) everywhere except, if you want, the root."
+    },
+    {
+      "type": "learn",
+      "title": "How a ratio sampler decides",
+      "body": [
+        "A ratio sampler must make the **same** decision for the same trace in every service, without talking to the others. So it decides",
+        "from the trace id itself, which is random: read part of the id as a number and keep the trace when that number is below",
+        "`ratio × maximum`. The .NET SDK's `TraceIdRatioBasedSampler` reads the first 8 bytes as a 64-bit integer.",
+        "",
+        "```csharp",
+        ".WithTracing(t => t.SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(0.25))))",
+        "// or, without code: OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.25",
+        "```",
+        "",
+        "Newer specs make this exact across languages: W3C Trace Context Level 2 marks trace ids whose last 7 bytes are random (flag `02`), and",
+        "OpenTelemetry's consistent probability sampling compares those 56 bits with a threshold it records in `tracestate` (`ot=th:...`),",
+        "so a backend can count what each kept trace stands for."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "This is the decision rule of the next exercise. Which trace ids does a 25% sampler keep?",
+      "code": [
+        "bool Keep(string traceId, double ratio) => ulong.Parse(traceId[..16], System.Globalization.NumberStyles.HexNumber) / 18446744073709551616.0 < ratio;",
+        "Console.WriteLine(Keep(\"1fffffffffffffff0000000000000001\", 0.25));",
+        "Console.WriteLine(Keep(\"4000000000000000ffffffffffffffff\", 0.25));",
+        "Console.WriteLine(Keep(\"c0ffee0000000000aaaaaaaaaaaaaaaa\", 0.25));"
+      ],
+      "answer": ["True", "False", "False"],
+      "explain": "`0x1fff...` is 1/8 of the 64-bit range, under 0.25: kept. `0x4000...` is exactly 1/4: not under it. `0xc0ff...` is about 75%. Every service applying the same rule to the same id agrees."
+    },
+    {
+      "type": "code",
+      "title": "ParentBased(TraceIdRatioBased)",
+      "prompt": [
+        "Write `bool Sample(string traceId, bool? parentSampled, bool parentIsRemote, double ratio)`, the SDK default with a ratio root:",
+        "",
+        "- with a parent (`parentSampled` not null), follow it: return `parentSampled.Value` (both for a remote parent, from `traceparent`,",
+        "  and a local one, `parentIsRemote` only matters for configuring the two separately, which you do not do here);",
+        "- without a parent (a root span), keep the trace when the first 16 hex digits of the trace id, read as an unsigned 64-bit number,",
+        "  divided by 2^64 (`18446744073709551616.0`) is **below** `ratio`. `ratio` 0 keeps nothing, 1 keeps everything."
+      ],
+      "starter": [
+        "bool Sample(string traceId, bool? parentSampled, bool parentIsRemote, double ratio)",
+        "{",
+        "    return true;",
+        "}"
+      ],
+      "solution": [
+        "bool Sample(string traceId, bool? parentSampled, bool parentIsRemote, double ratio)",
+        "{",
+        "    if (parentSampled is bool parent) return parent;",
+        "    var x = ulong.Parse(traceId[..16], System.Globalization.NumberStyles.HexNumber);",
+        "    return x / 18446744073709551616.0 < ratio;",
+        "}"
+      ],
+      "hints": [
+        "`if (parentSampled is bool parent) return parent;` handles every child span.",
+        "`ulong.Parse(traceId[..16], NumberStyles.HexNumber) / 18446744073709551616.0 < ratio`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "Dojo.Eq(\"a sampled remote parent is followed\", true, Sample(\"ffffffffffffffff0000000000000001\", true, true, 0.01));",
+        "Dojo.Eq(\"an unsampled parent is followed\", false, Sample(\"0000000000000001ffffffffffffffff\", false, true, 1.0));",
+        "Dojo.Eq(\"a local parent is followed too\", true, Sample(\"ffffffffffffffff0000000000000001\", true, false, 0.0));",
+        "Dojo.Eq(\"root under the ratio: kept\", true, Sample(\"1fffffffffffffff0000000000000001\", null, false, 0.25));",
+        "Dojo.Eq(\"root at the boundary: dropped\", false, Sample(\"4000000000000000ffffffffffffffff\", null, false, 0.25));",
+        "Dojo.Eq(\"ratio 1 keeps a high id\", true, Sample(\"efffffffffffffffffffffffffffffff\", null, false, 1.0));",
+        "Dojo.Eq(\"ratio 0 keeps nothing\", false, Sample(\"0000000000000001ffffffffffffffff\", null, false, 0.0));",
+        "var dojoIds = Enumerable.Range(0, 2000).Select(i => (((ulong)i * 0x9E3779B97F4A7C15UL)).ToString(\"x16\") + \"0000000000000001\").ToList();",
+        "var dojoKept = dojoIds.Count(id => Sample(id, null, false, 0.1));",
+        "Dojo.Check(\"about 10% of 2 000 roots are kept\", dojoKept is > 150 and < 250, \"kept \" + dojoKept);",
+        "Dojo.Check(\"two services agree on every trace\", dojoIds.All(id => Sample(id, null, false, 0.1) == Sample(id, null, true, 0.1)), \"\");"
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Where is this decided: the SDK at the root (head) or a Collector after the trace ends (tail)?",
+      "buckets": ["Head (SDK)", "Tail (Collector)"],
+      "items": [
+        ["keep 10% of traces at random", 0],
+        ["keep every trace that contains an error", 1],
+        ["keep every trace slower than 2 s end to end", 1],
+        ["follow the caller's sampled flag", 0],
+        ["keep all traces of tenant `acme`, 1% of the others", 1],
+        ["drop spans before they are even recorded, to save CPU", 0]
+      ],
+      "explain": "Anything that depends on what happened (an error, the total duration, an attribute set late) needs the whole trace: tail. Head sampling only knows what is true when the root starts."
+    }
+  ]
+}

@@ -1,0 +1,257 @@
+{
+  "title": "API, SDK, resources and spans",
+  "summary": "What OpenTelemetry is made of, what a span holds (kind, attributes, events, status, links), and how .NET's own Activity is the tracing API.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "API, SDK, exporter, Collector",
+      "body": [
+        "OpenTelemetry (OTel) is a vendor-neutral standard and a set of libraries for traces, metrics and logs. Four parts:",
+        "",
+        "- **API**: what code calls to create telemetry. It does nothing on its own (a no-op), so libraries can depend on it safely. In .NET",
+        "  the API is built into the runtime: `System.Diagnostics.ActivitySource` / `Activity` for traces, `System.Diagnostics.Metrics.Meter`",
+        "  for metrics, and `ILogger` for logs. ASP.NET Core, HttpClient, Npgsql and EF Core already call it.",
+        "- **SDK**: what the *application* adds to make it real (the `OpenTelemetry` NuGet packages): providers that listen, samplers, processors,",
+        "  and the **resource** that says who is sending.",
+        "- **Exporter**: sends the data, usually as **OTLP** (the OpenTelemetry protocol, gRPC on 4317 or HTTP/protobuf on 4318).",
+        "- **Collector**: a separate process that receives, processes and forwards telemetry to backends (module 4).",
+        "",
+        "A **resource** describes the entity producing telemetry and is attached to everything it sends: `service.name` (required in practice:",
+        "without it you get `unknown_service`), `service.version`, `service.instance.id`, `deployment.environment.name`, plus host, container and",
+        "Kubernetes attributes from detectors.",
+        "",
+        "```csharp",
+        "builder.Services.AddOpenTelemetry()",
+        "    .ConfigureResource(r => r.AddService(\"shop\", serviceVersion: \"1.4.2\"))",
+        "    .WithTracing(t => t.AddSource(\"Shop.App\").AddAspNetCoreInstrumentation().AddOtlpExporter());",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You maintain a NuGet library used by many teams. How should it emit traces?",
+      "options": [
+        "Create an `ActivitySource` and start activities; let each application decide whether to add the OpenTelemetry SDK and an exporter",
+        "Reference the OpenTelemetry SDK and configure an OTLP exporter in the library's static constructor",
+        "Write spans to `Console.Out` as JSON",
+        "Reference a vendor's agent so traces always arrive"
+      ],
+      "answer": 0,
+      "explain": "Libraries use the API only (in .NET: System.Diagnostics, no extra package). With no listener `StartActivity` returns null and costs almost nothing. The application owns the SDK, the sampler, the exporter and where data goes."
+    },
+    {
+      "type": "learn",
+      "title": "Anatomy of a span",
+      "body": [
+        "A **span** is one timed operation. In .NET it is an `Activity`. It has:",
+        "",
+        "- a **name**: low cardinality, the *kind* of work (`GET /api/products/{id:int}`, `checkout`), never ids or raw URLs;",
+        "- **trace id** (shared by the whole request), **span id**, and **parent span id** (which makes the tree);",
+        "- a **kind**: `Server` (handles an incoming request), `Client` (makes an outgoing call), `Internal`, `Producer` / `Consumer` (messages);",
+        "- start time and duration;",
+        "- **attributes**: typed key/values (`http.route`, `db.query.text`, `app.cart.size = 3`);",
+        "- **events**: timestamped points inside the span (an exception, \"cache miss\");",
+        "- **status**: `Unset` (the default: fine), `Ok` (explicitly fine; rarely set) or `Error` with a description;",
+        "- **links**: pointers to spans in *other* traces (a batch job that processes 50 messages links to each message's trace).",
+        "",
+        "This is a real product-page request from the lab: the shop calls inventory, then runs one query. Look at the bar lengths: almost all of",
+        "the 93 ms is one database span. Open it to read `db.query.text`."
+      ],
+      "otelviz": {"kind":"trace","traceId":"0eeecaba1ae500cd99b8be150cc66ac1","spans":[{"id":"5644e9d8c27d3bce","service":"shop","name":"GET /api/products/{id:int}","scope":"Microsoft.AspNetCore","kind":"server","start":0.0,"dur":93.56,"status":"unset","attrs":{"http.request.method":"GET","http.response.status_code":"200","http.route":"/api/products/{id:int}","server.address":"shop","server.port":"8080","url.path":"/api/products/18"}},{"id":"58433eb9d9b5bd3d","parent":"5644e9d8c27d3bce","service":"shop","name":"GET","scope":"System.Net.Http","kind":"client","start":0.07,"dur":0.88,"status":"unset","attrs":{"http.request.method":"GET","http.response.status_code":"200","server.address":"inventory","server.port":"8080","url.full":"http://inventory:8080/stock/18"}},{"id":"219f0f6e253c0bfa","parent":"58433eb9d9b5bd3d","service":"inventory","name":"GET /stock/{sku:int}","scope":"Microsoft.AspNetCore","kind":"server","start":0.26,"dur":0.53,"status":"unset","attrs":{"http.request.method":"GET","http.response.status_code":"200","http.route":"/stock/{sku:int}","server.address":"inventory","server.port":"8080","url.path":"/stock/18"}},{"id":"60d18a87792c1ddb","parent":"219f0f6e253c0bfa","service":"inventory","name":"postgresql","scope":"Npgsql","kind":"client","start":0.37,"dur":0.37,"status":"unset","attrs":{"db.namespace":"shop","db.query.text":"SELECT qty FROM stock WHERE product_id = $1","db.system.name":"postgresql","server.address":"postgres"},"events":[{"t":0.73,"name":"received-first-response","attrs":{}}]},{"id":"8ce0fb656d91de92","parent":"5644e9d8c27d3bce","service":"shop","name":"postgresql","scope":"Npgsql","kind":"client","start":1.0,"dur":92.48,"status":"unset","attrs":{"db.namespace":"shop","db.query.text":"SELECT rating, body FROM reviews WHERE product_id = $1 ORDER BY created DESC LIMIT 5","db.system.name":"postgresql","server.address":"postgres"},"events":[{"t":93.46,"name":"received-first-response","attrs":{}}]}]}
+    },
+    {
+      "type": "match",
+      "prompt": "Match each operation to its span kind.",
+      "pairs": [
+        ["ASP.NET Core handling `GET /orders/42`", "Server"],
+        ["HttpClient calling the payment API", "Client"],
+        ["A SQL query sent by Npgsql", "Client, with db.* attributes"],
+        ["Publishing `OrderPlaced` to a broker", "Producer"],
+        ["A worker handling a message from a queue", "Consumer"],
+        ["Computing the price of a cart in memory", "Internal"]
+      ],
+      "explain": "Kind tells the backend how to draw service maps: a Client span in one service and the Server span it caused in another are an edge between the two. A database is a Client span with no matching Server span (the database does not trace itself)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Per the HTTP semantic conventions, which spans get status **Error**? (select all that apply)",
+      "options": [
+        "A server span that answered 500",
+        "A client span whose call got a 409",
+        "A server span that answered 404",
+        "A client span whose call timed out (no response)",
+        "A server span that answered 201"
+      ],
+      "answer": [0, 1, 3],
+      "explain": "Servers mark only 5xx as errors (a 4xx is the caller's mistake, not the server failing); clients mark 4xx and 5xx, and any failure to get a response. You can see both in the lab's failed checkout: inventory's server span for the 409 is Unset, the shop's client span for it is Error. Set `error.type` too (the status code, or the exception type)."
+    },
+    {
+      "type": "predict",
+      "prompt": "No SDK, no listener. What does this print?",
+      "code": [
+        "using System.Diagnostics;",
+        "",
+        "var source = new ActivitySource(\"Shop.App\");",
+        "using var activity = source.StartActivity(\"checkout\");",
+        "activity?.SetTag(\"app.cart.size\", 3);",
+        "Console.WriteLine(activity is null ? \"no span\" : activity.DisplayName);"
+      ],
+      "answer": "no span",
+      "explain": "With nobody listening to `Shop.App`, `StartActivity` returns null: no allocation, no cost. That is why instrumentation always uses `?.`. The same happens when the SDK listens but the sampler drops the trace, or when you forgot `AddSource(\"Shop.App\")`: a classic \"my spans never show up\" bug."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the span: an attribute, an event, and an error status.",
+      "code": [
+        "using var activity = source.__1__(\"checkout\", ActivityKind.Internal);",
+        "activity?.__2__(\"app.payment.method\", \"card\");",
+        "activity?.__3__(new ActivityEvent(\"card.declined\"));",
+        "activity?.__4__(ActivityStatusCode.Error, \"card declined\");"
+      ],
+      "blanks": ["StartActivity", "SetTag", "AddEvent", "SetStatus"],
+      "bank": ["CreateActivity", "AddBaggage", "SetBaggage", "Stop", "SetCustomProperty"]
+    },
+    {
+      "type": "code",
+      "title": "Instrument a checkout with Activity",
+      "prompt": [
+        "Write `void Checkout(ActivitySource source, string payment, int items, bool declined)` that records, with the .NET tracing API:",
+        "",
+        "1. a span `checkout` (kind `Internal`) with attributes `app.payment.method` = `payment` and `app.cart.size` = `items` (an **int**);",
+        "2. inside it, a child span `reserve stock` of kind `Client`;",
+        "3. when `declined`: an event `card.declined` on `checkout` and status `Error` with the description `card declined`.",
+        "",
+        "The tests listen with an `ActivityListener` (what the SDK does for you) and read the spans back. Always use `?.`: when nobody",
+        "listens, `StartActivity` returns null."
+      ],
+      "starter": [
+        "void Checkout(ActivitySource source, string payment, int items, bool declined)",
+        "{",
+        "}"
+      ],
+      "solution": [
+        "void Checkout(ActivitySource source, string payment, int items, bool declined)",
+        "{",
+        "    using var activity = source.StartActivity(\"checkout\", ActivityKind.Internal);",
+        "    activity?.SetTag(\"app.payment.method\", payment);",
+        "    activity?.SetTag(\"app.cart.size\", items);",
+        "    using (source.StartActivity(\"reserve stock\", ActivityKind.Client)) { }",
+        "    if (declined)",
+        "    {",
+        "        activity?.AddEvent(new ActivityEvent(\"card.declined\"));",
+        "        activity?.SetStatus(ActivityStatusCode.Error, \"card declined\");",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "`using var activity = source.StartActivity(\"checkout\", ActivityKind.Internal);` ends the span when the method returns.",
+        "The child: `using (source.StartActivity(\"reserve stock\", ActivityKind.Client)) { }` started while `checkout` is `Activity.Current`, so it becomes its child."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoDone = new List<Activity>();",
+        "using var dojoListener = new ActivityListener { ShouldListenTo = s => s.Name == \"Dojo.Shop\",",
+        "    Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded, ActivityStopped = a => dojoDone.Add(a) };",
+        "ActivitySource.AddActivityListener(dojoListener);",
+        "using var dojoSource = new ActivitySource(\"Dojo.Shop\");",
+        "Checkout(dojoSource, \"card\", 3, false);",
+        "var dojoCheckout = dojoDone.FirstOrDefault(a => a.DisplayName == \"checkout\");",
+        "var dojoChild = dojoDone.FirstOrDefault(a => a.DisplayName == \"reserve stock\");",
+        "Dojo.Check(\"a checkout span\", dojoCheckout is not null, \"spans: \" + string.Join(\", \", dojoDone.Select(a => a.DisplayName)));",
+        "Dojo.Eq(\"kind Internal\", \"Internal\", dojoCheckout?.Kind.ToString());",
+        "Dojo.Eq(\"app.payment.method\", \"card\", dojoCheckout?.GetTagItem(\"app.payment.method\") as string);",
+        "Dojo.Check(\"app.cart.size is an int 3\", dojoCheckout?.GetTagItem(\"app.cart.size\") is int dojoSize && dojoSize == 3, \"got \" + dojoCheckout?.GetTagItem(\"app.cart.size\")?.GetType().Name);",
+        "Dojo.Check(\"reserve stock is a Client child of checkout\", dojoChild?.ParentSpanId == dojoCheckout?.SpanId && dojoChild?.Kind == ActivityKind.Client, \"\");",
+        "Dojo.Eq(\"a good checkout keeps status Unset\", \"Unset\", dojoCheckout?.Status.ToString());",
+        "dojoDone.Clear();",
+        "Checkout(dojoSource, \"voucher\", 1, true);",
+        "var dojoBad = dojoDone.FirstOrDefault(a => a.DisplayName == \"checkout\");",
+        "Dojo.Eq(\"declined: status Error\", \"Error\", dojoBad?.Status.ToString());",
+        "Dojo.Eq(\"declined: the description\", \"card declined\", dojoBad?.StatusDescription);",
+        "Dojo.Check(\"declined: a card.declined event\", dojoBad?.Events.Any(e => e.Name == \"card.declined\") == true, \"\");",
+        "dojoListener.Dispose();",
+        "dojoDone.Clear();",
+        "Checkout(new ActivitySource(\"Nobody.Listens\"), \"card\", 1, true);",
+        "Dojo.Check(\"no listener: no crash, no spans\", dojoDone.Count == 0, \"\");"
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Draw the waterfall",
+      "prompt": [
+        "A backend receives spans as a flat list and draws the tree. Do it yourself. Spans are",
+        "`record SpanRec(string Id, string? Parent, string Service, string Name, double Start, double Dur, string Status);` (milliseconds).",
+        "",
+        "Write `List<string> Waterfall(List<SpanRec> spans)`: depth-first from the root (the span whose parent is null or not in the list),",
+        "children in order of `Start`, one line per span, indented two spaces per level:",
+        "",
+        "```text",
+        "shop GET /api/products/{id:int} 93.6ms self 0.2ms",
+        "  shop GET 0.9ms self 0.3ms",
+        "    inventory GET /stock/{sku:int} 0.5ms self 0.2ms",
+        "      inventory postgresql 0.4ms self 0.4ms",
+        "  shop postgresql 92.5ms self 92.5ms",
+        "```",
+        "",
+        "**Self time** is the span's duration minus the sum of its direct children's durations (never below 0). Durations with `F1`.",
+        "Append ` ERROR` to the line of a span whose `Status` is `\"error\"`."
+      ],
+      "starter": [
+        "List<string> Waterfall(List<SpanRec> spans)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Waterfall(List<SpanRec> spans)",
+        "{",
+        "    var ids = spans.Select(s => s.Id).ToHashSet();",
+        "    var lines = new List<string>();",
+        "    void Walk(SpanRec s, int depth)",
+        "    {",
+        "        var kids = spans.Where(c => c.Parent == s.Id).OrderBy(c => c.Start).ToList();",
+        "        var self = Math.Max(0, s.Dur - kids.Sum(k => k.Dur));",
+        "        lines.Add($\"{new string(' ', depth * 2)}{s.Service} {s.Name} {s.Dur:F1}ms self {self:F1}ms{(s.Status == \"error\" ? \" ERROR\" : \"\")}\");",
+        "        foreach (var k in kids) Walk(k, depth + 1);",
+        "    }",
+        "    foreach (var root in spans.Where(s => s.Parent is null || !ids.Contains(s.Parent)).OrderBy(s => s.Start)) Walk(root, 0);",
+        "    return lines;",
+        "}"
+      ],
+      "hints": [
+        "A recursive local function `Walk(span, depth)` that adds its line, then walks `spans.Where(c => c.Parent == s.Id).OrderBy(c => c.Start)`.",
+        "Roots: `Parent is null || !ids.Contains(Parent)` (a parent that was never exported still leaves a root)."
+      ],
+      "template": [
+        "{{CODE}}",
+        "var dojoSlow = new List<SpanRec> {",
+        "    new(\"8ce0\", \"5644\", \"shop\", \"postgresql\", 1.0, 92.48, \"unset\"),",
+        "    new(\"5644\", null, \"shop\", \"GET /api/products/{id:int}\", 0, 93.56, \"unset\"),",
+        "    new(\"219f\", \"5843\", \"inventory\", \"GET /stock/{sku:int}\", 0.26, 0.53, \"unset\"),",
+        "    new(\"5843\", \"5644\", \"shop\", \"GET\", 0.07, 0.88, \"unset\"),",
+        "    new(\"60d1\", \"219f\", \"inventory\", \"postgresql\", 0.37, 0.37, \"unset\") };",
+        "Dojo.Eq(\"the slow product page (recorded in the lab)\", new List<string> {",
+        "    \"shop GET /api/products/{id:int} 93.6ms self 0.2ms\",",
+        "    \"  shop GET 0.9ms self 0.3ms\",",
+        "    \"    inventory GET /stock/{sku:int} 0.5ms self 0.2ms\",",
+        "    \"      inventory postgresql 0.4ms self 0.4ms\",",
+        "    \"  shop postgresql 92.5ms self 92.5ms\" }, Waterfall(dojoSlow));",
+        "var dojoErr = new List<SpanRec> {",
+        "    new(\"a\", null, \"shop\", \"POST /api/checkout\", 0, 6.24, \"error\"),",
+        "    new(\"b\", \"a\", \"shop\", \"checkout\", 0.08, 6.1, \"error\"),",
+        "    new(\"d\", \"b\", \"shop\", \"POST\", 5.58, 0.52, \"error\"),",
+        "    new(\"c\", \"b\", \"shop\", \"POST\", 0.11, 5.42, \"unset\") };",
+        "Dojo.Eq(\"children by start time, errors marked\", new List<string> {",
+        "    \"shop POST /api/checkout 6.2ms self 0.1ms ERROR\",",
+        "    \"  shop checkout 6.1ms self 0.2ms ERROR\",",
+        "    \"    shop POST 5.4ms self 5.4ms\",",
+        "    \"    shop POST 0.5ms self 0.5ms ERROR\" }, Waterfall(dojoErr));",
+        "Dojo.Eq(\"a span whose parent never arrived is a root\", new List<string> { \"inventory POST /reservations 5.0ms self 5.0ms\" },",
+        "    Waterfall(new List<SpanRec> { new(\"x\", \"missing\", \"inventory\", \"POST /reservations\", 0, 4.96, \"unset\") }));",
+        "record SpanRec(string Id, string? Parent, string Service, string Name, double Start, double Dur, string Status);"
+      ]
+    }
+  ]
+}
