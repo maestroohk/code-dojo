@@ -94,6 +94,10 @@ const JS_KEYWORDS = new Set(('break case catch class const continue debugger def
   'declare namespace satisfies static get set').split(' '));
 const PY_TOKEN = /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|[rRbBfFuU]{0,2}"(?:\\.|[^"\\\n])*"?|[rRbBfFuU]{0,2}'(?:\\.|[^'\\\n])*'?)|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?j?\b)|([A-Za-z_]\w*)|([\s\S])/g;
 const JS_TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(`(?:\\.|[^`\\])*`?|"(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?)|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?n?\b)|([A-Za-z_$][\w$]*)|([\s\S])/g;
+// HCL (Terraform, OpenTofu, .tftest.hcl): # // /* */ comments, "strings", block keywords and the built-in names.
+const HCL_TOKEN = /(#[^\n]*|\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\\n])*"?)|(\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([A-Za-z_][\w-]*)|([\s\S])/g;
+const HCL_KEYWORDS = new Set(('resource data variable output locals module provider terraform moved import removed check run mock_provider ' +
+  'override_resource override_data override_module dynamic content lifecycle for in if else endif endfor true false null var local each count self path').split(' '));
 // SQL: keywords in any case, -- and /* */ comments, 'strings' with '' escapes.
 export const SQL_KEYWORD_LIST = ('SELECT FROM WHERE AND OR NOT IN IS NULL AS ON JOIN INNER LEFT RIGHT FULL OUTER CROSS NATURAL USING ' +
   'GROUP BY ORDER HAVING LIMIT OFFSET DISTINCT ALL UNION INTERSECT EXCEPT INSERT INTO VALUES UPDATE SET DELETE CREATE TABLE VIEW ' +
@@ -111,6 +115,7 @@ const LANGS = {
   python: [PY_TOKEN, PY_KEYWORDS], py: [PY_TOKEN, PY_KEYWORDS],
   javascript: [JS_TOKEN, JS_KEYWORDS], js: [JS_TOKEN, JS_KEYWORDS], typescript: [JS_TOKEN, JS_KEYWORDS], ts: [JS_TOKEN, JS_KEYWORDS],
   tsx: [JS_TOKEN, JS_KEYWORDS], jsx: [JS_TOKEN, JS_KEYWORDS], html: [JS_TOKEN, JS_KEYWORDS], java: [CS_TOKEN, CS_KEYWORDS],
+  hcl: [HCL_TOKEN, HCL_KEYWORDS], terraform: [HCL_TOKEN, HCL_KEYWORDS], tf: [HCL_TOKEN, HCL_KEYWORDS],
   json: [JS_TOKEN, new Set(['true', 'false', 'null'])], css: [JS_TOKEN, new Set(['important', 'inherit', 'initial', 'none', 'auto'])],
 };
 

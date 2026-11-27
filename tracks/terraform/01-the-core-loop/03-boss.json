@@ -1,0 +1,135 @@
+{
+  "title": "Boss: works on my machine",
+  "summary": "Sam's status page config fails three different ways on a clean machine. Read each error, find the cause, and leave it applying cleanly with a plan that stays quiet.",
+  "minutes": 18,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Ticket PLAT-118",
+      "body": [
+        "*\"Sam is on holiday and the status page needs a new deploy. The repo is `~/infra/status-page`. The README says",
+        "init, plan, apply. It does not work for me. Also, Sam mentioned the plan 'always shows something', is that normal?\"*",
+        "",
+        "Three stages, one bug each. Start from the **first error message** every time: read the block it names, the line,",
+        "and the sentence under it. Every check runs real Terraform on what you leave behind."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "init fails",
+      "prompt": [
+        "`cd ~/infra/status-page && terraform init` fails. Read the error, fix the configuration (not the machine), and get",
+        "`init` and `terraform validate` to succeed. The machine's provider mirror is what an air-gapped company network has:",
+        "`ls /usr/local/share/terraform/plugins/registry.terraform.io/hashicorp/random` shows which versions exist."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 1"],
+      "checks": [
+        { "name": "init has installed the providers",
+          "cmd": "cd ~/infra/status-page && grep -A1 'hashicorp/random' .terraform.lock.hcl | grep -q 'version *= *\"3\\.'",
+          "fail": "`terraform init` has not installed `hashicorp/random` yet (no entry in `.terraform.lock.hcl`). Fix the version constraint it complains about." },
+        { "name": "the constraint allows a current 3.x",
+          "cmd": "cd ~/infra/status-page && ! grep -q '3\\.6' versions.tf",
+          "fail": "`versions.tf` still asks for `~> 3.6.0`, a version that is not available." },
+        { "name": "validate passes",
+          "cmd": "cd ~/infra/status-page && terraform validate -no-color",
+          "fail": "`terraform validate` should succeed (it needs a successful init)." }
+      ],
+      "hints": [
+        "The error: `no available releases match the given constraints ~> 3.6.0`. What does `~> 3.6.0` allow?",
+        "`~> 3.6.0` means 3.6.x only. The mirror has 3.7.2 and 3.9.1. A constraint like `~> 3.9` allows any 3.x from 3.9.",
+        "`sed -i 's/~> 3.6.0/~> 3.9/' versions.tf && terraform init && terraform validate`"
+      ],
+      "solution": [
+        "cd ~/infra/status-page",
+        "terraform init",
+        "ls /usr/local/share/terraform/plugins/registry.terraform.io/hashicorp/random",
+        "sed -i 's/~> 3.6.0/~> 3.9/' versions.tf",
+        "terraform init",
+        "terraform validate"
+      ],
+      "explain": "A too-tight constraint is a common reason a config only works where it was first initialised: Sam's laptop still had 3.6 in its cache. With a public registry the same error appears when a version was yanked, or when a module asks for a range that does not overlap with yours (`terraform providers` shows who asks for what)."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Unsupported attribute",
+      "prompt": [
+        "`init` works now, but `terraform plan` fails with **Unsupported attribute**. Find out which attributes `random_pet`",
+        "really exports (the provider's schema is on this machine: `terraform providers schema -json | jq` on",
+        "`.provider_schemas[\"registry.terraform.io/hashicorp/random\"].resource_schemas.random_pet.block.attributes | keys`),",
+        "fix the reference, and apply."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 2"],
+      "checks": [
+        { "name": "the page shows the build name",
+          "cmd": "cd ~/infra/status-page && grep -q \"<p>Build $(terraform state show -no-color random_pet.page | sed -n 's/^ *id *= *\"\\(.*\\)\"/\\1/p')</p>\" public/index.html",
+          "fail": "`public/index.html` should contain `<p>Build <the pet's id></p>`. Fix the reference and apply." },
+        { "name": "validate passes",
+          "cmd": "cd ~/infra/status-page && terraform validate -no-color",
+          "fail": "`terraform validate` still fails." }
+      ],
+      "hints": [
+        "The error points at `random_pet.page.name`: there is no exported attribute called `name`.",
+        "`terraform providers schema -json | jq '.provider_schemas[\"registry.terraform.io/hashicorp/random\"].resource_schemas.random_pet.block.attributes | keys'` lists `id`, `keepers`, `length`, `prefix`, `separator`. The generated name is the `id`.",
+        "`sed -i 's/random_pet.page.name/random_pet.page.id/' main.tf`, then `terraform plan -out=tfplan` and `terraform apply tfplan`."
+      ],
+      "solution": [
+        "cd ~/infra/status-page",
+        "terraform plan",
+        "terraform providers schema -json | jq '.provider_schemas[\"registry.terraform.io/hashicorp/random\"].resource_schemas.random_pet.block.attributes | keys'",
+        "sed -i 's/random_pet.page.name/random_pet.page.id/' main.tf",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "cat public/index.html"
+      ],
+      "explain": "Each provider documents its attributes on the Terraform Registry, but the schema on your machine is the truth for the exact version you run. `terraform providers schema -json` is how editors and linters know it too."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The plan that always shows something",
+      "prompt": [
+        "Sam's comment was right: it is applied, and yet **every** `terraform plan` wants to replace `local_file.index`. A plan",
+        "that is never empty hides real changes and breaks drift alerts.",
+        "",
+        "1. Plan twice and compare. Which expression is never the same twice?",
+        "2. Keep the *Last deployed* line, but make it change only when the page really changes: record the time once, in the",
+        "   state, with a `time_static` resource from the `hashicorp/time` provider (add it to `required_providers`, version",
+        "   `~> 0.14`, then `terraform init`). Use its `rfc3339` attribute.",
+        "3. Apply, then show that `terraform plan -detailed-exitcode` exits 0."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 3"],
+      "checks": [
+        { "name": "no timestamp() left",
+          "cmd": "cd ~/infra/status-page && ! grep -q 'timestamp()' *.tf",
+          "fail": "`timestamp()` returns the current time on every plan, so the content is never the same. Replace it." },
+        { "name": "a time_static records the deploy time",
+          "cmd": "cd ~/infra/status-page && t=$(terraform state show -no-color \"$(terraform state list | grep '^time_static\\.' | head -n1)\" | sed -n 's/^ *rfc3339 *= *\"\\(.*\\)\"/\\1/p') && test -n \"$t\" && grep -q \"Last deployed: $t\" public/index.html",
+          "fail": "`public/index.html` should say `Last deployed: <the rfc3339 of a time_static resource in the state>`." },
+        { "name": "two plans in a row show no changes",
+          "cmd": "cd ~/infra/status-page && terraform plan -detailed-exitcode -input=false -no-color >/dev/null && sleep 1 && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "`terraform plan -detailed-exitcode` should exit 0, twice in a row." }
+      ],
+      "hints": [
+        "`timestamp()` is evaluated on every plan, so `content` changes every time, and a file's content forces replacement.",
+        "Add `time = { source = \"hashicorp/time\", version = \"~> 0.14\" }` to `required_providers`, a `resource \"time_static\" \"deployed\" {}` block, and use `${time_static.deployed.rfc3339}`. Run `terraform init` again for the new provider.",
+        "`sed -i 's/timestamp()/time_static.deployed.rfc3339/' main.tf`, `printf 'resource \"time_static\" \"deployed\" {}\\n' >> main.tf`, `sed -i '/hashicorp\\/random/a\\    time   = { source = \"hashicorp/time\", version = \"~> 0.14\" }' versions.tf`, then init, plan, apply."
+      ],
+      "solution": [
+        "cd ~/infra/status-page",
+        "terraform plan -detailed-exitcode; echo \"exit $?\"",
+        "sed -i 's/timestamp()/time_static.deployed.rfc3339/' main.tf",
+        "printf '\\nresource \"time_static\" \"deployed\" {}\\n' >> main.tf",
+        "sed -i '/hashicorp\\/random/a\\    time   = { source = \"hashicorp/time\", version = \"~> 0.14\" }' versions.tf",
+        "terraform fmt",
+        "terraform init",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform plan -detailed-exitcode; echo \"exit $?\""
+      ],
+      "explain": "`timestamp()`, `uuid()` and reading files that change on every run all produce a *perpetual diff*. `time_static` stores the time once in the state; it only changes when you replace it (for example with `triggers` or `replace_triggered_by`, module 3). A quiet plan is a feature: it means any change you see is real."
+    }
+  ]
+}

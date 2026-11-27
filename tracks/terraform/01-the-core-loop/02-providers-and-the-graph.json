@@ -1,0 +1,197 @@
+{
+  "title": "Providers, resources and the graph",
+  "summary": "Provider requirements and version constraints, resources, data sources and references, and how Terraform orders its work from a dependency graph (and when it cannot see a dependency).",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Providers: the plugins that do the work",
+      "body": [
+        "Terraform itself knows nothing about AWS or files. A **provider** is a plugin (a separate program) that knows one",
+        "API: `hashicorp/aws`, `hashicorp/azurerm`, `hashicorp/google`, `hashicorp/kubernetes`, `cloudflare/cloudflare`,",
+        "`datadog/datadog`, and the small utility ones this topic uses (`local`, `random`, `tls`, `time`, `null`, `archive`).",
+        "",
+        "```hcl",
+        "terraform {",
+        "  required_version = \">= 1.10\"                 # which Terraform CLI may run this",
+        "  required_providers {",
+        "    aws = {",
+        "      source  = \"hashicorp/aws\"                # registry.terraform.io/hashicorp/aws",
+        "      version = \"~> 6.0\"                       # any 6.x, never 7.0",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "provider \"aws\" {",
+        "  region = \"eu-west-1\"                         # configuration for the plugin; credentials come from the environment",
+        "}",
+        "```",
+        "",
+        "`terraform init` finds a version that matches every constraint, installs it and records the exact version and its",
+        "checksums in `.terraform.lock.hcl`. From then on everyone (and CI) gets that same version until someone runs",
+        "`terraform init -upgrade` and commits the new lock file. **Never put credentials in a `provider` block**: use",
+        "environment variables, an SSO profile or the CI system's workload identity."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each version constraint to the versions it allows.",
+      "pairs": [
+        ["`version = \"2.9.1\"`", "exactly 2.9.1"],
+        ["`version = \"~> 2.9\"`", "2.9 or newer, below 3.0"],
+        ["`version = \"~> 2.9.1\"`", "2.9.1 or newer, below 2.10"],
+        ["`version = \">= 2.0, < 4.0\"`", "anything from 2.0 up to, not including, 4.0"]
+      ],
+      "explain": "`~>` (the *pessimistic* operator) lets only the right-most given part grow. `~> 6.0` is the common choice for a provider: new features and fixes, no breaking major version. Pin exact versions in modules you publish only when you must; let the root configuration and its lock file decide."
+    },
+    {
+      "type": "learn",
+      "title": "Resources, data sources and references",
+      "body": [
+        "A **resource** block is something Terraform *manages*: it creates, updates and deletes it. Its **address** is",
+        "`TYPE.NAME` (`aws_s3_bucket.assets`, `local_file.motd`), unique in the module. Inside the block you set **arguments**;",
+        "afterwards the provider exposes **attributes**, some only known after creation (an `id`, an `arn`, an IP address).",
+        "",
+        "A **data source** only *reads* something that exists already (managed elsewhere, or by another team):",
+        "",
+        "```hcl",
+        "data \"aws_vpc\" \"main\" {",
+        "  tags = { Name = \"shop-prod\" }",
+        "}",
+        "",
+        "resource \"aws_security_group\" \"db\" {",
+        "  name   = \"shop-prod-db\"",
+        "  vpc_id = data.aws_vpc.main.id       # a reference: data.TYPE.NAME.ATTRIBUTE",
+        "}",
+        "```",
+        "",
+        "A **reference** such as `aws_security_group.db.id` or `data.aws_vpc.main.id` does two jobs: it passes the value, and",
+        "it tells Terraform the order. Terraform builds a **dependency graph** from all references and works through it,",
+        "creating independent resources in parallel (10 at a time by default, `-parallelism=N`) and destroying in reverse."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Wire the alarm to the database: complete the references.",
+      "lang": "hcl",
+      "code": [
+        "resource \"aws_db_instance\" \"main\" {",
+        "  identifier = \"shop-prod-db\"",
+        "  # ...",
+        "}",
+        "",
+        "data \"aws_sns_topic\" \"oncall\" {",
+        "  name = \"platform-oncall\"",
+        "}",
+        "",
+        "resource \"aws_cloudwatch_metric_alarm\" \"db_cpu\" {",
+        "  alarm_name    = \"shop-prod-db-cpu\"",
+        "  dimensions    = { DBInstanceIdentifier = __1__.identifier }",
+        "  alarm_actions = [__2__.arn]",
+        "  # ...",
+        "}"
+      ],
+      "blanks": ["aws_db_instance.main", "data.aws_sns_topic.oncall"],
+      "bank": ["resource.aws_db_instance.main", "aws_sns_topic.oncall", "var.oncall", "db_instance.main"],
+      "explain": "Resources are referenced as `TYPE.NAME.ATTRIBUTE`, data sources with the `data.` prefix. Both references also put the alarm *after* the database and the topic lookup in the graph."
+    },
+    {
+      "type": "learn",
+      "title": "When Terraform cannot see a dependency",
+      "body": [
+        "Terraform only knows about dependencies it can **see in references**. If two things are linked some other way (a file",
+        "path written as a string, an IAM policy that must exist before an app starts, a name typed twice), Terraform may run",
+        "them in parallel or in the wrong order. It often works on the laptop where the thing already existed, and fails on a",
+        "clean machine or in CI.",
+        "",
+        "Two fixes, best first:",
+        "",
+        "1. **Reference the value** instead of repeating it: `filename = local_file.settings.filename` rather than the same",
+        "   string. The dependency is now visible and the two can never drift apart.",
+        "2. When there is no value to pass, say it outright with **`depends_on`**:",
+        "",
+        "```hcl",
+        "resource \"aws_instance\" \"app\" {",
+        "  # the app reads the policy at boot, but nothing here references it",
+        "  depends_on = [aws_iam_role_policy.app_s3]",
+        "}",
+        "```",
+        "",
+        "`depends_on` is a blunt tool: on a data source it delays the read until apply, so the plan shows less. Prefer a",
+        "reference whenever one exists. `terraform graph` prints the graph (in DOT; `dependent -> dependency`), and",
+        "`terraform graph | dot -Tsvg > graph.svg` draws it where Graphviz is installed."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "It only works on Sam's laptop",
+      "prompt": [
+        "`~/infra/site` is a fresh checkout. Sam says it applies fine for them. On your machine (and in CI) it does not.",
+        "",
+        "1. `cd ~/infra/site` and run `terraform plan`. Read the error: which block fails, and why does the file not exist yet?",
+        "2. Fix the configuration so Terraform knows the data source must wait for `local_file.settings`. Do not create the",
+        "   file by hand: a clean machine must work.",
+        "3. Plan and apply. Then look at the graph: `terraform graph | grep -- '->'`.",
+        "",
+        "The check copies your `.tf` files to an empty folder and applies them there, like a CI runner would."
+      ],
+      "setup": ["graph.sh"],
+      "checks": [
+        { "name": "a clean checkout applies",
+          "cmd": "rm -rf /tmp/fresh && mkdir /tmp/fresh && cp ~/infra/site/*.tf /tmp/fresh/ && cd /tmp/fresh && terraform init -input=false -no-color >/dev/null && terraform apply -auto-approve -input=false -no-color >/tmp/fresh.log 2>&1 && grep -q 'server_name shop.example.com;' build/nginx.conf || { tail -n 12 /tmp/fresh.log; exit 1; }",
+          "fail": "In an empty folder, `terraform apply` must work and write `build/nginx.conf` with `server_name shop.example.com;`. Make the data source depend on the resource that writes the file." },
+        { "name": "your own folder is applied",
+          "cmd": "cd ~/infra/site && grep -q 'server_name shop.example.com;' build/nginx.conf && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "Apply the fixed configuration in `~/infra/site` too, so `build/nginx.conf` exists and `terraform plan` shows no changes." }
+      ],
+      "hints": [
+        "The error is `Read local file data source error ... no such file or directory`: Terraform reads data sources during the plan, before `local_file.settings` has written anything.",
+        "The data source repeats the path as a string. Reference the resource instead, so the dependency is visible.",
+        "In the `data \"local_file\" \"settings\"` block: `filename = local_file.settings.filename`. Then `terraform plan` shows *will be read during apply*."
+      ],
+      "solution": [
+        "cd ~/infra/site",
+        "terraform plan",
+        "sed -i '/data \"local_file\" \"settings\"/,/}/ s|filename = .*|filename = local_file.settings.filename|' main.tf",
+        "grep -n -A2 'data \"local_file\"' main.tf",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform graph | grep -- '->'"
+      ],
+      "explain": "With the reference, the graph has `data.local_file.settings -> local_file.settings`, the plan says `data.local_file.settings will be read during apply (depends on a resource or a module with changes pending)`, and the order is right everywhere. Even simpler would be to drop the data source and use `local.settings` directly: reading back a file you just wrote is a sign the design can be flatter."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An app server must not boot before an IAM policy that it uses at start-up exists. Nothing in the `aws_instance` block references the policy. What do you write?",
+      "options": [
+        "`depends_on = [aws_iam_role_policy.app_s3]` in the `aws_instance` block",
+        "Nothing: Terraform creates resources in the order they appear in the file",
+        "`-parallelism=1` on every apply",
+        "Put both resources in the same `.tf` file"
+      ],
+      "answer": 0,
+      "explain": "The order of blocks and files does not matter at all: Terraform reads every `.tf` file in the folder as one configuration and orders work only by the graph. A hidden dependency needs `depends_on`. `-parallelism=1` only makes things slow; the order would still be undefined."
+    },
+    {
+      "type": "order",
+      "prompt": [
+        "Given these references, in which order does `terraform apply` create the resources (one valid order)?",
+        "",
+        "```hcl",
+        "resource \"aws_vpc\" \"main\" { cidr_block = \"10.20.0.0/16\" }",
+        "resource \"aws_subnet\" \"app\" { vpc_id = aws_vpc.main.id }",
+        "resource \"aws_security_group\" \"web\" { vpc_id = aws_vpc.main.id }",
+        "resource \"aws_instance\" \"web\" {",
+        "  subnet_id              = aws_subnet.app.id",
+        "  vpc_security_group_ids = [aws_security_group.web.id]",
+        "}",
+        "```"
+      ],
+      "lines": ["aws_vpc.main", "aws_subnet.app", "aws_security_group.web", "aws_instance.web"],
+      "also": [["aws_vpc.main", "aws_security_group.web", "aws_subnet.app", "aws_instance.web"]],
+      "explain": "The VPC first (both others reference it), then the subnet and the security group (in parallel, in any order), then the instance, which references both. `terraform destroy` walks the same graph backwards: the instance goes first, the VPC last."
+    }
+  ]
+}
