@@ -1,0 +1,197 @@
+{
+  "title": "Command injection, argument injection and LDAP",
+  "summary": "Process.Start through a shell turns a host name into a command line. Start programs without a shell, pass ArgumentList, stop option injection with --, and escape LDAP filters the RFC 4515 way.",
+  "minutes": 17,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The request, and the command line it builds",
+      "body": [
+        "```csharp fragment",
+        "Process.Start(\"/bin/sh\", $\"-c \\\"ping -c 1 {host}\\\"\");",
+        "```",
+        "",
+        "```text",
+        "GET /api/tools/ping?host=10.0.0.5          ->  sh -c \"ping -c 1 10.0.0.5\"",
+        "GET /api/tools/ping?host=10.0.0.5; id      ->  sh -c \"ping -c 1 10.0.0.5; id\"",
+        "                                              uid=1442(shopsvc) gid=1442(shopsvc)",
+        "```",
+        "",
+        "A **shell** reads the whole string and gives meaning to `;` `&&` `|` `$( )` backticks, newlines, `>` and quotes. Anything that reaches a shell is code. From `id` it is a short way to `env` (the app's secrets), `curl` to the internal network, or a reverse shell.",
+        "",
+        "It is not only `/bin/sh` written out. These all go through a shell: `cmd.exe /c ...`, `powershell -Command ...`, `ProcessStartInfo { UseShellExecute = true }` with a constructed file name, Python's `subprocess.run(cmd, shell=True)`, Node's `child_process.exec`, and `system()` in almost every language."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Does this start the program through a shell (dangerous with user input) or directly?",
+      "buckets": ["Through a shell", "Directly"],
+      "items": [
+        ["`Process.Start(\"/bin/sh\", \"-c \\\"convert \" + file + \"\\\"\")`", 0],
+        ["`Process.Start(\"cmd.exe\", \"/c dir \" + folder)`", 0],
+        ["Python `subprocess.run(f\"ping {host}\", shell=True)`", 0],
+        ["Node `child_process.exec(\"git log \" + branch)`", 0],
+        ["`new ProcessStartInfo(\"ping\") { ArgumentList = { \"-c\", \"1\", host } }`", 1],
+        ["Python `subprocess.run([\"ping\", \"-c\", \"1\", host])`", 1],
+        ["Node `child_process.execFile(\"git\", [\"log\", branch])`", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "No shell, ArgumentList, and --",
+      "body": [
+        "```csharp fragment",
+        "var psi = new ProcessStartInfo(\"ping\")        // the program itself, found on PATH",
+        "{",
+        "    ArgumentList = { \"-c\", \"1\", \"--\", host },  // each item is one argument, passed as it is",
+        "    UseShellExecute = false,                    // the default in .NET Core and later",
+        "};",
+        "```",
+        "",
+        "With no shell, `10.0.0.5; id` is one strange host name that `ping` cannot resolve. Three more things a reviewer checks:",
+        "",
+        "1. **Argument injection.** No shell is needed to abuse a program's own options: a host of `-f` makes ping flood; a file name of `--output=/etc/cron.d/x` makes some tools write anywhere. `--` ends the options, so everything after it is a plain argument. Validate the shape too (an IP address, a host name).",
+        "2. **`Arguments` (one string) versus `ArgumentList`.** `Arguments = \"-c 1 \" + host` is split by .NET's own rules, so a space or a quote in `host` adds arguments. Use `ArgumentList`.",
+        "3. **A library instead of a process.** `System.Net.NetworkInformation.Ping`, `System.IO.Compression.ZipFile`, an image library: no process, no command line, no injection."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "How many arguments does the program receive in each case?",
+      "code": [
+        "var host = \"10.0.0.5 -f\";",
+        "var a = new System.Diagnostics.ProcessStartInfo(\"ping\") { Arguments = \"-c 1 \" + host };",
+        "var b = new System.Diagnostics.ProcessStartInfo(\"ping\");",
+        "foreach (var x in new[] { \"-c\", \"1\", \"--\", host }) b.ArgumentList.Add(x);",
+        "Console.WriteLine(a.Arguments.Split(' ').Length);",
+        "Console.WriteLine(b.ArgumentList.Count);"
+      ],
+      "answer": ["4", "4"],
+      "explain": "Both are 4, but not the same 4. The single string becomes `-c`, `1`, `10.0.0.5` and `-f`: the attacker added an option. The list passes `-c`, `1`, `--` and `10.0.0.5 -f` as one (invalid) host name."
+    },
+    {
+      "type": "code",
+      "title": "A ping command that cannot be injected",
+      "prompt": [
+        "Write `ProcessStartInfo PingCommand(string host)` (`using System.Diagnostics;` and `using System.Net;` at the top). It returns a `ProcessStartInfo` for `ping` that the caller will start:",
+        "",
+        "- `FileName` is `\"ping\"` and `UseShellExecute` is `false`;",
+        "- `ArgumentList` is exactly `-c`, `1`, `-W`, `1`, `--`, `host`;",
+        "- `host` must be an IP address (`IPAddress.TryParse`) or a host name: labels of letters, digits and `-`, separated by dots, not starting or ending with `-`, at most 253 characters. Anything else throws `ArgumentException`, before a `ProcessStartInfo` exists."
+      ],
+      "starter": [
+        "using System.Diagnostics;",
+        "using System.Net;",
+        "",
+        "ProcessStartInfo PingCommand(string host) =>",
+        "    new ProcessStartInfo(\"/bin/sh\", $\"-c \\\"ping -c 1 -W 1 {host}\\\"\");"
+      ],
+      "solution": [
+        "using System.Diagnostics;",
+        "using System.Net;",
+        "using System.Text.RegularExpressions;",
+        "",
+        "ProcessStartInfo PingCommand(string host)",
+        "{",
+        "    var hostName = new Regex(@\"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$\");",
+        "    if (!IPAddress.TryParse(host, out _) && !hostName.IsMatch(host))",
+        "        throw new ArgumentException(\"Not an IP address or host name.\", nameof(host));",
+        "    var psi = new ProcessStartInfo(\"ping\") { UseShellExecute = false };",
+        "    foreach (var a in new[] { \"-c\", \"1\", \"-W\", \"1\", \"--\", host }) psi.ArgumentList.Add(a);",
+        "    return psi;",
+        "}"
+      ],
+      "hints": [
+        "Validate first: `if (!IPAddress.TryParse(host, out _) && !Regex.IsMatch(host, @\"...\")) throw new ArgumentException(...);`. `$` in .NET also matches before a final newline: put the length check `(?=.{1,253}$)` in front, or use `\\z`.",
+        "Build it with `new ProcessStartInfo(\"ping\") { UseShellExecute = false }` and add each argument with `psi.ArgumentList.Add(...)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var ok = PingCommand(\"10.0.0.5\");",
+        "Dojo.Eq(\"FileName is ping, not a shell\", \"ping\", ok.FileName);",
+        "Dojo.Eq(\"no shell execute\", false, ok.UseShellExecute);",
+        "Dojo.Eq(\"the arguments, one by one\", new List<string> { \"-c\", \"1\", \"-W\", \"1\", \"--\", \"10.0.0.5\" }, ok.ArgumentList.ToList());",
+        "Dojo.Eq(\"a host name works\", \"hub-7.lamps.example\", PingCommand(\"hub-7.lamps.example\").ArgumentList.Last());",
+        "Dojo.Eq(\"an IPv6 address works\", \"::1\", PingCommand(\"::1\").ArgumentList.Last());",
+        "Dojo.Throws<ArgumentException>(\"'10.0.0.5; id' is refused\", () => PingCommand(\"10.0.0.5; id\"));",
+        "Dojo.Throws<ArgumentException>(\"'$(id)' is refused\", () => PingCommand(\"$(id)\"));",
+        "Dojo.Throws<ArgumentException>(\"'-f' (an option) is refused\", () => PingCommand(\"-f\"));",
+        "Dojo.Throws<ArgumentException>(\"a space is refused\", () => PingCommand(\"10.0.0.5 -f\"));",
+        "Dojo.Throws<ArgumentException>(\"a trailing newline is refused\", () => PingCommand(\"hub.example\\nid\"));",
+        "Dojo.Throws<ArgumentException>(\"an empty host is refused\", () => PingCommand(\"\"));"
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "LDAP filters inject too",
+      "body": [
+        "Directory searches (Active Directory, OpenLDAP) use filters like `(&(uid=ada)(objectClass=person))`. Built by concatenation, a username of `*` matches everyone, and `ada)(|(uid=*` rewrites the filter:",
+        "",
+        "```text",
+        "(&(uid=\" + user + \")(userPassword=\" + pw + \"))",
+        "user = *)(uid=*))(|(uid=*      ->  (&(uid=*)(uid=*))(|(uid=*)(userPassword=...))",
+        "```",
+        "",
+        "RFC 4515 defines the escaping for values in a filter: each of `\\` `*` `(` `)` and the NUL character becomes a backslash and two hex digits: `\\5c`, `\\2a`, `\\28`, `\\29`, `\\00`. `System.DirectoryServices.Protocols` has no helper for it, so teams write one, once, and use it for every value."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Escape an LDAP filter value",
+      "prompt": [
+        "Write `string LdapValue(string value)` that escapes a value for an LDAP search filter (RFC 4515): `\\` → `\\5c`, `*` → `\\2a`, `(` → `\\28`, `)` → `\\29`, NUL (`\\0`) → `\\00`. Every other character stays as it is.",
+        "",
+        "```text",
+        "LdapValue(\"ada\")         ->  ada",
+        "LdapValue(\"*\")           ->  \\2a",
+        "LdapValue(\"ada)(uid=*\")  ->  ada\\29\\28uid=\\2a",
+        "```"
+      ],
+      "starter": [
+        "string LdapValue(string value) => value;"
+      ],
+      "solution": [
+        "string LdapValue(string value)",
+        "{",
+        "    var sb = new StringBuilder(value.Length);",
+        "    foreach (var c in value)",
+        "        sb.Append(c switch",
+        "        {",
+        "            '\\\\' => \"\\\\5c\",",
+        "            '*' => \"\\\\2a\",",
+        "            '(' => \"\\\\28\",",
+        "            ')' => \"\\\\29\",",
+        "            '\\0' => \"\\\\00\",",
+        "            _ => c.ToString(),",
+        "        });",
+        "    return sb.ToString();",
+        "}"
+      ],
+      "hints": [
+        "Escape the backslash **first** if you use `Replace`, or (simpler) go character by character with a `switch` into a `StringBuilder`.",
+        "`'\\\\' => \"\\\\5c\"` in C# is: the character backslash becomes the text `\\5c`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "Dojo.Eq(\"a plain name is unchanged\", \"ada.lovelace\", LdapValue(\"ada.lovelace\"));",
+        "Dojo.Eq(\"* is escaped\", \"\\\\2a\", LdapValue(\"*\"));",
+        "Dojo.Eq(\"the filter-breaking payload is defused\", \"ada\\\\29\\\\28uid=\\\\2a\", LdapValue(\"ada)(uid=*\"));",
+        "Dojo.Eq(\"a backslash is escaped once, not twice\", \"a\\\\5cb\\\\2a\", LdapValue(\"a\\\\b*\"));",
+        "Dojo.Eq(\"NUL is escaped\", \"x\\\\00y\", LdapValue(\"x\\0y\"));",
+        "Dojo.Eq(\"accents stay as they are\", \"Zoë (sales)\".Replace(\"(\", \"\\\\28\").Replace(\")\", \"\\\\29\"), LdapValue(\"Zoë (sales)\"));"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "26-vulnerable-shop",
+      "task": ["t15", "t16"],
+      "title": "Live lab: run id on the shop, then remove the shell",
+      "prompt": [
+        "In the **vulnerable shop** lab, do **Attack: run commands on the server** (read `DEPLOY_TOKEN` through the ping tool) and **Fix: no shell, validate, ArgumentList** in `Tools.cs`. The check tries `;`, `&&`, `|`, `$( )`, backticks, a newline and an option, and still pings `127.0.0.1`."
+      ],
+      "explain": "Without a shell nothing in the host string has a special meaning; validation and `--` stop the argument tricks a shell is not needed for."
+    }
+  ]
+}

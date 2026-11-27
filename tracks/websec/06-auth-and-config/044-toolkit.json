@@ -1,0 +1,76 @@
+{
+  "title": "Senior's toolkit: authentication and hardening",
+  "summary": "hydra for testing your own login limits, ASP.NET Core's rate limiter and Identity's PasswordHasher, the security headers check, and structured logging that redacts.",
+  "minutes": 8,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: authentication and hardening",
+      "body": "The tools for proving a login resists guessing, storing passwords the standard way, and checking the headers and logs a scan or an auditor will look at.",
+      "toolkit": [
+        {
+          "cmd": "hydra -l USER -P wordlist -s PORT HOST http-post-form 'PATH:BODY:F=failure text'",
+          "what": "Online password guessing against a login form: the way to prove your rate limit and lockout work, on your own staging system.",
+          "flags": [["-l carol / -L users.txt", "one user / a list"], ["-P top-passwords.txt", "the password list"], ["-t 4", "parallel tasks"], ["-f", "stop at the first hit"], ["F=Wrong username", "text that means a failed attempt (S= for success text)"]],
+          "example": "hydra -l carol -P ~/top-passwords.txt -s 8080 -f shop http-post-form '/login:username=^USER^&password=^PASS^:F=Wrong username'"
+        },
+        {
+          "cmd": "AddRateLimiter + RequireRateLimiting",
+          "what": "ASP.NET Core's built-in rate limiting middleware (Microsoft.AspNetCore.RateLimiting): fixed window, sliding window, token bucket and concurrency limiters, partitioned by whatever key you choose.",
+          "flags": [["RateLimitPartition.GetFixedWindowLimiter(key, ...)", "one counter per key (address, user, API key)"], ["RejectionStatusCode = 429", "the default is 503"], ["OnRejected", "add Retry-After, log the rejection"], ["RequireRateLimiting(\"login\")", "apply a policy to an endpoint or group"]],
+          "example": "builder.Services.AddRateLimiter(o => { o.RejectionStatusCode = 429; o.AddSlidingWindowLimiter(\"api\", w => { w.PermitLimit = 100; w.Window = TimeSpan.FromMinutes(1); w.SegmentsPerWindow = 6; }); });\napp.UseRateLimiter();\napp.MapGroup(\"/api\").RequireRateLimiting(\"api\");",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "PasswordHasher<TUser>",
+          "what": "ASP.NET Core Identity's password hasher, usable on its own: PBKDF2-HMAC-SHA512 with a random salt and a versioned format, and SuccessRehashNeeded when a stored hash should be upgraded.",
+          "flags": [["HashPassword(user, password)", "a versioned, salted hash"], ["VerifyHashedPassword(user, hash, password)", "Failed, Success or SuccessRehashNeeded"], ["PasswordHasherOptions.IterationCount", "raise the cost over time"]],
+          "example": "var hasher = new PasswordHasher<User>();\nvar result = hasher.VerifyHashedPassword(user, user.PasswordHash, password);\nif (result == PasswordVerificationResult.SuccessRehashNeeded) user.PasswordHash = hasher.HashPassword(user, password);",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "curl -sI https://staging.shop.example | grep -iE 'strict-transport|content-security|x-content-type|x-frame|referrer|server'",
+          "what": "The 10-second header check before a scan: which security headers are there, and what the Server header gives away. securityheaders.com does the same for public sites.",
+          "flags": [["-I", "HEAD request: headers only"], ["-s", "no progress bar"], ["grep -iE", "case-insensitive, several headers at once"]],
+          "example": "curl -sI https://staging.shop.example/account | grep -iE 'strict-transport|content-security|x-content-type|x-frame|referrer|server|set-cookie'"
+        },
+        {
+          "cmd": "logger.LogWarning(\"Sign-in failed for {UserId} from {Ip}\", id, ip)",
+          "what": "Structured logging: values travel as named properties (encoded by the sink, searchable in the SIEM) instead of being glued into the message. Add HTTP logging with redaction for request details.",
+          "flags": [["{Placeholder}", "a named property, not string interpolation"], ["AddHttpLogging(o => o.RequestHeaders...)", "log only the headers you list"], ["Microsoft.Extensions.Compliance.Redaction", "mark data as personal or secret and redact it"]],
+          "example": "builder.Services.AddHttpLogging(o => { o.LoggingFields = HttpLoggingFields.RequestPath | HttpLoggingFields.ResponseStatusCode; });\nlogger.LogWarning(\"Sign-in failed for {UserName} from {Ip}\", login.Username, ctx.Connection.RemoteIpAddress);",
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each tool or API to its job.",
+      "pairs": [
+        ["hydra", "proves a login can or cannot be guessed"],
+        ["`RequireRateLimiting`", "puts a rate limit policy on an endpoint"],
+        ["`SuccessRehashNeeded`", "says a stored password hash should be upgraded"],
+        ["`curl -sI`", "shows the response headers only"],
+        ["`{UserName}` in a log message", "a structured property instead of string gluing"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Test the lab's login: stop at the first hit, and treat this text as failure.",
+      "code": ["hydra -l carol -P ~/top-passwords.txt -s 8080 __1__ shop http-post-form '/login:username=^USER^&password=^PASS^:__2__=Wrong username'"],
+      "blanks": ["-f", "F"],
+      "bank": ["-t", "S", "-L", "-V"]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A rate limiter rejects requests with its default status. Why do teams set `RejectionStatusCode = 429`?",
+      "options": [
+        "The default is 503, which looks like an outage to monitoring and to clients; 429 tells a client to slow down and lets alerts count throttling separately",
+        "429 is faster",
+        "Browsers retry 503 forever",
+        "429 bypasses the CDN cache"
+      ],
+      "answer": 0
+    }
+  ]
+}

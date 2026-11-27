@@ -1,0 +1,126 @@
+{
+  "title": "XXE: XML that reads your files",
+  "summary": "XML documents can declare entities that pull in files and URLs, or expand into gigabytes. Know .NET's safe defaults, the settings that undo them, and parse supplier XML with DTDs prohibited.",
+  "minutes": 14,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "An XML upload, and what the parser does with it",
+      "body": [
+        "A supplier uploads a price list. The attacker's version:",
+        "",
+        "```xml",
+        "<?xml version=\"1.0\"?>",
+        "<!DOCTYPE supplier [",
+        "  <!ENTITY secret SYSTEM \"file:///etc/passwd\">",
+        "  <!ENTITY meta   SYSTEM \"http://169.254.169.254/latest/meta-data/\">",
+        "]>",
+        "<supplier><name>&secret;</name></supplier>",
+        "```",
+        "",
+        "A parser that processes the DTD and resolves external entities replaces `&secret;` with the contents of `/etc/passwd`, and the app shows it back as \"the supplier name\". That is **XML external entity** injection (XXE): file disclosure and SSRF through an upload. Without external entities, a DTD can still define entities that expand into each other a billion times (**billion laughs**) and exhaust memory.",
+        "",
+        "XML hides in more places than `.xml` uploads: SOAP services, SAML assertions, `.docx`/`.xlsx`/`.svg` files (all XML inside), RSS feeds, and config imports."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "In modern .NET (Core, 5 and later), which of these parses the attacker's document **with** external entities resolved?",
+      "options": [
+        "An XmlDocument whose XmlResolver was set to new XmlUrlResolver(), loaded from a reader with DtdProcessing.Parse",
+        "new XmlDocument() with its defaults",
+        "XDocument.Parse(xml)",
+        "XmlReader.Create(stream) with default settings"
+      ],
+      "answer": 0,
+      "explain": "Modern .NET is safe by default: `XmlReaderSettings.DtdProcessing` is `Prohibit`, and `XmlDocument.XmlResolver` is null, so no external entity is fetched. XXE comes back when code opts in (often copied from old .NET Framework samples), or with third-party parsers."
+    },
+    {
+      "type": "learn",
+      "title": "Say it explicitly",
+      "body": [
+        "Defaults protect you until someone changes them. Write the safe settings where the parsing happens, so a reviewer sees them:",
+        "",
+        "```csharp fragment",
+        "var settings = new XmlReaderSettings",
+        "{",
+        "    DtdProcessing = DtdProcessing.Prohibit,   // a DOCTYPE is an error (XmlException)",
+        "    XmlResolver = null,                       // never fetch files or URLs",
+        "    MaxCharactersInDocument = 10_000_000,     // a size cap for uploads",
+        "};",
+        "using var reader = XmlReader.Create(new StringReader(xml), settings);",
+        "var doc = XDocument.Load(reader);",
+        "```",
+        "",
+        "Settings to flag in review: `DtdProcessing.Parse`, any `XmlResolver = new XmlUrlResolver()` (or `XmlSecureResolver` used as if it were safe), `XmlTextReader` from old code (it had unsafe defaults in .NET Framework), and XSLT with `XsltSettings.TrustedXslt` or scripts enabled. If you do not need XML at all, accept JSON."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Safe or XXE-prone?",
+      "buckets": ["Safe", "XXE-prone"],
+      "items": [
+        ["`XmlReader.Create(s, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit })`", 0],
+        ["`new XmlDocument().LoadXml(xml)` on .NET 10", 0],
+        ["`XDocument.Load(XmlReader.Create(s, safeSettings))`", 0],
+        ["`new XmlReaderSettings { DtdProcessing = DtdProcessing.Parse, XmlResolver = new XmlUrlResolver() }`", 1],
+        ["`var d = new XmlDocument { XmlResolver = new XmlUrlResolver() }; d.Load(reader)` with DTDs parsed", 1],
+        ["`new XslCompiledTransform().Load(xslt, XsltSettings.TrustedXslt, new XmlUrlResolver())` on uploaded XSLT", 1]
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "title": "Parse supplier XML safely",
+      "prompt": [
+        "`string ReadSupplierName(string xml)` returns the text of `/supplier/name`. It was copied from an old sample and resolves external entities. Fix it: parse with an `XmlReader` whose settings **prohibit DTDs** and have **no resolver**. A document with a DOCTYPE then throws `XmlException`; normal documents still work.",
+        "",
+        "Keep `using System.Xml;` at the top."
+      ],
+      "starter": [
+        "using System.Xml;",
+        "",
+        "string ReadSupplierName(string xml)",
+        "{",
+        "    var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Parse, XmlResolver = new XmlUrlResolver() };",
+        "    using var reader = XmlReader.Create(new StringReader(xml), settings);",
+        "    var doc = new XmlDocument { XmlResolver = new XmlUrlResolver() };",
+        "    doc.Load(reader);",
+        "    return doc.SelectSingleNode(\"/supplier/name\")?.InnerText ?? \"\";",
+        "}"
+      ],
+      "solution": [
+        "using System.Xml;",
+        "",
+        "string ReadSupplierName(string xml)",
+        "{",
+        "    var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };",
+        "    using var reader = XmlReader.Create(new StringReader(xml), settings);",
+        "    var doc = new XmlDocument { XmlResolver = null };",
+        "    doc.Load(reader);",
+        "    return doc.SelectSingleNode(\"/supplier/name\")?.InnerText ?? \"\";",
+        "}"
+      ],
+      "hints": [
+        "`DtdProcessing = DtdProcessing.Prohibit` makes any `<!DOCTYPE` an `XmlException`.",
+        "Set `XmlResolver = null` on both the settings and the `XmlDocument`, so nothing is ever fetched even if DTDs are allowed one day."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var dojoSecret = Path.Combine(Path.GetTempPath(), \"dojo-xxe-secret.txt\");",
+        "File.WriteAllText(dojoSecret, \"DB_PASSWORD=hunter2\");",
+        "var dojoUri = new Uri(dojoSecret).AbsoluteUri;",
+        "Dojo.Eq(\"a normal document\", \"Lamps Ltd\", ReadSupplierName(\"<supplier><name>Lamps Ltd</name></supplier>\"));",
+        "Dojo.Eq(\"entities built into XML still work\", \"Lamps & Bulbs\", ReadSupplierName(\"<supplier><name>Lamps &amp; Bulbs</name></supplier>\"));",
+        "var dojoXxe = $\"<?xml version=\\\"1.0\\\"?><!DOCTYPE supplier [<!ENTITY s SYSTEM \\\"{dojoUri}\\\">]><supplier><name>&s;</name></supplier>\";",
+        "var dojoLeak = \"\";",
+        "try { dojoLeak = ReadSupplierName(dojoXxe); } catch (XmlException) { dojoLeak = \"refused\"; }",
+        "Dojo.Check(\"the external entity does not read the file\", !dojoLeak.Contains(\"hunter2\"), dojoLeak);",
+        "Dojo.Throws<XmlException>(\"a DOCTYPE is refused\", () => ReadSupplierName(dojoXxe));",
+        "var dojoLaughs = \"<?xml version=\\\"1.0\\\"?><!DOCTYPE l [<!ENTITY a \\\"lol\\\"><!ENTITY b \\\"&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;\\\"><!ENTITY c \\\"&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;\\\">]><supplier><name>&c;</name></supplier>\";",
+        "Dojo.Throws<XmlException>(\"entity expansion (billion laughs) is refused\", () => ReadSupplierName(dojoLaughs));"
+      ]
+    }
+  ]
+}

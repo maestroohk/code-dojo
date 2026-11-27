@@ -1,0 +1,170 @@
+{
+  "title": "Threat modelling with STRIDE",
+  "summary": "Find the bugs before they are written: draw the data flow, mark the trust boundaries, walk STRIDE over each one, and fix a repudiation threat that is really an injection: forged log lines.",
+  "minutes": 15,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Four questions and a drawing",
+      "body": [
+        "Threat modelling is a design review with an attacker's hat on. It fits in a 45-minute meeting, and it answers four questions (Adam Shostack's framework):",
+        "",
+        "1. **What are we working on?** Draw it: a data flow diagram with the people, processes, data stores and the arrows between them.",
+        "2. **What can go wrong?** Walk each arrow that crosses a **trust boundary** with STRIDE.",
+        "3. **What are we going to do about it?** A mitigation, an accepted risk, or a ticket for each threat.",
+        "4. **Did we do a good job?** Did the review find real problems? Do the tests check the mitigations?",
+        "",
+        "Here is the Lamp Shop's link-preview feature, drawn as text:",
+        "",
+        "```text",
+        "  [Customer browser] --(1) GET /api/preview?url=...--> [Shop API] --(2) GET url--> [Any web server]",
+        "  ======== internet: trust boundary =========                   |",
+        "                                                                 +--(3)--> [Reviews DB]",
+        "                                         [Metadata 169.254.169.254]   (inside the cloud network)",
+        "```",
+        "",
+        "Arrow (2) is where the design goes wrong: the shop makes requests **from inside** the network, to an address the customer chose. Nobody needs a scanner to see that once it is drawn."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Each STRIDE threat breaks one security property. Match them.",
+      "pairs": [
+        ["**S**poofing: pretending to be someone else", "Authentication"],
+        ["**T**ampering: changing data or code", "Integrity"],
+        ["**R**epudiation: \"I never did that\"", "Non-repudiation (audit)"],
+        ["**I**nformation disclosure: reading what you should not", "Confidentiality"],
+        ["**D**enial of service: making it unavailable", "Availability"],
+        ["**E**levation of privilege: doing what you may not", "Authorization"]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "STRIDE on one arrow",
+      "body": [
+        "Take arrow (1), the customer's request to `/api/preview`, and ask each letter in turn:",
+        "",
+        "| | Threat | Mitigation |",
+        "|---|---|---|",
+        "| S | A script on another site calls the preview with the user's cookie | it needs no session: make it anonymous, or check `Sec-Fetch-Site` |",
+        "| T | The `url` points at `http://169.254.169.254/` | allow-list of hosts, no redirects (task 12 of the live lab) |",
+        "| R | Nobody can tell who triggered a fetch | log the user and URL of every fetch |",
+        "| I | The preview returns the body of an internal page | return only the title, never the body |",
+        "| D | A URL to a 10 GB file, or one that never answers | timeout of 3 s, read at most 64 KB |",
+        "| E | Credentials from the metadata service act as the server's cloud role | IMDSv2, and a role with only the permissions it needs |",
+        "",
+        "Not every letter finds something every time, and that is fine. The value is in asking all six on every boundary-crossing arrow, so the obvious-in-hindsight ones are not missed."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Threats from a review of a password-reset feature. Which STRIDE letter is each?",
+      "buckets": ["Spoofing", "Tampering", "Information disclosure", "Elevation of privilege"],
+      "items": [
+        ["Reset links are guessable sequential numbers, so anyone can reset anyone", 0],
+        ["The reset email is sent to the address given in the request, not the stored one", 0],
+        ["The `userId` in the reset form can be changed to another account's", 1],
+        ["The token in the link can be edited to extend its expiry", 1],
+        ["\"No account with that email\" tells an attacker who has an account", 2],
+        ["Reset tokens are written to the application log", 2],
+        ["A reset by a normal user can set `role=admin` in the same form", 3],
+        ["Resetting a password does not end the attacker's other sessions", 3]
+      ],
+      "explain": "Several fit two letters; pick the one the fix targets. Anything that lets you act **as** another user is spoofing; anything that lets you **change** what the server trusts is tampering."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In a 45-minute threat model, which arrows deserve the most time?",
+      "options": [
+        "Arrows that cross a trust boundary: from the internet, from a partner, from a less trusted service",
+        "Arrows between two functions in the same process",
+        "The arrows with the most traffic",
+        "The arrows that use TLS"
+      ],
+      "answer": 0,
+      "explain": "Inside one process every call already shares the same trust. At a boundary, data from someone you do not control enters your code: that is where validation, authentication and authorization have to happen."
+    },
+    {
+      "type": "learn",
+      "title": "Repudiation, and the forged log line",
+      "body": [
+        "Audit logs are the answer to repudiation: \"who refunded order 1003?\". But a log line built by gluing strings is itself an injection target (CWE-117):",
+        "",
+        "```csharp fragment",
+        "log.WriteLine($\"user={user} action={action} target={target}\");",
+        "```",
+        "",
+        "A user who signs up with the name `alice\\nuser=admin action=delete target=all` adds a second, fake line to the audit log:",
+        "",
+        "```text",
+        "user=alice",
+        "user=admin action=delete target=all action=login target=web",
+        "```",
+        "",
+        "Now the log blames the admin, and the investigation goes wrong. The fix is to **encode values** for the log's format: escape line breaks and quotes, quote values that contain spaces. Structured logging (`logger.LogInformation(\"Refund {OrderId} by {User}\", id, user)` with a JSON sink) does this for you, which is one more reason to use it."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "An audit line that cannot be forged",
+      "prompt": [
+        "Write `string AuditLine(string user, string action, string target)` that returns `user=<v> action=<v> target=<v>`, where each value `<v>` is:",
+        "",
+        "- cut to its first **100** characters plus `...` when it is longer than 100;",
+        "- written **as it is** when it is not empty and only has ASCII letters, digits and `._@:/-`;",
+        "- otherwise wrapped in double quotes, with `\\` written as `\\\\`, `\"` as `\\\"`, carriage return as `\\r`, line feed as `\\n`, tab as `\\t`, and any other control character as `\\u` plus four hex digits (`\\u0007`).",
+        "",
+        "```text",
+        "AuditLine(\"alice\", \"refund\", \"order-1003\")   ->  user=alice action=refund target=order-1003",
+        "AuditLine(\"bob smith\", \"login\", \"\")         ->  user=\"bob smith\" action=login target=\"\"",
+        "```"
+      ],
+      "starter": [
+        "string AuditLine(string user, string action, string target) =>",
+        "    $\"user={user} action={action} target={target}\";"
+      ],
+      "solution": [
+        "string AuditLine(string user, string action, string target) =>",
+        "    $\"user={Value(user)} action={Value(action)} target={Value(target)}\";",
+        "",
+        "string Value(string v)",
+        "{",
+        "    if (v.Length > 100) v = v[..100] + \"...\";",
+        "    if (v.Length > 0 && v.All(c => char.IsAsciiLetterOrDigit(c) || \"._@:/-\".Contains(c))) return v;",
+        "    var sb = new StringBuilder(\"\\\"\");",
+        "    foreach (var c in v)",
+        "        sb.Append(c switch",
+        "        {",
+        "            '\\\\' => \"\\\\\\\\\",",
+        "            '\"' => \"\\\\\\\"\",",
+        "            '\\r' => \"\\\\r\",",
+        "            '\\n' => \"\\\\n\",",
+        "            '\\t' => \"\\\\t\",",
+        "            _ when char.IsControl(c) => $\"\\\\u{(int)c:x4}\",",
+        "            _ => c.ToString(),",
+        "        });",
+        "    return sb.Append('\"').ToString();",
+        "}"
+      ],
+      "hints": [
+        "Write a helper `string Value(string v)` and call it three times.",
+        "Decide first whether quoting is needed: `v.All(c => char.IsAsciiLetterOrDigit(c) || \"._@:/-\".Contains(c))`.",
+        "When quoting, build the result with a `StringBuilder` and a `switch` on each character; `char.IsControl(c)` catches the rest, and `$\"\\\\u{(int)c:x4}\"` formats one."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "Dojo.Eq(\"a plain line\", \"user=alice action=refund target=order-1003\", AuditLine(\"alice\", \"refund\", \"order-1003\"));",
+        "Dojo.Eq(\"spaces are quoted, empty is \\\"\\\"\", \"user=\\\"bob smith\\\" action=login target=\\\"\\\"\", AuditLine(\"bob smith\", \"login\", \"\"));",
+        "var forged = AuditLine(\"alice\\nuser=admin action=delete target=all\", \"login\", \"web\");",
+        "Dojo.Check(\"a line feed in a value cannot start a new line\", !forged.Contains('\\n') && !forged.Contains('\\r'), forged);",
+        "Dojo.Eq(\"...it is escaped inside quotes\", \"user=\\\"alice\\\\nuser=admin action=delete target=all\\\" action=login target=web\", forged);",
+        "Dojo.Eq(\"quotes and backslashes are escaped\", \"user=\\\"say \\\\\\\"hi\\\\\\\" C:\\\\\\\\x\\\" action=a target=b\", AuditLine(\"say \\\"hi\\\" C:\\\\x\", \"a\", \"b\"));",
+        "Dojo.Eq(\"CR and tab are escaped\", \"user=\\\"a\\\\rb\\\\tc\\\" action=a target=b\", AuditLine(\"a\\rb\\tc\", \"a\", \"b\"));",
+        "Dojo.Eq(\"other control characters become \\\\u00XX\", \"user=\\\"bell\\\\u0007\\\" action=a target=b\", AuditLine(\"bell\\u0007\", \"a\", \"b\"));",
+        "Dojo.Eq(\"emails and paths stay unquoted\", \"user=ada@shop.example action=export target=/reports/2026-11.csv\", AuditLine(\"ada@shop.example\", \"export\", \"/reports/2026-11.csv\"));",
+        "Dojo.Eq(\"a 150-character value is cut to 100 plus ...\", \"user=\" + new string('a', 100) + \"... action=a target=b\", AuditLine(new string('a', 150), \"a\", \"b\"));"
+      ]
+    }
+  ]
+}

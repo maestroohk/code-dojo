@@ -1,0 +1,27 @@
+#!/bin/bash
+# shop-rebuild (on the shop host): build /work/shop and, when it compiles, restart the shop on the new build.
+# If the build fails, the shop keeps running the old version and the compiler errors are printed.
+cd /work/shop || { echo "shop-rebuild: /work/shop is missing" >&2; exit 1; }
+echo "shop-rebuild: building /work/shop (about 15 seconds) ..."
+rm -rf /work/build/next
+out=$(dotnet publish -c Release -o /work/build/next --no-restore -nologo -v q -clp:NoSummary -p:UseAppHost=false 2>&1)
+rc=$?
+if [ $rc -ne 0 ]; then
+  echo "$out" | grep -E ': (error|warning) [A-Z]+[0-9]+' | sed -e 's#/work/shop/##' -e 's# \[/work/shop/Shop.csproj\]##' | sort -u
+  [ -n "$(echo "$out" | grep -E ': error ')" ] || echo "$out" | tail -n 20
+  echo "shop-rebuild: the build FAILED. The shop keeps running the previous version." >&2
+  exit 1
+fi
+rm -rf /work/build/previous
+[ -d /work/build/current ] && mv /work/build/current /work/build/previous
+mv /work/build/next /work/build/current
+[ "${1:-}" = "--no-restart" ] && { echo "shop-rebuild: built."; exit 0; }
+pid=$(cat /run/shop.pid 2>/dev/null)
+[ -n "$pid" ] && kill "$pid" 2>/dev/null
+sleep 1
+for _ in $(seq 1 40); do
+  if curl -s -m 2 -o /dev/null http://127.0.0.1:8080/; then echo "shop-rebuild: the shop is running the new build."; exit 0; fi
+  sleep 0.5
+done
+echo "shop-rebuild: the shop did not start. Read the end of /work/logs/shop.log." >&2
+exit 1

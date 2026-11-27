@@ -1,0 +1,181 @@
+{
+  "title": "Vulnerable components: find, prioritise, gate",
+  "summary": "Most of your app is other people's code. List vulnerable packages, direct and transitive, decide what to fix first with CVSS, EPSS and the KEV catalogue, and write the CI gate that fails on high and critical advisories.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Your dependencies' vulnerabilities are yours",
+      "body": [
+        "```text",
+        "$ dotnet list package --vulnerable --include-transitive",
+        "",
+        "Project `Shop` has the following vulnerable packages",
+        "   [net10.0]:",
+        "   Top-level Package          Requested   Resolved   Severity   Advisory URL",
+        "   > Example.ImageKit         2.1.0       2.1.0      Critical   https://github.com/advisories/GHSA-xxxx-0001",
+        "",
+        "   Transitive Package         Resolved   Severity   Advisory URL",
+        "   > Example.Compression      1.4.2      High       https://github.com/advisories/GHSA-xxxx-0002",
+        "```",
+        "",
+        "**Transitive** packages (pulled in by your packages) are most of the tree, and most of the findings. Fix them by upgrading the direct package that brings them in, or by referencing a fixed version directly.",
+        "",
+        "Since the .NET 8 SDK, `dotnet restore` checks advisories itself (**NuGetAudit**: warnings `NU1901` to `NU1904` for low to critical), and recent SDKs audit transitive packages too. Make the serious ones errors: `<WarningsAsErrors>NU1903;NU1904</WarningsAsErrors>`. For JavaScript: `npm audit --audit-level=high` (and `npm audit fix`); for containers: `trivy image` or `docker scout cves`. **Dependabot** (or Renovate) opens the upgrade pull requests for you; your tests decide whether they merge."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "`dotnet list package --vulnerable` shows nothing, but a scanner reports a High advisory in `Example.Compression`. Why might that be?",
+      "options": [
+        "It is a transitive package: add --include-transitive",
+        "The scanner is wrong: dotnet list package covers everything",
+        "High advisories are hidden by default",
+        "The package must be signed to be listed"
+      ],
+      "answer": 0,
+      "explain": "Without `--include-transitive` only your direct references are listed. Recent SDKs' restore-time audit covers transitive packages; the list command still needs the flag."
+    },
+    {
+      "type": "learn",
+      "title": "What to fix first",
+      "body": [
+        "A big app has dozens of advisories at any time. Three signals decide the order:",
+        "",
+        "- **CVSS** (0-10): how bad it is *if* exploited. Useful, but it says nothing about likelihood.",
+        "- **EPSS** (0-1, from FIRST): the probability it is exploited in the wild in the next 30 days.",
+        "- **CISA KEV**: the catalogue of vulnerabilities **known to be exploited**. If it is in KEV, it is first.",
+        "",
+        "And one question only you can answer: **is the vulnerable code reachable** in your app? A critical bug in an XML parser you never call with untrusted input is real, but less urgent than a medium one in your login path. Reachability analysis (GitHub's, Snyk's, Semgrep Supply Chain) helps; so does reading the advisory.",
+        "",
+        "Write down the decision either way: a fix date, or an accepted risk with an **expiry date**, so \"later\" does not mean never."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Triage these advisories. Fix this sprint, or schedule?",
+      "buckets": ["Fix now", "Schedule with a date"],
+      "items": [
+        ["In the CISA KEV catalogue, used by your API", 0],
+        ["CVSS 9.8, EPSS 0.92, in the request path", 0],
+        ["CVSS 7.5 in the JSON parser that reads every request body", 0],
+        ["CVSS 9.1 in a test-only package that never ships", 1],
+        ["CVSS 5.3, EPSS 0.001, in an admin-only export behind VPN", 1],
+        ["CVSS 7.0 in a feature flag that is off, removal already planned", 1]
+      ],
+      "explain": "Exploitation evidence and reachability beat the raw score. \"Schedule\" still means a ticket with a date, not a muted alert."
+    },
+    {
+      "type": "blanks",
+      "prompt": "A Dependabot configuration that checks NuGet packages every week and groups minor updates.",
+      "code": [
+        "version: 2",
+        "updates:",
+        "  - package-ecosystem: \"__1__\"",
+        "    directory: \"/\"",
+        "    schedule:",
+        "      interval: \"__2__\"",
+        "    groups:",
+        "      minor-and-patch:",
+        "        update-types: [\"minor\", \"patch\"]"
+      ],
+      "blanks": ["nuget", "weekly"],
+      "bank": ["dotnet", "npm", "hourly", "always"]
+    },
+    {
+      "type": "code",
+      "title": "A CI gate on the vulnerable-packages report",
+      "prompt": [
+        "Write `List<string> GateFindings(string json)` (`using System.Text.Json;` at the top). `json` is the output of `dotnet list package --vulnerable --include-transitive --format json`:",
+        "",
+        "```json",
+        "{ \"version\": 1, \"projects\": [ { \"path\": \"src/Shop/Shop.csproj\", \"frameworks\": [ { \"framework\": \"net10.0\",",
+        "    \"topLevelPackages\": [ { \"id\": \"Example.ImageKit\", \"requestedVersion\": \"2.1.0\", \"resolvedVersion\": \"2.1.0\",",
+        "        \"vulnerabilities\": [ { \"severity\": \"Critical\", \"advisoryurl\": \"https://github.com/advisories/GHSA-xxxx-0001\" } ] } ],",
+        "    \"transitivePackages\": [ ... the same shape, no requestedVersion ... ] } ] } ] }",
+        "```",
+        "",
+        "Return one line per **High** or **Critical** vulnerability: `\"<id> <resolvedVersion> <severity> <advisoryurl>\"`, both top-level and transitive, from every project and framework, **without duplicates**, Critical before High, then by id (ordinal). Projects or frameworks without package lists are fine. An empty list means the build may pass."
+      ],
+      "starter": [
+        "using System.Text.Json;",
+        "",
+        "List<string> GateFindings(string json)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "using System.Text.Json;",
+        "",
+        "List<string> GateFindings(string json)",
+        "{",
+        "    var found = new HashSet<(int Rank, string Line, string Id)>();",
+        "    using var doc = JsonDocument.Parse(json);",
+        "    if (!doc.RootElement.TryGetProperty(\"projects\", out var projects)) return new List<string>();",
+        "    foreach (var project in projects.EnumerateArray())",
+        "    {",
+        "        if (!project.TryGetProperty(\"frameworks\", out var frameworks)) continue;",
+        "        foreach (var fw in frameworks.EnumerateArray())",
+        "            foreach (var listName in new[] { \"topLevelPackages\", \"transitivePackages\" })",
+        "            {",
+        "                if (!fw.TryGetProperty(listName, out var packages)) continue;",
+        "                foreach (var p in packages.EnumerateArray())",
+        "                {",
+        "                    if (!p.TryGetProperty(\"vulnerabilities\", out var vulns)) continue;",
+        "                    var id = p.GetProperty(\"id\").GetString()!;",
+        "                    var version = p.GetProperty(\"resolvedVersion\").GetString()!;",
+        "                    foreach (var v in vulns.EnumerateArray())",
+        "                    {",
+        "                        var severity = v.GetProperty(\"severity\").GetString()!;",
+        "                        var rank = severity == \"Critical\" ? 0 : severity == \"High\" ? 1 : -1;",
+        "                        if (rank < 0) continue;",
+        "                        found.Add((rank, $\"{id} {version} {severity} {v.GetProperty(\"advisoryurl\").GetString()}\", id));",
+        "                    }",
+        "                }",
+        "            }",
+        "    }",
+        "    return found.OrderBy(f => f.Rank).ThenBy(f => f.Id, StringComparer.Ordinal).ThenBy(f => f.Line, StringComparer.Ordinal)",
+        "        .Select(f => f.Line).ToList();",
+        "}"
+      ],
+      "hints": [
+        "Walk it with `JsonDocument`: `projects` → `frameworks` → `topLevelPackages` and `transitivePackages` → `vulnerabilities`. Use `TryGetProperty` where a list may be missing.",
+        "Collect `(rank, line, id)` tuples in a `HashSet` (rank 0 for Critical, 1 for High) to drop duplicates, then sort by rank and id."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var report = \"\"\"",
+        "{ \"version\": 1, \"parameters\": \"--vulnerable --include-transitive\", \"projects\": [",
+        "  { \"path\": \"src/Shop/Shop.csproj\", \"frameworks\": [ { \"framework\": \"net10.0\",",
+        "      \"topLevelPackages\": [",
+        "        { \"id\": \"Example.ImageKit\", \"requestedVersion\": \"2.1.0\", \"resolvedVersion\": \"2.1.0\",",
+        "          \"vulnerabilities\": [ { \"severity\": \"Critical\", \"advisoryurl\": \"https://github.com/advisories/GHSA-xxxx-0001\" } ] },",
+        "        { \"id\": \"Example.Logging\", \"requestedVersion\": \"3.0.0\", \"resolvedVersion\": \"3.0.0\",",
+        "          \"vulnerabilities\": [ { \"severity\": \"Moderate\", \"advisoryurl\": \"https://github.com/advisories/GHSA-xxxx-0003\" } ] } ],",
+        "      \"transitivePackages\": [",
+        "        { \"id\": \"Example.Compression\", \"resolvedVersion\": \"1.4.2\",",
+        "          \"vulnerabilities\": [ { \"severity\": \"High\", \"advisoryurl\": \"https://github.com/advisories/GHSA-xxxx-0002\" },",
+        "                               { \"severity\": \"Low\", \"advisoryurl\": \"https://github.com/advisories/GHSA-xxxx-0004\" } ] } ] } ] },",
+        "  { \"path\": \"src/Shop.Worker/Shop.Worker.csproj\", \"frameworks\": [ { \"framework\": \"net10.0\",",
+        "      \"transitivePackages\": [",
+        "        { \"id\": \"Example.Compression\", \"resolvedVersion\": \"1.4.2\",",
+        "          \"vulnerabilities\": [ { \"severity\": \"High\", \"advisoryurl\": \"https://github.com/advisories/GHSA-xxxx-0002\" } ] },",
+        "        { \"id\": \"Example.Archive\", \"resolvedVersion\": \"0.9.0\",",
+        "          \"vulnerabilities\": [ { \"severity\": \"Critical\", \"advisoryurl\": \"https://github.com/advisories/GHSA-xxxx-0005\" } ] } ] } ] },",
+        "  { \"path\": \"tests/Shop.Tests/Shop.Tests.csproj\", \"frameworks\": [ { \"framework\": \"net10.0\" } ] }",
+        "] }",
+        "\"\"\";",
+        "Dojo.Eq(\"the gate's findings\", new List<string>",
+        "{",
+        "    \"Example.Archive 0.9.0 Critical https://github.com/advisories/GHSA-xxxx-0005\",",
+        "    \"Example.ImageKit 2.1.0 Critical https://github.com/advisories/GHSA-xxxx-0001\",",
+        "    \"Example.Compression 1.4.2 High https://github.com/advisories/GHSA-xxxx-0002\",",
+        "}, GateFindings(report));",
+        "Dojo.Eq(\"a clean report passes\", new List<string>(), GateFindings(\"{ \\\"version\\\": 1, \\\"projects\\\": [ { \\\"path\\\": \\\"a.csproj\\\", \\\"frameworks\\\": [ { \\\"framework\\\": \\\"net10.0\\\", \\\"topLevelPackages\\\": [] } ] } ] }\"));",
+        "Dojo.Eq(\"no projects at all passes\", new List<string>(), GateFindings(\"{ \\\"version\\\": 1, \\\"projects\\\": [] }\"));"
+      ]
+    }
+  ]
+}

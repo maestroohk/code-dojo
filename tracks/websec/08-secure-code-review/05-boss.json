@@ -1,0 +1,207 @@
+{
+  "title": "Boss: review PR #1187 (avatars, CSV export, admin search)",
+  "summary": "A friendly, well-tested pull request with three security problems a scanner will not flag. Write the review in code: a safe upload, a CSV export that cannot run formulas, and an admin search that checks who is asking and how much they take.",
+  "minutes": 40,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "PR #1187: \"Profile pictures, customer export, admin user search\"",
+      "body": [
+        "```diff",
+        "+ // Save the uploaded avatar under its own name.",
+        "+ File.WriteAllBytes(Path.Combine(avatarDir, upload.FileName), upload.Bytes);",
+        "",
+        "+ // Export customers for the marketing team (opens in Excel).",
+        "+ sb.AppendLine($\"{c.Name},{c.Email},{c.Notes}\");",
+        "",
+        "+ app.MapGet(\"/admin/users/search\", (string q, int take) =>",
+        "+     users.Where(u => u.Name.Contains(q)).Take(take));",
+        "```",
+        "",
+        "Review notes, one per step:",
+        "",
+        "1. **Upload**: the file name is the user's (path traversal, overwriting `index.html`, an `.html` \"avatar\" served from your origin = stored XSS); nothing checks it is an image or limits its size.",
+        "2. **CSV**: a customer named `=HYPERLINK(\"https://evil.example\",\"Click\")` or `=cmd|' /C calc'!A0` becomes a formula when marketing opens the file in a spreadsheet (CSV injection, CWE-1236). Commas and quotes also break the columns.",
+        "3. **Admin search**: no role check (BFLA), the whole user entity goes out (password hashes, MFA secrets), and `take=10000000` reads the whole table (API4: unrestricted resource consumption)."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Note 1: accept only real images, under our own name",
+      "prompt": [
+        "Write `string? AcceptAvatar(byte[] content, string fileName)`. It returns the **name to store the file under**, or `null` to refuse:",
+        "",
+        "- at most 1,048,576 bytes (1 MiB), and not empty;",
+        "- the type comes from the **content**, not the name: PNG starts with the bytes `89 50 4E 47 0D 0A 1A 0A`, JPEG with `FF D8 FF`; anything else is refused, whatever `fileName` says;",
+        "- the stored name is a new random `Guid` in `N` format plus `.png` or `.jpg`. `fileName` is never used in it."
+      ],
+      "starter": [
+        "string? AcceptAvatar(byte[] content, string fileName) => fileName;"
+      ],
+      "solution": [
+        "string? AcceptAvatar(byte[] content, string fileName)",
+        "{",
+        "    if (content.Length == 0 || content.Length > 1_048_576) return null;",
+        "    ReadOnlySpan<byte> png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];",
+        "    ReadOnlySpan<byte> jpg = [0xFF, 0xD8, 0xFF];",
+        "    string? ext = content.AsSpan().StartsWith(png) ? \".png\" : content.AsSpan().StartsWith(jpg) ? \".jpg\" : null;",
+        "    return ext is null ? null : Guid.NewGuid().ToString(\"N\") + ext;   // the user's name never reaches the file system",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "byte[] Png(int size) { var b = new byte[size]; new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }.CopyTo(b, 0); return b; }",
+        "byte[] Jpg(int size) { var b = new byte[size]; new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 }.CopyTo(b, 0); return b; }",
+        "var nameRule = new System.Text.RegularExpressions.Regex(\"^[0-9a-f]{32}\\\\.(png|jpg)$\");",
+        "var a = AcceptAvatar(Png(2048), \"me.png\");",
+        "Dojo.Check(\"a PNG is stored as <guid>.png\", a is not null && nameRule.IsMatch(a) && a.EndsWith(\".png\"), a ?? \"null\");",
+        "var j = AcceptAvatar(Jpg(2048), \"holiday.JPG\");",
+        "Dojo.Check(\"a JPEG is stored as <guid>.jpg\", j is not null && nameRule.IsMatch(j) && j.EndsWith(\".jpg\"), j ?? \"null\");",
+        "Dojo.Check(\"two uploads get different names\", AcceptAvatar(Png(10), \"a.png\") != AcceptAvatar(Png(10), \"a.png\"), \"same name twice\");",
+        "var t = AcceptAvatar(Png(10), \"../../wwwroot/index.html\");",
+        "Dojo.Check(\"the user's path never reaches the name\", t is not null && !t.Contains(\"..\") && !t.Contains(\"index\") && !t.Contains('/'), t ?? \"null\");",
+        "Dojo.Eq(\"HTML named avatar.png is refused\", null, AcceptAvatar(Encoding.UTF8.GetBytes(\"<script>alert(document.cookie)</script>\"), \"avatar.png\"));",
+        "Dojo.Eq(\"an SVG is refused (it can carry scripts)\", null, AcceptAvatar(Encoding.UTF8.GetBytes(\"<svg onload=alert(1)>\"), \"a.svg\"));",
+        "Dojo.Eq(\"an empty file is refused\", null, AcceptAvatar(Array.Empty<byte>(), \"a.png\"));",
+        "Dojo.Eq(\"exactly 1 MiB is fine\", true, AcceptAvatar(Png(1_048_576), \"a.png\") is not null);",
+        "Dojo.Eq(\"one byte more is refused\", null, AcceptAvatar(Png(1_048_577), \"a.png\"));"
+      ],
+      "hints": [
+        "`content.AsSpan().StartsWith(new byte[] { 0x89, 0x50, ... })` checks the magic bytes.",
+        "`Guid.NewGuid().ToString(\"N\") + ext`: 32 hex characters, nothing from the user."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Note 2: CSV cells that stay text",
+      "prompt": [
+        "Write `string CsvCell(string value)` for the customer export:",
+        "",
+        "1. if the value starts with `=`, `+`, `-`, `@`, a tab or a carriage return, put a single quote `'` in front of it (so a spreadsheet shows it as text, as OWASP recommends);",
+        "2. then, if the result contains a comma, a double quote, a CR or an LF, wrap it in double quotes and double every `\"` inside (RFC 4180).",
+        "",
+        "```text",
+        "Ada                                  ->  Ada",
+        "=HYPERLINK(\"https://evil.example\")   ->  \"'=HYPERLINK(\"\"https://evil.example\"\")\"",
+        "Smith, Jo                            ->  \"Smith, Jo\"",
+        "```"
+      ],
+      "starter": [
+        "string CsvCell(string value) => value;"
+      ],
+      "solution": [
+        "string CsvCell(string value)",
+        "{",
+        "    if (value.Length > 0 && \"=+-@\\t\\r\".Contains(value[0])) value = \"'\" + value;",
+        "    if (value.IndexOfAny([',', '\"', '\\r', '\\n']) >= 0) value = \"\\\"\" + value.Replace(\"\\\"\", \"\\\"\\\"\") + \"\\\"\";",
+        "    return value;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "Dojo.Eq(\"a plain name\", \"Ada\", CsvCell(\"Ada\"));",
+        "Dojo.Eq(\"an empty cell\", \"\", CsvCell(\"\"));",
+        "Dojo.Eq(\"a formula with quotes\", \"\\\"'=HYPERLINK(\\\"\\\"https://evil.example\\\"\\\")\\\"\", CsvCell(\"=HYPERLINK(\\\"https://evil.example\\\")\"));",
+        "Dojo.Eq(\"the DDE classic\", \"'=cmd|' /C calc'!A0\", CsvCell(\"=cmd|' /C calc'!A0\"));",
+        "Dojo.Eq(\"+ and @ and -\", \"'+1+1 '@SUM(A1) '-2+3\", CsvCell(\"+1+1\") + \" \" + CsvCell(\"@SUM(A1)\") + \" \" + CsvCell(\"-2+3\"));",
+        "Dojo.Eq(\"a leading tab\", \"'\\t=1\", CsvCell(\"\\t=1\"));",
+        "Dojo.Eq(\"a comma\", \"\\\"Smith, Jo\\\"\", CsvCell(\"Smith, Jo\"));",
+        "Dojo.Eq(\"a line break\", \"\\\"line one\\nline two\\\"\", CsvCell(\"line one\\nline two\"));",
+        "Dojo.Eq(\"an email with a minus inside is untouched\", \"jo-ann@customer.example\", CsvCell(\"jo-ann@customer.example\"));"
+      ],
+      "hints": [
+        "`\"=+-@\\t\\r\".Contains(value[0])` for the first rule (check the length first).",
+        "`value.IndexOfAny(new[] { ',', '\"', '\\r', '\\n' }) >= 0`, then `\"\\\"\" + value.Replace(\"\\\"\", \"\\\"\\\"\") + \"\\\"\"`."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "web",
+      "title": "Note 3: the admin search",
+      "prompt": [
+        "Fix `GET /admin/users/search?q=&take=` (`X-User` is the caller; `roles` holds each caller's role):",
+        "",
+        "- only callers with the role `admin`: no `X-User` → `401`, anyone else → `403`;",
+        "- return `{ id, name }` per user, never `passwordHash` or `mfaSecret`;",
+        "- `take` defaults to **20** when missing, and must be **1 to 100**, else `400`."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "var roles = new Dictionary<string, string> { [\"sam\"] = \"admin\", [\"ada\"] = \"customer\" };",
+        "var users = Enumerable.Range(1, 500).Select(i => new User(i, $\"User {i}\", $\"pbkdf2$hash{i}\", $\"MFA{i:D6}\")).ToList();",
+        "string? Caller(HttpContext ctx) => ctx.Request.Headers[\"X-User\"].FirstOrDefault();",
+        "",
+        "app.MapGet(\"/admin/users/search\", (string q, int take) =>",
+        "    users.Where(u => u.Name.Contains(q)).Take(take));",
+        "",
+        "app.Run();",
+        "",
+        "record User(int Id, string Name, string PasswordHash, string MfaSecret);"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "var roles = new Dictionary<string, string> { [\"sam\"] = \"admin\", [\"ada\"] = \"customer\" };",
+        "var users = Enumerable.Range(1, 500).Select(i => new User(i, $\"User {i}\", $\"pbkdf2$hash{i}\", $\"MFA{i:D6}\")).ToList();",
+        "string? Caller(HttpContext ctx) => ctx.Request.Headers[\"X-User\"].FirstOrDefault();",
+        "",
+        "app.MapGet(\"/admin/users/search\", (string q, int? take, HttpContext ctx) =>",
+        "{",
+        "    if (Caller(ctx) is not { } me) return Results.Unauthorized();",
+        "    if (!roles.TryGetValue(me, out var role) || role != \"admin\") return Results.StatusCode(403);",
+        "    var n = take ?? 20;",
+        "    if (n is < 1 or > 100) return Results.BadRequest(new { error = \"take must be 1 to 100\" });",
+        "    return Results.Ok(users.Where(u => u.Name.Contains(q)).Take(n).Select(u => new { u.Id, u.Name }));",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "record User(int Id, string Name, string PasswordHash, string MfaSecret);"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "static class DojoTests",
+        "{",
+        "    static Task<HttpResponseMessage> Get(HttpClient http, string url, string? user)",
+        "    {",
+        "        var msg = new HttpRequestMessage(HttpMethod.Get, url);",
+        "        if (user is not null) msg.Headers.Add(\"X-User\", user);",
+        "        return http.SendAsync(msg);",
+        "    }",
+        "",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"The admin search could be called\", async () =>",
+        "        {",
+        "            DojoWeb.Status(\"no user: 401\", 401, await Get(http, \"/admin/users/search?q=User\", null));",
+        "            DojoWeb.Status(\"a customer: 403\", 403, await Get(http, \"/admin/users/search?q=User\", \"ada\"));",
+        "            var r = await Get(http, \"/admin/users/search?q=User\", \"sam\");",
+        "            DojoWeb.Status(\"the admin searches\", 200, r);",
+        "            var body = await DojoWeb.Text(r);",
+        "            Dojo.Check(\"no password hashes or MFA secrets\", !body.Contains(\"pbkdf2\") && !body.Contains(\"MFA0\") && !body.Contains(\"mfaSecret\", StringComparison.OrdinalIgnoreCase), body.Length > 200 ? body[..200] : body);",
+        "            var json = await DojoWeb.Json(await Get(http, \"/admin/users/search?q=User\", \"sam\"));",
+        "            Dojo.Eq(\"take defaults to 20\", 20, json.ValueKind == JsonValueKind.Array ? json.GetArrayLength() : -1);",
+        "            var five = await DojoWeb.Json(await Get(http, \"/admin/users/search?q=User&take=5\", \"sam\"));",
+        "            Dojo.Eq(\"take=5 gives 5\", 5, five.ValueKind == JsonValueKind.Array ? five.GetArrayLength() : -1);",
+        "            Dojo.Eq(\"...with id and name\", \"User 1\", five.ValueKind == JsonValueKind.Array ? DojoWeb.Prop(five[0], \"name\") : null);",
+        "            DojoWeb.Status(\"take=10000000 is refused\", 400, await Get(http, \"/admin/users/search?q=User&take=10000000\", \"sam\"));",
+        "            DojoWeb.Status(\"take=0 is refused\", 400, await Get(http, \"/admin/users/search?q=User&take=0\", \"sam\"));",
+        "        });",
+        "    }",
+        "}"
+      ],
+      "hints": [
+        "Take `HttpContext ctx` and make `take` an `int?` so a missing value is `null`, then `var n = take ?? 20;`.",
+        "Role check first (401, then 403), the range check next, and `.Select(u => new { u.Id, u.Name })` last."
+      ]
+    }
+  ]
+}

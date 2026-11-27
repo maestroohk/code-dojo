@@ -1,0 +1,137 @@
+{
+  "title": "Logging, alerting and exceptional conditions",
+  "summary": "A09 and A10: log the security events that matter without logging secrets, turn them into alerts a person will see, and keep error paths failing closed. Write the brute-force and credential-stuffing detector a SOC would run.",
+  "minutes": 16,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The attack nobody saw",
+      "body": [
+        "Most breaches are found by someone else (a customer, a researcher, a journalist) weeks after they started. **A09:2025 Security Logging and Alerting Failures** is about closing that gap:",
+        "",
+        "- **Log** security-relevant events, with who, what, from where and the result: sign-ins and failures, MFA changes, password resets, permission changes, access denied (403/404 on other users' objects), input validation failures, 429s, admin actions, exports.",
+        "- **Do not log secrets**: passwords (even wrong ones: they are often the right password for another site), tokens, session ids, full card numbers, API keys. Log a user id and a request id instead.",
+        "- **Encode** what you log (the STRIDE lesson's forged line), use structured logging, and send it somewhere an attacker on the box cannot edit.",
+        "- **Alert**: a log nobody reads is not monitoring. A few precise alerts that a person acts on beat a thousand dashboards.",
+        "",
+        "A10 (exceptional conditions) is the code side of the same coin: when the rate limiter's store is down, when the token can't be parsed, when the permissions service times out, the code must fail **closed** and **log** that it did."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Log it, or keep it out of the log?",
+      "buckets": ["Log it", "Never log it"],
+      "items": [
+        ["Failed sign-in: username, source address, time", 0],
+        ["A 403 on `DELETE /admin/users/7` by user 42", 0],
+        ["The rate limiter rejecting a client with 429", 0],
+        ["The password from a failed sign-in", 1],
+        ["The session cookie value", 1],
+        ["The `Authorization: Bearer ...` header", 1],
+        ["A full card number from the checkout form", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "From events to alerts",
+      "body": [
+        "Two classic detection rules over sign-in events:",
+        "",
+        "```text",
+        "brute force:   one username,  >= 5 failures within 60 seconds        -> \"brute-force carol\"",
+        "stuffing:      one address,   failures for >= 4 different usernames within 60 seconds -> \"stuffing 203.0.113.9\"",
+        "```",
+        "",
+        "In production these run in a SIEM (Microsoft Sentinel's KQL, Splunk's SPL, Elastic rules), with thresholds tuned on real traffic so they fire on attacks and not on Monday mornings. A **sliding window** (any 60 seconds, not each calendar minute) matters: an attack spread across 10:00:50 to 10:01:20 must not escape by straddling a minute boundary.",
+        "",
+        "```kusto",
+        "SigninLogs",
+        "| where ResultType != 0",
+        "| summarize Failures = count(), Users = dcount(UserPrincipalName) by IPAddress, bin(TimeGenerated, 1m)",
+        "| where Users >= 4",
+        "```"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A failed-login alert fires 300 times a day, mostly on users who mistype their password once or twice. The team mutes it. What is the better fix?",
+      "options": [
+        "Tune the rule (more failures, a sliding window, per-address and per-account variants) so it fires on attack patterns, and route it to someone who must act",
+        "Keep it muted and review the dashboard weekly",
+        "Alert on every single failed login",
+        "Stop logging failed logins to save money"
+      ],
+      "answer": 0,
+      "explain": "A muted alert is the same as no alert. Precision is what keeps people reading them."
+    },
+    {
+      "type": "code",
+      "title": "Detect brute force and credential stuffing",
+      "prompt": [
+        "Write `List<string> Alerts(List<LoginEvent> events)`. `record LoginEvent(DateTime At, string Ip, string Username, bool Success)` is given. Events may arrive in any order. Only failures (`Success == false`) count.",
+        "",
+        "- `\"brute-force <username>\"` when one username has **5 or more** failures within **any 60-second window** (the last minus the first at most 60 seconds);",
+        "- `\"stuffing <ip>\"` when one address has failures for **4 or more different usernames** within any 60-second window;",
+        "- each alert at most once; the list sorted with ordinal string order."
+      ],
+      "starter": [
+        "List<string> Alerts(List<LoginEvent> events)",
+        "{",
+        "    return new List<string>();",
+        "}"
+      ],
+      "solution": [
+        "List<string> Alerts(List<LoginEvent> events)",
+        "{",
+        "    var fails = events.Where(e => !e.Success).OrderBy(e => e.At).ToList();",
+        "    var alerts = new SortedSet<string>(StringComparer.Ordinal);",
+        "    foreach (var g in fails.GroupBy(e => e.Username))",
+        "    {",
+        "        var list = g.ToList();",
+        "        for (var i = 0; i + 4 < list.Count; i++)",
+        "            if (list[i + 4].At - list[i].At <= TimeSpan.FromSeconds(60)) { alerts.Add($\"brute-force {g.Key}\"); break; }",
+        "    }",
+        "    foreach (var g in fails.GroupBy(e => e.Ip))",
+        "    {",
+        "        var list = g.ToList();",
+        "        for (var i = 0; i < list.Count; i++)",
+        "        {",
+        "            var users = list.Skip(i).TakeWhile(e => e.At - list[i].At <= TimeSpan.FromSeconds(60)).Select(e => e.Username).Distinct().Count();",
+        "            if (users >= 4) { alerts.Add($\"stuffing {g.Key}\"); break; }",
+        "        }",
+        "    }",
+        "    return alerts.ToList();",
+        "}"
+      ],
+      "hints": [
+        "Keep only failures and sort them by time. Then group: by `Username` for brute force, by `Ip` for stuffing.",
+        "Brute force: in a time-sorted group, 5 failures within 60 s exist when some `list[i + 4].At - list[i].At <= 60 s`.",
+        "Stuffing: from each event, take the following events while they are within 60 s and count the distinct usernames."
+      ],
+      "template": [
+        "var t0 = new DateTime(2026, 11, 24, 10, 0, 50, DateTimeKind.Utc);",
+        "LoginEvent F(int s, string ip, string user) => new(t0.AddSeconds(s), ip, user, false);",
+        "",
+        "var brute = Enumerable.Range(0, 5).Select(i => F(i * 7, \"198.51.100.4\", \"carol\")).ToList();",
+        "Dojo.Eq(\"5 failures for carol in 28 s, across a minute boundary\", new List<string> { \"brute-force carol\" }, Alerts(brute));",
+        "var slow = Enumerable.Range(0, 5).Select(i => F(i * 20, \"198.51.100.4\", \"carol\")).ToList();",
+        "Dojo.Eq(\"5 failures spread over 80 s do not alert\", new List<string>(), Alerts(slow));",
+        "var mixed = new List<LoginEvent>(brute) { new(t0.AddSeconds(3), \"198.51.100.4\", \"carol\", true) };",
+        "mixed.Reverse();",
+        "Dojo.Eq(\"order does not matter, successes do not count\", new List<string> { \"brute-force carol\" }, Alerts(mixed));",
+        "var stuffing = new List<LoginEvent> { F(0, \"203.0.113.9\", \"ada\"), F(10, \"203.0.113.9\", \"bob\"), F(20, \"203.0.113.9\", \"carol\"), F(30, \"203.0.113.9\", \"dan\") };",
+        "Dojo.Eq(\"4 usernames from one address in 30 s\", new List<string> { \"stuffing 203.0.113.9\" }, Alerts(stuffing));",
+        "var spread = new List<LoginEvent> { F(0, \"203.0.113.9\", \"ada\"), F(30, \"203.0.113.9\", \"bob\"), F(61, \"203.0.113.9\", \"carol\"), F(95, \"203.0.113.9\", \"dan\") };",
+        "Dojo.Eq(\"4 usernames over 95 s do not alert\", new List<string>(), Alerts(spread));",
+        "var both = brute.Concat(stuffing).ToList();",
+        "Dojo.Eq(\"both alerts, sorted\", new List<string> { \"brute-force carol\", \"stuffing 203.0.113.9\" }, Alerts(both));",
+        "var typos = new List<LoginEvent> { F(0, \"192.0.2.1\", \"ada\"), F(5, \"192.0.2.1\", \"ada\"), new(t0.AddSeconds(9), \"192.0.2.1\", \"ada\", true) };",
+        "Dojo.Eq(\"two typos then a success: nothing\", new List<string>(), Alerts(typos));",
+        "",
+        "{{CODE}}",
+        "",
+        "record LoginEvent(DateTime At, string Ip, string Username, bool Success);"
+      ]
+    }
+  ]
+}

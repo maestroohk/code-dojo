@@ -1,0 +1,150 @@
+{
+  "title": "Threat model a feature: partner webhooks",
+  "summary": "Before a line is written: draw the webhook feature, walk STRIDE over each boundary, and turn the threats into requirements. Then build the one the receiving side always gets wrong: verifying a signed, timestamped webhook.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The design on the whiteboard",
+      "body": [
+        "The product team wants partner webhooks: partners register a URL, and the shop POSTs order events to it. Partners also send *us* events (refunds) on our webhook endpoint.",
+        "",
+        "```text",
+        "[Partner admin] --(1) register https://hooks.partner.example/shop --> [Shop API] --> [Webhooks DB]",
+        "                                                                          |",
+        "[Order service] --(2) event --> [Webhook sender] --(3) POST event --> [Partner server]   (internet)",
+        "",
+        "[Partner server] --(4) POST /webhooks/refunds  X-Signature, X-Timestamp --> [Shop API] --> [Refunds]",
+        "```",
+        "",
+        "Three arrows cross the internet: (1), (3) and (4). Walk STRIDE on each, then write down the requirements before the tickets are cut. Ten minutes here saves a vulnerability report later."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each threat from the session to the requirement that answers it.",
+      "pairs": [
+        ["(1) A partner registers `https://169.254.169.254/` as their URL", "validate URLs and check the IP at connect time (SSRF)"],
+        ["(4) Anyone on the internet POSTs a fake refund", "verify an HMAC signature with the partner's secret"],
+        ["(4) An attacker resends a real, signed refund event a day later", "sign a timestamp too, and refuse events older than 5 minutes"],
+        ["(3) A partner's server hangs for minutes on every call", "short timeouts, retries with backoff, a queue"],
+        ["(4) A partner says \"we never sent that refund\"", "log each event's id, signature result and source"]
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Classify the threats with STRIDE.",
+      "buckets": ["Spoofing", "Tampering", "Repudiation", "Denial of service"],
+      "items": [
+        ["A fake refund event with a partner's name in it", 0],
+        ["A request to /webhooks/refunds from an unknown sender", 0],
+        ["Changing the amount in a captured, signed event", 1],
+        ["Replaying a signed event with a new timestamp header", 1],
+        ["A partner disputes an event and there is no record of it", 2],
+        ["A burst of 50,000 webhook calls on our endpoint", 3],
+        ["One partner's slow server blocks all outgoing events", 3]
+      ],
+      "explain": "Replaying with a new timestamp only works if the timestamp is not part of what is signed; tampering with signed data is caught by the signature."
+    },
+    {
+      "type": "learn",
+      "title": "Signed, timestamped webhooks",
+      "body": [
+        "The pattern most providers use (Stripe, GitHub, Slack, Shopify, all slightly differently):",
+        "",
+        "```text",
+        "X-Timestamp: 1795776000",
+        "X-Signature: v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd",
+        "",
+        "signature = hex( HMAC-SHA256( secret, timestamp + \".\" + raw body ) )",
+        "```",
+        "",
+        "The receiver, in this order:",
+        "",
+        "1. read the **raw body** bytes (re-serialized JSON may differ by a space, and the signature breaks);",
+        "2. refuse a timestamp more than **5 minutes** from now (replays and very late deliveries);",
+        "3. compute the HMAC over `timestamp.body` and compare with **`CryptographicOperations.FixedTimeEquals`**, never `==` (a timing leak lets an attacker guess the signature byte by byte);",
+        "4. accept **several** signatures (`v1=a,v1=b`) so the secret can be rotated without downtime;",
+        "5. remember event ids for a while and ignore duplicates (retries are normal; idempotency).",
+        "",
+        "Sending side: the same HMAC, a per-partner secret, and the SSRF rules from module 5 for the URL."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A receiver checks `signature == ComputeHmac(body)` where `body` is the parsed request object serialized again. What two problems does a reviewer raise?",
+      "options": [
+        "== leaks timing (use FixedTimeEquals), and re-serializing changes the bytes, so honest events fail: sign and verify the raw body",
+        "HMAC-SHA256 is too weak, and the body should be encrypted",
+        "The signature should be Base64, and == is fine for strings",
+        "Nothing: this is how webhooks work"
+      ],
+      "answer": 0
+    },
+    {
+      "type": "code",
+      "title": "Verify a partner webhook",
+      "prompt": [
+        "Write `bool VerifyWebhook(string body, string? signature, string? timestamp, byte[] secret, DateTimeOffset now)` (`using System.Security.Cryptography;`):",
+        "",
+        "- `timestamp` is Unix seconds; missing, not a number, or more than **300 seconds** before or after `now` → `false`;",
+        "- `signature` holds one or more comma-separated entries `v1=<lowercase hex>`; entries with another prefix are ignored;",
+        "- it is valid when **any** `v1` entry equals HMAC-SHA256 with `secret` over the UTF-8 bytes of `timestamp + \".\" + body`, compared with `CryptographicOperations.FixedTimeEquals` on the bytes. Bad hex → that entry does not match."
+      ],
+      "starter": [
+        "using System.Security.Cryptography;",
+        "",
+        "bool VerifyWebhook(string body, string? signature, string? timestamp, byte[] secret, DateTimeOffset now) =>",
+        "    signature == \"v1=\" + Convert.ToHexStringLower(HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes(body)));"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "bool VerifyWebhook(string body, string? signature, string? timestamp, byte[] secret, DateTimeOffset now)",
+        "{",
+        "    if (signature is null || !long.TryParse(timestamp, out var ts)) return false;",
+        "    if (Math.Abs(now.ToUnixTimeSeconds() - ts) > 300) return false;",
+        "    var expected = HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes(timestamp + \".\" + body));",
+        "    foreach (var entry in signature.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))",
+        "    {",
+        "        if (!entry.StartsWith(\"v1=\")) continue;",
+        "        try",
+        "        {",
+        "            if (CryptographicOperations.FixedTimeEquals(expected, Convert.FromHexString(entry[3..]))) return true;",
+        "        }",
+        "        catch (FormatException) { }",
+        "    }",
+        "    return false;",
+        "}"
+      ],
+      "require": [
+        { "pattern": "FixedTimeEquals", "message": "Compares signatures in constant time" }
+      ],
+      "hints": [
+        "Check the timestamp first: `long.TryParse`, then `Math.Abs(now.ToUnixTimeSeconds() - ts) > 300`.",
+        "Compute `HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes(timestamp + \".\" + body))` once; for each `v1=` entry, `Convert.FromHexString(entry[3..])` (inside a try) and `FixedTimeEquals`."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "var key = Encoding.UTF8.GetBytes(\"whsec_partner_7f3c91\");",
+        "var oldKey = Encoding.UTF8.GetBytes(\"whsec_partner_old_02\");",
+        "var now = DateTimeOffset.FromUnixTimeSeconds(1795776000);",
+        "var body = \"{\\\"event\\\":\\\"refund.created\\\",\\\"order\\\":1003,\\\"amount\\\":89.00}\";",
+        "string Sig(byte[] k, string ts, string b) => \"v1=\" + Convert.ToHexStringLower(HMACSHA256.HashData(k, Encoding.UTF8.GetBytes(ts + \".\" + b)));",
+        "var ts = \"1795776000\";",
+        "Dojo.Eq(\"a genuine event\", true, VerifyWebhook(body, Sig(key, ts, body), ts, key, now));",
+        "Dojo.Eq(\"sent 4 minutes ago\", true, VerifyWebhook(body, Sig(key, \"1795775760\", body), \"1795775760\", key, now));",
+        "Dojo.Eq(\"a changed amount\", false, VerifyWebhook(body.Replace(\"89.00\", \"8900.00\"), Sig(key, ts, body), ts, key, now));",
+        "Dojo.Eq(\"a replay from yesterday\", false, VerifyWebhook(body, Sig(key, \"1795689600\", body), \"1795689600\", key, now));",
+        "Dojo.Eq(\"an old signature with a fresh timestamp header\", false, VerifyWebhook(body, Sig(key, \"1795689600\", body), ts, key, now));",
+        "Dojo.Eq(\"a timestamp from the future (10 minutes)\", false, VerifyWebhook(body, Sig(key, \"1795776600\", body), \"1795776600\", key, now));",
+        "Dojo.Eq(\"during key rotation: the second entry matches\", true, VerifyWebhook(body, Sig(oldKey, ts, body) + \",\" + Sig(key, ts, body), ts, key, now));",
+        "Dojo.Eq(\"a signed body without the timestamp in it\", false, VerifyWebhook(body, \"v1=\" + Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(body))), ts, key, now));",
+        "Dojo.Eq(\"another scheme is ignored\", false, VerifyWebhook(body, Sig(key, ts, body).Replace(\"v1=\", \"v0=\"), ts, key, now));",
+        "Dojo.Eq(\"missing headers\", false, VerifyWebhook(body, null, null, key, now));",
+        "Dojo.Eq(\"bad hex\", false, VerifyWebhook(body, \"v1=zz\", ts, key, now));"
+      ]
+    }
+  ]
+}

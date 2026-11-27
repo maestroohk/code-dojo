@@ -1,0 +1,77 @@
+{
+  "title": "Senior's toolkit: testing and enforcing access control",
+  "summary": "Two accounts and curl, Burp's Autorize, ASP.NET Core's fallback policy and resource-based authorization, and PhysicalFileProvider for files.",
+  "minutes": 9,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: testing and enforcing access control",
+      "body": "Access control bugs are found with two accounts and patience, and prevented with rules that apply by default. These are the tools for both.",
+      "toolkit": [
+        {
+          "cmd": "curl -b alice.jar / -b bob.jar",
+          "what": "The two-account test: capture every request as user A, replay it with user B's session, compare. Any 200 that should be a 404 is an IDOR or BFLA.",
+          "flags": [["-c alice.jar", "save A's session at sign-in"], ["-b bob.jar", "replay with B's session"], ["-o /dev/null -w '%{http_code}'", "print only the status, for loops over many ids"]],
+          "example": "for id in $(seq 1000 1010); do printf '%s ' $id; curl -s -o /dev/null -w '%{http_code}\\n' -b bob.jar https://staging.shop.example/api/orders/$id; done"
+        },
+        {
+          "cmd": "Autorize (Burp Suite extension)",
+          "what": "Automates the two-account test while you click through the app as a privileged user: every request is replayed with a low-privilege cookie and with none, and colour-coded as bypassed, enforced or unclear.",
+          "flags": [["low-privilege headers", "paste the other user's Cookie header"], ["unauthenticated check", "also replay with no cookie"], ["enforcement detector", "a string (\"Not found\") that means the check worked"]],
+          "example": "Burp → Extensions → BApp Store → Autorize → paste 'Cookie: sid=<bob>' → Autorize is on → browse the admin pages as sam",
+          "lang": "text"
+        },
+        {
+          "cmd": "SetFallbackPolicy(...)",
+          "what": "Deny by default in ASP.NET Core: every endpoint with no authorization metadata requires a signed-in user. Public endpoints opt out with AllowAnonymous().",
+          "flags": [["AddAuthorizationBuilder()", "the builder for policies"], ["RequireAuthenticatedUser()", "the fallback rule"], ["MapGroup(\"/admin\").RequireAuthorization(\"Admin\")", "one policy on a whole group"], ["AllowAnonymous()", "the explicit, reviewable exception"]],
+          "example": "builder.Services.AddAuthorizationBuilder()\n    .SetFallbackPolicy(new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build())\n    .AddPolicy(\"Admin\", p => p.RequireRole(\"admin\"));\napp.MapGroup(\"/admin\").RequireAuthorization(\"Admin\");",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "IAuthorizationService.AuthorizeAsync(user, resource, policy)",
+          "what": "Resource-based authorization: the rule (\"owner or shared with\") lives in one AuthorizationHandler<TRequirement, TResource> and every endpoint asks it about the object it loaded.",
+          "flags": [["AuthorizationHandler<OwnerRequirement, Document>", "where the rule lives"], ["result.Succeeded", "allowed or not"], ["Results.NotFound()", "on failure, so ids cannot be probed"]],
+          "example": "var doc = await db.Documents.FindAsync([id], ct);\nif (doc is null) return Results.NotFound();\nvar ok = await authz.AuthorizeAsync(user, doc, \"CanRead\");\nreturn ok.Succeeded ? Results.Ok(doc.ToDto()) : Results.NotFound();",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new PhysicalFileProvider(root).GetFileInfo(name)",
+          "what": "Serve files from one folder only: it refuses absolute paths and paths that climb out of the root (GetFileInfo returns a NotFoundFileInfo).",
+          "flags": [["fileInfo.Exists", "false for missing and for refused paths"], ["fileInfo.CreateReadStream()", "the content"], ["Results.Stream(...)", "send it"]],
+          "example": "var provider = new PhysicalFileProvider(\"/work/data/invoices\");\nvar f = provider.GetFileInfo(file);\nreturn f.Exists ? Results.Stream(f.CreateReadStream(), \"application/pdf\") : Results.NotFound();",
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each tool or API to the job it does.",
+      "pairs": [
+        ["Autorize", "replays your requests with a second user's cookie"],
+        ["`SetFallbackPolicy`", "requires sign-in on endpoints that say nothing"],
+        ["`IAuthorizationService.AuthorizeAsync`", "checks one user against one loaded object"],
+        ["`PhysicalFileProvider`", "keeps file access inside one folder"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Loop over order ids with Bob's session and print only each status code.",
+      "code": ["for id in $(seq 1000 1010); do curl -s -o /dev/null __1__ '%{http_code}\\n' __2__ bob.jar https://staging.shop.example/api/orders/$id; done"],
+      "blanks": ["-w", "-b"],
+      "bank": ["-c", "-i", "-d", "-X"]
+    },
+    {
+      "type": "mcq",
+      "prompt": "With a fallback policy that requires a signed-in user, the health check endpoint `/healthz` starts returning 401 to the load balancer. What is the right fix?",
+      "options": [
+        "Add `.AllowAnonymous()` to the `/healthz` endpoint, so the exception is explicit and visible in review",
+        "Remove the fallback policy",
+        "Give the load balancer an admin account",
+        "Move the health check to a secret path"
+      ],
+      "answer": 0,
+      "explain": "Deny by default with explicit, greppable exceptions: a reviewer can list every `AllowAnonymous` in the codebase in one search."
+    }
+  ]
+}

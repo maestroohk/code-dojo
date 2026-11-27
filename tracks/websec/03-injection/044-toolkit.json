@@ -1,0 +1,76 @@
+{
+  "title": "Senior's toolkit: finding injection",
+  "summary": "sqlmap to prove an injection (on systems you may test), Semgrep and CodeQL to find concatenated queries and shells in code, EF Core's EF1002 and the .NET CA rules as build errors, and ToQueryString to see the SQL.",
+  "minutes": 9,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: finding injection",
+      "body": "Injection is found two ways: from the outside by sending payloads, and from the inside by tracing user input (a source) to a query or a shell (a sink). Seniors use both, and make the build refuse the patterns that cause it.",
+      "toolkit": [
+        {
+          "cmd": "sqlmap -u URL",
+          "what": "Detect and exploit SQL injection automatically: boolean, error, UNION, stacked and time-based techniques, then dump tables. Only against systems you are authorised to test: it sends thousands of requests.",
+          "flags": [["-u 'https://.../search?q=lamp'", "the target, with a normal value"], ["--batch", "accept the defaults, no questions"], ["--dbms=postgresql", "skip guessing the database"], ["-p q", "test only this parameter"], ["--dump -T users", "read a table once injection is confirmed"], ["--risk / --level", "how aggressive the payloads are (1-3 / 1-5)"]],
+          "example": "sqlmap -u 'http://shop:8080/api/products/search?q=lamp' -p q --dbms=sqlite --batch --dump -T users"
+        },
+        {
+          "cmd": "semgrep scan --config p/csharp",
+          "what": "Pattern-based static analysis that reads like code: finds string-built SQL, Process.Start with a shell, Html.Raw on input. Fast enough for every pull request; write your own rules for your codebase's helpers.",
+          "flags": [["--config p/csharp", "the community C# rules (also p/owasp-top-ten, p/secrets)"], ["--config rules/", "your own YAML rules"], ["--error", "exit 1 on findings, to fail CI"], ["--sarif -o out.sarif", "upload to GitHub code scanning"]],
+          "example": "semgrep scan --config p/csharp --config p/owasp-top-ten --error src/"
+        },
+        {
+          "cmd": "codeql database analyze",
+          "what": "Data-flow (taint) analysis: follows a value from an HTTP parameter through method calls to a sink such as ExecuteSqlRaw or Process.Start. Slower than Semgrep, finds what pattern matching misses. GitHub code scanning runs it for you.",
+          "flags": [["database create --language=csharp", "build the code into a CodeQL database"], ["codeql/csharp-queries:codeql-suites/csharp-security-extended.qls", "the security query suite"], ["--format=sarif-latest --output=r.sarif", "results for code scanning"]],
+          "example": "codeql database create db --language=csharp --command='dotnet build'\ncodeql database analyze db codeql/csharp-queries:codeql-suites/csharp-security-extended.qls --format=sarif-latest --output=codeql.sarif"
+        },
+        {
+          "cmd": "<WarningsAsErrors>EF1002;CA2100;CA3001</WarningsAsErrors>",
+          "what": "Make the compiler refuse injection-prone code: EF1002 (interpolated string in FromSqlRaw/ExecuteSqlRaw), CA2100 (SQL text from a non-constant), CA3001-CA3012 (taint rules: SQL, process, file path, XSS; enable them first, they are off by default).",
+          "flags": [["EF1002", "EF Core analyzer, on by default"], ["CA2100", "review SQL queries for security vulnerabilities"], ["CA3001 / CA3006", "SQL injection / process command injection (taint)"], ["dotnet_diagnostic.CA3001.severity = error", "the .editorconfig way to turn one on"]],
+          "example": "<PropertyGroup>\n  <WarningsAsErrors>EF1002;CA2100;CA3001;CA3006</WarningsAsErrors>\n</PropertyGroup>",
+          "lang": "text"
+        },
+        {
+          "cmd": "query.ToQueryString()",
+          "what": "Print the SQL EF Core will send, with its parameters declared. The quickest proof in review that a value became a parameter (@p0, @__q_0) and not text.",
+          "flags": [["ToQueryString()", "the SQL and DECLARE lines for the parameters"], ["LogTo(Console.WriteLine, LogLevel.Information)", "every executed command"], ["EnableSensitiveDataLogging()", "include parameter values: development only"]],
+          "example": "var pattern = \"%\" + q + \"%\";\nConsole.WriteLine(db.Products.FromSql($\"SELECT * FROM Products WHERE Name LIKE {pattern}\").ToQueryString());",
+          "lang": "csharp"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each tool to how it finds injection.",
+      "pairs": [
+        ["sqlmap", "sends payloads to a running app"],
+        ["Semgrep", "matches code patterns, fast, on every PR"],
+        ["CodeQL", "follows tainted data from source to sink"],
+        ["EF1002", "a compiler warning for interpolated FromSqlRaw"],
+        ["`ToQueryString()`", "shows the SQL and its parameters"]
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Test only the `q` parameter of the lab's search, without questions, and read the users table.",
+      "code": ["sqlmap -u 'http://shop:8080/api/products/search?q=lamp' __1__ q --batch __2__ -T users"],
+      "blanks": ["-p", "--dump"],
+      "bank": ["-u", "--risk", "-T", "--tables"]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Semgrep reports no SQL injection, but a pentest finds one: the query is built in `ReportBuilder.AddFilter(string column, string value)`, three calls away from the controller. Which tool is designed for exactly this?",
+      "options": [
+        "CodeQL (taint tracking): it follows the request value through the calls to the sink",
+        "A second Semgrep run with --error",
+        "sqlmap with --level 5",
+        "A WAF rule"
+      ],
+      "answer": 0,
+      "explain": "Pattern matching sees one place at a time; data-flow analysis follows values across methods. In practice teams run both: Semgrep for speed and custom rules, CodeQL for depth."
+    }
+  ]
+}

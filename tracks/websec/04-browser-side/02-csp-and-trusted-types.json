@@ -1,0 +1,198 @@
+{
+  "title": "Content-Security-Policy and Trusted Types",
+  "summary": "The second layer: a strict CSP with a fresh nonce per response and 'strict-dynamic', so injected scripts do not run even when encoding is missed. Report-only roll-out, and Trusted Types against DOM XSS.",
+  "minutes": 17,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A policy the browser enforces",
+      "body": [
+        "`Content-Security-Policy` is a response header that tells the browser which scripts it may run. A **strict** policy, as Google's security team recommends it:",
+        "",
+        "```text",
+        "Content-Security-Policy: script-src 'nonce-rAnd0m...' 'strict-dynamic'; object-src 'none'; base-uri 'none'",
+        "```",
+        "",
+        "```html",
+        "<script nonce=\"rAnd0m...\">...the page's own code: runs</script>",
+        "<script>...injected by a review: blocked</script>",
+        "<img src=x onerror=\"...\">           <!-- inline handler: blocked -->",
+        "```",
+        "",
+        "- **`'nonce-...'`**: a random value, **new for every response**, that the server puts both in the header and on its own `<script>` tags. An attacker who injects markup cannot know this response's nonce.",
+        "- **`'strict-dynamic'`**: a trusted script may load more scripts (bundlers, tag managers) and those are trusted too, so you do not have to list every CDN. Host lists like `script-src https://cdn.example` are weaker: any JSONP endpoint or old library on that host becomes a bypass.",
+        "- **`object-src 'none'`** (no plugins) and **`base-uri 'none'`** (no `<base href>` that redirects relative script URLs)."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "With `script-src 'nonce-abc123' 'strict-dynamic'; object-src 'none'; base-uri 'none'` on this response, does it run?",
+      "buckets": ["Runs", "Blocked"],
+      "items": [
+        ["`<script nonce=\"abc123\">init()</script>`", 0],
+        ["a script that `<script nonce=\"abc123\">` adds with `document.createElement('script')`", 0],
+        ["`<script>alert(1)</script>` from a review", 1],
+        ["`<img src=x onerror=\"alert(1)\">`", 1],
+        ["`<a href=\"javascript:alert(1)\">`", 1],
+        ["`<script nonce=\"abc123\">` copied from yesterday's page into a review today... on today's response with a new nonce", 1]
+      ],
+      "explain": "The nonce must change on every response; a fixed nonce is a password printed on every page. Inline event handlers and `javascript:` URLs never carry a nonce, so a strict policy blocks them all."
+    },
+    {
+      "type": "learn",
+      "title": "Rolling it out without breaking the site",
+      "body": [
+        "1. Ship it as **`Content-Security-Policy-Report-Only`** first, with a `report-to` (or the older `report-uri`) endpoint. Nothing is blocked; every violation is reported.",
+        "2. Fix what the reports show: move inline `onclick=` handlers into script files or nonced blocks (`addEventListener`), add the nonce to every `<script>` your templates write.",
+        "3. Switch the header name to `Content-Security-Policy`. Keep reporting on, so a regression shows up in your logs, not in a bug bounty.",
+        "",
+        "Things that weaken a policy to watch for in review: `'unsafe-inline'` (ignored when a nonce is present in modern browsers, but a sign the nonce is missing somewhere), `'unsafe-eval'`, `*` or `https:` in `script-src`, and a nonce that is reused or predictable.",
+        "",
+        "CSP is **defence in depth**. It turns most XSS bugs into blocked attempts in your reports. It does not replace encoding: data can still be stolen by injected markup without scripts (a fake login form, a dangling `<img src='...`), and not every browser feature is covered."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A team generates one nonce when the app starts and reuses it for every response \"for performance\". What does that do to the policy?",
+      "options": [
+        "It defeats it: an attacker reads the nonce from any page and puts it on their injected script",
+        "Nothing: the nonce is still random",
+        "It only breaks caching",
+        "It makes 'strict-dynamic' stop working"
+      ],
+      "answer": 0,
+      "explain": "A nonce works because the attacker cannot predict it when the injection is written. 16 random bytes from `RandomNumberGenerator` per response costs microseconds."
+    },
+    {
+      "type": "learn",
+      "title": "Trusted Types: DOM XSS, stopped at the sink",
+      "body": [
+        "DOM XSS happens in your own JavaScript: `el.innerHTML = untrusted`. **Trusted Types** make the browser refuse plain strings at those dangerous sinks:",
+        "",
+        "```text",
+        "Content-Security-Policy: require-trusted-types-for 'script'; trusted-types app-sanitizer",
+        "```",
+        "",
+        "```js",
+        "el.innerHTML = location.hash;                                   // TypeError: requires TrustedHTML",
+        "const policy = trustedTypes.createPolicy('app-sanitizer', { createHTML: s => DOMPurify.sanitize(s) });",
+        "el.innerHTML = policy.createHTML(location.hash);                // allowed, and sanitized",
+        "```",
+        "",
+        "Now the only way to write HTML into the page is through the policies you named, so a review only has to check those. Chromium-based browsers have enforced Trusted Types for years, and the other engines have been adding them; check current support for your users' browsers, and roll them out report-only first, like the rest of the CSP. Where a browser does not enforce them, the page still works, just without the extra check. The simplest fix for most sinks needs no policy: use `textContent` instead of `innerHTML`."
+      ]
+    },
+    {
+      "type": "blanks",
+      "prompt": "Complete the strict policy the shop sends with every page.",
+      "code": ["Content-Security-Policy: script-src 'nonce-{nonce}' __1__; object-src __2__; base-uri 'none'; frame-ancestors 'none'"],
+      "blanks": ["'strict-dynamic'", "'none'"],
+      "bank": ["'unsafe-inline'", "'self'", "*", "'unsafe-eval'"]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "web",
+      "title": "A nonce per response",
+      "prompt": [
+        "Add a strict CSP to the shop's page:",
+        "",
+        "1. A middleware (`app.Use(async (ctx, next) => { ... await next(); })`) that makes a nonce from **16 random bytes** (`RandomNumberGenerator.GetBytes(16)`, Base64), stores it in `ctx.Items[\"csp-nonce\"]`, and sets the header:",
+        "   `default-src 'self'; script-src 'nonce-<nonce>' 'strict-dynamic'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`",
+        "2. The page's `<script>` gets `nonce=\"<nonce>\"`, so it keeps running.",
+        "",
+        "Add `using System.Security.Cryptography;` at the top. **Run checks** loads the page twice."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.MapGet(\"/\", (HttpContext ctx) =>",
+        "{",
+        "    var html = \"\"\"",
+        "        <!doctype html>",
+        "        <title>Lamp Shop</title>",
+        "        <h1>Lamp Shop</h1>",
+        "        <script>document.title = 'Lamp Shop: ready';</script>",
+        "        \"\"\";",
+        "    return Results.Content(html, \"text/html\");",
+        "});",
+        "",
+        "app.Run();"
+      ],
+      "solution": [
+        "using System.Security.Cryptography;",
+        "",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "app.Use(async (ctx, next) =>",
+        "{",
+        "    var nonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));",
+        "    ctx.Items[\"csp-nonce\"] = nonce;",
+        "    ctx.Response.Headers.ContentSecurityPolicy =",
+        "        $\"default-src 'self'; script-src 'nonce-{nonce}' 'strict-dynamic'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\";",
+        "    await next();",
+        "});",
+        "",
+        "app.MapGet(\"/\", (HttpContext ctx) =>",
+        "{",
+        "    var nonce = (string)ctx.Items[\"csp-nonce\"]!;",
+        "    var html = $\"\"\"",
+        "        <!doctype html>",
+        "        <title>Lamp Shop</title>",
+        "        <h1>Lamp Shop</h1>",
+        "        <script nonce=\"{nonce}\">document.title = 'Lamp Shop: ready';</script>",
+        "        \"\"\";",
+        "    return Results.Content(html, \"text/html\");",
+        "});",
+        "",
+        "app.Run();"
+      ],
+      "hints": [
+        "The middleware goes before `app.MapGet`. `ctx.Response.Headers.ContentSecurityPolicy = $\"...'nonce-{nonce}'...\";`",
+        "In the page, read it back with `(string)ctx.Items[\"csp-nonce\"]!` and make the raw string interpolated (`$\"\"\"`) so `{nonce}` is filled in."
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "static class DojoTests",
+        "{",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"The page could be loaded\", async () =>",
+        "        {",
+        "            var r1 = await http.GetAsync(\"/\");",
+        "            var r2 = await http.GetAsync(\"/\");",
+        "            var csp = r1.Headers.TryGetValues(\"Content-Security-Policy\", out var v) ? string.Join(\";\", v) : \"\";",
+        "            Dojo.Check(\"there is a Content-Security-Policy header\", csp.Length > 0, \"no header\");",
+        "            var m = System.Text.RegularExpressions.Regex.Match(csp, \"'nonce-([^']+)'\");",
+        "            Dojo.Check(\"script-src has a nonce\", m.Success, csp);",
+        "            var nonce = m.Groups[1].Value;",
+        "            byte[] raw = [];",
+        "            try { raw = Convert.FromBase64String(nonce); } catch (FormatException) { }",
+        "            Dojo.Check(\"the nonce is 16 random bytes in Base64\", raw.Length >= 16, nonce);",
+        "            foreach (var d in new[] { \"'strict-dynamic'\", \"object-src 'none'\", \"base-uri 'none'\", \"frame-ancestors 'none'\" })",
+        "                Dojo.Check($\"the policy has {d}\", csp.Contains(d), csp);",
+        "            Dojo.Check(\"no 'unsafe-inline'\", !csp.Contains(\"unsafe-inline\"), csp);",
+        "            var csp2 = r2.Headers.TryGetValues(\"Content-Security-Policy\", out var v2) ? string.Join(\";\", v2) : \"\";",
+        "            Dojo.Check(\"every response gets a new nonce\", csp2.Length > 0 && csp2 != csp, csp2);",
+        "            var page = WebUtility.HtmlDecode(await DojoWeb.Text(r1));",
+        "            Dojo.Check(\"the page's script carries this response's nonce\", nonce.Length > 0 && page.Contains($\"<script nonce=\\\"{nonce}\\\">\"), page);",
+        "        });",
+        "    }",
+        "}"
+      ]
+    },
+    {
+      "type": "lab",
+      "live": "26-vulnerable-shop",
+      "task": "t8",
+      "title": "Live lab: encode, HttpOnly, and a strict CSP",
+      "prompt": [
+        "In the **vulnerable shop** lab, do **Fix: encode, HttpOnly, and a strict CSP**: `@r.Body` instead of `Html.Raw` in `Pages/Product.cshtml`, `HttpOnly` (and `SameSite`) in `Session.cs`, and this lesson's nonce middleware in `Csp.cs`. The check opens the page with fresh payloads in a real browser on the bot host."
+      ],
+      "explain": "Three independent layers: the payload is shown as text, a script that slipped through would be blocked, and one that ran could not read the session cookie."
+    }
+  ]
+}

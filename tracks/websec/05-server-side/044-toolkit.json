@@ -1,0 +1,70 @@
+{
+  "title": "Senior's toolkit: server-side requests and parsers",
+  "summary": "Out-of-band testing with a listener you control, IMDSv2 enforcement, SocketsHttpHandler's ConnectCallback, safe XmlReaderSettings, and the analyzers that flag dangerous deserializers.",
+  "minutes": 8,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Senior's toolkit: server-side requests and parsers",
+      "body": "SSRF, XXE and deserialization bugs are often blind: nothing comes back in the response. Testers prove them out of band, and developers shut them with a few platform and framework settings.",
+      "toolkit": [
+        {
+          "cmd": "a listener you control (Burp Collaborator, interactsh, python3 -m http.server)",
+          "what": "Prove a blind SSRF or XXE: point the feature at a host you control and watch for the server's request. In the lab, `listen` on attacker does this. Only use public callback services with permission: they see the traffic too.",
+          "flags": [["python3 -m http.server 8000", "a simple listener on a test host"], ["Burp Collaborator / interactsh", "public DNS and HTTP callbacks"], ["a unique path per test", "/ssrf-preview-17 tells you which feature called"]],
+          "example": "curl -s -G https://staging.shop.example/api/preview --data-urlencode 'url=http://tester.example:8000/ssrf-preview-17'"
+        },
+        {
+          "cmd": "aws ec2 modify-instance-metadata-options --http-tokens required",
+          "what": "Enforce IMDSv2 on an instance: metadata needs a session token from a PUT, which a GET-only SSRF cannot send. Set the hop limit to 1 so containers on the host cannot reach it either.",
+          "flags": [["--http-tokens required", "IMDSv2 only"], ["--http-put-response-hop-limit 1", "the token cannot travel past the instance"], ["--http-endpoint disabled", "no metadata at all, if nothing needs it"]],
+          "example": "aws ec2 modify-instance-metadata-options --instance-id i-0abc123 --http-tokens required --http-put-response-hop-limit 1"
+        },
+        {
+          "cmd": "SocketsHttpHandler { ConnectCallback, AllowAutoRedirect = false }",
+          "what": "The .NET hook for outbound requests to user-chosen URLs: resolve the host yourself, refuse private and link-local addresses, connect to the address you checked (no DNS rebinding), and follow no redirects.",
+          "flags": [["ConnectCallback", "your own resolve-check-connect"], ["AllowAutoRedirect = false", "a 302 is the end"], ["MaxResponseContentBufferSize", "cap what you read"], ["Timeout = 3 s", "no hanging fetches"]],
+          "example": "builder.Services.AddHttpClient(\"webhooks\", c => c.Timeout = TimeSpan.FromSeconds(3))\n    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, ConnectCallback = SafeConnect });",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null }",
+          "what": "The safe XML parser settings, written out so a reviewer sees them. Pass them to XmlReader.Create, then load XDocument or XmlDocument from that reader.",
+          "flags": [["DtdProcessing.Prohibit", "a DOCTYPE throws XmlException"], ["XmlResolver = null", "never fetch files or URLs"], ["MaxCharactersInDocument", "a size cap"]],
+          "example": "using var r = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null });\nvar doc = XDocument.Load(r);",
+          "lang": "csharp"
+        },
+        {
+          "cmd": "CA2300-CA2330, SYSLIB0011",
+          "what": "Analyzer rules for dangerous deserializers: SYSLIB0011 flags BinaryFormatter; CA2300 to CA2330 flag BinaryFormatter, LosFormatter, NetDataContractSerializer, and Json.NET's TypeNameHandling without a binder. Make them errors.",
+          "flags": [["SYSLIB0011", "BinaryFormatter is obsolete (and throws since .NET 9)"], ["CA2326 / CA2327", "Json.NET TypeNameHandling other than None"], ["CA2330", "insecure JsonSerializer settings when deserializing"]],
+          "example": "[*.cs]\ndotnet_diagnostic.CA2326.severity = error\ndotnet_diagnostic.CA2327.severity = error\ndotnet_diagnostic.SYSLIB0011.severity = error",
+          "lang": "text"
+        }
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match each setting to the attack it stops.",
+      "pairs": [
+        ["`--http-tokens required` (IMDSv2)", "a GET-only SSRF stealing cloud credentials"],
+        ["`AllowAutoRedirect = false`", "an allowed host redirecting to an internal one"],
+        ["`ConnectCallback` checking the resolved IP", "DNS rebinding"],
+        ["`DtdProcessing.Prohibit`", "external entities and billion laughs"],
+        ["`[JsonDerivedType]` allow-list", "input that names its own .NET type"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "The webhook feature lets customers enter any URL, so no host allow-list is possible. Which combination is right?",
+      "options": [
+        "https only, an IP check on the resolved address at connect time, no redirects, a short timeout and a size cap, ideally through an egress proxy",
+        "A regex that rejects URLs containing '169.254'",
+        "Resolve the host once when the webhook is saved and trust it afterwards",
+        "Only allow port 443"
+      ],
+      "answer": 0,
+      "explain": "A regex misses the other spellings, and a check at save time is defeated by changing DNS later. The connect-time check sees the address actually used."
+    }
+  ]
+}

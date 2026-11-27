@@ -1,0 +1,204 @@
+{
+  "title": "Reviewing a diff: sources, sinks and the questions to ask",
+  "summary": "A security review is not a checklist read aloud. Follow each input from where it enters to where it is used, ask the four questions on every new endpoint, and spot the bug in real-looking diffs before fixing one.",
+  "minutes": 18,
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Sources, sinks, and what sits between them",
+      "body": [
+        "Almost every bug in this topic has the same shape: data from a **source** reaches a **sink** without the right check in between.",
+        "",
+        "| Sources (attacker-controlled) | Sinks (dangerous when fed attacker data) | The check in between |",
+        "|---|---|---|",
+        "| route values, query, body, headers, cookies | SQL text: `FromSqlRaw`, `ExecuteSqlRaw`, `CommandText` | parameters |",
+        "| uploaded files and their names | `Process.Start`, `sh -c` | no shell, `ArgumentList`, validation |",
+        "| data stored by other users (reviews, names) | HTML: `Html.Raw`, `innerHTML`, string-built pages | encoding, sanitizing |",
+        "| webhooks, partner APIs, queue messages | `HttpClient.GetAsync(url)` | allow-list, IP check |",
+        "| JWT claims you did not verify | `Path.Combine`, `File.*`, `Results.File` | resolve and confine |",
+        "| | `Type.GetType`, `TypeNameHandling`, `Redirect(url)` | allow-lists, local-only redirects |",
+        "| | database lookups by id | ownership checks |",
+        "",
+        "Four questions for every new or changed endpoint: **Who can call this?** (authentication, the right policy) **Which object does it touch, and is it theirs?** (object-level) **What goes in?** (each input to each sink) **What comes out?** (fields, errors, headers). Most findings fall out of those four."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Review this diff. What is the most important comment?",
+      "code": [
+        "+ app.MapGet(\"/api/receipts/{id:int}\", async (int id, ShopDb db, ClaimsPrincipal user) =>",
+        "+ {",
+        "+     var receipt = await db.Receipts.FindAsync(id);",
+        "+     return receipt is null ? Results.NotFound() : Results.Ok(receipt);",
+        "+ }).RequireAuthorization();"
+      ],
+      "options": [
+        "Any signed-in user can read any receipt: filter by the caller's id (and return a DTO, not the entity)",
+        "FindAsync should be FirstOrDefaultAsync",
+        "The route needs a version prefix",
+        "RequireAuthorization should come before MapGet"
+      ],
+      "answer": 0,
+      "explain": "Authenticated, but not authorized for *this* receipt: classic BOLA. Returning the entity also publishes every column the table gets in the future."
+    },
+    {
+      "type": "mcq",
+      "prompt": "And this one?",
+      "code": [
+        "  app.MapPost(\"/login\", async (LoginForm f, SignInService s) =>",
+        "  {",
+        "      if (!await s.SignInAsync(f.Username, f.Password)) return Results.Unauthorized();",
+        "-     return Results.Ok(new { next = \"/\" });",
+        "+     return Results.Ok(new { next = f.ReturnUrl ?? \"/\" });   // back to where the user was",
+        "  });"
+      ],
+      "options": [
+        "An open redirect: a phishing link with returnUrl=https://evil.example sends users to a fake page after a real sign-in. Allow only local paths",
+        "ReturnUrl should be URL-encoded",
+        "Use 302 instead of returning JSON",
+        "Nothing: the user typed their own password"
+      ],
+      "answer": 0,
+      "explain": "Open redirects (CWE-601) make phishing convincing: the link really is your domain. Accept only paths that start with a single `/` (not `//` or `/\\`), the rule `Url.IsLocalUrl` implements in MVC."
+    },
+    {
+      "type": "sort",
+      "prompt": "Lines from different pull requests. Which deserve a security comment?",
+      "buckets": ["Comment", "Fine as it is"],
+      "items": [
+        ["`cmd.CommandText = $\"SELECT * FROM t WHERE id = {id}\";`", 0],
+        ["`<div>@Html.Raw(model.Bio)</div>`", 0],
+        ["`p.SetIsOriginAllowed(_ => true).AllowCredentials()`", 0],
+        ["`new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.Auto }`", 0],
+        ["`db.Orders.Where(o => o.Id == id && o.UserId == me)`", 1],
+        ["`cmd.Parameters.AddWithValue(\"$q\", q);`", 1],
+        ["`new ProcessStartInfo(\"git\") { ArgumentList = { \"log\", \"--\", path } }`", 1],
+        ["`<div>@model.Bio</div>`", 1]
+      ]
+    },
+    {
+      "type": "learn",
+      "title": "Writing the comment",
+      "body": [
+        "A security review comment that gets fixed has four parts: **what** can happen, **how** (a concrete request), **the fix**, and **how bad**. For example:",
+        "",
+        "```text",
+        "Blocking: any signed-in user can read any receipt.",
+        "  curl -b 'sid=<bob>' https://staging.shop.example/api/receipts/5001   -> Ada's receipt",
+        "Fix: FirstOrDefaultAsync(r => r.Id == id && r.UserId == userId), 404 otherwise,",
+        "and return ReceiptDto (no PaymentToken column).",
+        "Severity: high (personal data, every customer, trivial to exploit).",
+        "```",
+        "",
+        "Be specific, be kind, and mark what blocks the merge. \"Looks insecure?\" gets ignored; a request someone can paste into a terminal does not. And add the test: a regression test with the attack request is the review's most durable output."
+      ]
+    },
+    {
+      "type": "code",
+      "mode": "fix",
+      "framework": "web",
+      "title": "Fix PR #904 before it merges",
+      "prompt": [
+        "The PR adds receipts and a return URL after sign-in. `X-User` stands in for the session. Fix both comments:",
+        "",
+        "1. `GET /receipts/{id}`: only the owner may read a receipt (`404` otherwise), and the answer is `{ id, total }` only: no `paymentToken`.",
+        "2. `POST /login` answers `{ \"next\": ... }`: `returnUrl` is used only when it is a **local path**: it starts with `/`, and the second character is neither `/` nor `\\`. Anything else (absolute URLs, `//evil.example`, `/\\evil.example`, empty) gives `\"/\"`."
+      ],
+      "starter": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "var receipts = new List<Receipt> { new(5001, \"ada\", 49.00m, \"tok_ada_1\"), new(5002, \"bob\", 12.00m, \"tok_bob_2\") };",
+        "string? Caller(HttpContext ctx) => ctx.Request.Headers[\"X-User\"].FirstOrDefault();",
+        "",
+        "app.MapGet(\"/receipts/{id:int}\", (int id, HttpContext ctx) =>",
+        "{",
+        "    if (Caller(ctx) is null) return Results.Unauthorized();",
+        "    var r = receipts.FirstOrDefault(x => x.Id == id);",
+        "    return r is null ? Results.NotFound() : Results.Ok(r);",
+        "});",
+        "",
+        "app.MapPost(\"/login\", (LoginForm f) =>",
+        "{",
+        "    if (f.Password != \"correct horse battery staple\") return Results.Unauthorized();",
+        "    return Results.Ok(new { next = f.ReturnUrl ?? \"/\" });",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "record Receipt(int Id, string Owner, decimal Total, string PaymentToken);",
+        "record LoginForm(string Username, string Password, string? ReturnUrl);"
+      ],
+      "solution": [
+        "var builder = WebApplication.CreateBuilder(args);",
+        "var app = builder.Build();",
+        "",
+        "var receipts = new List<Receipt> { new(5001, \"ada\", 49.00m, \"tok_ada_1\"), new(5002, \"bob\", 12.00m, \"tok_bob_2\") };",
+        "string? Caller(HttpContext ctx) => ctx.Request.Headers[\"X-User\"].FirstOrDefault();",
+        "",
+        "// Local paths only: \"/orders\" yes; \"//evil.example\", \"/\\\\evil.example\" and \"https://...\" no.",
+        "bool IsLocal(string? url) => !string.IsNullOrEmpty(url) && url[0] == '/' && (url.Length == 1 || (url[1] != '/' && url[1] != '\\\\'));",
+        "",
+        "app.MapGet(\"/receipts/{id:int}\", (int id, HttpContext ctx) =>",
+        "{",
+        "    if (Caller(ctx) is not { } user) return Results.Unauthorized();",
+        "    var r = receipts.FirstOrDefault(x => x.Id == id && x.Owner == user);",
+        "    return r is null ? Results.NotFound() : Results.Ok(new { r.Id, r.Total });",
+        "});",
+        "",
+        "app.MapPost(\"/login\", (LoginForm f) =>",
+        "{",
+        "    if (f.Password != \"correct horse battery staple\") return Results.Unauthorized();",
+        "    return Results.Ok(new { next = IsLocal(f.ReturnUrl) ? f.ReturnUrl : \"/\" });",
+        "});",
+        "",
+        "app.Run();",
+        "",
+        "record Receipt(int Id, string Owner, decimal Total, string PaymentToken);",
+        "record LoginForm(string Username, string Password, string? ReturnUrl);"
+      ],
+      "hints": [
+        "Receipts: add `&& x.Owner == user` and return `new { r.Id, r.Total }`.",
+        "`bool IsLocal(string? url) => !string.IsNullOrEmpty(url) && url[0] == '/' && (url.Length == 1 || (url[1] != '/' && url[1] != '\\\\'));`"
+      ],
+      "template": [
+        "{{CODE}}",
+        "",
+        "static class DojoTests",
+        "{",
+        "    static Task<HttpResponseMessage> Get(HttpClient http, string url, string user)",
+        "    {",
+        "        var msg = new HttpRequestMessage(HttpMethod.Get, url);",
+        "        msg.Headers.Add(\"X-User\", user);",
+        "        return http.SendAsync(msg);",
+        "    }",
+        "",
+        "    static async Task<string?> Next(HttpClient http, string? returnUrl) =>",
+        "        DojoWeb.Prop(await DojoWeb.Json(await http.PostAsJsonAsync(\"/login\", new { username = \"ada\", password = \"correct horse battery staple\", returnUrl })), \"next\");",
+        "",
+        "    public static async Task Run(HttpClient http)",
+        "    {",
+        "        await Dojo.TryAsync(\"Receipts could be checked\", async () =>",
+        "        {",
+        "            var own = await Get(http, \"/receipts/5001\", \"ada\");",
+        "            DojoWeb.Status(\"ada reads her receipt\", 200, own);",
+        "            var body = await DojoWeb.Text(own);",
+        "            Dojo.Check(\"...without the payment token\", !body.Contains(\"tok_\") && !body.Contains(\"paymentToken\", StringComparison.OrdinalIgnoreCase), body);",
+        "            Dojo.Eq(\"...with its total\", \"49.00\", DojoWeb.Prop(await DojoWeb.Json(await Get(http, \"/receipts/5001\", \"ada\")), \"total\"));",
+        "            DojoWeb.Status(\"bob cannot read ada's receipt\", 404, await Get(http, \"/receipts/5001\", \"bob\"));",
+        "        });",
+        "        await Dojo.TryAsync(\"The return URL could be checked\", async () =>",
+        "        {",
+        "            Dojo.Eq(\"a local path is kept\", \"/orders/1001\", await Next(http, \"/orders/1001\"));",
+        "            Dojo.Eq(\"no returnUrl gives /\", \"/\", await Next(http, null));",
+        "            Dojo.Eq(\"an absolute URL gives /\", \"/\", await Next(http, \"https://evil.example/login\"));",
+        "            Dojo.Eq(\"a protocol-relative URL gives /\", \"/\", await Next(http, \"//evil.example\"));",
+        "            Dojo.Eq(\"/\\\\evil.example gives /\", \"/\", await Next(http, \"/\\\\evil.example\"));",
+        "            Dojo.Eq(\"javascript: gives /\", \"/\", await Next(http, \"javascript:alert(1)\"));",
+        "        });",
+        "    }",
+        "}"
+      ]
+    }
+  ]
+}
