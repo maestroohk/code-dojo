@@ -1,0 +1,99 @@
+{
+  "title": "Versions and the lock file",
+  "summary": "required_version, provider constraints and .terraform.lock.hcl: what each pins, how a provider upgrade is done on purpose, and checksums for every platform the team uses.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Three things pin versions",
+      "body": [
+        "| What | Pins | Where |",
+        "|---|---|---|",
+        "| `required_version = \">= 1.10, < 2.0\"` | the Terraform CLI that may run this code | `terraform` block |",
+        "| `version = \"~> 6.0\"` in `required_providers` | which provider versions are **allowed** | every module |",
+        "| `.terraform.lock.hcl` | the exact provider version **chosen**, and its checksums | root module, committed |",
+        "",
+        "```hcl",
+        "provider \"registry.terraform.io/hashicorp/aws\" {",
+        "  version     = \"6.74.0\"",
+        "  constraints = \"~> 6.0\"",
+        "  hashes = [",
+        "    \"h1:...\",     # hash of the unpacked package (any platform you installed on)",
+        "    \"zh:...\",     # hashes of the official zips, one per platform, from the registry",
+        "  ]",
+        "}",
+        "```",
+        "",
+        "Without the lock file, every `init` picks the newest allowed version, so a provider release can change tomorrow's",
+        "plan with no commit in your repo. With it, upgrades are **pull requests**: `terraform init -upgrade`, read the",
+        "provider's changelog, plan every environment, commit the new lock file. If the team works on several platforms",
+        "(Linux CI, Mac laptops), record all of them: `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "CI runs `terraform init -lockfile=readonly` and fails with *the lock file would need to be updated*. A developer added `hashicorp/tls` to `required_providers` but did not commit a new lock file. What is the fix?",
+      "options": [
+        "Run `terraform init` locally (it adds tls to the lock file), commit `.terraform.lock.hcl`, push",
+        "Remove `-lockfile=readonly` from CI",
+        "Delete the lock file from the repo",
+        "Add `tls` to `.gitignore`"
+      ],
+      "answer": 0,
+      "explain": "The lock file is part of the change. CI refusing to modify it is what guarantees that what was reviewed is what runs."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Upgrade a provider on purpose",
+      "prompt": [
+        "`~/infra/api` pins `hashicorp/random` to `~> 3.7.0`, and the lock file has 3.7.2 (`cat .terraform.lock.hcl`).",
+        "Ticket DEP-12 (`TICKET.txt`): move to 3.9.",
+        "",
+        "1. Change the constraint to allow 3.9.x and newer 3.x.",
+        "2. `terraform init -upgrade` and look at what changed in the lock file (`git diff .terraform.lock.hcl`).",
+        "3. Plan: does the upgrade change anything real? (The API's name must stay.) Apply only if it must.",
+        "4. Commit `versions.tf` and the lock file together."
+      ],
+      "setup": ["bash \"$DOJO_FILES/team.sh\" upgrade"],
+      "checks": [
+        { "name": "the lock file has random 3.9.1, committed",
+          "cmd": "cd ~/infra/api && git show HEAD:.terraform.lock.hcl | grep -A2 'hashicorp/random' | grep -q 'version *= *\"3.9.1\"'",
+          "fail": "The committed `.terraform.lock.hcl` should pin `hashicorp/random` at `3.9.1` (`git show HEAD:.terraform.lock.hcl`)." },
+        { "name": "the constraint allows 3.9",
+          "cmd": "cd ~/infra/api && git show HEAD:versions.tf | grep 'hashicorp/random' | grep -Eq '\"~> 3\\.9(\\.[0-9]+)?\"|\">= 3\\.9'",
+          "fail": "The committed `versions.tf` should constrain random to `~> 3.9` (or similar)." },
+        { "name": "the API kept its name, plan clean",
+          "cmd": "cd ~/infra/api && terraform state show -no-color random_pet.api | grep -q \"$(cat /opt/dojo/state/pet)\" && terraform plan -detailed-exitcode -input=false -no-color >/dev/null && test -z \"$(git status --porcelain)\"",
+          "fail": "`random_pet.api` should keep its name, `terraform plan` should be clean, and everything should be committed." }
+      ],
+      "hints": [
+        "`sed -i 's/~> 3.7.0/~> 3.9/' versions.tf`, then `terraform init -upgrade`. Plain `init` refuses: the locked 3.7.2 no longer matches.",
+        "`git diff .terraform.lock.hcl` shows the new version, constraint and hashes. `terraform plan` should then say *No changes*.",
+        "`git add versions.tf .terraform.lock.hcl && git commit -m \"Upgrade hashicorp/random to 3.9\"`."
+      ],
+      "solution": [
+        "cd ~/infra/api",
+        "cat TICKET.txt",
+        "grep -A2 hashicorp/random .terraform.lock.hcl",
+        "sed -i 's/~> 3.7.0/~> 3.9/' versions.tf",
+        "terraform init",
+        "terraform init -upgrade",
+        "git diff .terraform.lock.hcl",
+        "terraform plan -detailed-exitcode; echo \"exit $?\"",
+        "git add versions.tf .terraform.lock.hcl",
+        "git commit -m \"Upgrade hashicorp/random to 3.9 (DEP-12)\""
+      ],
+      "explain": "`init` alone failed with *locked provider ... 3.7.2 does not match configured version constraint*: the lock file protects you even from your own constraint changes until you say `-upgrade`. On a real provider, the step between init and commit is reading the release notes for every version you skip (the AWS provider's major versions have removed arguments and changed defaults) and planning every environment."
+    },
+    {
+      "type": "blanks",
+      "prompt": "Record checksums for Linux CI runners and Apple Silicon laptops. Fill the gaps.",
+      "code": ["terraform providers __1__ \\", "  -platform=__2__ \\", "  -platform=__3__"],
+      "blanks": ["lock", "linux_amd64", "darwin_arm64"],
+      "bank": ["mirror", "windows_amd64", "linux_arm", "upgrade"],
+      "explain": "Without the other platforms' `zh:` hashes, a teammate on another OS gets *the current package for ... doesn't match any of the checksums previously recorded* and must change the lock file. `terraform providers mirror DIR` is the related command that builds an offline mirror like this machine's."
+    }
+  ]
+}

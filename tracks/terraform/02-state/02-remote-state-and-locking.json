@@ -1,0 +1,208 @@
+{
+  "title": "Remote state and locking",
+  "summary": "Backends: S3 with a lock file, Azure Storage, HCP Terraform. Move a local state to a remote backend, then clear a lock left by a CI job that died, safely.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Backends: where the state lives",
+      "body": [
+        "A state file on one laptop cannot be shared, backed up or locked. At work it lives in a **backend**:",
+        "",
+        "```hcl",
+        "terraform {",
+        "  backend \"s3\" {",
+        "    bucket       = \"example-tfstate-prod\"          # versioning ON: every write is kept",
+        "    key          = \"shop/prod/terraform.tfstate\"",
+        "    region       = \"eu-west-1\"",
+        "    encrypt      = true",
+        "    use_lockfile = true      # Terraform 1.10+: a .tflock object next to the state (DynamoDB locking is deprecated)",
+        "  }",
+        "}",
+        "```",
+        "",
+        "| Backend | Locking | Typical at |",
+        "|---|---|---|",
+        "| `s3` | `use_lockfile = true` (S3 conditional writes); older setups use `dynamodb_table` | AWS shops |",
+        "| `azurerm` | a lease on the state blob, always on | Azure shops |",
+        "| `gcs` | a lock object, always on | Google Cloud |",
+        "| `cloud` block (HCP Terraform, Terraform Enterprise) | built in, plus runs, history and policy | teams that buy it |",
+        "| `http` | `LOCK`/`UNLOCK` calls to any server | GitLab's managed Terraform state |",
+        "",
+        "Rules that every team ends up with: **one state per environment and component** (a small blast radius), the bucket",
+        "or container versioned and encrypted, access limited to the pipeline's identity, and backend settings that differ",
+        "per environment passed in at init (`terraform init -backend-config=envs/prod.s3.tfbackend`), since a `backend` block",
+        "cannot use variables."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your team's S3 backend still has `dynamodb_table = \"tf-locks\"`. A colleague upgrades the repo to Terraform 1.17. What is the modern setting?",
+      "options": [
+        "`use_lockfile = true` (S3-native locking; `dynamodb_table` is deprecated and can be removed once everyone uses the lock file)",
+        "Nothing: S3 never needed locking",
+        "`lock = \"s3\"`",
+        "Move to the `local` backend, it locks too"
+      ],
+      "answer": 0,
+      "explain": "Since Terraform 1.10, the S3 backend can lock with a `.tflock` object written with an S3 conditional write; 1.11 deprecated the DynamoDB arguments. During a migration both can be set: Terraform takes both locks. OpenTofu has the same `use_lockfile` setting."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Move the state off the laptop",
+      "prompt": [
+        "`~/infra/shop` keeps its state in `terraform.tfstate` on this machine. The team runs a state server at",
+        "`http://127.0.0.1:8300` (it speaks Terraform's `http` backend protocol, as GitLab does).",
+        "",
+        "1. Add `backend.tf` with an `http` backend whose `address`, `lock_address` and `unlock_address` are all",
+        "   `http://127.0.0.1:8300/state/shop-prod`.",
+        "2. Run `terraform init -migrate-state` and answer `yes` to copying the existing state.",
+        "3. Prove it worked: `curl -s http://127.0.0.1:8300/state/shop-prod | jq '.serial, (.resources | length)'`, and",
+        "   `terraform plan` shows no changes. Then delete the local `terraform.tfstate` and `terraform.tfstate.backup`: a copy",
+        "   with secrets lying around is how leaks start."
+      ],
+      "setup": ["bash \"$DOJO_FILES/shop.sh\" remote"],
+      "checks": [
+        { "name": "the server holds the shop's state",
+          "cmd": "curl -fsS http://127.0.0.1:8300/state/shop-prod | jq -e '[.resources[] | select(.type == \"random_password\")] | length == 1' >/dev/null",
+          "fail": "The state server has no state at `/state/shop-prod` yet (`curl -s http://127.0.0.1:8300/state/shop-prod`). Add the backend and run `terraform init -migrate-state`." },
+        { "name": "Terraform uses the http backend",
+          "cmd": "cd ~/infra/shop && jq -e '.backend.type == \"http\"' .terraform/terraform.tfstate >/dev/null",
+          "fail": "`.terraform/terraform.tfstate` (the backend settings `init` saved) should say the backend is `http`. Run `terraform init -migrate-state`." },
+        { "name": "no local copy left",
+          "cmd": "cd ~/infra/shop && ! test -s terraform.tfstate && ! test -e terraform.tfstate.backup",
+          "fail": "Delete `terraform.tfstate` and `terraform.tfstate.backup` in `~/infra/shop` once the state is on the server." },
+        { "name": "nothing was lost",
+          "cmd": "cd ~/infra/shop && terraform plan -detailed-exitcode -input=false -no-color >/dev/null && test \"$(terraform output -raw db_password)\" = \"$(cat /opt/dojo/state/password)\"",
+          "quiet": true,
+          "fail": "`terraform plan` should show no changes and the password must be the same as before: the state must have been **copied**, not started fresh." }
+      ],
+      "hints": [
+        "`backend.tf` holds `terraform { backend \"http\" { address = \"...\" lock_address = \"...\" unlock_address = \"...\" } }` with the same URL three times.",
+        "`terraform init -migrate-state` asks *Do you want to copy existing state to the new backend?* Answer `yes`. In a script: `-force-copy`.",
+        "Check with `curl -s http://127.0.0.1:8300/state/shop-prod | jq .serial`, `terraform plan`, then `rm terraform.tfstate terraform.tfstate.backup`."
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "cat > backend.tf <<'EOF'",
+        "terraform {",
+        "  backend \"http\" {",
+        "    address        = \"http://127.0.0.1:8300/state/shop-prod\"",
+        "    lock_address   = \"http://127.0.0.1:8300/state/shop-prod\"",
+        "    unlock_address = \"http://127.0.0.1:8300/state/shop-prod\"",
+        "  }",
+        "}",
+        "EOF",
+        "terraform init -migrate-state -force-copy",
+        "curl -s http://127.0.0.1:8300/state/shop-prod | jq '.serial, (.resources | length)'",
+        "terraform plan",
+        "rm -f terraform.tfstate terraform.tfstate.backup"
+      ],
+      "explain": "`-migrate-state` copies the state from the old backend to the new one; without it, `init` would refuse to switch, and with `-reconfigure` it would start from an **empty** state (the next plan would want to create everything). The same steps move a state from local to S3, from S3 to HCP Terraform, or from one bucket key to another."
+    },
+    {
+      "type": "learn",
+      "title": "Locks, and the lock nobody holds",
+      "body": [
+        "Every command that might write the state first takes a **lock**, so two applies can never interleave. If the process",
+        "dies hard (a CI runner is reclaimed, a laptop lid closes, `kill -9`), the lock stays behind and every later run fails:",
+        "",
+        "```text",
+        "Error: Error acquiring the state lock",
+        "",
+        "Lock Info:",
+        "  ID:        3b7e1d24-8c5f-4a6e-b9d2-5f0c7a1e9b43",
+        "  Operation: OperationTypeApply",
+        "  Who:       runner@ci-runner-7",
+        "  Created:   2026-11-27 08:02:11 UTC",
+        "```",
+        "",
+        "Before you remove it, **prove nobody holds it**: read `Who`, `Operation` and `Created`; check that job in CI; ask in",
+        "the team channel. Breaking a lock that a live apply still holds lets two writers corrupt the state. Then:",
+        "",
+        "```bash",
+        "terraform force-unlock 3b7e1d24-8c5f-4a6e-b9d2-5f0c7a1e9b43   # asks yes; -force skips the question",
+        "```",
+        "",
+        "Never \"fix\" it with `-lock=false`: that only skips the lock for *your* run and hides the real question. After a",
+        "crashed **apply**, also run a plan: the dead job may have changed some objects before it died."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The lock from the dead job",
+      "prompt": [
+        "`~/infra/shop` now uses the state server. Every `terraform plan` fails with *Error acquiring the state lock*.",
+        "",
+        "1. Run `terraform plan` and read the Lock Info: who holds it, doing what, since when?",
+        "2. Check that holder: `~/ci/job-4821.log` is the CI job's log.",
+        "3. If it is really dead, remove exactly that lock. Then plan: did the dead apply change anything? Make `terraform plan`",
+        "   show no changes."
+      ],
+      "setup": ["bash \"$DOJO_FILES/shop.sh\" locked"],
+      "checks": [
+        { "name": "the stale lock is gone",
+          "cmd": "test ! -e /var/lib/dojo-tfstate/shop-prod/lock.json",
+          "fail": "The lock is still there. `terraform force-unlock <ID>` with the ID from the error." },
+        { "name": "the half-done apply is finished",
+          "cmd": "cd ~/infra/shop && test -f out/robots.txt && terraform plan -detailed-exitcode -input=false -no-color -lock-timeout=5s >/dev/null",
+          "fail": "`terraform plan` should run and show no changes, and `out/robots.txt` must exist again. The dead job left work half done." },
+        { "name": "the state was not replaced",
+          "cmd": "cd ~/infra/shop && test \"$(terraform output -raw db_password)\" = \"$(cat /opt/dojo/state/password)\"",
+          "quiet": true,
+          "fail": "The database password changed: the state on the server must be the original one." }
+      ],
+      "hints": [
+        "The ID is in the error under *Lock Info*. The log shows the job was killed: nobody is still applying.",
+        "`terraform force-unlock 3b7e1d24-8c5f-4a6e-b9d2-5f0c7a1e9b43` (it asks to confirm; type `yes`).",
+        "Then `terraform plan`: the job died between destroying and re-creating `local_file.robots`. Plan with `-out` and apply that plan to finish its work."
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "terraform plan -lock-timeout=5s",
+        "cat ~/ci/job-4821.log",
+        "terraform force-unlock -force 3b7e1d24-8c5f-4a6e-b9d2-5f0c7a1e9b43",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform plan -detailed-exitcode; echo \"exit $?\""
+      ],
+      "explain": "The ID ties the unlock to one specific lock, so you cannot remove a newer lock from a live run by accident. With S3 the same thing is a `<key>.tflock` object, with Azure a lease on the blob (`az storage blob lease break` is the manual way); `terraform force-unlock` works for all of them. `-lock-timeout=60s` in CI makes a run wait for a lock that is about to be released, instead of failing at once."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A plan fails on a lock held by `alex@alex-laptop`, created four minutes ago, operation `OperationTypeApply`. What do you do first?",
+      "options": [
+        "Ask Alex: an apply may really be running; wait, or retry with `-lock-timeout`",
+        "`terraform force-unlock` at once: locks are always stale",
+        "Run with `-lock=false`",
+        "Delete the state and import everything again"
+      ],
+      "answer": 0,
+      "explain": "A four-minute-old apply lock from a named person is most likely a live run. force-unlock is for locks whose holder is provably gone. If many people apply from laptops and this keeps happening, that is a sign applies should only run from the pipeline."
+    },
+    {
+      "type": "blanks",
+      "prompt": "One backend block, two environments: fill the gaps of the partial configuration.",
+      "code": [
+        "terraform {",
+        "  backend \"s3\" {}          // the settings come from a file per environment",
+        "}",
+        "",
+        "// envs/prod.s3.tfbackend",
+        "bucket       = \"example-tfstate-prod\"",
+        "key          = \"shop/terraform.tfstate\"",
+        "region       = \"eu-west-1\"",
+        "use_lockfile = __1__",
+        "",
+        "// in the pipeline",
+        "terraform init __2__=envs/prod.s3.tfbackend"
+      ],
+      "blanks": ["true", "-backend-config"],
+      "bank": ["\"dynamodb\"", "-var-file", "-backend", "false"],
+      "explain": "Backend blocks cannot read variables (they are needed before anything else is evaluated), so per-environment settings go in a `.tfbackend` file or `-backend-config=key=value` pairs at `init`."
+    }
+  ]
+}

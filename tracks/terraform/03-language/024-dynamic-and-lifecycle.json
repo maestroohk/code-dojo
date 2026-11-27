@@ -1,0 +1,207 @@
+{
+  "title": "dynamic blocks and lifecycle rules",
+  "summary": "Generate repeated nested blocks with dynamic, and control how Terraform replaces things: create_before_destroy, prevent_destroy, ignore_changes and replace_triggered_by.",
+  "minutes": 17,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "dynamic: repeated nested blocks from data",
+      "body": [
+        "Some resources take repeated **nested blocks**: `ingress` rules in a security group, `setting` blocks in an Elastic",
+        "Beanstalk environment, `source` blocks in an archive. `count` and `for_each` repeat whole resources; `dynamic`",
+        "repeats a nested block:",
+        "",
+        "```hcl",
+        "resource \"aws_security_group\" \"web\" {",
+        "  name = \"web\"",
+        "  dynamic \"ingress\" {",
+        "    for_each = var.ingress_ports            # e.g. { https = 443, http = 80 }",
+        "    content {",
+        "      description = ingress.key             # the iterator is named after the block",
+        "      from_port   = ingress.value",
+        "      to_port     = ingress.value",
+        "      protocol    = \"tcp\"",
+        "      cidr_blocks = [\"0.0.0.0/0\"]",
+        "    }",
+        "  }",
+        "}",
+        "```",
+        "",
+        "Use it when the blocks really come from data (a variable, a map). Do not use it to save typing two fixed blocks:",
+        "readers then have to run the loop in their head to know what is deployed."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "One release zip, driven by a map",
+      "prompt": [
+        "`~/infra/release/main.tf` builds the release zip with `data \"archive_file\"` and three hand-written `source` blocks",
+        "that repeat what `local.release_files` already says. Every release, someone forgets one of the two places.",
+        "",
+        "1. Replace the three `source` blocks with one `dynamic \"source\"` over `local.release_files` (file name to content).",
+        "2. Add a fourth file to the map: `RELEASE_NOTES.md` with the content `Faster checkout\\n`.",
+        "3. Apply, and check the zip: `unzip -l out/release.zip`."
+      ],
+      "setup": ["bash \"$DOJO_FILES/lang.sh\" release"],
+      "checks": [
+        { "name": "the zip has the four files",
+          "cmd": "cd ~/infra/release && unzip -Z1 out/release.zip | sort | tr '\\n' ' '",
+          "expectOutput": "RELEASE_NOTES.md VERSION config/app.yaml config/flags.yaml",
+          "fail": "`unzip -Z1 out/release.zip` should list exactly `RELEASE_NOTES.md`, `VERSION`, `config/app.yaml` and `config/flags.yaml`." },
+        { "name": "the notes are right",
+          "cmd": "cd ~/infra/release && test \"$(unzip -p out/release.zip RELEASE_NOTES.md)\" = 'Faster checkout'",
+          "fail": "`RELEASE_NOTES.md` in the zip should contain `Faster checkout`." },
+        { "name": "one dynamic block, driven by the map",
+          "cmd": "cd ~/infra/release && grep -q 'dynamic \"source\"' main.tf && test \"$(grep -cE '^ *source *\\{' main.tf)\" = 0 && grep -q 'local.release_files' main.tf",
+          "fail": "`main.tf` should have one `dynamic \"source\"` block with `for_each = local.release_files`, and no hand-written `source { }` blocks." },
+        { "name": "applied",
+          "cmd": "cd ~/infra/release && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "Apply, so the `release_sha256` output is up to date: `terraform plan` should show no changes." }
+      ],
+      "hints": [
+        "Inside `data \"archive_file\" \"release\"`: `dynamic \"source\" { for_each = local.release_files  content { ... } }`.",
+        "In `content { }`, `source.key` is the file name and `source.value` its content: `filename = source.key`, `content = source.value`.",
+        "Add `\"RELEASE_NOTES.md\" = \"Faster checkout\\n\"` to the map, then `terraform plan -out=tfplan` and `terraform apply tfplan`."
+      ],
+      "solution": [
+        "cd ~/infra/release",
+        "cat > main.tf <<'EOF'",
+        "locals {",
+        "  release_files = {",
+        "    \"VERSION\"           = \"2.3.0\\n\"",
+        "    \"config/app.yaml\"   = \"log_level: info\\nport: 8080\\n\"",
+        "    \"config/flags.yaml\" = \"new_checkout: false\\n\"",
+        "    \"RELEASE_NOTES.md\"  = \"Faster checkout\\n\"",
+        "  }",
+        "}",
+        "",
+        "data \"archive_file\" \"release\" {",
+        "  type        = \"zip\"",
+        "  output_path = \"${path.module}/out/release.zip\"",
+        "",
+        "  dynamic \"source\" {",
+        "    for_each = local.release_files",
+        "    content {",
+        "      filename = source.key",
+        "      content  = source.value",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "output \"release_sha256\" {",
+        "  value = data.archive_file.release.output_sha256",
+        "}",
+        "EOF",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "unzip -l out/release.zip"
+      ],
+      "explain": "Now the map is the only list of files. The same pattern builds security group rules from a variable, or Lambda layers from a list. An optional block is a `dynamic` with `for_each = var.enable_logging ? [1] : []`."
+    },
+    {
+      "type": "learn",
+      "title": "lifecycle: how and whether things are replaced",
+      "body": [
+        "```hcl",
+        "resource \"aws_acm_certificate\" \"web\" {",
+        "  # ...",
+        "  lifecycle {",
+        "    create_before_destroy = true   # the new one exists before the old is deleted: no gap (+/- in the plan)",
+        "  }",
+        "}",
+        "",
+        "resource \"aws_db_instance\" \"main\" {",
+        "  # ...",
+        "  lifecycle {",
+        "    prevent_destroy = true          # any plan that would destroy (or replace) it fails",
+        "    ignore_changes  = [engine_version]   # minor upgrades are applied by AWS itself",
+        "  }",
+        "}",
+        "",
+        "resource \"random_password\" \"api_key\" {",
+        "  length = 40",
+        "  lifecycle {",
+        "    replace_triggered_by = [time_rotating.api_key]   # a new key whenever the rotation timer rolls over",
+        "  }",
+        "}",
+        "```",
+        "",
+        "Know their limits. `create_before_destroy` needs names that can exist twice (use `name_prefix`). `prevent_destroy`",
+        "only protects while the block exists: delete the block and the protection goes with it, so also turn on the",
+        "provider's own protection (`deletion_protection = true` on databases). `ignore_changes` hides drift on that",
+        "attribute forever: name attributes narrowly."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A certificate on a live load balancer must be replaced (its domain list changed). With the default lifecycle, what does the apply do, and what fixes it?",
+      "options": [
+        "It deletes the old certificate first, which fails or leaves the listener without one; `create_before_destroy = true` creates the new one first",
+        "It updates the certificate in place; nothing to fix",
+        "It creates both at once; `prevent_destroy` fixes it",
+        "It refuses to replace certificates; `ignore_changes` fixes it"
+      ],
+      "answer": 0,
+      "explain": "The default for a replacement is destroy-then-create (`-/+`). With `create_before_destroy`, the plan shows `+/-`: create the new certificate, move the listener to it, then delete the old one. Anything referenced by something that must never be without it is a candidate."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Protect the CA, rotate the API key",
+      "prompt": [
+        "`~/infra/certs` holds the internal CA's key and a partner API key. Two findings from the security review:",
+        "",
+        "1. **The CA key must never be destroyed by Terraform**, not even by a careless `terraform destroy` or a change that",
+        "   would replace it. Add the right lifecycle rule. Prove it: `terraform plan -destroy` must fail.",
+        "2. **The partner API key must rotate every 90 days.** Add a `time_rotating` resource (`hashicorp/time`) with",
+        "   `rotation_days = 90`, and make `random_password.partner_api_key` be replaced whenever it rotates.",
+        "",
+        "Apply. The CA key must still be the same key afterwards."
+      ],
+      "setup": ["bash \"$DOJO_FILES/lang.sh\" certs"],
+      "checks": [
+        { "name": "destroying the CA key is refused",
+          "cmd": "cd ~/infra/certs && ! terraform plan -destroy -input=false -no-color > /tmp/d 2>&1 && grep -q 'Instance cannot be destroyed' /tmp/d && grep -q 'tls_private_key.ca' /tmp/d",
+          "fail": "`terraform plan -destroy` should fail with *Instance cannot be destroyed* for `tls_private_key.ca`. Add `lifecycle { prevent_destroy = true }` to it." },
+        { "name": "a 90-day rotation timer exists",
+          "cmd": "cd ~/infra/certs && t=$(terraform state list | grep '^time_rotating\\.' | head -n1) && test -n \"$t\" && terraform state show -no-color \"$t\" | grep -Eq 'rotation_days *= *90'",
+          "fail": "The state should have a `time_rotating` resource with `rotation_days = 90`. Add it and apply." },
+        { "name": "rotation replaces the API key",
+          "cmd": "cd ~/infra/certs && t=$(terraform state list | grep '^time_rotating\\.' | head -n1) && terraform plan -input=false -no-color -replace=\"$t\" | grep -q 'random_password.partner_api_key will be replaced'",
+          "fail": "When the timer is replaced (`terraform plan -replace=time_rotating.<name>`), `random_password.partner_api_key` must be replaced too. Use `replace_triggered_by`." },
+        { "name": "the CA key survived",
+          "cmd": "cd ~/infra/certs && terraform state show -no-color tls_private_key.ca | grep -q \"$(cat /opt/dojo/state/ca)\" && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "The CA key changed, or the plan is not clean. Apply your changes; nothing should replace the CA key." }
+      ],
+      "hints": [
+        "In `resource \"tls_private_key\" \"ca\"`: `lifecycle { prevent_destroy = true }`.",
+        "`resource \"time_rotating\" \"partner_api_key\" { rotation_days = 90 }`, and in the password: `lifecycle { replace_triggered_by = [time_rotating.partner_api_key] }`.",
+        "Plan and apply (the new timer is created; read whether the key changes now), then `terraform plan -destroy` to see the protection."
+      ],
+      "solution": [
+        "cd ~/infra/certs",
+        "sed -i '/ecdsa_curve = \"P384\"/a\\  lifecycle {\\n    prevent_destroy = true\\n  }' main.tf",
+        "sed -i '/^  special = false$/a\\  lifecycle {\\n    replace_triggered_by = [time_rotating.partner_api_key]\\n  }' main.tf",
+        "printf '\\nresource \"time_rotating\" \"partner_api_key\" {\\n  rotation_days = 90\\n}\\n' >> main.tf",
+        "terraform fmt",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform plan -destroy",
+        "terraform plan -replace=time_rotating.partner_api_key"
+      ],
+      "explain": "`time_rotating` stores a rotation time; once that time has passed, the next plan replaces it, and `replace_triggered_by` replaces the key with it. A scheduled pipeline run (daily `plan`/`apply`) is what actually rotates. `prevent_destroy` makes even `terraform destroy` fail for the whole configuration: that is the point, and also why it belongs on a few critical things only."
+    },
+    {
+      "type": "match",
+      "prompt": "Match the need to the lifecycle setting.",
+      "pairs": [
+        ["no gap while a certificate is replaced", "`create_before_destroy = true`"],
+        ["a plan that would delete the database must fail", "`prevent_destroy = true`"],
+        ["the autoscaler owns `desired_count`", "`ignore_changes = [desired_count]`"],
+        ["restart the app when its config changes", "`replace_triggered_by = [local_file.config]`"]
+      ]
+    }
+  ]
+}

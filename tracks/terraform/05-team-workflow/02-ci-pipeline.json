@@ -1,0 +1,148 @@
+{
+  "title": "Plan on the pull request, apply on merge",
+  "summary": "The pipeline every Terraform team ends up with: fmt, validate and tflint first, a saved plan posted for review, the same plan applied after merge with the environment's own identity. Then make a failing repo's CI pass.",
+  "minutes": 17,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "The pipeline",
+      "body": [
+        "```yaml",
+        "# .github/workflows/terraform-prod.yml",
+        "on:",
+        "  pull_request: { paths: [\"envs/prod/**\", \"modules/**\"] }",
+        "  push:         { branches: [main], paths: [\"envs/prod/**\", \"modules/**\"] }",
+        "permissions: { id-token: write, contents: read, pull-requests: write }",
+        "concurrency: terraform-prod                 # never two runs against prod's state at once",
+        "jobs:",
+        "  plan:",
+        "    runs-on: ubuntu-latest",
+        "    defaults: { run: { working-directory: envs/prod } }",
+        "    steps:",
+        "      - uses: actions/checkout@v7",
+        "      - uses: hashicorp/setup-terraform@v4",
+        "        with: { terraform_version: 1.17.2 }",
+        "      - uses: aws-actions/configure-aws-credentials@v6   # OIDC: no stored keys",
+        "        with: { role-to-assume: arn:aws:iam::111122223333:role/tf-prod-plan, aws-region: eu-west-1 }",
+        "      - run: terraform fmt -check -recursive ../..",
+        "      - run: terraform init -input=false -lockfile=readonly",
+        "      - run: terraform validate",
+        "      - run: tflint --recursive",
+        "      - run: terraform plan -input=false -lock-timeout=5m -out=tfplan",
+        "      - run: terraform show -no-color tfplan > plan.txt    # posted as a PR comment",
+        "      - uses: actions/upload-artifact@v7",
+        "        with: { name: prod-plan, path: envs/prod/tfplan }",
+        "  apply:",
+        "    if: github.event_name == 'push'",
+        "    needs: plan",
+        "    environment: production                 # a required reviewer approves here",
+        "    # ...same setup, an apply role, download the artifact, then:",
+        "    #   terraform apply -input=false tfplan",
+        "```",
+        "",
+        "Key decisions: **read-only credentials for plan, write credentials only for apply** (the plan role cannot change",
+        "anything, so a malicious pull request cannot either); **the merged plan is the one applied** (a stale plan fails",
+        "safely); **one run at a time per state**. Tools such as Atlantis, HCP Terraform, Spacelift or env0 package the same",
+        "flow with plan comments and approvals built in."
+      ]
+    },
+    {
+      "type": "order",
+      "prompt": "Put a pull request's CI steps in order (cheapest checks first).",
+      "lines": [
+        "terraform fmt -check -recursive",
+        "terraform init -input=false -lockfile=readonly",
+        "terraform validate",
+        "tflint --recursive",
+        "terraform plan -input=false -out=tfplan",
+        "terraform show -no-color tfplan  # post it on the PR"
+      ],
+      "also": [[
+        "terraform fmt -check -recursive",
+        "terraform init -input=false -lockfile=readonly",
+        "tflint --recursive",
+        "terraform validate",
+        "terraform plan -input=false -out=tfplan",
+        "terraform show -no-color tfplan  # post it on the PR"
+      ]],
+      "explain": "`fmt` needs nothing; `validate` needs `init` (providers for the schema) but no credentials; `tflint` and `validate` can swap; `plan` is the expensive step that talks to the cloud. Failing fast saves minutes on every push."
+    },
+    {
+      "type": "learn",
+      "title": "fmt, validate, tflint: what each one catches",
+      "body": [
+        "| Tool | Catches | Needs |",
+        "|---|---|---|",
+        "| `terraform fmt -check -recursive` | layout differences (exit 3); `-diff` shows them | nothing |",
+        "| `terraform validate` | syntax, unknown arguments, wrong types, references to things that do not exist | `init` (use `-backend=false` in CI lint jobs) |",
+        "| `tflint` | valid code that is still wrong or sloppy: unused declarations, untyped variables, missing version constraints, deprecated syntax; with provider rulesets, an `instance_type` that does not exist | a `.tflint.hcl` |",
+        "",
+        "`terraform validate` checks the **configuration**; it never knows whether an AMI exists or a name is taken. tflint's",
+        "`recommended` preset (the bundled `terraform` ruleset) is a good default; provider rulesets (`tflint-ruleset-aws`,",
+        "`-azurerm`, `-google`) add cloud knowledge. Run all three locally with one command (`make ci`, a pre-commit hook) so",
+        "CI is never the first to tell you."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Make CI green",
+      "prompt": [
+        "`~/infra/shop-repo` is a pull request whose CI is red. CI runs `make ci` (`cat Makefile`): fmt, validate, tflint.",
+        "",
+        "Run `make ci` and fix each failure **properly**, in the order they appear: format the files, fix what `validate`",
+        "reports, and fix what `tflint` reports (do not silence rules: no `tflint-ignore`, no changes to `.tflint.hcl` or the",
+        "`Makefile`). The `retention_days` input must stay and must actually be used: put it in the rendered JSON as",
+        "`retention_days`. Commit when `make ci` passes."
+      ],
+      "setup": ["bash \"$DOJO_FILES/team.sh\" ci"],
+      "checks": [
+        { "name": "make ci passes",
+          "cmd": "cd ~/infra/shop-repo && make ci 2>&1 | tail -n 15; test ${PIPESTATUS[0]} = 0",
+          "fail": "`make ci` still fails (the end of its output is shown)." },
+        { "name": "nothing silenced",
+          "cmd": "cd ~/infra/shop-repo && ! grep -rq 'tflint-ignore' --include='*.tf' . && git diff --quiet HEAD -- .tflint.hcl Makefile && test \"$(git log --format=%H -- .tflint.hcl Makefile | wc -l)\" = 1",
+          "fail": "Fix the code, not the rules: no `tflint-ignore` comments, and `.tflint.hcl` and `Makefile` unchanged." },
+        { "name": "retention_days is typed and used",
+          "cmd": "cd ~/infra/shop-repo/envs/prod && rm -rf /tmp/ci && cp -r ../.. /tmp/ci && cd /tmp/ci/envs/prod && terraform init -input=false -no-color >/dev/null && terraform apply -auto-approve -input=false -no-color >/dev/null && jq -e '.retention_days == 30 and .env == \"prod\"' out/prod/notify.json >/dev/null",
+          "fail": "Applying `envs/prod` should write `out/prod/notify.json` with `\"retention_days\": 30` (and `env`, `channels`)." },
+        { "name": "committed",
+          "cmd": "cd ~/infra/shop-repo && test -z \"$(git status --porcelain)\" && test \"$(git rev-list --count HEAD)\" -ge 2",
+          "fail": "Commit your fixes: `git status` should be clean." }
+      ],
+      "hints": [
+        "`terraform fmt -recursive` fixes the layout. `make validate` then reports *Unsupported attribute* on `module.notify.filenme`: the module's output is called `file`.",
+        "tflint reports `retention_days` has no type and is declared but unused. Give it `type = number` and use it in the `jsonencode({...})`.",
+        "`sed -i 's/module.notify.filenme/module.notify.file/' envs/prod/main.tf`, add `type = number` to the variable, add `retention_days = var.retention_days` to the JSON, `terraform fmt -recursive`, `make ci`, commit."
+      ],
+      "solution": [
+        "cd ~/infra/shop-repo",
+        "make ci",
+        "terraform fmt -recursive",
+        "make validate",
+        "sed -i 's/module.notify.filenme/module.notify.file/' envs/prod/main.tf",
+        "make lint",
+        "sed -i 's/^  description = \"How long alert history is kept.\"$/  type        = number\\n  description = \"How long alert history is kept.\"/' modules/notify/main.tf",
+        "sed -i 's/^    channels = var.channels$/    channels       = var.channels\\n    retention_days = var.retention_days/' modules/notify/main.tf",
+        "terraform fmt -recursive",
+        "make ci",
+        "git add -A",
+        "git commit -m \"Fix formatting, the output reference, and type and use retention_days\""
+      ],
+      "explain": "Each tool caught a different class of mistake: layout (fmt), a broken reference (validate), and an input that was accepted and then silently ignored (tflint). That last one is the dangerous kind: the caller set `retention_days = 30` and believed it worked."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does the plan job use a role that can only **read** the cloud account, while only the apply job (after merge and approval) can write?",
+      "options": [
+        "Plans run code from unreviewed pull requests; with a read-only role, a malicious or broken PR still cannot change anything (an `external` data source or a provider could run arbitrary code)",
+        "Read-only roles make plans faster",
+        "Terraform refuses to plan with write permissions",
+        "It saves cloud costs"
+      ],
+      "answer": 0,
+      "explain": "`terraform plan` executes providers and can run programs (`data \"external\"`), so it is code execution with the job's credentials. Separate identities per stage and per environment, short-lived through OIDC, are the standard answer."
+    }
+  ]
+}

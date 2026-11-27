@@ -20,6 +20,7 @@ import { EXTRA_STEPS, EXTRA_LABELS } from './labsteps.js';
 import { regexStep } from './regexstep.js';
 import { regexCard } from './regex-ui.js';
 import { pipeViz } from './pspipe.js';
+import { tfPlan } from './tfplan.js';
 import { sqlVisuals, withSqlVisuals, sqlPlanButton } from './sqlviz.js';
 
 export const DRAG_TYPES = new Set(['order', 'blanks', 'match', 'sort']);
@@ -223,6 +224,7 @@ function learn(step, ctx) {
       step.testviz && testViz(step.testviz),
       step.pspipe && pipeViz(step.pspipe),
       step.otelviz && otelViz(step.otelviz),
+      step.tfplan && tfPlan(step.tfplan),
       sqlVisuals(step)),
     ready: () => true, check: async () => ({ correct: true }), reveal() {}, lock() {},
   };

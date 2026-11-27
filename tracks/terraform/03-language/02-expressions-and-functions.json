@@ -1,0 +1,154 @@
+{
+  "title": "Expressions, functions and terraform console",
+  "summary": "Conditionals, for expressions (with filters and grouping), splats, the functions you use weekly, templatefile, and trying all of it live in terraform console.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Expressions that shape data",
+      "body": [
+        "Most real Terraform code is turning one shape of data into another: a map of services into DNS records, a list of",
+        "subnets into security group rules. The tools:",
+        "",
+        "```hcl",
+        "locals {",
+        "  # conditional",
+        "  instance_type = var.env == \"prod\" ? \"m7g.large\" : \"t4g.small\"",
+        "",
+        "  # for expression: list in, list out (with a filter)",
+        "  web_names = [for name, s in var.servers : upper(name) if s.role == \"web\"]",
+        "",
+        "  # for expression: map out",
+        "  ip_by_name = { for name, s in var.servers : name => s.ip }",
+        "",
+        "  # grouping: the ... collects every value for a repeated key into a list",
+        "  names_by_role = { for name, s in var.servers : s.role => name... }",
+        "",
+        "  # splat: one attribute from every element",
+        "  subnet_ids = aws_subnet.app[*].id",
+        "}",
+        "```",
+        "",
+        "A `for` over a **map** visits the keys in lexical (sorted) order, so the output is stable from run to run. That",
+        "matters: an order that changes between plans means a perpetual diff."
+      ]
+    },
+    {
+      "type": "predict",
+      "prompt": "What does `terraform console` print?",
+      "lang": "hcl",
+      "code": ["> { for name, s in { web-2 = \"web\", db-1 = \"db\", web-1 = \"web\" } : s => name... }"],
+      "answer": ["{", "  \"db\" = [", "    \"db-1\",", "  ]", "  \"web\" = [", "    \"web-1\",", "    \"web-2\",", "  ]", "}"],
+      "verify": false,
+      "explain": "Keys are visited sorted (`db-1`, `web-1`, `web-2`), so each group is in key order. Without the `...`, two entries with the key `\"web\"` would be an error: *Duplicate object key*."
+    },
+    {
+      "type": "learn",
+      "title": "Functions you use every week",
+      "body": [
+        "| Function | Example | Gives |",
+        "|---|---|---|",
+        "| `merge` | `merge(local.tags, { Name = \"web\" })` | one map, later keys win |",
+        "| `lookup` | `lookup(var.sizes, var.env, \"small\")` | a map value with a default |",
+        "| `try` | `try(var.settings.tls.min_version, \"1.2\")` | the first expression that does not error |",
+        "| `coalesce` | `coalesce(var.name_override, local.default_name)` | the first non-null, non-empty value |",
+        "| `format` | `format(\"%s-%03d\", \"web\", 7)` | `\"web-007\"` |",
+        "| `join` / `split` | `join(\",\", var.cidrs)` | text from a list, and back |",
+        "| `toset` | `toset(var.names)` | a set, for `for_each` |",
+        "| `flatten` | `flatten([for s in var.subnets : s.rules])` | one flat list from nested lists |",
+        "| `cidrsubnet` | `cidrsubnet(\"10.20.0.0/16\", 8, 3)` | `\"10.20.3.0/24\"` |",
+        "| `jsonencode` / `yamlencode` | `jsonencode({ a = 1 })` | `{\"a\":1}` |",
+        "| `templatefile` | `templatefile(\"${path.module}/nginx.conf.tftpl\", { port = 443 })` | a rendered file |",
+        "",
+        "Try anything against your real configuration and state with **`terraform console`**: it evaluates expressions with",
+        "your variables, locals and resource attributes. `echo 'local.ip_by_name' | terraform console` works in scripts.",
+        "There are no user-defined functions in Terraform (OpenTofu and Terraform 1.8+ support *provider-defined*",
+        "functions, called as `provider::NAME::FUNCTION(...)`)."
+      ]
+    },
+    {
+      "type": "match",
+      "prompt": "Match the expression to its result.",
+      "pairs": [
+        ["`merge({ a = 1, b = 2 }, { b = 3 })`", "`{ a = 1, b = 3 }`"],
+        ["`lookup({ prod = \"large\" }, \"dev\", \"small\")`", "`\"small\"`"],
+        ["`coalesce(\"\", \"fallback\")`", "`\"fallback\"`"],
+        ["`format(\"%s-%03d\", \"web\", 7)`", "`\"web-007\"`"],
+        ["`join(\",\", sort([\"b\", \"a\"]))`", "`\"a,b\"`"]
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "A hosts file and two outputs from one map",
+      "prompt": [
+        "`~/infra/hosts/variables.tf` has a map of servers (name to IP and role). In `main.tf`, write:",
+        "",
+        "1. a `local_file` at `out/hosts` with one line per server, in name order, `IP NAME.internal.example.com`, ending in a",
+        "   newline. For example `10.20.3.31 cache-1.internal.example.com`.",
+        "2. an output `web_ips`: the IPs of the `web` servers, in name order.",
+        "3. an output `names_by_role`: a map from each role to the list of its server names.",
+        "",
+        "Try your expressions in `terraform console` first (`var.servers`, then build up the `for`). Then apply."
+      ],
+      "setup": ["bash \"$DOJO_FILES/lang.sh\" hosts"],
+      "checks": [
+        { "name": "the hosts file is right",
+          "cmd": "cd ~/infra/hosts && diff <(printf '%s\\n' '10.20.3.31 cache-1.internal.example.com' '10.20.2.21 db-1.internal.example.com' '10.20.1.11 web-1.internal.example.com' '10.20.1.12 web-2.internal.example.com' '10.20.1.13 web-3.internal.example.com') out/hosts",
+          "fail": "`out/hosts` should have five lines in name order, `IP NAME.internal.example.com`, and end with a newline (the diff shows what differs)." },
+        { "name": "web_ips",
+          "cmd": "cd ~/infra/hosts && terraform output -json web_ips | jq -c .",
+          "expectOutput": "[\"10.20.1.11\",\"10.20.1.12\",\"10.20.1.13\"]",
+          "fail": "`terraform output -json web_ips` should be the three web IPs in name order." },
+        { "name": "names_by_role",
+          "cmd": "cd ~/infra/hosts && terraform output -json names_by_role | jq -cS .",
+          "expectOutput": "{\"cache\":[\"cache-1\"],\"db\":[\"db-1\"],\"web\":[\"web-1\",\"web-2\",\"web-3\"]}",
+          "fail": "`terraform output -json names_by_role` should map each role to its names. A grouping `for` with `...` does it." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/hosts && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "Apply your changes: `terraform plan` should show none." }
+      ],
+      "hints": [
+        "`echo '[for name, s in var.servers : \"${s.ip} ${name}.internal.example.com\"]' | terraform console` shows the lines. `join(\"\\n\", ...)` makes them one text; add a final `\\n`.",
+        "`web_ips`: `[for name, s in var.servers : s.ip if s.role == \"web\"]`. `names_by_role`: `{ for name, s in var.servers : s.role => name... }`.",
+        "`content = \"${join(\"\\n\", [for name, s in var.servers : \"${s.ip} ${name}.internal.example.com\"])}\\n\"`"
+      ],
+      "solution": [
+        "cd ~/infra/hosts",
+        "echo 'var.servers' | terraform console",
+        "cat > main.tf <<'EOF'",
+        "resource \"local_file\" \"hosts\" {",
+        "  filename = \"${path.module}/out/hosts\"",
+        "  content  = \"${join(\"\\n\", [for name, s in var.servers : \"${s.ip} ${name}.internal.example.com\"])}\\n\"",
+        "}",
+        "",
+        "output \"web_ips\" {",
+        "  value = [for name, s in var.servers : s.ip if s.role == \"web\"]",
+        "}",
+        "",
+        "output \"names_by_role\" {",
+        "  value = { for name, s in var.servers : s.role => name... }",
+        "}",
+        "EOF",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "cat out/hosts",
+        "terraform output"
+      ],
+      "explain": "One source of truth (the map) feeds a file and two outputs; add a server once and all three follow. For a longer file, `templatefile(\"hosts.tftpl\", { servers = var.servers })` with `%{ for name, s in servers ~}` directives keeps the layout readable."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`var.settings` may or may not have a `tls` key, and `tls` may or may not have `min_version`. Which expression gives `\"1.2\"` when either is missing, without an error?",
+      "options": [
+        "`try(var.settings.tls.min_version, \"1.2\")`",
+        "`lookup(var.settings, \"min_version\", \"1.2\")`",
+        "`coalesce(var.settings.tls.min_version, \"1.2\")`",
+        "`var.settings.tls.min_version ?? \"1.2\"`"
+      ],
+      "answer": 0,
+      "explain": "`try` evaluates each argument and returns the first that does not raise an error, so a missing key at any depth falls through to the default. `coalesce` still evaluates `var.settings.tls.min_version` first and errors when `tls` is missing. HCL has no `??` operator."
+    }
+  ]
+}

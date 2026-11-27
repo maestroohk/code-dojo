@@ -1,0 +1,157 @@
+{
+  "title": "Boss: a module three teams can use",
+  "summary": "Make the site module work with for_each, release a minor version from its own repository with a tag and a changelog, then ship an internal rename that no caller notices.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "PLAT-202",
+      "body": [
+        "*\"Checkout, search and web all want the standard site setup. Platform owns the `site` module. Make it usable for all",
+        "three from one call, release it properly, and from now on no module release may replace anything in a caller.\"*",
+        "",
+        "You are the module's maintainer and its first caller (`~/infra/platform`). Three steps."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Incompatible with for_each",
+      "prompt": [
+        "`~/infra/platform/main.tf` calls `./modules/site` with `for_each` over the three teams' domains. `terraform init` or",
+        "`plan` refuses. Read the error, fix the **module** (not the call), and apply the three sites."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 1"],
+      "checks": [
+        { "name": "no provider configuration in the module",
+          "cmd": "cd ~/infra/platform/modules/site && ! grep -qE '^\\s*provider \"' *.tf && grep -q required_providers *.tf",
+          "fail": "The module still configures a provider (a `provider \"...\" {}` block). Keep `required_providers`; remove the configuration." },
+        { "name": "three sites applied",
+          "cmd": "cd ~/infra/platform && terraform state list | grep -c 'tls_self_signed_cert.site$'",
+          "expectOutput": "3",
+          "fail": "`terraform state list` should show a certificate in each of the three `module.site[...]` instances." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/platform && terraform plan -detailed-exitcode -input=false -no-color >/dev/null && test -f out/www.example.com/nginx.conf",
+          "fail": "`terraform plan` should show no changes." }
+      ],
+      "hints": [
+        "*Module is incompatible with count, for_each, and depends_on* ... *contains provider configuration*: look in `modules/site/providers.tf`.",
+        "Empty `provider \"tls\" {}` blocks configure nothing useful, but they still make the module a \"legacy module\". The root module gets default provider configurations without any block.",
+        "`rm modules/site/providers.tf`, then `terraform init`, `terraform plan -out=tfplan`, `terraform apply tfplan`."
+      ],
+      "solution": [
+        "cd ~/infra/platform",
+        "terraform init",
+        "cat modules/site/providers.tf",
+        "rm modules/site/providers.tf",
+        "terraform init",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform state list"
+      ],
+      "explain": "Since Terraform 0.13, modules declare providers (`required_providers`) and callers configure them. Old modules with `provider` blocks still work with a single call, which is why they linger, but they block `for_each`, `count` and `depends_on` on the call."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Release v1.1.0",
+      "prompt": [
+        "The module now lives in its own repository: your working copy is `~/src/tf-modules` (its `origin` is the team's",
+        "server, `/srv/git/tf-modules.git`). `~/infra/platform` uses it from Git at `v1.0.0`. The teams want each site's key",
+        "fingerprint.",
+        "",
+        "1. In `~/src/tf-modules`: add an output `cert_fingerprint` (with a description) to `site/outputs.tf`, add a `v1.1.0`",
+        "   entry at the top of `CHANGELOG.md`, commit, tag `v1.1.0` and push the commit **and** the tag.",
+        "2. In `~/infra/platform`: use `v1.1.0`, add an output `fingerprints` (team to fingerprint), `terraform init`, plan,",
+        "   apply. Nothing may be replaced."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 2"],
+      "checks": [
+        { "name": "v1.1.0 is released",
+          "cmd": "git -C /srv/git/tf-modules.git show v1.1.0:site/outputs.tf | grep -q 'output \"cert_fingerprint\"' && git -C /srv/git/tf-modules.git show v1.1.0:CHANGELOG.md | grep -q '1\\.1\\.0' && ! git -C /srv/git/tf-modules.git show v1.0.0:site/outputs.tf | grep -q cert_fingerprint",
+          "fail": "The server should have a tag `v1.1.0` whose `site/outputs.tf` has `cert_fingerprint` and whose `CHANGELOG.md` mentions 1.1.0 (`git push origin main --tags`). `v1.0.0` must stay as it was." },
+        { "name": "the platform uses v1.1.0",
+          "cmd": "cd ~/infra/platform && jq -r '[.Modules[] | select(.Key | startswith(\"site\")) | .Source] | unique | .[]' .terraform/modules/modules.json",
+          "expectOutput": "git::file:///srv/git/tf-modules.git//site?ref=v1.1.0",
+          "fail": "`.terraform/modules/modules.json` should show the site module at `?ref=v1.1.0`. Change `ref` and run `terraform init`." },
+        { "name": "fingerprints output",
+          "cmd": "cd ~/infra/platform && terraform output -json fingerprints | jq -e 'keys == [\"checkout\",\"search\",\"web\"] and all(.[]; startswith(\"SHA256:\"))' >/dev/null",
+          "fail": "`terraform output -json fingerprints` should map checkout, search and web to `SHA256:...` fingerprints." },
+        { "name": "nothing was replaced, plan clean",
+          "cmd": "cd ~/infra/platform && for d in checkout.example.com search.example.com www.example.com; do test \"$(stat -c %Y out/$d/nginx.conf)\" = \"$(cat /opt/dojo/state/nginx-$d)\" || exit 1; done && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "A site's files were rewritten, or the plan is not clean. A new output should change nothing real." }
+      ],
+      "hints": [
+        "In `~/src/tf-modules`: `output \"cert_fingerprint\" { description = \"...\"  value = tls_private_key.site.public_key_fingerprint_sha256 }`.",
+        "`git commit -am \"Add cert_fingerprint output\" && git tag v1.1.0 && git push origin main --tags`. A tag that is not pushed does not exist for anyone else.",
+        "In `~/infra/platform`: `sed -i 's/ref=v1.0.0/ref=v1.1.0/' main.tf`, an `outputs.tf` with `value = { for team, s in module.site : team => s.cert_fingerprint }`, then `terraform init`, plan, apply."
+      ],
+      "solution": [
+        "cd ~/src/tf-modules",
+        "printf '\\noutput \"cert_fingerprint\" {\\n  description = \"SHA-256 fingerprint of the site key.\"\\n  value       = tls_private_key.site.public_key_fingerprint_sha256\\n}\\n' >> site/outputs.tf",
+        "sed -i '0,/^## v1.0.0/s//## v1.1.0\\n- New output `cert_fingerprint`.\\n\\n## v1.0.0/' CHANGELOG.md",
+        "cat CHANGELOG.md",
+        "git commit -am \"Add cert_fingerprint output\"",
+        "git tag v1.1.0",
+        "git push origin main --tags",
+        "cd ~/infra/platform",
+        "sed -i 's/ref=v1.0.0/ref=v1.1.0/' main.tf",
+        "printf 'output \"fingerprints\" {\\n  value = { for team, s in module.site : team => s.cert_fingerprint }\\n}\\n' > outputs.tf",
+        "terraform init",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform output fingerprints"
+      ],
+      "explain": "An added output is a **minor** release: no caller has to change anything. Tags are the contract; never move or delete a published tag (every caller pinned to it would silently change). Registries (public or private) read the same Git tags to publish versions."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "v1.2.0: a rename no caller notices",
+      "prompt": [
+        "The naming standard says `local_file.nginx` in the module should be `local_file.server_block`. Release that as",
+        "`v1.2.0` so that callers upgrading see **only moves**: in `~/src/tf-modules`, rename it, ship what makes it safe, add",
+        "a changelog entry, commit, tag `v1.2.0`, push. Then upgrade `~/infra/platform` to `v1.2.0` and apply. No site's file",
+        "may be rewritten."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 3"],
+      "checks": [
+        { "name": "v1.2.0 renames with a moved block",
+          "cmd": "git -C /srv/git/tf-modules.git show v1.2.0:site/main.tf | grep -q 'resource \"local_file\" \"server_block\"' && git -C /srv/git/tf-modules.git grep -q -E 'from *= *local_file.nginx' v1.2.0 -- site && git -C /srv/git/tf-modules.git show v1.2.0:CHANGELOG.md | grep -q '1\\.2\\.0'",
+          "fail": "Tag `v1.2.0` on the server should rename the resource to `server_block`, include `moved { from = local_file.nginx  to = local_file.server_block }` in `site/`, and mention 1.2.0 in the changelog." },
+        { "name": "the platform uses v1.2.0",
+          "cmd": "cd ~/infra/platform && jq -r '[.Modules[] | select(.Key | startswith(\"site\")) | .Source] | unique | .[]' .terraform/modules/modules.json",
+          "expectOutput": "git::file:///srv/git/tf-modules.git//site?ref=v1.2.0",
+          "fail": "Upgrade the call to `?ref=v1.2.0` and run `terraform init`." },
+        { "name": "the state has the new names",
+          "cmd": "cd ~/infra/platform && test \"$(terraform state list | grep -c 'local_file.server_block$')\" = 3 && ! terraform state list | grep -q 'local_file.nginx$'",
+          "fail": "Apply the upgrade: each `module.site[...]` should have `local_file.server_block` and no `local_file.nginx`." },
+        { "name": "no file was rewritten, plan clean",
+          "cmd": "cd ~/infra/platform && for d in checkout.example.com search.example.com www.example.com; do test \"$(stat -c %Y out/$d/nginx.conf)\" = \"$(cat /opt/dojo/state/nginx-$d)\" || exit 1; done && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "A site's nginx.conf was rewritten (the rename destroyed and re-created it), or the plan is not clean. Ship a `moved` block inside the module." }
+      ],
+      "hints": [
+        "Rename the block in `site/main.tf`, and add `moved { from = local_file.nginx  to = local_file.server_block }` in the module itself (for example `site/moved.tf`): it applies to every caller's state.",
+        "Changelog, `git add -A && git commit -m ... && git tag v1.2.0 && git push origin main --tags`.",
+        "In the platform: `sed -i 's/ref=v1.1.0/ref=v1.2.0/' main.tf`, `terraform init`, then the plan shows three *has moved to* and nothing else."
+      ],
+      "solution": [
+        "cd ~/src/tf-modules",
+        "sed -i 's/\"local_file\" \"nginx\"/\"local_file\" \"server_block\"/' site/main.tf",
+        "printf 'moved {\\n  from = local_file.nginx\\n  to   = local_file.server_block\\n}\\n' > site/moved.tf",
+        "sed -i '0,/^## v1.1.0/s//## v1.2.0\\n- `local_file.nginx` is now `local_file.server_block` (a moved block is included: nothing is replaced).\\n\\n## v1.1.0/' CHANGELOG.md",
+        "git add -A",
+        "git commit -m \"Rename local_file.nginx to server_block (with moved block)\"",
+        "git tag v1.2.0",
+        "git push origin main --tags",
+        "cd ~/infra/platform",
+        "sed -i 's/ref=v1.1.0/ref=v1.2.0/' main.tf",
+        "terraform init",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan"
+      ],
+      "explain": "`moved` blocks inside a module are the module author's tool for refactoring without breaking callers. Keep them for a long time (until you are sure nobody upgrades from before), and treat any release that makes a caller's plan show `-` or `-/+` as a major version, with a migration note."
+    }
+  ]
+}

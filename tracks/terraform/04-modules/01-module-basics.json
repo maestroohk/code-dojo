@@ -1,0 +1,203 @@
+{
+  "title": "Your first module",
+  "summary": "A module is a folder of .tf files with inputs and outputs. Extract one from working code with moved blocks, then make several copies with for_each on the module call.",
+  "minutes": 17,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "A module is a folder",
+      "body": [
+        "Every folder of `.tf` files is a **module**. The one you run `terraform` in is the **root module**; any folder it",
+        "calls with a `module` block is a **child module**. A reusable module has a conventional layout:",
+        "",
+        "```text",
+        "modules/site/",
+        "  main.tf        the resources",
+        "  variables.tf   its inputs (typed, described, validated)",
+        "  outputs.tf     what it gives back",
+        "  versions.tf    required_providers (no provider blocks!)",
+        "  README.md      what it is for, an example call",
+        "```",
+        "",
+        "```hcl",
+        "module \"shop\" {",
+        "  source = \"./modules/site\"      # a local path, a registry address or a Git URL",
+        "  domain = \"shop.example.com\"     # every other argument is one of its variables",
+        "}",
+        "",
+        "output \"shop_cert\" {",
+        "  value = module.shop.cert_pem    # module.NAME.OUTPUT",
+        "}",
+        "```",
+        "",
+        "Inside the module, resources only see the module's own variables, locals and resources: everything it needs comes",
+        "in as a variable, everything the caller needs goes out as an output. That boundary is the point. Resource",
+        "addresses get a prefix: `module.shop.tls_private_key.site`."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why should a reusable module have `required_providers` but no `provider \"aws\" { region = ... }` block?",
+      "options": [
+        "The caller configures providers (region, credentials, aliases) and passes them in; a provider block inside also stops the module from being used with count, for_each or depends_on",
+        "Provider blocks are not allowed in files called main.tf",
+        "It makes the module faster to init",
+        "Only the registry may configure providers"
+      ],
+      "answer": 0,
+      "explain": "A module that configures its own provider decides the region and credentials for every caller, and cannot be repeated with `for_each`: *Module is incompatible with count, for_each, and depends_on*. Declare what you need in `required_providers`; let the root module configure it. This module's boss has that bug."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Extract a module, destroy nothing",
+      "prompt": [
+        "`~/infra/web/main.tf` sets up one site (`shop.example.com`): a TLS key, a self-signed certificate and an nginx server",
+        "block. The docs site needs the same. First, move the shop's resources into a module, without changing anything real:",
+        "",
+        "1. Create `modules/site` with `main.tf` (the three resources, using `var.domain` instead of `shop.example.com`),",
+        "   `variables.tf` (a typed, described `domain`), `outputs.tf` (an output `cert_pem` with the certificate) and",
+        "   `versions.tf` (copy the root's).",
+        "2. Replace the root's `main.tf` with a call: `module \"shop\"` with `source = \"./modules/site\"`.",
+        "3. Add `moved` blocks so the plan says *has moved to* three times and nothing else. `terraform init` (a new module",
+        "   needs it), plan, apply."
+      ],
+      "setup": ["bash \"$DOJO_FILES/modules.sh\" extract"],
+      "checks": [
+        { "name": "the resources live in module.shop",
+          "cmd": "cd ~/infra/web && terraform state list | sort | tr '\\n' ' '",
+          "expectOutput": "module.shop.local_file.nginx module.shop.tls_private_key.site module.shop.tls_self_signed_cert.site",
+          "fail": "`terraform state list` should show the three resources under `module.shop.` and nothing in the root." },
+        { "name": "the certificate was not replaced",
+          "cmd": "cd ~/infra/web && terraform state show -no-color module.shop.tls_self_signed_cert.site | grep -q \"$(cat /opt/dojo/state/cert)\"",
+          "fail": "The certificate is a new one (its serial number changed): it was destroyed and re-created. Press Reset scenario and use `moved` blocks." },
+        { "name": "the module has its files",
+          "cmd": "cd ~/infra/web/modules/site && grep -q 'variable \"domain\"' variables.tf && grep -q 'output \"cert_pem\"' outputs.tf && grep -q 'required_providers' versions.tf && grep -q 'var.domain' main.tf && ! grep -q 'shop.example.com' main.tf && ! grep -q '^provider' *.tf",
+          "fail": "`modules/site` needs `main.tf` (using `var.domain`, no hard-coded `shop.example.com`), `variables.tf` with `domain`, `outputs.tf` with `cert_pem` and `versions.tf` with `required_providers` (and no `provider` block)." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/web && terraform plan -detailed-exitcode -input=false -no-color >/dev/null",
+          "fail": "`terraform plan` should show no changes." }
+      ],
+      "hints": [
+        "`mkdir -p modules/site && cp main.tf modules/site/main.tf && cp versions.tf modules/site/`, then in the module replace `\"shop.example.com\"` with `var.domain` (and `shop.example.com` inside strings with `${var.domain}`).",
+        "The root's `main.tf` becomes just `module \"shop\" { source = \"./modules/site\"  domain = \"shop.example.com\" }`. Run `terraform init` so Terraform sees the module.",
+        "`moved { from = tls_private_key.site  to = module.shop.tls_private_key.site }`, and the same for `tls_self_signed_cert.site` and `local_file.nginx`."
+      ],
+      "solution": [
+        "cd ~/infra/web",
+        "mkdir -p modules/site",
+        "sed 's/\"shop.example.com\"/var.domain/g; s/shop.example.com/${var.domain}/g' main.tf > modules/site/main.tf",
+        "cp versions.tf modules/site/versions.tf",
+        "printf 'variable \"domain\" {\\n  type        = string\\n  description = \"The site domain name, for example shop.example.com.\"\\n}\\n' > modules/site/variables.tf",
+        "printf 'output \"cert_pem\" {\\n  description = \"The site TLS certificate (PEM).\"\\n  value       = tls_self_signed_cert.site.cert_pem\\n}\\n' > modules/site/outputs.tf",
+        "printf 'module \"shop\" {\\n  source = \"./modules/site\"\\n  domain = \"shop.example.com\"\\n}\\n' > main.tf",
+        "for r in tls_private_key.site tls_self_signed_cert.site local_file.nginx; do printf 'moved {\\n  from = %s\\n  to   = module.shop.%s\\n}\\n\\n' $r $r; done > moved.tf",
+        "terraform fmt -recursive",
+        "terraform init",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform state list"
+      ],
+      "explain": "The plan: three *has moved to* notes, `0 to add, 0 to change, 0 to destroy`. Extracting a module is a refactor like a rename, and it needs the same care: in a real cloud account, forgetting the `moved` blocks would have replaced the certificate (and the load balancer using it would have served an error for a while)."
+    },
+    {
+      "type": "learn",
+      "title": "Many copies: for_each on the module",
+      "body": [
+        "A `module` block takes `count` and `for_each` like a resource. Every instance is a full copy of the module:",
+        "",
+        "```hcl",
+        "module \"site\" {",
+        "  for_each = toset([\"shop.example.com\", \"docs.example.com\"])",
+        "  source   = \"./modules/site\"",
+        "  domain   = each.key",
+        "}",
+        "",
+        "output \"certs\" {",
+        "  value = { for d, m in module.site : d => m.cert_pem }   # module.site is a map of instances",
+        "}",
+        "```",
+        "",
+        "Addresses become `module.site[\"shop.example.com\"].tls_private_key.site`. Going from a single `module \"shop\"` to",
+        "the keyed form is one more `moved` block, for the whole module at once:",
+        "",
+        "```hcl",
+        "moved {",
+        "  from = module.shop",
+        "  to   = module.site[\"shop.example.com\"]",
+        "}",
+        "```"
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Add the docs site",
+      "prompt": [
+        "`~/infra/web` now calls `module \"shop\"`. Replace it with one `module \"site\"` that uses `for_each` over",
+        "`shop.example.com` and `docs.example.com` (`domain = each.key`), move the shop's existing instance into it so its",
+        "certificate is kept, and apply. Add an output `certs`: a map from domain to `cert_pem`."
+      ],
+      "setup": ["bash \"$DOJO_FILES/modules.sh\" second"],
+      "checks": [
+        { "name": "both sites exist, keyed by domain",
+          "cmd": "cd ~/infra/web && terraform state list | grep -c '^module.site\\[\"\\(shop\\|docs\\).example.com\"\\]\\.'",
+          "expectOutput": "6",
+          "fail": "`terraform state list` should show three resources under `module.site[\"shop.example.com\"]` and three under `module.site[\"docs.example.com\"]`." },
+        { "name": "the shop kept its certificate",
+          "cmd": "cd ~/infra/web && terraform state show -no-color 'module.site[\"shop.example.com\"].tls_self_signed_cert.site' | grep -q \"$(cat /opt/dojo/state/cert)\"",
+          "fail": "The shop's certificate was replaced. Press Reset scenario and add `moved { from = module.shop  to = module.site[\"shop.example.com\"] }`." },
+        { "name": "the certs output",
+          "cmd": "cd ~/infra/web && terraform output -json certs | jq -r 'keys | join(\",\")' && terraform output -json certs | jq -e 'all(.[]; startswith(\"-----BEGIN CERTIFICATE-----\"))' >/dev/null",
+          "expectContains": "docs.example.com,shop.example.com",
+          "fail": "`terraform output -json certs` should map both domains to a PEM certificate." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/web && terraform plan -detailed-exitcode -input=false -no-color >/dev/null && test -f out/docs.example.com/nginx.conf",
+          "fail": "Apply: `terraform plan` should show no changes and `out/docs.example.com/nginx.conf` should exist." }
+      ],
+      "hints": [
+        "`module \"site\" { for_each = toset([\"shop.example.com\", \"docs.example.com\"])  source = \"./modules/site\"  domain = each.key }`.",
+        "One `moved` block moves the whole module instance: `from = module.shop`, `to = module.site[\"shop.example.com\"]`. Remove (or replace) the old `moved` blocks that point at `module.shop.*`, or point them at the new address.",
+        "The output: `value = { for d, m in module.site : d => m.cert_pem }`. Then `terraform init`, plan, apply."
+      ],
+      "solution": [
+        "cd ~/infra/web",
+        "cat > main.tf <<'EOF'",
+        "module \"site\" {",
+        "  for_each = toset([\"shop.example.com\", \"docs.example.com\"])",
+        "  source   = \"./modules/site\"",
+        "  domain   = each.key",
+        "}",
+        "",
+        "moved {",
+        "  from = module.shop",
+        "  to   = module.site[\"shop.example.com\"]",
+        "}",
+        "",
+        "output \"certs\" {",
+        "  value = { for d, m in module.site : d => m.cert_pem }",
+        "}",
+        "EOF",
+        "terraform init",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform output -json certs | jq -r 'keys[]'"
+      ],
+      "explain": "Plan: the shop's module instance *has moved to* `module.site[\"shop.example.com\"]`, and three resources are created for docs. Adding a third site is now one string in the set. Keys are domains, so removing one site never disturbs another."
+    },
+    {
+      "type": "order",
+      "prompt": "Order the steps of extracting resources into a module safely.",
+      "lines": [
+        "write the module folder (variables, main, outputs, versions)",
+        "replace the resources in the root with a module call",
+        "add one moved block per resource",
+        "terraform init",
+        "terraform plan: only has moved to, 0 to add, 0 to destroy",
+        "terraform apply the saved plan"
+      ],
+      "explain": "`init` is needed whenever a module call is added or its `source` changes: it copies or downloads the module into `.terraform/modules`. The plan is the proof the refactor is pure."
+    }
+  ]
+}

@@ -1,0 +1,156 @@
+{
+  "title": "Boss: guard rails for web-envs",
+  "summary": "Bring prod into a one-state-per-environment repo without touching dev, write the CI gate that blocks destructive plans, and apply an approved change whose saved plan went stale.",
+  "minutes": 25,
+  "kind": "boss",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "PLAT-310",
+      "body": [
+        "*\"web-envs is our new layout: one root module, a backend file and a tfvars file per environment, states on the team",
+        "server. Dev is live. Please add prod, give CI a gate that stops destructive plans, and get PR 41 out.\"*",
+        "",
+        "`~/infra/web-envs/README.md` has the commands. Three steps."
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Add prod, leave dev alone",
+      "prompt": [
+        "In `~/infra/web-envs`, dev is applied (state `web-dev` on the server, see `envs/dev.tfbackend`). Create",
+        "`envs/prod.tfbackend` for a separate state, `web-prod`, switch this folder to it, and apply prod with",
+        "`envs/prod.tfvars`. Prod must start from an **empty** state of its own: dev's state must not be copied, changed or",
+        "used."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 1"],
+      "checks": [
+        { "name": "prod has its own state",
+          "cmd": "curl -fsS http://127.0.0.1:8300/state/web-prod | jq -r '.resources[] | select(.type == \"random_pet\") | .instances[0].attributes.id' | grep -q '^prod-'",
+          "fail": "The server should have a state `web-prod` whose `random_pet.web` starts with `prod-`. Write `envs/prod.tfbackend`, `terraform init -reconfigure -backend-config=envs/prod.tfbackend`, and apply with `-var-file=envs/prod.tfvars`." },
+        { "name": "dev was not touched",
+          "cmd": "curl -fsS http://127.0.0.1:8300/state/web-dev | jq -e --argjson s \"$(cat /opt/dojo/state/dev-serial)\" '.serial == $s and ([.resources[] | select(.type == \"random_pet\") | .instances[0].attributes.id | startswith(\"dev-\")] | all)' >/dev/null",
+          "fail": "Dev's state changed. Press Reset scenario; use `-reconfigure` (start clean), not `-migrate-state` (copy dev's state into prod)." },
+        { "name": "prod is applied, plan clean",
+          "cmd": "cd ~/infra/web-envs && grep -q '^replicas=3$' out/prod/web.conf && jq -e '.backend.config.address | endswith(\"/state/web-prod\")' .terraform/terraform.tfstate >/dev/null && terraform plan -detailed-exitcode -input=false -no-color -var-file=envs/prod.tfvars >/dev/null",
+          "fail": "This folder should now be initialised against `web-prod`, prod applied (`out/prod/web.conf` with `replicas=3`) and its plan clean." }
+      ],
+      "hints": [
+        "`envs/prod.tfbackend` is `envs/dev.tfbackend` with `web-dev` replaced by `web-prod`.",
+        "`terraform init -reconfigure -backend-config=envs/prod.tfbackend`. If init asks about copying state, you used `-migrate-state`: answer no.",
+        "`terraform plan -var-file=envs/prod.tfvars -out=tfplan` must say `3 to add` (a fresh prod), then `terraform apply tfplan`."
+      ],
+      "solution": [
+        "cd ~/infra/web-envs",
+        "cat README.md envs/dev.tfbackend",
+        "sed 's/web-dev/web-prod/g' envs/dev.tfbackend > envs/prod.tfbackend",
+        "terraform init -reconfigure -backend-config=envs/prod.tfbackend",
+        "terraform plan -var-file=envs/prod.tfvars -out=tfplan",
+        "terraform apply tfplan",
+        "curl -s http://127.0.0.1:8300/state/web-prod | jq '[.resources[].type]'"
+      ],
+      "explain": "One code base, two states, chosen at `init`. With `-migrate-state`, Terraform would have offered to copy dev's state into `web-prod`, and the prod plan would then have renamed dev's resources (replacing them) instead of creating prod's. CI does the same `init -reconfigure -backend-config=envs/$ENV.tfbackend` per job."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The destroy gate",
+      "prompt": [
+        "Write `~/infra/web-envs/ci/plan-gate.sh`, run by CI after `terraform show -json tfplan > plan.json` as",
+        "`bash ci/plan-gate.sh plan.json`. It must:",
+        "",
+        "1. print the summary line Terraform would print, `Plan: A to add, C to change, D to destroy.` (a replacement counts",
+        "   as one add **and** one destroy);",
+        "2. print `DESTROY <address>` for every resource that will be destroyed or replaced, sorted;",
+        "3. exit 1 when anything is destroyed, unless the environment variable `ALLOW_DESTROY=yes` is set (a reviewer sets it",
+        "   after reading the plan); otherwise exit 0.",
+        "",
+        "Test it on the three real plans in `ci/testdata/`."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 2"],
+      "checks": [
+        { "name": "a new environment passes",
+          "cmd": "cd ~/infra/web-envs && bash ci/plan-gate.sh ci/testdata/new-env.json",
+          "expectContains": "Plan: 3 to add, 0 to change, 0 to destroy.",
+          "fail": "`bash ci/plan-gate.sh ci/testdata/new-env.json` should print `Plan: 3 to add, 0 to change, 0 to destroy.` and exit 0." },
+        { "name": "an update passes",
+          "cmd": "cd ~/infra/web-envs && bash ci/plan-gate.sh ci/testdata/add-owner.json",
+          "expectContains": "Plan: 0 to add, 1 to change, 0 to destroy.",
+          "fail": "`bash ci/plan-gate.sh ci/testdata/add-owner.json` should print `Plan: 0 to add, 1 to change, 0 to destroy.` and exit 0." },
+        { "name": "a destructive plan is blocked",
+          "cmd": "cd ~/infra/web-envs && out=$(bash ci/plan-gate.sh ci/testdata/rename-env.json); rc=$?; echo \"$out\"; test $rc = 1 && echo \"$out\" | grep -qx 'Plan: 2 to add, 1 to change, 2 to destroy.' && test \"$(echo \"$out\" | grep '^DESTROY ' | tr '\\n' ' ')\" = 'DESTROY local_file.conf DESTROY random_pet.web '",
+          "fail": "For `rename-env.json` the gate should print `Plan: 2 to add, 1 to change, 2 to destroy.`, then `DESTROY local_file.conf` and `DESTROY random_pet.web` (sorted), and exit 1." },
+        { "name": "ALLOW_DESTROY=yes lets it through",
+          "cmd": "cd ~/infra/web-envs && ALLOW_DESTROY=yes bash ci/plan-gate.sh ci/testdata/rename-env.json >/dev/null && ALLOW_DESTROY=no bash -c '! bash ci/plan-gate.sh ci/testdata/rename-env.json >/dev/null'",
+          "fail": "With `ALLOW_DESTROY=yes` the destructive plan should exit 0; with any other value, 1." }
+      ],
+      "hints": [
+        "`jq` can count everything at once: `[.resource_changes[].change.actions]` is a list of action lists. Creates are lists containing `\"create\"`, destroys lists containing `\"delete\"`, changes exactly `[\"update\"]`.",
+        "`add=$(jq '[.resource_changes[] | select(.change.actions | index(\"create\"))] | length' \"$1\")`, the same with `\"delete\"`, and `select(.change.actions == [\"update\"])` for changes.",
+        "Then `printf 'Plan: %s to add, %s to change, %s to destroy.\\n'`, the `DESTROY` lines with `jq -r ... | sort | sed 's/^/DESTROY /'`, and `if [ \"$destroy\" -gt 0 ] && [ \"${ALLOW_DESTROY:-}\" != yes ]; then exit 1; fi`."
+      ],
+      "solution": [
+        "cd ~/infra/web-envs",
+        "jq -c '.resource_changes[] | {address, actions: .change.actions}' ci/testdata/rename-env.json",
+        "cat > ci/plan-gate.sh <<'EOF'",
+        "#!/usr/bin/env bash",
+        "# Usage: plan-gate.sh plan.json   (the output of: terraform show -json tfplan)",
+        "set -euo pipefail",
+        "plan=$1",
+        "count() { jq --arg a \"$1\" '[.resource_changes[] | select(.change.actions | index($a))] | length' \"$plan\"; }",
+        "add=$(count create)",
+        "destroy=$(count delete)",
+        "change=$(jq '[.resource_changes[] | select(.change.actions == [\"update\"])] | length' \"$plan\")",
+        "printf 'Plan: %s to add, %s to change, %s to destroy.\\n' \"$add\" \"$change\" \"$destroy\"",
+        "jq -r '.resource_changes[] | select(.change.actions | index(\"delete\")) | .address' \"$plan\" | sort | sed 's/^/DESTROY /'",
+        "if [ \"$destroy\" -gt 0 ]; then",
+        "  if [ \"${ALLOW_DESTROY:-}\" = yes ]; then echo 'destroy allowed by ALLOW_DESTROY=yes'; exit 0; fi",
+        "  echo 'This plan destroys resources: a reviewer must read it and set ALLOW_DESTROY=yes.' >&2",
+        "  exit 1",
+        "fi",
+        "EOF",
+        "chmod +x ci/plan-gate.sh",
+        "for p in ci/testdata/*.json; do echo \"== $p\"; bash ci/plan-gate.sh \"$p\"; echo \"exit $?\"; done"
+      ],
+      "explain": "The gate turns *read every plan* from a hope into a rule: plans that only add and change flow, plans that destroy stop until a human has read them. Teams wire `ALLOW_DESTROY` to a pull request label or an environment approval, and post the same summary as a PR comment."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "PR 41's plan is stale",
+      "prompt": [
+        "`~/infra/web-envs` is initialised against prod. PR 41 (prod from 3 to 4 replicas) was approved yesterday and its",
+        "saved plan is `ci/pr-41.tfplan`. Read `ci/NOTES.txt`, try to apply the saved plan, read what Terraform says, and get",
+        "PR 41 out **safely**: prod ends with 4 replicas and keeps PR 43's setting. Finish with a clean plan."
+      ],
+      "setup": ["bash \"$DOJO_FILES/boss.sh\" 3"],
+      "checks": [
+        { "name": "prod runs 4 replicas",
+          "cmd": "cd ~/infra/web-envs && grep -q '^replicas=4$' out/prod/web.conf && curl -fsS http://127.0.0.1:8300/state/web-prod | jq -e '.resources[] | select(.type == \"terraform_data\") | .instances[0].attributes.input.value | .replicas == 4' >/dev/null",
+          "fail": "Prod should have `replicas = 4` (in `out/prod/web.conf` and in the state of `terraform_data.deploy`)." },
+        { "name": "PR 43's setting survived",
+          "cmd": "curl -fsS http://127.0.0.1:8300/state/web-prod | jq -e '.resources[] | select(.type == \"terraform_data\") | .instances[0].attributes.input.value.log_level == \"warn\"' >/dev/null",
+          "fail": "`log_level = \"warn\"` from PR 43 is gone from prod. A plan made before PR 43 must not be forced through." },
+        { "name": "plan is clean",
+          "cmd": "cd ~/infra/web-envs && terraform plan -detailed-exitcode -input=false -no-color -var-file=envs/prod.tfvars >/dev/null",
+          "fail": "`terraform plan -var-file=envs/prod.tfvars` should show no changes." }
+      ],
+      "hints": [
+        "`terraform apply ci/pr-41.tfplan` fails with *Saved plan is stale*: the state changed after the plan was made (PR 43 was applied). That is the protection working.",
+        "Make a new plan from the current code and `envs/prod.tfvars`, and read it: it should only change the replica count (in `terraform_data.deploy` and `local_file.conf`).",
+        "`terraform plan -var-file=envs/prod.tfvars -out=pr-41-replan.tfplan`, read it, `terraform apply pr-41-replan.tfplan`."
+      ],
+      "solution": [
+        "cd ~/infra/web-envs",
+        "cat ci/NOTES.txt",
+        "terraform apply ci/pr-41.tfplan",
+        "terraform plan -var-file=envs/prod.tfvars -out=pr-41-replan.tfplan",
+        "terraform show pr-41-replan.tfplan | grep -E '^  #|replicas|log_level'",
+        "terraform apply pr-41-replan.tfplan",
+        "cat out/prod/web.conf"
+      ],
+      "explain": "A saved plan records the state serial it was made from; if anything wrote the state since, `apply` refuses with *Saved plan is stale* instead of applying actions computed from an old picture. The replan showed only the replica change, because PR 43 was already in the code and in prod. In CI the answer is the same: re-run the plan job, review the new plan, apply that."
+    }
+  ]
+}

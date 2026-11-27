@@ -74,6 +74,7 @@ public static class Validator
                     foreach (var msg in XunitCheck.Lint(step)) Error(where, msg);   // "xunit": tests against planted bugs
                     foreach (var msg in TestViz.Check(step)) Error(where, msg);     // "testviz" learn-card visuals
                     foreach (var msg in OtelViz.Check(step)) Error(where, msg);     // "otelviz" learn-card visuals
+                    foreach (var msg in TfPlan.Check(step)) Error(where, msg);      // "tfplan" plan review cards
                     if (step["build"] is { } build)
                     {
                         if (type != "code") throw new("\"build\" only works on code steps");

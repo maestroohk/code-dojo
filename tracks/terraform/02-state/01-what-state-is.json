@@ -1,0 +1,189 @@
+{
+  "title": "What the state is",
+  "summary": "The state maps each address in your code to a real object. What is in it, how to look inside safely, why secrets end up there, and what to do when it was committed to Git.",
+  "minutes": 15,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Terraform's memory",
+      "body": [
+        "Your code says `resource \"aws_db_instance\" \"main\"`. AWS knows a database called `db-ABCDEFGH...`. The **state** is the",
+        "table that joins the two: for every resource address, the real object's ID and the last known value of every attribute.",
+        "",
+        "Terraform needs it to:",
+        "",
+        "- know **which** real object belongs to which block (tags and names are not reliable keys);",
+        "- know what to **delete** when you remove a block (it is no longer in the code, only in the state);",
+        "- plan **fast**: it refreshes the objects it knows instead of scanning the whole cloud account;",
+        "- remember values the API never returns again (a generated password, a private key).",
+        "",
+        "It is a JSON file (`terraform.tfstate` with the local backend) with a `serial` that goes up on every write and a",
+        "`lineage` that identifies one state's history. **Never edit it by hand.** Read it with the commands:",
+        "",
+        "```bash",
+        "terraform state list                      # every address",
+        "terraform state show random_pet.server    # one resource, as HCL",
+        "terraform show -json | jq '.values.root_module.resources[] | {address, id: .values.id}'",
+        "```",
+        "",
+        "Lose the state and Terraform forgets everything it manages: the next plan wants to create it all again, and",
+        "fails on names that already exist."
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Someone deletes the `resource \"aws_s3_bucket\" \"logs\"` block from the code. How does Terraform know it must delete the real bucket?",
+      "options": [
+        "The address is still in the state but no longer in the configuration, so the plan says *destroy (because aws_s3_bucket.logs is not in configuration)*",
+        "It lists every bucket in the AWS account and deletes the ones not in the code",
+        "It does not: removed blocks are simply ignored",
+        "Git tells Terraform which lines were deleted"
+      ],
+      "answer": 0,
+      "explain": "Only the state links code to real objects. That is also why a *rename* in code looks like delete-plus-create to Terraform, unless you tell it about the move (lesson 3)."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Look inside the state",
+      "prompt": [
+        "`~/infra/shop` is applied. Find these in the state, using Terraform's own commands and `jq`, and write each answer",
+        "into a file (just the value, one line):",
+        "",
+        "1. `~/answers/count.txt`: how many resource instances the state holds.",
+        "2. `~/answers/server.txt`: the `id` of `random_pet.server`.",
+        "3. `~/answers/serial.txt`: the state's `serial`.",
+        "4. `~/answers/db.txt`: the database password. `terraform state show` hides it as `(sensitive value)`. Is it really",
+        "   hidden? Look at `terraform show -json` or the file itself."
+      ],
+      "setup": ["bash \"$DOJO_FILES/shop.sh\" explore"],
+      "checks": [
+        { "name": "count.txt is the number of resources",
+          "cmd": "cd ~/infra/shop && test \"$(tr -d ' \\r\\n' < ~/answers/count.txt)\" = \"$(terraform state list | wc -l)\"",
+          "fail": "`~/answers/count.txt` should hold the number of lines `terraform state list` prints." },
+        { "name": "server.txt is the pet's id",
+          "cmd": "test \"$(tr -d ' \\r\\n\"' < ~/answers/server.txt)\" = \"$(cat /opt/dojo/state/pet)\"",
+          "fail": "`~/answers/server.txt` should hold the `id` of `random_pet.server` (`terraform state show random_pet.server`)." },
+        { "name": "serial.txt is the serial",
+          "cmd": "cd ~/infra/shop && test \"$(tr -d ' \\r\\n' < ~/answers/serial.txt)\" = \"$(jq .serial terraform.tfstate)\"",
+          "fail": "`~/answers/serial.txt` should hold the `serial` from the top of `terraform.tfstate` (`jq .serial terraform.tfstate`)." },
+        { "name": "db.txt is the real password",
+          "cmd": "test \"$(tr -d ' \\r\\n\"' < ~/answers/db.txt)\" = \"$(cat /opt/dojo/state/password)\"",
+          "quiet": true,
+          "fail": "`~/answers/db.txt` should hold the actual password. `terraform show -json | jq -r '.values.root_module.resources[] | select(.address == \"random_password.db\") | .values.result'` finds it." }
+      ],
+      "hints": [
+        "`terraform state list | wc -l` counts the instances; `terraform state show random_pet.server` shows its `id`.",
+        "The state is JSON: `jq .serial terraform.tfstate`.",
+        "`sensitive` only hides values in the CLI output. `terraform show -json | jq -r '.values.root_module.resources[] | select(.address == \"random_password.db\") | .values.result' > ~/answers/db.txt`"
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "terraform state list",
+        "terraform state list | wc -l > ~/answers/count.txt",
+        "terraform state show random_pet.server",
+        "terraform output -raw server_name > ~/answers/server.txt",
+        "jq .serial terraform.tfstate > ~/answers/serial.txt",
+        "terraform state show random_password.db",
+        "terraform show -json | jq -r '.values.root_module.resources[] | select(.address == \"random_password.db\") | .values.result' > ~/answers/db.txt"
+      ],
+      "explain": "`sensitive = true` (and `(sensitive value)` in the output) only stops a value from being **printed**. The state holds it in plain text, and so does the JSON of a saved plan. Anyone who can read the state can read every password, private key and token Terraform ever generated or was given. That shapes everything in the next lesson: where state lives, who can read it, and that it is encrypted at rest."
+    },
+    {
+      "type": "learn",
+      "title": "Secrets in state, and the state in Git",
+      "body": [
+        "Treat the state as a **secret** itself:",
+        "",
+        "- keep it in a remote backend with **encryption at rest** and **tight access** (only the pipeline and a few people);",
+        "- never commit it: `.gitignore` must have `*.tfstate` and `*.tfstate.*` (backups), plus `.terraform/` and saved plans",
+        "  (`*.tfplan` also contain values);",
+        "- prefer secrets that never enter Terraform: let the database manage its own master password",
+        "  (`manage_master_user_password = true` on `aws_db_instance` keeps it in Secrets Manager), read secrets at runtime, and",
+        "  use **ephemeral** values (`ephemeral = true` variables and outputs, `ephemeral` resources, and write-only",
+        "  arguments such as `password_wo`, Terraform 1.10 and 1.11 onwards), which are never written to the state or the plan.",
+        "",
+        "If a state with secrets was ever committed, deleting the file is **not enough**: it is in the history and in every",
+        "clone. Stop tracking it, then **rotate** every secret it contained.",
+        "",
+        "```bash",
+        "git rm --cached terraform.tfstate          # stop tracking, keep the file",
+        "terraform apply -replace=random_password.db   # a new value, everywhere that uses it",
+        "```"
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "The state was committed",
+      "prompt": [
+        "Code review found that the first commit of `~/infra/shop` included `terraform.tfstate` (`git log --stat`). The repo is",
+        "about to be shared with a contractor. Before that:",
+        "",
+        "1. Stop tracking the state in Git without deleting it from disk, and add a `.gitignore` so state files, their",
+        "   backups (`terraform.tfstate.backup`), `.terraform/` and saved plans (`tfplan`, `*.tfplan`) can never be committed again.",
+        "2. Rotate the database password: plan and apply a replacement of `random_password.db` (the app's env file follows).",
+        "3. Commit the result. `git status` must be clean afterwards.",
+        "",
+        "Rewriting the old commit is a separate job for the repo's owner; the rotation is what makes the leaked value useless."
+      ],
+      "setup": ["bash \"$DOJO_FILES/shop.sh\" committed"],
+      "checks": [
+        { "name": "the state is no longer tracked",
+          "cmd": "cd ~/infra/shop && ! git ls-files --error-unmatch terraform.tfstate >/dev/null 2>&1 && test -s terraform.tfstate",
+          "fail": "`git ls-files` still lists `terraform.tfstate` (or the file is gone from disk). Use `git rm --cached terraform.tfstate`." },
+        { "name": ".gitignore covers state, backups, .terraform and plans",
+          "cmd": "cd ~/infra/shop && git check-ignore -q terraform.tfstate && git check-ignore -q terraform.tfstate.backup && git check-ignore -q .terraform/x && git check-ignore -q review.tfplan && git check-ignore -q tfplan",
+          "fail": "`git check-ignore -v terraform.tfstate terraform.tfstate.backup .terraform/x review.tfplan tfplan` should name a `.gitignore` rule for each." },
+        { "name": "the password was rotated",
+          "cmd": "cd ~/infra/shop && new=$(terraform output -raw db_password) && test -n \"$new\" && test \"$new\" != \"$(cat /opt/dojo/state/password)\" && grep -q \"shop:$new@\" out/app.env",
+          "quiet": true,
+          "fail": "The database password in the state is still the leaked one, or `out/app.env` does not use the new one. `terraform apply -replace=random_password.db`." },
+        { "name": "everything is committed",
+          "cmd": "cd ~/infra/shop && test -z \"$(git status --porcelain)\" && git log -1 --format=%H >/dev/null && test \"$(git rev-list --count HEAD)\" -ge 2",
+          "fail": "Commit the change (`.gitignore` and the removal of the state from the index). `git status` should print nothing." }
+      ],
+      "hints": [
+        "`git rm --cached terraform.tfstate` removes it from the index only. Then write `.gitignore` with `.terraform/`, `*.tfstate`, `*.tfstate.*`, `tfplan` and `*.tfplan` (a plan file named just `tfplan` does not match `*.tfplan`).",
+        "`terraform plan -replace=random_password.db -out=tfplan` shows the password and the env file being replaced; apply that plan.",
+        "`git add .gitignore && git commit -m \"Stop tracking state; rotate DB password\"`. Check with `git status`."
+      ],
+      "solution": [
+        "cd ~/infra/shop",
+        "git log --stat --oneline",
+        "git rm --cached terraform.tfstate",
+        "printf '.terraform/\\n*.tfstate\\n*.tfstate.*\\ntfplan\\n*.tfplan\\ncrash.log\\nout/\\n' > .gitignore",
+        "terraform plan -replace=random_password.db -out=tfplan",
+        "terraform apply tfplan",
+        "git add .gitignore",
+        "git commit -m \"Stop tracking state; rotate the database password\"",
+        "git status"
+      ],
+      "explain": "The usual `.gitignore` for a Terraform repo is `.terraform/`, `*.tfstate`, `*.tfstate.*`, `*.tfplan`, `crash.log` and `override.tf` files; **keep** `.terraform.lock.hcl` committed. In real life the rotation also means updating the database itself; here the env file got the new value through the reference. Next: get the state off the laptop entirely."
+    },
+    {
+      "type": "match",
+      "prompt": "Commit it or ignore it?",
+      "pairs": [
+        ["`.terraform.lock.hcl`", "commit: everyone gets the same provider versions"],
+        ["`terraform.tfstate`", "ignore: it holds secrets and belongs in a backend"],
+        ["`.terraform/`", "ignore: downloaded providers and modules"],
+        ["`prod.tfplan`", "ignore: a saved plan holds values too"],
+        ["`*.tf` and `*.tftest.hcl`", "commit: the code and its tests"]
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A module needs a database password from a vault at apply time, and you do not want it in the state at all. Which Terraform 1.10+ feature fits?",
+      "options": [
+        "An `ephemeral` resource to read it, passed to a write-only argument such as `password_wo`",
+        "`sensitive = true` on the variable",
+        "`terraform state rm` after every apply",
+        "Putting the password in a `.tfvars` file that is in `.gitignore`"
+      ],
+      "answer": 0,
+      "explain": "Ephemeral resources (`ephemeral \"aws_secretsmanager_secret_version\" ...`) are opened during plan or apply and never saved; write-only arguments (`password_wo` with a `password_wo_version` counter on `aws_db_instance`, for example) accept ephemeral values and are not stored either. `sensitive` only hides values in output; a git-ignored tfvars keeps it out of Git, but not out of the state."
+    }
+  ]
+}

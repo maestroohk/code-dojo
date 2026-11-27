@@ -1,0 +1,119 @@
+{
+  "title": "Environments: workspaces or folders",
+  "summary": "CLI workspaces (one configuration, several states) against a folder per environment (one root module each, calling shared modules), and why most teams choose folders for dev, staging and prod.",
+  "minutes": 14,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "One config, several states: workspaces",
+      "body": [
+        "A **workspace** is a named state for the same configuration and backend. `terraform.workspace` is its name:",
+        "",
+        "```bash",
+        "terraform workspace new staging      # create and switch",
+        "terraform workspace select prod      # switch (select -or-create in Terraform 1.4+)",
+        "terraform workspace list             # * marks the current one",
+        "terraform workspace show",
+        "```",
+        "",
+        "With the local backend the states live in `terraform.tfstate.d/<name>/`; with S3 under `env:/<name>/<key>`. Everything",
+        "else is shared: the code, the provider configuration, the backend and its credentials, the module versions.",
+        "",
+        "That is great for **short-lived copies** of the same thing (a test environment per feature branch). It is risky for",
+        "dev/staging/prod: one credential reaches all of them, one forgotten `workspace select` applies dev's change to prod,",
+        "and prod cannot stay on the old module version while dev tries the new one. (HCP Terraform \"workspaces\" are a",
+        "different, bigger thing: a state plus its variables, permissions and run history.)"
+      ]
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Two more workspaces",
+      "prompt": [
+        "`~/infra/api` names things after `terraform.workspace` and is applied in `default`. Create workspaces `staging` and",
+        "`prod`, apply in each, and look at where each state lives (`ls -R terraform.tfstate.d`). Finish in `prod` and check",
+        "its config: `cat out/prod/api.conf`. Leave the `default` workspace untouched."
+      ],
+      "setup": ["bash \"$DOJO_FILES/team.sh\" workspaces"],
+      "checks": [
+        { "name": "staging and prod exist and are applied",
+          "cmd": "cd ~/infra/api && test -s terraform.tfstate.d/staging/terraform.tfstate && test -s terraform.tfstate.d/prod/terraform.tfstate && grep -q '^replicas=3$' out/prod/api.conf && grep -q '^replicas=1$' out/staging/api.conf",
+          "fail": "Both `terraform.tfstate.d/staging` and `terraform.tfstate.d/prod` should hold a state, and `out/prod/api.conf` should say `replicas=3`. Create each workspace and apply in it." },
+        { "name": "you finished in prod",
+          "cmd": "cd ~/infra/api && terraform workspace show",
+          "expectOutput": "prod",
+          "fail": "`terraform workspace show` should print `prod`." },
+        { "name": "default still has only its own",
+          "cmd": "cd ~/infra/api && jq -r '.resources[].instances[].attributes.id' terraform.tfstate | grep -q '^default-'",
+          "fail": "The `default` workspace's state (`terraform.tfstate`) should still hold the `default-...` name." }
+      ],
+      "hints": [
+        "`terraform workspace new staging` creates it and switches to it. Then plan and apply as usual.",
+        "`terraform workspace new prod`, plan, apply. `terraform workspace list` marks the current one with `*`.",
+        "`terraform workspace new staging && terraform apply -auto-approve && terraform workspace new prod && terraform apply -auto-approve` (in real life: saved plans)."
+      ],
+      "solution": [
+        "cd ~/infra/api",
+        "terraform workspace list",
+        "terraform workspace new staging",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "terraform workspace new prod",
+        "terraform plan -out=tfplan",
+        "terraform apply tfplan",
+        "ls -R terraform.tfstate.d",
+        "cat out/prod/api.conf"
+      ],
+      "explain": "Three states, one config. Notice how little separates them: the prompt shows no workspace, and `terraform apply` in the wrong one is a single forgotten command away. Teams that use workspaces for real environments add a guard (a `precondition` on `terraform.workspace`, or a wrapper script that prints it in red)."
+    },
+    {
+      "type": "learn",
+      "title": "A folder per environment",
+      "body": [
+        "Most teams lay out real environments as **separate root modules** that call the same shared modules:",
+        "",
+        "```text",
+        "infra/",
+        "  modules/",
+        "    app/             the reusable parts",
+        "    network/",
+        "  envs/",
+        "    dev/       main.tf  backend.tf  dev.tfvars      module \"app\" { source = \"../../modules/app\" ... }",
+        "    staging/   ...",
+        "    prod/      main.tf  backend.tf  prod.tfvars     (its own state, its own credentials)",
+        "```",
+        "",
+        "Each environment has its own backend key, its own pipeline identity (prod's role can only touch prod), and can pin a",
+        "different module version while a change is tried in dev. Differences between environments are visible in code",
+        "review instead of hidden in `terraform.workspace == \"prod\" ? ... : ...` branches. The price is some repetition in",
+        "the small root files, which tools like Terragrunt (or HCP Terraform Stacks) try to remove."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Workspaces, or a folder per environment?",
+      "buckets": ["CLI workspaces fit", "a folder per environment fits"],
+      "items": [
+        ["a throwaway copy of the stack for each feature branch", 0],
+        ["prod must use a different AWS account and role than dev", 1],
+        ["try module v3 in dev while prod stays on v2", 1],
+        ["load tests that spin up five identical copies and delete them", 0],
+        ["auditors must see exactly what differs between staging and prod", 1]
+      ],
+      "explain": "Same code, same credentials, short-lived: workspaces. Different accounts, different versions, different reviewers, long-lived: folders (or HCP Terraform workspaces, which do give each one its own variables and permissions)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A config uses `terraform.workspace` and someone runs `terraform apply` in prod's folder while the `default` workspace is selected. What happens?",
+      "options": [
+        "Terraform uses the `default` state: it plans to create a second copy of everything (named `default-...`)",
+        "Terraform refuses: workspaces must be selected explicitly",
+        "It applies to prod, because the folder is prod's",
+        "It merges the two states"
+      ],
+      "answer": 0,
+      "explain": "The selected workspace is stored in `.terraform/environment` and nothing in the prompt shows it. `TF_WORKSPACE=prod` in CI makes the choice explicit; a `precondition` such as `contains([\"dev\", \"prod\"], terraform.workspace)` stops `default` being used by accident."
+    }
+  ]
+}

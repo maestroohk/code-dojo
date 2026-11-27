@@ -1,0 +1,133 @@
+{
+  "title": "Preconditions, postconditions and check blocks",
+  "summary": "Guard rails in the code: preconditions that stop a bad plan, postconditions that refuse bad data from elsewhere, and check blocks that warn about the real world (an expiring certificate) without blocking.",
+  "minutes": 16,
+  "kind": "lesson",
+  "steps": [
+    {
+      "type": "learn",
+      "title": "Assumptions, written down",
+      "body": [
+        "Variable validation checks one input. **Conditions** check assumptions about the whole picture, where they matter:",
+        "",
+        "```hcl",
+        "resource \"aws_instance\" \"app\" {",
+        "  # ...",
+        "  lifecycle {",
+        "    precondition {                                # checked before planning this resource",
+        "      condition     = var.env != \"prod\" || var.replicas >= 2",
+        "      error_message = \"prod needs at least 2 replicas.\"",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "data \"aws_ami\" \"app\" {",
+        "  # ...",
+        "  lifecycle {",
+        "    postcondition {                               # checked on the result; self is this object",
+        "      condition     = self.architecture == \"arm64\"",
+        "      error_message = \"The app image must be arm64.\"",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "check \"site_up\" {                                 # never blocks: a warning on every plan and apply",
+        "  data \"http\" \"health\" { url = \"https://shop.example.com/health\" }",
+        "  assert {",
+        "    condition     = data.http.health.status_code == 200",
+        "    error_message = \"shop.example.com is not answering 200.\"",
+        "  }",
+        "}",
+        "```",
+        "",
+        "A failed **pre**- or **post**condition is an **error**: the plan (or apply) stops, with your message. A failed",
+        "**check** is a **warning**: the run goes on, and HCP Terraform can alert on it continuously. Use postconditions on",
+        "*data sources* to refuse bad data from systems you do not control."
+      ]
+    },
+    {
+      "type": "sort",
+      "prompt": "Which tool for which rule?",
+      "buckets": ["variable validation", "precondition / postcondition", "check block"],
+      "items": [
+        ["`env` must be dev, staging or prod", 0],
+        ["prod needs at least two replicas (two variables together)", 1],
+        ["the AMI found by a data source must be arm64", 1],
+        ["warn when the TLS certificate expires within 30 days", 2],
+        ["`replicas` is between 1 and 10", 0],
+        ["warn when the site's health URL does not answer 200", 2]
+      ],
+      "explain": "One input alone: validation. Assumptions across values, or about what a provider returned: conditions, which stop the run. Facts about the running system that should not block a deploy (often you are deploying the fix!): checks."
+    },
+    {
+      "type": "terminal",
+      "image": "terraform",
+      "title": "Guard rails for the edge proxy",
+      "prompt": [
+        "`~/infra/edge` (applied with `prod.tfvars`) deploys the edge proxy. Add three guard rails:",
+        "",
+        "1. A **precondition** on `terraform_data.deploy`: when `var.env` is `\"prod\"`, `var.replicas` must be at least 2.",
+        "2. A **postcondition** on `data.local_file.upstreams`: the registry's JSON must list at least one upstream",
+        "   (`length(jsondecode(self.content).upstreams) > 0`). Last month it published an empty list and the proxy had nowhere",
+        "   to send traffic.",
+        "3. A **check** block `edge_cert_validity` that warns when `tls_self_signed_cert.edge` expires within 30 days",
+        "   (`timecmp(tls_self_signed_cert.edge.validity_end_time, timeadd(plantimestamp(), \"720h\")) > 0`).",
+        "",
+        "Plan with `-var-file=prod.tfvars`: your check should warn. Then fix the cause (give the certificate a year,",
+        "`8760` hours) and apply until the plan is clean and quiet."
+      ],
+      "setup": ["bash \"$DOJO_FILES/lang.sh\" checks"],
+      "checks": [
+        { "name": "prod with 1 replica is refused",
+          "cmd": "cd ~/infra/edge && ! terraform plan -input=false -no-color -var env=prod -var replicas=1 > /tmp/o 2>&1 && grep -q 'Resource precondition failed' /tmp/o && terraform plan -input=false -no-color -var env=dev -var replicas=1 >/dev/null 2>&1",
+          "fail": "`terraform plan -var env=prod -var replicas=1` should fail with *Resource precondition failed*, and the same with `env=dev` should work." },
+        { "name": "an empty upstream list is refused",
+          "cmd": "cd ~/infra/edge && cp ~/shared/upstreams.json /tmp/u.json && echo '{\"upstreams\": []}' > ~/shared/upstreams.json && (terraform plan -input=false -no-color -var-file=prod.tfvars > /tmp/o 2>&1; rc=$?; cp /tmp/u.json ~/shared/upstreams.json; test $rc = 1) && grep -q 'Resource postcondition failed' /tmp/o",
+          "fail": "With `{\"upstreams\": []}` in `~/shared/upstreams.json`, the plan should fail with *Resource postcondition failed*." },
+        { "name": "the check block exists and warns on a short certificate",
+          "cmd": "cd ~/infra/edge && grep -q 'check \"edge_cert_validity\"' *.tf && sed 's/validity_period_hours *= *[0-9]*/validity_period_hours = 240/' main.tf > /tmp/main.tf && mkdir -p /tmp/edge && cp *.tf prod.tfvars /tmp/edge/ && cp /tmp/main.tf /tmp/edge/main.tf && cd /tmp/edge && rm -rf .terraform* terraform.tfstate* out && terraform init -input=false -no-color >/dev/null && terraform apply -auto-approve -input=false -no-color -var-file=prod.tfvars 2>&1 | grep -q 'Check block assertion failed'",
+          "fail": "A `check \"edge_cert_validity\"` block should make a plan *warn* (*Check block assertion failed*) when the certificate is valid for only 240 hours." },
+        { "name": "fixed: a year-long certificate, a quiet clean plan",
+          "cmd": "cd ~/infra/edge && terraform plan -detailed-exitcode -input=false -no-color -var-file=prod.tfvars > /tmp/o 2>&1 && ! grep -q 'Check block assertion failed' /tmp/o",
+          "fail": "Give the certificate `validity_period_hours = 8760` and apply with `-var-file=prod.tfvars`: the plan should then be clean, with no warning." }
+      ],
+      "hints": [
+        "Conditions live in a `lifecycle { }` block: `precondition { condition = ...  error_message = \"...\" }` in the resource, `postcondition { ... }` in the data source (with `self`).",
+        "`check \"edge_cert_validity\" { assert { condition = timecmp(...) > 0  error_message = \"...\" } }` goes at the top level of the file, outside any resource.",
+        "Then `sed -i 's/validity_period_hours = 240/validity_period_hours = 8760/' main.tf`, `terraform plan -var-file=prod.tfvars -out=tfplan`, `terraform apply tfplan`."
+      ],
+      "solution": [
+        "cd ~/infra/edge",
+        "sed -i '/^resource \"terraform_data\" \"deploy\" {$/a\\  lifecycle {\\n    precondition {\\n      condition     = var.env != \"prod\" || var.replicas >= 2\\n      error_message = \"prod needs at least 2 replicas.\"\\n    }\\n  }' main.tf",
+        "sed -i '/filename = pathexpand(\"~\\/shared\\/upstreams.json\")/a\\  lifecycle {\\n    postcondition {\\n      condition     = length(jsondecode(self.content).upstreams) > 0\\n      error_message = \"The service registry published no upstreams.\"\\n    }\\n  }' main.tf",
+        "cat > checks.tf <<'EOF'",
+        "check \"edge_cert_validity\" {",
+        "  assert {",
+        "    condition     = timecmp(tls_self_signed_cert.edge.validity_end_time, timeadd(plantimestamp(), \"720h\")) > 0",
+        "    error_message = \"The edge certificate expires within 30 days: renew it.\"",
+        "  }",
+        "}",
+        "EOF",
+        "terraform fmt",
+        "terraform plan -var-file=prod.tfvars",
+        "sed -i 's/validity_period_hours = 240/validity_period_hours = 8760/' main.tf",
+        "terraform plan -var-file=prod.tfvars -out=tfplan",
+        "terraform apply tfplan",
+        "terraform plan -var-file=prod.tfvars -detailed-exitcode; echo \"exit $?\""
+      ],
+      "explain": "The precondition encodes a production rule; the postcondition turns \"garbage in, outage out\" into a failed plan with a clear message; the check keeps warning on every run until someone renews the certificate. `plantimestamp()` (not `timestamp()`) is the time the plan was made, stable within one run."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is the health URL test a `check` block and not a postcondition?",
+      "options": [
+        "A failing check only warns, so you can still apply the change that fixes the site; a postcondition would block that apply",
+        "Postconditions cannot use data sources",
+        "Check blocks run faster",
+        "Postconditions only work in modules"
+      ],
+      "answer": 0,
+      "explain": "If the site is down, the deploy you are making may be the fix. Blocking it on the symptom would make the outage longer. Checks report the state of the world; conditions protect the correctness of the change."
+    }
+  ]
+}
